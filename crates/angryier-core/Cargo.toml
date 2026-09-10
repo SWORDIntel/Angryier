@@ -1,0 +1,15 @@
+[package]
+name = "angryier-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Engine orchestration contracts and analysis context for Angryier"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
