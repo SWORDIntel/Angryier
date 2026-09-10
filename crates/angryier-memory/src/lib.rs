@@ -43,10 +43,7 @@ pub enum MemoryError {
     RegionOverlap,
     AddressOverflow,
     Unmapped(Address),
-    PermissionDenied {
-        address: Address,
-        access: MemoryAccessKind,
-    },
+    PermissionDenied { address: Address, access: MemoryAccessKind },
     VersionOverflow(CodePageId),
 }
 
@@ -189,16 +186,11 @@ impl PersistentMemory {
             return Ok(address);
         }
         let delta = u64::try_from(len - 1).map_err(|_| MemoryError::AddressOverflow)?;
-        address
-            .checked_add(delta)
-            .ok_or(MemoryError::AddressOverflow)
+        address.checked_add(delta).ok_or(MemoryError::AddressOverflow)
     }
 
     fn region_end(region: &MemoryRegion) -> Result<Address, MemoryError> {
-        region
-            .base
-            .checked_add(region.size)
-            .ok_or(MemoryError::AddressOverflow)
+        region.base.checked_add(region.size).ok_or(MemoryError::AddressOverflow)
     }
 
     fn region_containing(&self, address: Address) -> Option<&MemoryRegion> {
@@ -219,9 +211,7 @@ impl PersistentMemory {
         let mut cursor = address;
 
         loop {
-            let region = self
-                .region_containing(cursor)
-                .ok_or(MemoryError::Unmapped(cursor))?;
+            let region = self.region_containing(cursor).ok_or(MemoryError::Unmapped(cursor))?;
             let region_end = Self::region_end(region)?;
             if region_end == 0 {
                 return Err(MemoryError::AddressOverflow);
@@ -234,12 +224,7 @@ impl PersistentMemory {
         }
     }
 
-    fn check_access(
-        &self,
-        address: Address,
-        len: usize,
-        access: MemoryAccessKind,
-    ) -> Result<(), MemoryError> {
+    fn check_access(&self, address: Address, len: usize, access: MemoryAccessKind) -> Result<(), MemoryError> {
         if len == 0 {
             return Ok(());
         }
@@ -248,9 +233,7 @@ impl PersistentMemory {
         let mut cursor = address;
 
         loop {
-            let region = self
-                .region_containing(cursor)
-                .ok_or(MemoryError::Unmapped(cursor))?;
+            let region = self.region_containing(cursor).ok_or(MemoryError::Unmapped(cursor))?;
             let allowed = match access {
                 MemoryAccessKind::Read => region.readable,
                 MemoryAccessKind::Write => region.writable,
@@ -285,9 +268,7 @@ impl PersistentMemory {
         let mut grouped: BTreeMap<u64, Vec<(usize, ByteValue)>> = BTreeMap::new();
         for (index, value) in bytes.iter().copied().enumerate() {
             let offset = u64::try_from(index).map_err(|_| MemoryError::AddressOverflow)?;
-            let current = address
-                .checked_add(offset)
-                .ok_or(MemoryError::AddressOverflow)?;
+            let current = address.checked_add(offset).ok_or(MemoryError::AddressOverflow)?;
             grouped
                 .entry(Self::page_number(current))
                 .or_default()
@@ -316,10 +297,7 @@ impl PersistentMemory {
 
             for page in touched {
                 if let Some(version) = code_versions.get_mut(&page) {
-                    version.0 = version
-                        .0
-                        .checked_add(1)
-                        .ok_or(MemoryError::VersionOverflow(page))?;
+                    version.0 = version.0.checked_add(1).ok_or(MemoryError::VersionOverflow(page))?;
                 }
             }
         }
@@ -341,9 +319,7 @@ impl LayeredMemory for PersistentMemory {
         let mut output = Vec::with_capacity(len);
         for index in 0..len {
             let offset = u64::try_from(index).map_err(|_| MemoryError::AddressOverflow)?;
-            let current = address
-                .checked_add(offset)
-                .ok_or(MemoryError::AddressOverflow)?;
+            let current = address.checked_add(offset).ok_or(MemoryError::AddressOverflow)?;
             let value = self
                 .pages
                 .get(&Self::page_number(current))
@@ -397,11 +373,7 @@ mod tests {
 
         assert_eq!(
             memory.read(0x1000, 3)?,
-            vec![
-                ByteValue::Concrete(1),
-                ByteValue::Concrete(2),
-                ByteValue::Concrete(3)
-            ]
+            vec![ByteValue::Concrete(1), ByteValue::Concrete(2), ByteValue::Concrete(3)]
         );
         assert_eq!(
             changed.read(0x1000, 3)?,
@@ -425,10 +397,7 @@ mod tests {
         assert_eq!(memory.page_version(page2), Some(CodePageVersion(0)));
         assert_eq!(memory.page_version(page3), Some(CodePageVersion(0)));
 
-        let changed = memory.write(
-            0x1fff,
-            &[ByteValue::Concrete(0x90), ByteValue::Concrete(0x90)],
-        )?;
+        let changed = memory.write(0x1fff, &[ByteValue::Concrete(0x90), ByteValue::Concrete(0x90)])?;
 
         assert_eq!(changed.page_version(page1), Some(CodePageVersion(1)));
         assert_eq!(changed.page_version(page2), Some(CodePageVersion(1)));
@@ -462,10 +431,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(
-            memory.read(0x7000, 1),
-            Err(MemoryError::Unmapped(0x7000))
-        ));
+        assert!(matches!(memory.read(0x7000, 1), Err(MemoryError::Unmapped(0x7000))));
         Ok(())
     }
 }
