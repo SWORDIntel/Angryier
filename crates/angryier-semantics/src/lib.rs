@@ -7,8 +7,7 @@
 //! replay publication contracts live in their dedicated crates.
 
 use angryier_types::{
-    Address, BlockId, CodeVersionGuard, FidelityProfile, ImageId, SemanticRuleId,
-    SemanticVersion, TargetProfileId,
+    Address, BlockId, CodeVersionGuard, FidelityProfile, ImageId, SemanticRuleId, SemanticVersion, TargetProfileId,
 };
 use core::fmt::Debug;
 
@@ -212,12 +211,7 @@ pub trait SemanticBuilder {
     fn constant(&mut self, ty: SemanticType, bytes_le: &[u8]) -> Result<ValueId, SemanticError>;
     fn read_register(&mut self, reg: RegisterId, ty: SemanticType) -> Result<ValueId, SemanticError>;
     fn read_operand(&mut self, operand_index: u8) -> Result<ValueId, SemanticError>;
-    fn emit(
-        &mut self,
-        op: SemanticOp,
-        ty: SemanticType,
-        inputs: &[ValueId],
-    ) -> Result<ValueId, SemanticError>;
+    fn emit(&mut self, op: SemanticOp, ty: SemanticType, inputs: &[ValueId]) -> Result<ValueId, SemanticError>;
     fn write_register(&mut self, reg: RegisterId, value: ValueId) -> Result<EffectId, SemanticError>;
     fn write_operand(&mut self, operand_index: u8, value: ValueId) -> Result<EffectId, SemanticError>;
     fn side_effect(&mut self, effect: SideEffect, inputs: &[ValueId]) -> Result<EffectId, SemanticError>;
@@ -297,9 +291,5 @@ pub trait SemanticLowerer: Send + Sync {
     type RichBlock;
     type Output;
 
-    fn lower(
-        &self,
-        rich: &Self::RichBlock,
-        key: &BlockValidityKey,
-    ) -> Result<Self::Output, SemanticError>;
+    fn lower(&self, rich: &Self::RichBlock, key: &BlockValidityKey) -> Result<Self::Output, SemanticError>;
 }

@@ -46,18 +46,47 @@ pub enum IrPrimitive {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IrOp {
-    Constant { ty: IrType, bytes_le: Vec<u8> },
+    Constant {
+        ty: IrType,
+        bytes_le: Vec<u8>,
+    },
     ExprRef(ExprId),
-    Primitive { op: IrPrimitive, ty: IrType, inputs: Vec<IrValueId> },
-    ReadRegister { register: u32, ty: IrType },
-    WriteRegister { register: u32, value: IrValueId },
-    Load { address: IrValueId, ty: IrType },
-    Store { address: IrValueId, value: IrValueId },
-    Branch { condition: IrValueId, taken: Address, not_taken: Address },
-    Jump { target: Address },
-    Call { target: Address },
+    Primitive {
+        op: IrPrimitive,
+        ty: IrType,
+        inputs: Vec<IrValueId>,
+    },
+    ReadRegister {
+        register: u32,
+        ty: IrType,
+    },
+    WriteRegister {
+        register: u32,
+        value: IrValueId,
+    },
+    Load {
+        address: IrValueId,
+        ty: IrType,
+    },
+    Store {
+        address: IrValueId,
+        value: IrValueId,
+    },
+    Branch {
+        condition: IrValueId,
+        taken: Address,
+        not_taken: Address,
+    },
+    Jump {
+        target: Address,
+    },
+    Call {
+        target: Address,
+    },
     Return,
-    Trap { vector: u32 },
+    Trap {
+        vector: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

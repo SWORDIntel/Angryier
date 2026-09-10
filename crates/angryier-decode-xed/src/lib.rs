@@ -54,7 +54,6 @@ impl<B: XedDecodeBackend> Decoder for BoundXedDecoder<B> {
     type Error = XedAdapterError;
 
     fn decode(&self, address: Address, bytes: &[u8]) -> Result<DecodedInstruction, Self::Error> {
-        self.backend
-            .decode_normalized(self.adapter.config, address, bytes)
+        self.backend.decode_normalized(self.adapter.config, address, bytes)
     }
 }
