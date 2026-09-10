@@ -1,9 +1,7 @@
 #![forbid(unsafe_code)]
 
 use angryier_memory::{ByteValue, LayeredMemory};
-use angryier_types::{
-    Address, AnalysisDebtKind, FidelityProfile, StateId, TargetProfileId,
-};
+use angryier_types::{Address, AnalysisDebtKind, FidelityProfile, StateId, TargetProfileId};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,10 +194,7 @@ mod tests {
                 actual: 4
             })
         ));
-        assert_eq!(
-            registers.read(99),
-            Err(RegisterError::UnknownRegister(99))
-        );
+        assert_eq!(registers.read(99), Err(RegisterError::UnknownRegister(99)));
     }
 
     #[test]
@@ -233,14 +228,8 @@ mod tests {
         assert_eq!(child.parent, Some(StateId(10)));
         assert_eq!(state.registers.read(1).unwrap(), vec![0; 8]);
         assert_eq!(child.registers.read(1).unwrap(), vec![0x42; 8]);
-        assert_eq!(
-            state.memory.read(0x1000, 1).unwrap(),
-            vec![ByteValue::Concrete(0)]
-        );
-        assert_eq!(
-            child.memory.read(0x1000, 1).unwrap(),
-            vec![ByteValue::Concrete(0xcc)]
-        );
+        assert_eq!(state.memory.read(0x1000, 1).unwrap(), vec![ByteValue::Concrete(0)]);
+        assert_eq!(child.memory.read(0x1000, 1).unwrap(), vec![ByteValue::Concrete(0xcc)]);
     }
 
     #[test]
