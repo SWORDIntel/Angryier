@@ -1,0 +1,15 @@
+[package]
+name = "angryier-arch"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "ISA-neutral architecture contracts for Angryier"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
