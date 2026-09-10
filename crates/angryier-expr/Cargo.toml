@@ -1,0 +1,12 @@
+[package]
+name = "angryier-expr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hash-consed expression DAG contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true
