@@ -1,0 +1,12 @@
+[package]
+name = "angryier-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Layered concrete/symbolic memory contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true
