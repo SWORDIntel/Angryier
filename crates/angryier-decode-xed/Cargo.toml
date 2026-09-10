@@ -1,0 +1,14 @@
+[package]
+name = "angryier-decode-xed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Intel XED adapter boundary for Angryier"
+
+[dependencies]
+angryier-arch = { path = "../angryier-arch" }
+angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true
