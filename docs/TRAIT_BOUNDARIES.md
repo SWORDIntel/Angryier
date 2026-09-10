@@ -6,12 +6,13 @@ This document defines the first concrete Rust interface boundaries implied by `P
 
 The primary failure mode being prevented is semantic/execution/provenance desynchronization during code-page mutation and JIT invalidation.
 
-The architecture therefore enforces four separations:
+The architecture therefore enforces five separations:
 
 1. **Decode is not semantics.** Intel XED-specific objects terminate at the decoder adapter boundary.
-2. **Rich semantics are not execution IR.** Semantic providers emit into a typed semantic builder; only a dedicated lowerer may create compact execution IR.
-3. **Execution IR validity is versioned.** Every lowered block carries semantic-version, target-profile, and code-page version guards.
-4. **State, JIT validity, provenance, and replay publication are atomic.** They advance under one execution-ledger epoch or not at all.
+2. **Construction is not publication.** Rich semantic blocks may be mutable only while private to construction/normalization/validation.
+3. **Rich semantics are not execution IR.** Semantic providers emit into a typed semantic builder; only a dedicated lowerer may create compact execution IR.
+4. **Execution IR validity is versioned.** Every lowered block carries semantic-version, target-profile, content-identity, and code-page version guards.
+5. **State, JIT validity, provenance, and replay publication are atomic.** They advance under one execution-ledger epoch or not at all.
 
 The initial interfaces live in `crates/angryier-semantics/src/lib.rs`.
 
@@ -96,6 +97,52 @@ This is the central impedance barrier between the truth plane and execution plan
 
 ---
 
+# Semantic Block Lifecycle
+
+Rich semantic blocks use a two-stage lifecycle.
+
+```text
+PRIVATE / MUTABLE
+    |
+    +-- construct
+    +-- normalize
+    +-- optimize
+    +-- validate
+    |
+    v
+SEAL
+    |
+    +-- canonical serialization
+    +-- content digest
+    +-- semantic version binding
+    +-- provenance receipt
+    |
+    v
+PUBLIC / IMMUTABLE / CONTENT-ADDRESSED
+    |
+    +-- lowering
+    +-- cache insertion
+    +-- JIT validity keys
+    +-- provenance references
+    +-- replay capsules
+    +-- cross-run knowledge
+```
+
+A semantic block must not be observable by the execution, replay, or knowledge planes before sealing succeeds.
+
+After sealing, in-place mutation is forbidden. Any transformation produces a new semantic block with:
+
+- a new content identity;
+- an explicit derivation link to the parent block;
+- its own validation result;
+- its own semantic receipt.
+
+This prevents published semantics from changing underneath cached execution IR, JIT blocks, or replay capsules.
+
+The seal operation is therefore the semantic equivalent of a commit boundary.
+
+---
+
 ## Typed Domains
 
 The initial contract recognizes:
@@ -141,7 +188,12 @@ SemanticProvider
 SemanticBuilder
       |
       v
-Rich typed semantic IR
+Private rich semantic IR
+      |
+  normalize/validate
+      |
+      v
+Sealed semantic block
       |
       v
 SemanticLowerer
@@ -150,10 +202,11 @@ SemanticLowerer
 Compact execution IR / JIT candidate
 ```
 
-`SemanticLowerer` receives a `BlockValidityKey` containing:
+`SemanticLowerer` accepts only sealed semantic blocks and receives a `BlockValidityKey` containing:
 
 - image identity;
 - block identity/address;
+- sealed semantic content identity;
 - semantic version;
 - target CPU profile;
 - all relevant code-page versions.
@@ -175,6 +228,7 @@ JIT/BlockValidity
 ProvenanceSequence
 ReplayCheckpoint
 SemanticVersion
+SemanticContentIdentity
 ```
 
 These values must not become visible independently.
@@ -191,6 +245,7 @@ begin(snapshot N)
     +-- JIT invalidation consequence
     +-- provenance events
     +-- replay checkpoint
+    +-- sealed semantic identity references
     |
 commit
     |
@@ -205,6 +260,7 @@ NO state publication
 NO code-version publication
 NO provenance advancement
 NO replay-checkpoint publication
+NO semantic-reference publication
 ```
 
 This is stronger than merely writing the same timestamp into separate logs.
@@ -216,6 +272,7 @@ The initial ledger contract explicitly models rejection for:
 - stale execution epoch;
 - stale code-page version;
 - semantic-version mismatch;
+- semantic-content mismatch;
 - provenance sequence gap;
 - replay-checkpoint mismatch;
 - conflicting concurrent commit.
@@ -233,6 +290,7 @@ A JIT block is valid only if all of the following still match:
 ```text
 image identity
 block identity/address
+sealed semantic content identity
 semantic version
 target profile
 code-page versions
@@ -261,13 +319,15 @@ Expected implementation pattern:
 
 ```text
 read-only semantic registry         shared
-semantic definition tables         shared immutable
-expression/semantic arenas         persistent or partitioned
-worker hot caches                  worker-local
-solver contexts                    worker-local
-trace rings                        worker-local
-state mutation                     owned by executing worker
-ledger publication                 atomic serialized boundary per conflicting state/version domain
+sealed semantic blocks              shared immutable
+semantic definition tables          shared immutable
+construction builders               worker/private mutable
+expression/semantic arenas          persistent or partitioned
+worker hot caches                    worker-local
+solver contexts                      worker-local
+trace rings                          worker-local
+state mutation                       owned by executing worker
+ledger publication                   atomic serialized boundary per conflicting state/version domain
 ```
 
 The ledger must not become a single global mutex for all states. Atomicity is required only across mutually dependent publication fields; independent states/pages should remain independently committable wherever correctness permits.
@@ -318,14 +378,17 @@ The trait layer is not considered stable until the following architecture tests 
 
 1. A synthetic decoder can feed a semantic provider without XED linked.
 2. Generated and handwritten providers cannot ambiguously resolve the same form.
-3. Rich semantic IR can be lowered under a version key and rejected after a code-page version change.
-4. A failed ledger commit leaves state/provenance/replay visibility unchanged.
-5. Two independent state commits can proceed without a global execution lock.
-6. A JIT block referencing multiple code pages is invalidated if any referenced page version changes.
-7. Lazy-chunked and dense-cell AMX representations produce equivalent concrete/solver-visible semantics on the same tests.
-8. SMT-FP and controlled bitvector fallback agree on the designated cross-check corpus where both are applicable.
-9. Deterministic replay rejects capsules whose semantic or code-page validity keys do not match.
-10. Provenance sequence gaps are detected rather than silently repaired.
+3. A private rich semantic block cannot enter lowering/cache/provenance before sealing.
+4. Sealing the same canonical semantic block twice yields the same persistent content identity.
+5. Any post-seal transformation yields a distinct immutable object rather than mutating the original.
+6. Rich semantic IR can be lowered under a version key and rejected after a code-page version change.
+7. A failed ledger commit leaves state/provenance/replay visibility unchanged.
+8. Two independent state commits can proceed without a global execution lock.
+9. A JIT block referencing multiple code pages is invalidated if any referenced page version changes.
+10. Lazy-chunked and dense-cell AMX representations produce equivalent concrete/solver-visible semantics on the same tests.
+11. SMT-FP and controlled bitvector fallback agree on the designated cross-check corpus where both are applicable.
+12. Deterministic replay rejects capsules whose semantic content, semantic version, or code-page validity keys do not match.
+13. Provenance sequence gaps are detected rather than silently repaired.
 
 ---
 
@@ -345,6 +408,14 @@ Implemented as interface scaffold only:
 - atomic execution-ledger contract;
 - JIT block validity oracle;
 - stress-probe interface.
+
+Architecturally locked, but not yet implemented in the Rust scaffold:
+
+- private mutable semantic construction state;
+- semantic sealing API;
+- canonical semantic serialization;
+- persistent semantic content identity;
+- derivation/provenance linkage between transformed sealed blocks.
 
 Not implemented yet:
 
