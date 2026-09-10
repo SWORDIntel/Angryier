@@ -7,6 +7,7 @@ description = "Layered concrete/symbolic memory contracts"
 
 [dependencies]
 angryier-types = { path = "../angryier-types" }
+angryier-core = { path = "../angryier-core" }
 
 [lints]
 workspace = true
