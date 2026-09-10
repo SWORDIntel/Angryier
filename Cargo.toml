@@ -1,13 +1,11 @@
 [workspace]
-members = [
-    "crates/angryier-semantics",
-    "crates/angryier-semantic-contracts",
-]
+members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
 license = "AGPL-3.0-or-later"
+version = "0.1.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
