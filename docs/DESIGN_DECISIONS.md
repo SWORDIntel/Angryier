@@ -234,6 +234,19 @@ A similarity hit proposes a candidate. Exact machinery determines whether that c
 
 Future AI/agent assistance may advise search prioritization, model suggestions, triage, or analyst interaction. It is never trusted as instruction semantics or silently promoted into PROVE truth.
 
+## D-025 — Sealed immutable semantic IR
+
+**Status:** Locked
+
+Rich semantic blocks use a two-stage lifecycle:
+
+1. mutable/private while being constructed, normalized, optimized, and validated;
+2. sealed, immutable, and content-addressed before entering lowering, caches, provenance, replay, or cross-run knowledge.
+
+A sealed semantic object cannot be mutated in place. Any semantic transformation after sealing produces a new object with a new content identity and provenance link to its predecessor.
+
+This prevents replay capsules, JIT validity keys, cache entries, and cross-run knowledge from observing semantic mutation after publication.
+
 ---
 
 # Open Decisions
