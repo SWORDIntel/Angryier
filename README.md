@@ -2,7 +2,7 @@
 
 > When you are absolutely furious your symbolic execution is taking too long and you just can't stand it anymore and you're not just angry, you're **Angryier**.
 
-Angryier is a planned native, multicore binary symbolic/concolic execution and program-analysis engine written in Rust.
+Angryier is a native, multicore binary symbolic/concolic execution and program-analysis engine under active development in Rust.
 
 The objective is broader than making angr-style workflows faster. Angryier is being designed to improve **speed, correctness, and analyst insight simultaneously**, while accumulating reusable knowledge across analyses rather than treating every run as disposable.
 
@@ -173,20 +173,34 @@ All useful modalities may contribute. Missing modalities are explicitly masked.
 
 QIHSE's quantum-inspired/vector retrieval layer stores the fused similarity representation, while canonical exact artifacts remain in KV/graph/document storage.
 
+## Repository Blueprint
+
+The architecture is frozen; the repository now contains the complete **interface/contract scaffold** for the major subsystems. A scaffolded crate reserves ownership and exposes the intended boundary. It does **not** imply that its backend is implemented.
+
+The workspace includes architecture/Intel 64, XED adaptation, semantics and generation, semantic identity/evidence, execution IR, expressions, memory, state, taint, execution, atomic ledger, replay, solver orchestration plus Z3/Bitwuzla seams, NUMA-aware scheduling, provenance, cumulative knowledge, learned fusion, environment models, loading/state import, fuzzing, telemetry, WAL/storage, JIT, QIHSE, KEYSTONE, plugins, benchmarking, CLI and future distribution boundaries.
+
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — full three-plane architecture, state/solver/scheduler/fidelity/knowledge design.
-- [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — locked decisions from the design Q&A and currently open decisions.
+- [`Plan.md`](Plan.md) — operational architecture lock and Q9–Q54 decision baseline.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — complete frozen three-plane system architecture and invariants.
+- [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — implementation order and phase exit gates.
+- [`docs/CRATE_MAP.md`](docs/CRATE_MAP.md) — ownership map from architecture components to Rust crates.
+- [`docs/SCAFFOLD_STATUS.md`](docs/SCAFFOLD_STATUS.md) — explicit distinction between scaffolded contracts and implemented functionality.
+- [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — locked design decisions and replacement-decision policy.
 - [`docs/SEMANTICS.md`](docs/SEMANTICS.md) — Intel 64 decode, typed semantics, generator plan, AVX/AVX-512/AMX handling and validation gates.
+- [`docs/SEMANTIC_IDENTITY.md`](docs/SEMANTIC_IDENTITY.md) — `ContentId`, semantic fingerprints, derivation and validity rules.
+- [`docs/TRAIT_BOUNDARIES.md`](docs/TRAIT_BOUNDARIES.md) — semantic/execution/ledger interface contracts.
 - [`docs/PROVENANCE_KNOWLEDGE.md`](docs/PROVENANCE_KNOWLEDGE.md) — adaptive provenance, cleanup, QIHSE/KEYSTONE mapping, cross-run reuse and learned fusion.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — implementation order and go/no-go gates.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — broader implementation roadmap and go/no-go gates.
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — performance, semantic correctness, provenance, cumulative reuse and retrieval benchmark contract.
 
 ## Current Status
 
-**Design/scaffold phase.** Architecture and documentation are being frozen through design review before implementation begins.
+**Architecture frozen; full interface/contract scaffold present; engine implementation not yet complete.**
 
-No implementation should silently reintroduce the earlier libVEX-based design or treat decode support as semantic support.
+The repository intentionally does not fake missing native backends. Native XED integration, Intel semantic coverage, COW memory internals, concrete/symbolic execution, Z3/Bitwuzla translation, scheduler implementation, durable replay/ledger storage, QIHSE/KEYSTONE bindings, learned models, fuzzing adapters and JIT remain implementation work and must fail explicitly until real implementations exist.
+
+Repository checks are defined by `scripts/check.sh` and `.github/workflows/ci.yml`: formatting, workspace compilation, Clippy with warnings denied, and tests. The scaffold is only considered build-clean once those checks have actually passed.
 
 ## Performance Policy
 
