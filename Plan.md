@@ -18,3 +18,7 @@ The critical failure mode is an impedance mismatch between the rich typed semant
 ## Alternatives & Next Steps
 
 If lazy chunking chokes the solver translation pipeline, you will need an alternative fallback to dense cell matrices for the AMX representations. Your immediate next step is to scaffold the exact Rust trait boundaries for the semantic combinators in the repository.
+
+## Subsequent Locked Decisions
+
+- **Q29 — Semantic IR immutability:** Locked C. Two-stage: mutable/private while being constructed and validated, then sealed immutable and content-addressed before it can enter lowering, caching, provenance, replay, or cross-run knowledge.
