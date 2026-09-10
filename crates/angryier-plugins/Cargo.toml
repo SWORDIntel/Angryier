@@ -1,0 +1,9 @@
+[package]
+name = "angryier-plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stable internal Rust plugin trait registry"
+
+[lints]
+workspace = true

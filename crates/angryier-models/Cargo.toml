@@ -1,0 +1,12 @@
+[package]
+name = "angryier-models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Environment and function-summary model contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

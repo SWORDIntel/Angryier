@@ -1,0 +1,12 @@
+[package]
+name = "angryier-knowledge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Persistent exact/advisory knowledge contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

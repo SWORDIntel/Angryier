@@ -1,0 +1,12 @@
+[package]
+name = "angryier-taint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Taint and dataflow contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

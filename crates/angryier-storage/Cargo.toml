@@ -1,0 +1,12 @@
+[package]
+name = "angryier-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local WAL, spill, raw chunk and retention contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

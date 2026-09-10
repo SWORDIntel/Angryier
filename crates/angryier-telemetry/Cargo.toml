@@ -1,0 +1,12 @@
+[package]
+name = "angryier-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Performance, backpressure, and time-series telemetry contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

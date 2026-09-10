@@ -1,0 +1,13 @@
+[package]
+name = "angryier-execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Execution plane contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+angryier-ir = { path = "../angryier-ir" }
+
+[lints]
+workspace = true

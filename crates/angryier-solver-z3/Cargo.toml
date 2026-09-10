@@ -1,0 +1,12 @@
+[package]
+name = "angryier-solver-z3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Z3 adapter seam; no fake solver implementation"
+
+[dependencies]
+angryier-solver = { path = "../angryier-solver" }
+
+[lints]
+workspace = true

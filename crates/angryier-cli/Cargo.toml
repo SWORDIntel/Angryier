@@ -1,0 +1,13 @@
+[package]
+name = "angryier-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line orchestration entry point"
+
+[[bin]]
+name = "angryier"
+path = "src/main.rs"
+
+[lints]
+workspace = true

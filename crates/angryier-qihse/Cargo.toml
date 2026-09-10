@@ -1,0 +1,12 @@
+[package]
+name = "angryier-qihse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QIHSE persistence adapter contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

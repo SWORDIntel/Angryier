@@ -1,0 +1,12 @@
+[package]
+name = "angryier-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bidirectional hybrid-fuzzing boundary"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

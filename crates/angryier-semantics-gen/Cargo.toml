@@ -1,0 +1,13 @@
+[package]
+name = "angryier-semantics-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hybrid semantic definition compiler/generator contracts"
+
+[dependencies]
+angryier-semantics = { path = "../angryier-semantics" }
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "angryier-provenance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Adaptive tiered provenance contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

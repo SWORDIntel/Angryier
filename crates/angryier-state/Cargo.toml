@@ -1,0 +1,13 @@
+[package]
+name = "angryier-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Persistent execution state contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+angryier-memory = { path = "../angryier-memory" }
+
+[lints]
+workspace = true

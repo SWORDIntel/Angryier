@@ -1,0 +1,12 @@
+[package]
+name = "angryier-solver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Solver-neutral query and portfolio contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

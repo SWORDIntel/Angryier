@@ -1,0 +1,12 @@
+[package]
+name = "angryier-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NUMA-aware multi-objective scheduler contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

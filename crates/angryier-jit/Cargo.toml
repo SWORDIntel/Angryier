@@ -1,0 +1,13 @@
+[package]
+name = "angryier-jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Profile-driven JIT and native isolation contracts"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+angryier-ir = { path = "../angryier-ir" }
+
+[lints]
+workspace = true
