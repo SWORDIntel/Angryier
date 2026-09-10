@@ -1,34 +1,22 @@
 #![forbid(unsafe_code)]
 
-//! Architectural contracts for Angryier semantic definition, lowering, and atomic execution publication.
+//! Architectural contracts for Angryier semantic definition and lowering.
 //!
-//! This crate intentionally contains interfaces and data contracts only. It does not implement Intel XED
-//! decoding, instruction semantics, solver translation, JIT compilation, or execution.
+//! This crate owns semantic construction/provider interfaces only. Cross-plane
+//! identity and version types come from `angryier-types`; execution-ledger and
+//! replay publication contracts live in their dedicated crates.
 
+use angryier_types::{
+    Address, BlockId, CodeVersionGuard, FidelityProfile, ImageId, SemanticRuleId,
+    SemanticVersion, TargetProfileId,
+};
 use core::fmt::Debug;
 
-pub type Address = u64;
 pub type FormId = u32;
 pub type FeatureId = u32;
 pub type RegisterId = u16;
-pub type SemanticRuleId = u32;
 pub type ValueId = u32;
 pub type EffectId = u32;
-pub type TargetProfileId = u64;
-pub type ImageId = u64;
-pub type CodePageId = u64;
-pub type StateId = u64;
-pub type ProvenanceSeq = u64;
-pub type LedgerEpoch = u64;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SemanticVersion(pub u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CodePageVersion(pub u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct BlockId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FloatFormat {
@@ -79,13 +67,6 @@ pub enum TileRepresentation {
 pub enum FloatingPointPolicy {
     SmtFpPreferred,
     ControlledBitVectorFallback,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum FidelityProfile {
-    Prove,
-    Explore,
-    Hunt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -225,7 +206,8 @@ pub enum SemanticError {
 
 /// Builder for the rich canonical semantic IR.
 ///
-/// Semantic definitions emit into this interface. They do not construct the compact execution IR directly.
+/// Semantic definitions emit into this interface. They do not construct compact
+/// execution IR, solver ASTs, JIT objects, or persistence records directly.
 pub trait SemanticBuilder {
     fn constant(&mut self, ty: SemanticType, bytes_le: &[u8]) -> Result<ValueId, SemanticError>;
     fn read_register(&mut self, reg: RegisterId, ty: SemanticType) -> Result<ValueId, SemanticError>;
@@ -248,7 +230,7 @@ pub struct SemanticReceipt {
     pub semantic_version: SemanticVersion,
 }
 
-/// Shared contract implemented by any semantic provider.
+/// Shared contract implemented by every semantic provider.
 pub trait SemanticProvider: Debug + Send + Sync {
     fn rule_id(&self) -> SemanticRuleId;
     fn origin(&self) -> SemanticOrigin;
@@ -261,14 +243,8 @@ pub trait SemanticProvider: Debug + Send + Sync {
     ) -> Result<SemanticReceipt, SemanticError>;
 }
 
-/// Marker for machine-generated, declarative instruction-family semantics.
 pub trait GeneratedSemanticFamily: SemanticProvider {}
-
-/// Marker for typed Rust combinators used by regular but non-trivial semantic families.
 pub trait RustSemanticCombinator: SemanticProvider {}
-
-/// Marker for exceptional handwritten semantics such as difficult AMX, gather/scatter,
-/// floating-point, CET, or other instructions that do not fit the declarative generator cleanly.
 pub trait SemanticOverride: SemanticProvider {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -285,20 +261,14 @@ pub struct SemanticResolution {
     pub semantic_version: SemanticVersion,
 }
 
-/// Resolves one decoded form to exactly one authoritative semantic provider.
-/// Ambiguous resolution is an error and must never be handled by provider ordering alone.
+/// Resolves a decoded form to exactly one authoritative semantic provider.
+/// Ambiguous resolution is always an error; registration order is not priority.
 pub trait SemanticRegistry: Send + Sync {
     fn resolve(
         &self,
         insn: &dyn DecodedInstructionView,
         version: SemanticVersion,
     ) -> Result<SemanticResolution, SemanticError>;
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct CodeVersionGuard {
-    pub page: CodePageId,
-    pub version: CodePageVersion,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -311,7 +281,8 @@ pub struct BlockValidityKey {
     pub code_versions: Vec<CodeVersionGuard>,
 }
 
-/// Sink for compact execution IR. The semantic layer intentionally knows nothing about concrete JIT objects.
+/// Sink for compact execution IR. Semantic code intentionally knows nothing
+/// about concrete JIT/compiler backend objects.
 pub trait ExecutionIrSink {
     type Output;
 
@@ -321,9 +292,7 @@ pub trait ExecutionIrSink {
     fn finish_block(&mut self) -> Result<Self::Output, SemanticError>;
 }
 
-/// Boundary between rich semantic IR and compact execution IR.
-///
-/// Any lowering result is valid only for the supplied semantic version, target profile, and code-page versions.
+/// Boundary between sealed rich semantic IR and compact execution IR.
 pub trait SemanticLowerer: Send + Sync {
     type RichBlock;
     type Output;
@@ -333,69 +302,4 @@ pub trait SemanticLowerer: Send + Sync {
         rich: &Self::RichBlock,
         key: &BlockValidityKey,
     ) -> Result<Self::Output, SemanticError>;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct LedgerSnapshot {
-    pub epoch: LedgerEpoch,
-    pub state_id: StateId,
-    pub provenance_seq: ProvenanceSeq,
-    pub semantic_version: SemanticVersion,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct LedgerMutation {
-    pub state_id: StateId,
-    pub semantic_version: SemanticVersion,
-    pub code_versions: Vec<CodeVersionGuard>,
-    pub provenance_from: ProvenanceSeq,
-    pub provenance_to: ProvenanceSeq,
-    pub replay_checkpoint: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CommitStamp {
-    pub epoch: LedgerEpoch,
-    pub state_id: StateId,
-    pub provenance_seq: ProvenanceSeq,
-    pub semantic_version: SemanticVersion,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LedgerError {
-    StaleEpoch,
-    StaleCodeVersion,
-    SemanticVersionMismatch,
-    ProvenanceGap,
-    ReplayCheckpointMismatch,
-    Conflict,
-}
-
-/// Atomic publication boundary for execution state, code-page versions, provenance, and replay metadata.
-///
-/// Contract: a successful commit makes all fields in `LedgerMutation` visible under one new epoch.
-/// A failed commit publishes none of them. JIT invalidation, state mutation, provenance advancement, and replay
-/// checkpoint visibility must never be committed independently.
-pub trait ExecutionLedger: Send + Sync {
-    type Transaction;
-
-    fn begin(&self, base: LedgerSnapshot) -> Result<Self::Transaction, LedgerError>;
-    fn commit(
-        &self,
-        transaction: Self::Transaction,
-        mutation: LedgerMutation,
-    ) -> Result<CommitStamp, LedgerError>;
-    fn abort(&self, transaction: Self::Transaction);
-}
-
-/// JIT/block-cache validity must be tested against the same ledger-visible code versions used by replay/provenance.
-pub trait BlockValidityOracle: Send + Sync {
-    fn is_valid(&self, key: &BlockValidityKey, snapshot: LedgerSnapshot) -> bool;
-}
-
-/// Architectural stress-test hook. These assumptions are hypotheses, not correctness dependencies.
-pub trait ArchitectureStressProbe: Send + Sync {
-    fn context_switch_pressure(&self) -> u64;
-    fn solver_fallback_pressure(&self) -> u64;
-    fn ledger_conflict_rate_ppm(&self) -> u64;
 }
