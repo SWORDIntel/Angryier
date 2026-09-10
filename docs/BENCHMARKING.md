@@ -1,43 +1,46 @@
 # Angryier Benchmarking Contract
 
-Performance claims are only accepted when they are reproducible and split by workload class. A single headline speedup is not meaningful for symbolic execution because different binaries are dominated by different costs.
+Performance claims are accepted only when they are reproducible, semantically comparable, and split by workload class.
 
-## Comparison Target
+A symbolic-execution benchmark is invalid if one engine solves a weaker problem, uses a looser environment model, silently concretizes, or reaches a result with a different fidelity policy.
 
-Primary reference: angr running equivalent symbolic/concolic tasks.
+---
 
-Optional secondary references may include SymCC/SymQEMU or other engines when the workload is genuinely comparable, but they must not replace the angr baseline.
+# Comparison Targets
 
-## Workload Classes
+Primary reference: angr on equivalent symbolic/concolic tasks.
 
-### A — Concrete-heavy
+Additional references may include SymCC/SymQEMU, Triton, KLEE, QSYM, S2E, Manticore, or other engines when the workload is genuinely comparable.
 
-Purpose: measure interpreter/runtime overhead and fast-path effectiveness.
+No single comparison target is sufficient for all workload classes.
+
+---
+
+# Workload Classes
+
+## A — Concrete-heavy
+
+Purpose: measure fast-path/runtime overhead.
 
 Characteristics:
 
 - mostly concrete execution;
-- small amount of tainted/symbolic input;
+- small symbolic/tainted surface;
 - few solver calls;
 - long basic-block sequences.
 
-Primary metrics:
+Metrics:
 
 - wall time;
 - instructions/second;
 - blocks/second;
 - expression nodes created;
+- taint operations;
 - peak RSS.
 
-### B — Branch-parallel
+## B — Branch-parallel
 
 Purpose: measure scheduler scaling.
-
-Characteristics:
-
-- many independent feasible branches;
-- modest solver complexity;
-- enough runnable states to saturate workers.
 
 Run at:
 
@@ -45,137 +48,271 @@ Run at:
 1, 2, 4, 8, 16, ... workers up to physical-core count
 ```
 
-Primary metrics:
+Metrics:
 
-- speedup vs 1 worker;
+- speedup vs one worker;
 - parallel efficiency;
 - steals;
+- rejected steals due to affinity cost;
+- solver-context rebuilds;
 - worker utilization;
+- NUMA migrations where measurable;
 - peak runnable states;
 - peak RSS.
 
-### C — Solver-heavy
+## C — Solver-heavy
 
-Purpose: determine whether engine improvements matter once SMT dominates.
+Purpose: measure solver architecture and reuse.
 
-Characteristics:
-
-- fewer branches;
-- complex bitvector constraints;
-- substantial solver time.
-
-Primary metrics:
+Metrics:
 
 - total wall time;
 - solver wall time;
-- number of solver queries;
-- query-cache hit rate;
-- average serialized AST size;
-- timeout count.
+- solver queries;
+- shared-context batches;
+- average predicates per batch;
+- local cache hits;
+- persistent exact hits;
+- generalized-fact hits;
+- UNSAT-core reuse;
+- serialized AST size;
+- timeout/UNKNOWN count;
+- backend selection.
 
-### D — Memory-symbolic
+## D — Symbolic memory/state
 
-Purpose: stress symbolic memory and COW state.
+Purpose: stress COW state and sparse symbolic memory.
 
-Characteristics:
-
-- symbolic bytes spread through mapped pages;
-- repeated state forks;
-- sparse writes after forks;
-- concrete and symbolic address cases separated into subtests.
-
-Primary metrics:
+Metrics:
 
 - fork latency;
-- load/store throughput;
 - page copies;
 - symbolic overlay entries;
+- symbolic-address queries;
+- structured vector/tile materialization counts;
+- load/store throughput;
 - peak RSS.
 
-### E — State-explosion
+## E — State explosion/search
 
-Purpose: evaluate search policy rather than pretend language choice removes exponential complexity.
+Purpose: evaluate search policy honestly.
 
-Characteristics:
-
-- intentionally explosive branch structures;
-- bounded target or coverage goal.
-
-Primary metrics:
+Metrics:
 
 - time-to-target;
-- states explored;
-- states pruned;
-- solver queries;
-- coverage reached;
-- peak RSS.
+- coverage;
+- states explored/pruned;
+- solver work;
+- peak states;
+- approximation/pruning policy;
+- whether exploration was complete, bounded, or heuristic.
 
-Results must state whether exploration was complete, bounded, or heuristic/pruned.
+## F — Intel semantic coverage
 
-## Correctness Before Timing
+Purpose: measure semantic correctness, not speed.
 
-A timed result is invalid unless the engines are solving the same problem.
+Corpus should include representative and generated forms across declared feature families.
 
-For each benchmark record:
+Metrics:
 
-- binary SHA-256;
-- architecture;
-- entry point;
-- symbolic input definition;
-- target/avoid conditions;
-- environment model assumptions;
-- solver and timeout;
-- search strategy;
-- generated testcase hash;
-- replay result.
+- decoded forms;
+- semantic forms implemented;
+- concrete differential pass rate;
+- symbolic validation pass rate;
+- taint validation pass rate;
+- unsupported forms;
+- semantic disagreements;
+- family support percentage.
 
-If Angryier and angr disagree on reachability, that benchmark is classified as a correctness investigation and excluded from performance summaries.
+A decode success is never counted as semantic support.
 
-## Host Control
+## G — Fidelity profiles
 
-Benchmark scripts should record and, where possible, control:
-
-- CPU model and microcode;
-- physical/logical core count;
-- kernel version;
-- Rust compiler version;
-- build profile and target CPU flags;
-- solver version;
-- angr/Python versions;
-- CPU affinity;
-- governor/frequency policy;
-- NUMA topology;
-- memory capacity;
-- transparent huge page state if relevant.
-
-Avoid comparing runs from thermally or power constrained states without recording that condition.
-
-## Build Profiles
-
-At minimum test:
+Run equivalent tasks under:
 
 ```text
-debug        # correctness only, never quoted for speed
-release      # standard production comparison
-release-lto  # optional maximum-throughput comparison
+PROVE
+EXPLORE
+HUNT
 ```
 
-Do not hide unsafe semantic changes behind the benchmark profile.
+Record:
 
-## Repetition
+- wall time;
+- coverage;
+- findings;
+- approximations;
+- concretizations;
+- replay success;
+- exact-upgrade success;
+- false-positive/false-negative evidence where known.
 
-For short/medium tests:
+The goal is to quantify the cost/value of fidelity tradeoffs.
 
-- one warm-up run;
-- at least 5 measured runs;
-- report median;
-- report min/max or dispersion.
+## H — Provenance overhead
 
-For long solver-heavy tests, fewer repetitions may be used when total runtime is prohibitive, but this must be explicit.
+Compare:
 
-## Metrics Schema
+```text
+Tier 0 only / persistence disabled
+Tier 1 structural provenance
+Tier 1 + adaptive Tier 2
+forced deep trace
+```
 
-Every Angryier run should emit JSON containing at least:
+Metrics:
+
+- execution slowdown;
+- event volume;
+- retained bytes;
+- trace-governor transitions;
+- compression/dedup ratio;
+- persistence queue depth;
+- backpressure time;
+- pre-trigger recovery success around injected events.
+
+## I — Cumulative knowledge reuse
+
+Run correlated binaries/workloads in cold and warm knowledge states.
+
+Metrics:
+
+- exact cross-run hit count;
+- generalized-fact hit count;
+- facts requiring revalidation;
+- stale fact rejection;
+- solver queries avoided;
+- wall time saved;
+- wrong-reuse count (**must be zero in PROVE**);
+- knowledge lookup overhead.
+
+## J — Learned fusion retrieval
+
+Evaluate specialist encoders + learned fusion independently from execution speed.
+
+Compare at least:
+
+```text
+384-D
+1024-D
+2048-D
+4096-D
+```
+
+Metrics:
+
+- precision@k;
+- recall@k;
+- MRR/nDCG where appropriate;
+- validated-equivalence conversion rate;
+- candidate usefulness to scheduler/analyst;
+- query latency;
+- index memory;
+- raw vector storage;
+- rerank cost;
+- contribution/explanation quality.
+
+A higher-dimensional profile wins only if measured retrieval benefit justifies cost.
+
+## K — Vector/mask/tile semantics
+
+Purpose: expose whether structured AVX/AVX-512/AMX representation controls symbolic growth.
+
+Compare structured/lazy representation against deliberately flattened baselines where practical.
+
+Metrics:
+
+- expression-node count;
+- solver AST size;
+- solver time;
+- materialized lanes/cells;
+- peak RSS;
+- semantic-equivalence pass rate.
+
+---
+
+# Correctness Before Timing
+
+Every benchmark records at least:
+
+```text
+binary SHA-256
+architecture/target profile
+semantic version
+semantics-generator version
+environment model version
+solver + version
+fidelity profile
+symbolic input definition
+target/avoid conditions
+search strategy
+approximation policy
+generated testcase hash
+native replay result
+knowledge-state identity (cold/warm)
+```
+
+If engines disagree on reachability or state semantics, classify the result as a correctness investigation and exclude it from performance summaries until resolved.
+
+---
+
+# Host Control
+
+Record and control where possible:
+
+- CPU model and microcode;
+- physical/logical cores;
+- Intel feature set;
+- kernel;
+- Rust compiler;
+- build flags;
+- solver versions;
+- comparison-engine versions;
+- CPU affinity;
+- frequency/governor policy;
+- NUMA topology;
+- memory capacity;
+- thermal/power throttling state;
+- transparent huge page state where relevant.
+
+Do not present thermally/power-limited runs as equivalent to unrestricted runs without labeling them.
+
+---
+
+# Build Profiles
+
+At minimum:
+
+```text
+debug
+release
+release-lto
+```
+
+Debug is correctness-only and is never quoted for speed.
+
+No build profile may silently alter semantic fidelity.
+
+---
+
+# Repetition and Statistics
+
+For short/medium benchmarks:
+
+- warm-up run;
+- at least five measured runs;
+- median reported;
+- dispersion/min/max reported.
+
+Long solver-heavy runs may use fewer repetitions when explicitly stated.
+
+For scheduler/scaling tests, report both aggregate runtime and per-worker utilization/steal behavior so a misleading speedup is easier to detect.
+
+---
+
+# Metrics Schema
+
+Every run should emit versioned machine-readable metrics including at least:
 
 ```json
 {
@@ -194,92 +331,141 @@ Every Angryier run should emit JSON containing at least:
   "expr_nodes_created": 0,
   "expr_cache_hits": 0,
   "solver_queries": 0,
-  "solver_cache_hits": 0,
+  "solver_local_cache_hits": 0,
+  "solver_persistent_exact_hits": 0,
+  "solver_generalized_hits": 0,
   "solver_ms": 0,
   "solver_timeouts": 0,
+  "shared_context_batches": 0,
   "coverage_edges": 0,
-  "result": "reached|not_reached|timeout|error"
+  "fidelity_profile": "PROVE",
+  "approximations": 0,
+  "tier1_events": 0,
+  "tier2_triggers": 0,
+  "tier2_bytes": 0,
+  "persistence_backpressure_ms": 0,
+  "knowledge_exact_hits": 0,
+  "knowledge_advisory_hits": 0,
+  "native_replay": "pass|fail|not_applicable",
+  "result": "reached|not_reached|timeout|unknown|error"
 }
 ```
 
-The schema should be versioned before external consumption.
+---
 
-## Derived Metrics
+# Derived Metrics
 
-### Speedup
+## Speedup
 
 ```text
 speedup = reference_wall_time / angryier_wall_time
 ```
 
-### Parallel efficiency
+## Parallel efficiency
 
 ```text
 parallel_efficiency = speedup_N / N
 ```
 
-### Solver fraction
+## Solver fraction
 
 ```text
 solver_fraction = solver_time / wall_time
 ```
 
-This is crucial: if solver fraction approaches 1.0, further executor micro-optimisation cannot produce large end-to-end gains.
-
-### Memory per live state
+## Approximate memory per live state
 
 ```text
-approx_bytes_per_state = peak_rss / peak_live_states
+peak_rss / peak_live_states
 ```
 
-Use only as an approximate diagnostic because shared pages/caches make attribution imperfect.
-
-## Performance Gates
-
-The following are engineering gates, not promises about all binaries.
-
-### Gate 1 — Native overhead
-
-On concrete-heavy microbenchmarks, Angryier must clearly outperform a Python-driven symbolic execution path before expensive optimisation work continues.
-
-### Gate 2 — Fork scalability
-
-Forking a state with large mapped memory but tiny write deltas must remain close to constant cost in total mapped-memory size.
-
-### Gate 3 — Multicore
-
-Branch-parallel workloads must show useful scaling from 1 to multiple physical cores. A flat curve is a blocker and must be profiled before adding features.
-
-### Gate 4 — Solver discipline
-
-Constraint slicing/caching must reduce solver work on at least the designated solver-heavy suite without changing satisfiability results.
-
-### Gate 5 — JIT justification
-
-JIT work is justified only when profiles show concrete execution remains a significant fraction of wall time after the earlier optimisations.
-
-## Claims Policy
-
-Never write claims such as `10x`, `50x`, or `100x faster than angr` into release documentation unless backed by a named benchmark suite and reproducible results.
-
-Use wording such as:
+## Provenance cost
 
 ```text
-Median 8.4x speedup over angr on suite B at 16 workers; solver-heavy suite C showed 1.3x.
+provenance_overhead = (wall_with_provenance - wall_without) / wall_without
 ```
 
-This distinction matters because an engine can be dramatically faster on runtime-dominated workloads and barely faster when both engines are waiting on equivalent SMT queries.
+## Knowledge reuse efficiency
 
-## Regression Policy
+```text
+reuse_efficiency = avoided_solver_or_analysis_time / knowledge_lookup_time
+```
 
-CI should preserve a rolling benchmark baseline.
+## Validated similarity yield
 
-Flag:
+```text
+validated_yield = validated_reusable_or_useful_candidates / similarity_candidates_returned
+```
 
-- >10% median wall-time regression on stable microbenchmarks;
-- >10% peak-RSS regression unless explained;
-- loss of parallel scaling;
-- solver query-count increase without corresponding coverage/solution improvement;
-- any semantic mismatch.
+---
 
-Performance regression checks should tolerate normal system noise and should not block on a single anomalous run.
+# Performance and Correctness Gates
+
+## Gate 1 — Native overhead
+
+Concrete-heavy execution must clearly outperform a Python-driven symbolic path before expensive optimization work proceeds.
+
+## Gate 2 — Fork scalability
+
+Fork cost must not scale linearly with unchanged mapped memory.
+
+## Gate 3 — Multicore
+
+Branch-parallel workloads must show useful physical-core scaling.
+
+## Gate 4 — Solver discipline
+
+Caching, shared-context batching, slicing, and persistent reuse must reduce solver work without changing satisfiability semantics.
+
+## Gate 5 — Fidelity honesty
+
+No benchmark may gain speed by silently weakening PROVE semantics.
+
+## Gate 6 — Provenance budget
+
+Tier 1 + adaptive Tier 2 must provide materially better causal observability without unacceptable hot-path overhead.
+
+## Gate 7 — Knowledge safety
+
+Wrong authoritative reuse in PROVE is a release-blocking correctness defect.
+
+## Gate 8 — Fusion usefulness
+
+Learned retrieval must improve candidate discovery, scheduling, or analyst insight enough to justify its compute/storage cost.
+
+## Gate 9 — JIT justification
+
+JIT work begins only if profiles show concrete execution remains a significant end-to-end cost.
+
+---
+
+# Claims Policy
+
+Never publish a generic `10x`, `50x`, or `100x faster` claim without a named reproducible workload class.
+
+Preferred wording:
+
+```text
+Median 8.4x speedup over angr on branch-parallel suite B at 16 workers;
+solver-heavy suite C improved 1.3x; PROVE semantics and replay criteria matched.
+```
+
+Performance, semantic coverage, fidelity, and knowledge-reuse claims are reported separately.
+
+---
+
+# Regression Policy
+
+CI or scheduled benchmark infrastructure should flag:
+
+- >10% stable median wall-time regression;
+- >10% peak-RSS regression unless justified;
+- loss of multicore scaling;
+- increased solver queries without corresponding coverage/solution benefit;
+- provenance overhead regression;
+- knowledge lookup/reuse regression;
+- fusion retrieval-quality regression;
+- any semantic mismatch;
+- any incorrect authoritative cross-run reuse.
+
+Normal system noise must be accounted for; a single anomalous run should not block without confirmation.
