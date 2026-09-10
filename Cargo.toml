@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/angryier-semantics",
+    "crates/angryier-semantic-contracts",
 ]
 resolver = "2"
 
