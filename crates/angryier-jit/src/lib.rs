@@ -79,10 +79,7 @@ mod tests {
         }])
     }
 
-    fn compiled_key(
-        address: u64,
-        code_versions: Vec<angryier_types::CodeVersionGuard>,
-    ) -> CompiledBlockKey {
+    fn compiled_key(address: u64, code_versions: Vec<angryier_types::CodeVersionGuard>) -> CompiledBlockKey {
         IrBlockKey {
             block: BlockId(address),
             address,
@@ -132,8 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_page_block_invalidates_when_any_guarded_page_changes(
-    ) -> Result<(), angryier_memory::MemoryError> {
+    fn multi_page_block_invalidates_when_any_guarded_page_changes() -> Result<(), angryier_memory::MemoryError> {
         let memory = executable_memory()?;
         let key = compiled_key(0x1ff8, memory.code_version_guards_for_range(0x1ff8, 16)?);
         assert_eq!(key.source.code_versions.len(), 2);
