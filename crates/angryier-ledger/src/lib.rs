@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 
 use angryier_types::{
-    CodeVersionGuard, ContentId, LedgerEpoch, ProvenanceSeq, ReplayCapsuleId, SemanticVersion,
-    StateId,
+    CodeVersionGuard, ContentId, LedgerEpoch, ProvenanceSeq, ReplayCapsuleId, SemanticVersion, StateId,
 };
 use std::{
     collections::BTreeMap,
@@ -68,11 +67,7 @@ impl std::error::Error for LedgerError {}
 pub trait ExecutionLedger: Send + Sync {
     type Transaction;
     fn begin(&self, base: &LedgerSnapshot) -> Result<Self::Transaction, LedgerError>;
-    fn commit(
-        &self,
-        tx: Self::Transaction,
-        mutation: LedgerMutation,
-    ) -> Result<LedgerSnapshot, LedgerError>;
+    fn commit(&self, tx: Self::Transaction, mutation: LedgerMutation) -> Result<LedgerSnapshot, LedgerError>;
     fn abort(&self, tx: Self::Transaction);
 }
 
@@ -111,10 +106,7 @@ impl InMemoryExecutionLedger {
 
     fn slot(&self, state: StateId) -> Result<Arc<Mutex<LedgerSnapshot>>, LedgerError> {
         let states = self.states.read().map_err(|_| LedgerError::Poisoned)?;
-        states
-            .get(&state)
-            .cloned()
-            .ok_or(LedgerError::UnknownState)
+        states.get(&state).cloned().ok_or(LedgerError::UnknownState)
     }
 
     fn validate_base(current: &LedgerSnapshot, base: &LedgerSnapshot) -> Result<(), LedgerError> {
@@ -142,10 +134,7 @@ impl InMemoryExecutionLedger {
         Ok(())
     }
 
-    fn validate_mutation(
-        current: &LedgerSnapshot,
-        mutation: &LedgerMutation,
-    ) -> Result<(), LedgerError> {
+    fn validate_mutation(current: &LedgerSnapshot, mutation: &LedgerMutation) -> Result<(), LedgerError> {
         if mutation.state != current.state {
             return Err(LedgerError::Conflict);
         }
@@ -169,11 +158,7 @@ impl ExecutionLedger for InMemoryExecutionLedger {
         Ok(InMemoryTransaction { base: base.clone() })
     }
 
-    fn commit(
-        &self,
-        tx: Self::Transaction,
-        mutation: LedgerMutation,
-    ) -> Result<LedgerSnapshot, LedgerError> {
+    fn commit(&self, tx: Self::Transaction, mutation: LedgerMutation) -> Result<LedgerSnapshot, LedgerError> {
         let slot = self.slot(tx.base.state)?;
         let mut current = slot.lock().map_err(|_| LedgerError::Poisoned)?;
 
