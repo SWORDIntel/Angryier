@@ -3,14 +3,8 @@
 //! Cross-plane contracts for sealed semantic identity and post-seal transformations.
 //! This crate defines policy/data boundaries only; it performs no optimization itself.
 
-use angryier_semantics::{FidelityProfile, SemanticVersion};
+use angryier_types::{ContentId, FidelityProfile, SemanticFingerprint, SemanticVersion};
 use core::fmt::Debug;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ContentId(pub [u8; 32]);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SemanticFingerprint(pub [u8; 32]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EvidenceDigest(pub [u8; 32]);
@@ -76,7 +70,6 @@ pub trait SemanticTransformation: Debug + Send + Sync {
 
     fn id(&self) -> TransformationId;
     fn contract(&self) -> TransformationContract;
-
     fn derive(&self, source: &Self::Source) -> Result<Self::Output, TransformationError>;
 }
 
