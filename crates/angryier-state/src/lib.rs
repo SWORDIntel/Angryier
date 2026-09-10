@@ -53,6 +53,30 @@ pub enum RegisterError {
     },
 }
 
+impl core::fmt::Display for RegisterError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::DuplicateRegister(register) => {
+                write!(formatter, "duplicate register definition: {register}")
+            }
+            Self::InvalidWidth(register) => {
+                write!(formatter, "register {register} has an invalid zero width")
+            }
+            Self::UnknownRegister(register) => write!(formatter, "unknown register: {register}"),
+            Self::WidthMismatch {
+                register,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "register {register} width mismatch: expected {expected} bytes, got {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RegisterError {}
+
 /// Copy-on-write register storage with fixed widths established by the
 /// architecture backend. Cloning the register file is O(1); a write clones only
 /// the small register index and replaces one value.
@@ -173,18 +197,19 @@ mod tests {
     use angryier_types::ObjectId;
 
     #[test]
-    fn persistent_register_write_does_not_mutate_parent() {
-        let registers = PersistentRegisters::from_widths([(1, 8), (2, 4)]).unwrap();
-        let changed = registers.write(1, &[0xaa; 8]).unwrap();
+    fn persistent_register_write_does_not_mutate_parent() -> Result<(), RegisterError> {
+        let registers = PersistentRegisters::from_widths([(1, 8), (2, 4)])?;
+        let changed = registers.write(1, &[0xaa; 8])?;
 
-        assert_eq!(registers.read(1).unwrap(), vec![0; 8]);
-        assert_eq!(changed.read(1).unwrap(), vec![0xaa; 8]);
-        assert_eq!(changed.read(2).unwrap(), vec![0; 4]);
+        assert_eq!(registers.read(1)?, vec![0; 8]);
+        assert_eq!(changed.read(1)?, vec![0xaa; 8]);
+        assert_eq!(changed.read(2)?, vec![0; 4]);
+        Ok(())
     }
 
     #[test]
-    fn register_widths_fail_closed() {
-        let registers = PersistentRegisters::from_widths([(7, 8)]).unwrap();
+    fn register_widths_fail_closed() -> Result<(), RegisterError> {
+        let registers = PersistentRegisters::from_widths([(7, 8)])?;
 
         assert!(matches!(
             registers.write(7, &[0; 4]),
@@ -195,10 +220,12 @@ mod tests {
             })
         ));
         assert_eq!(registers.read(99), Err(RegisterError::UnknownRegister(99)));
+        Ok(())
     }
 
     #[test]
-    fn state_fork_and_mutation_preserve_parent_snapshot() {
+    fn state_fork_and_mutation_preserve_parent_snapshot(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let memory = PersistentMemory::new(vec![MemoryRegion {
             object: ObjectId(1),
             base: 0x1000,
@@ -206,9 +233,8 @@ mod tests {
             readable: true,
             writable: true,
             executable: false,
-        }])
-        .unwrap();
-        let registers = PersistentRegisters::from_widths([(1, 8)]).unwrap();
+        }])?;
+        let registers = PersistentRegisters::from_widths([(1, 8)])?;
         let state = ExecutionState {
             id: StateId(10),
             parent: None,
@@ -220,16 +246,21 @@ mod tests {
 
         let child = state
             .fork_with_id(StateId(11))
-            .write_register(1, &[0x42; 8])
-            .unwrap()
-            .write_memory(0x1000, &[ByteValue::Concrete(0xcc)])
-            .unwrap();
+            .write_register(1, &[0x42; 8])?
+            .write_memory(0x1000, &[ByteValue::Concrete(0xcc)])?;
 
         assert_eq!(child.parent, Some(StateId(10)));
-        assert_eq!(state.registers.read(1).unwrap(), vec![0; 8]);
-        assert_eq!(child.registers.read(1).unwrap(), vec![0x42; 8]);
-        assert_eq!(state.memory.read(0x1000, 1).unwrap(), vec![ByteValue::Concrete(0)]);
-        assert_eq!(child.memory.read(0x1000, 1).unwrap(), vec![ByteValue::Concrete(0xcc)]);
+        assert_eq!(state.registers.read(1)?, vec![0; 8]);
+        assert_eq!(child.registers.read(1)?, vec![0x42; 8]);
+        assert_eq!(
+            state.memory.read(0x1000, 1)?,
+            vec![ByteValue::Concrete(0)]
+        );
+        assert_eq!(
+            child.memory.read(0x1000, 1)?,
+            vec![ByteValue::Concrete(0xcc)]
+        );
+        Ok(())
     }
 
     #[test]
