@@ -224,8 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn state_fork_and_mutation_preserve_parent_snapshot(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn state_fork_and_mutation_preserve_parent_snapshot() -> Result<(), Box<dyn std::error::Error>> {
         let memory = PersistentMemory::new(vec![MemoryRegion {
             object: ObjectId(1),
             base: 0x1000,
@@ -252,14 +251,8 @@ mod tests {
         assert_eq!(child.parent, Some(StateId(10)));
         assert_eq!(state.registers.read(1)?, vec![0; 8]);
         assert_eq!(child.registers.read(1)?, vec![0x42; 8]);
-        assert_eq!(
-            state.memory.read(0x1000, 1)?,
-            vec![ByteValue::Concrete(0)]
-        );
-        assert_eq!(
-            child.memory.read(0x1000, 1)?,
-            vec![ByteValue::Concrete(0xcc)]
-        );
+        assert_eq!(state.memory.read(0x1000, 1)?, vec![ByteValue::Concrete(0)]);
+        assert_eq!(child.memory.read(0x1000, 1)?, vec![ByteValue::Concrete(0xcc)]);
         Ok(())
     }
 
