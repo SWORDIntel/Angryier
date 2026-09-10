@@ -1,26 +1,131 @@
 # Angryier Trait Boundaries
 
-This document defines the first concrete Rust interface boundaries implied by `Plan.md` and the locked architecture. It is intentionally a contract document, not an implementation plan for instruction semantics.
+This document defines the concrete Rust ownership and interface boundaries implied by `Plan.md` and the frozen architecture. It is a contract document: crate existence reserves responsibility, but does not claim that a backend is implemented.
 
-## Purpose
+## Primary invariant
 
-The primary failure mode being prevented is semantic/execution/provenance desynchronization during code-page mutation and JIT invalidation.
+The dominant cross-plane failure mode is semantic/execution/provenance desynchronization during code mutation, lowering, cache/JIT reuse, solver reuse, or replay. Angryier therefore treats identity, validity, and publication boundaries as part of correctness rather than instrumentation.
 
-The architecture therefore enforces five separations:
+The architecture enforces these separations:
 
-1. **Decode is not semantics.** Intel XED-specific objects terminate at the decoder adapter boundary.
-2. **Construction is not publication.** Rich semantic blocks may be mutable only while private to construction/normalization/validation.
-3. **Rich semantics are not execution IR.** Semantic providers emit into a typed semantic builder; only a dedicated lowerer may create compact execution IR.
-4. **Execution IR validity is versioned.** Every lowered block carries semantic-version, target-profile, content-identity, and code-page version guards.
-5. **State, JIT validity, provenance, and replay publication are atomic.** They advance under one execution-ledger epoch or not at all.
-
-The initial interfaces live in `crates/angryier-semantics/src/lib.rs`.
+1. **Shared identity is singular.** Cross-plane IDs, versions, dependency keys, fidelity and analysis context are owned by `angryier-types`.
+2. **Decode is not semantics.** XED-specific ownership terminates in `angryier-decode-xed`.
+3. **Construction is not publication.** Rich semantic blocks are private/mutable until sealing.
+4. **Semantic truth is not execution representation.** `angryier-semantics` defines typed semantic construction; `angryier-ir` owns compact execution IR.
+5. **Post-seal transforms are derivations, not mutation.** `angryier-semantic-contracts` owns exact identity, fingerprints and equivalence-evidence contracts.
+6. **State is not solver state.** Persistent execution state stores engine-level expressions/constraints, never backend-native Z3/Bitwuzla objects.
+7. **Execution publication is atomic.** `angryier-ledger` owns the epoch boundary coupling state, code versions, provenance and replay-visible metadata.
+8. **Persistence is not execution.** QIHSE/KEYSTONE adapters are asynchronous knowledge-plane edges and never correctness prerequisites for a worker step.
+9. **Similarity is not proof.** Fusion/vector retrieval may propose candidates; authoritative reuse validates exact compatibility/dependency keys.
 
 ---
 
-## Semantic Provider Hierarchy
+# Ownership Map
 
-All instruction semantics satisfy one common contract:
+```text
+angryier-types
+    |
+    +-- angryier-arch
+    |      +-- angryier-arch-intel64
+    |             +-- angryier-decode-xed
+    |
+    +-- angryier-semantics
+    |      +-- angryier-semantics-gen
+    |
+    +-- angryier-semantic-contracts
+    |
+    +-- angryier-ir
+    +-- angryier-expr
+    +-- angryier-memory
+    +-- angryier-state
+    +-- angryier-taint
+    +-- angryier-execution
+    +-- angryier-ledger
+    +-- angryier-replay
+    +-- angryier-solver
+    |      +-- angryier-solver-z3
+    |      +-- angryier-solver-bitwuzla
+    +-- angryier-scheduler
+    +-- angryier-provenance
+    +-- angryier-knowledge
+    +-- angryier-fusion
+    +-- angryier-models
+    +-- angryier-storage
+    +-- angryier-telemetry
+    +-- angryier-qihse
+    +-- angryier-keystone
+    +-- angryier-loader
+    +-- angryier-fuzz
+    +-- angryier-jit
+    +-- angryier-plugins
+    +-- angryier-distribution
+    +-- angryier-bench
+```
+
+The CLI is an orchestration surface, not a source of engine truth.
+
+---
+
+# Canonical Shared Types
+
+`angryier-types` is deliberately low-level. The following classes of values must not be independently redefined by higher crates:
+
+```text
+Address
+RunId / ImageId / BlockId / StateId
+ConstraintId / ExprId
+CodePageId / CodePageVersion
+SemanticRuleId / SemanticVersion
+ContentId / SemanticFingerprint
+TargetProfileId
+ProvenanceNodeId / ProvenanceSeq
+ReplayCapsuleId
+DependencyKey
+EnvironmentModelVersion
+EmbeddingModelVersion
+KnowledgeSchemaVersion
+FidelityProfile
+RetentionProfile
+AnalysisContext
+```
+
+A type with the same conceptual name in two crates is an architectural defect unless it is intentionally architecture-local and cannot cross a plane boundary.
+
+Backend-native handles, pointers, contexts, ASTs and database objects are explicitly excluded from this crate.
+
+---
+
+# Decode Boundary
+
+`angryier-arch` owns the ISA-neutral decoder contract and normalized decoded-instruction shape. `angryier-arch-intel64` owns Intel 64 target profiles and architectural feature/state definitions. `angryier-decode-xed` adapts Intel XED into those internal forms.
+
+```text
+bytes + target profile
+        |
+        v
+Intel XED
+        |
+        v
+angryier-decode-xed
+        |
+  normalize/copy
+        |
+        v
+DecodedInstruction
+        |
+        v
+semantic provider resolution
+```
+
+XED-owned pointers, decoder-state lifetimes, opaque structs and allocator ownership do not cross the adapter boundary.
+
+The adapter must fail explicitly if XED is unavailable; the scaffold must never fabricate successful decode results.
+
+---
+
+# Semantic Provider Boundary
+
+`angryier-semantics` owns semantic construction and provider contracts:
 
 ```text
 SemanticProvider
@@ -29,123 +134,77 @@ SemanticProvider
 └── SemanticOverride
 ```
 
-This implements the locked hybrid design:
+The registry resolves each decoded form to exactly one authoritative provider. Registration order never acts as semantic priority; ambiguity is an error.
 
-- regular instruction families may be produced from declarative definitions;
-- non-trivial reusable behavior may be expressed through strongly typed Rust combinators;
-- exceptional instructions may use explicit handwritten overrides.
+Semantic providers can observe normalized instruction information and emit typed semantic values/effects. They cannot access:
 
-The registry must resolve a decoded form to exactly one authoritative provider. Provider registration order is never semantic priority. Ambiguous resolution is an error.
+- solver backend ASTs;
+- JIT/compiler handles;
+- mutable execution states;
+- QIHSE/KEYSTONE handles;
+- WAL/storage handles;
+- scheduler queues.
 
-### Why this matters
-
-The semantic generator is allowed to be wrong during development. It is **not** allowed to silently shadow a handwritten override or produce nondeterministic provider selection.
-
-Every successful semantic emission returns a `SemanticReceipt` containing:
-
-- semantic rule ID;
-- semantic origin;
-- semantic version.
-
-That receipt is part of the truth/provenance chain.
-
----
-
-## Decoder Boundary
-
-`DecodedInstructionView` is deliberately narrow.
-
-The semantic layer may observe normalized information such as:
-
-```text
-address
-form ID
-length
-feature IDs
-operand descriptors
-```
-
-It may not depend on XED-owned pointers, opaque decoder state, or decoder-specific lifetimes.
-
-This permits:
-
-- XED replacement or differential decoder testing;
-- deterministic serialization of decoded forms;
-- semantic generation without linking the execution core directly to decoder internals;
-- fuzzing the semantic layer with synthetic decoded forms.
-
----
-
-## Rich Semantic Builder
-
-Semantic definitions emit to `SemanticBuilder`.
-
-The builder exposes typed operations for:
-
-- constants;
-- register and operand reads;
-- typed primitive operations;
-- floating-point operations;
-- vector operations;
-- tile operations;
-- register/operand writes;
-- explicit architectural side effects.
-
-It does **not** expose JIT handles, machine code, executor state objects, solver ASTs, or database handles.
-
-This is the central impedance barrier between the truth plane and execution plane.
+That restriction is the primary impedance barrier between semantic truth and execution policy.
 
 ---
 
 # Semantic Block Lifecycle
-
-Rich semantic blocks use a two-stage lifecycle.
 
 ```text
 PRIVATE / MUTABLE
     |
     +-- construct
     +-- normalize
-    +-- optimize
+    +-- optimize before publication
     +-- validate
     |
     v
 SEAL
     |
     +-- canonical serialization
-    +-- content digest
-    +-- semantic version binding
-    +-- provenance receipt
+    +-- ContentId
+    +-- SemanticFingerprint
+    +-- semantic/schema version binding
+    +-- validation receipt
     |
     v
-PUBLIC / IMMUTABLE / CONTENT-ADDRESSED
+PUBLIC / IMMUTABLE
     |
     +-- lowering
-    +-- cache insertion
-    +-- JIT validity keys
+    +-- exact cache keys
+    +-- JIT validity
     +-- provenance references
     +-- replay capsules
-    +-- cross-run knowledge
+    +-- QIHSE exact-plane records
 ```
 
-A semantic block must not be observable by the execution, replay, or knowledge planes before sealing succeeds.
+No execution, replay, provenance or knowledge component may observe a rich semantic block before sealing succeeds.
 
-After sealing, in-place mutation is forbidden. Any transformation produces a new semantic block with:
+## Dual identity
 
-- a new content identity;
-- an explicit derivation link to the parent block;
-- its own validation result;
-- its own semantic receipt.
+`ContentId` is authoritative exact identity. `SemanticFingerprint` is a normalized candidate identity. Replay/JIT/exact-cache decisions may never substitute fingerprint equality for exact validity.
 
-This prevents published semantics from changing underneath cached execution IR, JIT blocks, or replay capsules.
+## Post-seal transformation
 
-The seal operation is therefore the semantic equivalent of a commit boundary.
+`angryier-semantic-contracts` defines immutable derivation:
+
+```text
+sealed A
+  |
+  +-- transformation contract
+  +-- equivalence evidence
+  v
+sealed B
+```
+
+B receives a new `ContentId` and a parent/derivation edge. PROVE accepts a derived block only when the acceptance policy considers its evidence sufficient for every claimed preserved property.
 
 ---
 
-## Typed Domains
+# Typed Wide Semantics
 
-The initial contract recognizes:
+The truth plane keeps structural domains for:
 
 ```text
 Scalar(BitVec / Float)
@@ -154,7 +213,7 @@ Opmask
 Tile
 ```
 
-Locked representation policies are represented explicitly:
+Locked representation policies include:
 
 ```text
 VectorRepresentation::HybridLazy
@@ -164,200 +223,75 @@ FloatingPointPolicy::SmtFpPreferred
 FloatingPointPolicy::ControlledBitVectorFallback
 ```
 
-### AMX fallback
-
-`LazyChunked` is the preferred AMX symbolic representation.
-
-If profiling shows pathological solver translation or synchronization behavior, the system may choose `DenseCellFallback` for a block/state/profile without changing architectural semantics. The chosen representation must be recorded in provenance and benchmark telemetry.
-
-The fallback is therefore a policy transition, not a semantic approximation.
+Lazy packed/lane/cell views are execution/solver representation choices, not semantic approximations. Any fallback between lazy AMX chunks and dense cells must preserve observable semantics and appear in provenance/benchmark telemetry.
 
 ---
 
-## Two-Level IR Boundary
-
-The rich semantic IR and compact execution IR are separate layers.
+# Two-Level IR Boundary
 
 ```text
-Decoded instruction
-      |
-      v
+DecodedInstruction
+       |
+       v
 SemanticProvider
-      |
-      v
-SemanticBuilder
-      |
-      v
-Private rich semantic IR
-      |
-  normalize/validate
-      |
-      v
-Sealed semantic block
-      |
-      v
+       |
+       v
+private rich semantic IR
+       |
+ normalize / validate / seal
+       |
+       v
+sealed semantic block
+       |
+       v
 SemanticLowerer
-      |
-      v
-Compact execution IR / JIT candidate
+       |
+       v
+angryier-ir compact block
+       |
+       +--> interpreter
+       +--> taint/symbolic hooks
+       +--> specialized executor
+       +--> profile-driven JIT
 ```
 
-`SemanticLowerer` accepts only sealed semantic blocks and receives a `BlockValidityKey` containing:
+The compact execution block carries or is bound to:
 
-- image identity;
-- block identity/address;
-- sealed semantic content identity;
+- exact semantic `ContentId`;
 - semantic version;
-- target CPU profile;
-- all relevant code-page versions.
+- target profile;
+- code-page versions;
+- image/block identity.
 
-A block lowered under one validity key must never be reused under another merely because its virtual address matches.
-
----
-
-# Atomic Execution State Ledger
-
-The execution ledger is the mandatory publication boundary for operations that affect deterministic replay.
-
-The relevant state is conceptually:
-
-```text
-ExecutionState
-CodePageVersions
-JIT/BlockValidity
-ProvenanceSequence
-ReplayCheckpoint
-SemanticVersion
-SemanticContentIdentity
-```
-
-These values must not become visible independently.
-
-## Commit invariant
-
-A successful ledger commit publishes one new epoch containing the complete mutation.
-
-```text
-begin(snapshot N)
-    |
-    +-- state mutation
-    +-- code-page version change
-    +-- JIT invalidation consequence
-    +-- provenance events
-    +-- replay checkpoint
-    +-- sealed semantic identity references
-    |
-commit
-    |
-    v
-snapshot N+1 becomes visible atomically
-```
-
-On failure:
-
-```text
-NO state publication
-NO code-version publication
-NO provenance advancement
-NO replay-checkpoint publication
-NO semantic-reference publication
-```
-
-This is stronger than merely writing the same timestamp into separate logs.
-
-## Required rejection conditions
-
-The initial ledger contract explicitly models rejection for:
-
-- stale execution epoch;
-- stale code-page version;
-- semantic-version mismatch;
-- semantic-content mismatch;
-- provenance sequence gap;
-- replay-checkpoint mismatch;
-- conflicting concurrent commit.
-
-Additional conditions may be added, but these may not be weakened.
+Virtual-address equality alone can never authorize reuse.
 
 ---
 
-## JIT and Self-Modifying Code
+# State, Memory and Expression Boundaries
 
-JIT/block-cache validity is guarded by `BlockValidityKey` and checked through `BlockValidityOracle`.
+`angryier-state` owns persistent state roots and fidelity history. `angryier-memory` owns page-backed copy-on-write memory and sparse symbolic overlays. `angryier-expr` owns hash-consed expression DAGs and canonicalization. `angryier-taint` owns dataflow provenance and concrete→taint→symbolic promotion decisions.
 
-A JIT block is valid only if all of the following still match:
+The normal design direction is:
 
 ```text
-image identity
-block identity/address
-sealed semantic content identity
-semantic version
-target profile
-code-page versions
+immutable shared state roots
++ worker-owned current mutation context
++ COW memory/page deltas
++ compact ExprId references
++ worker-local caches
 ```
 
-A write to executable memory increments the affected page version. Any block whose guard references the old version becomes invalid without requiring a global flush.
+State must not embed solver contexts, backend ASTs, database sessions or JIT compiler objects.
 
-The resulting invalidation and the execution-state/provenance consequences must be published in the same ledger epoch when they affect replay-visible execution.
+Symbolic addresses are resolved through explicit profile-aware policy rather than hidden concretization.
 
 ---
 
-# Concurrency Rules
+# Solver Boundary
 
-The locked concurrency model remains:
+`angryier-solver` defines backend-neutral query/result structures, shared-context batch solving, routing and preemption. Z3 and Bitwuzla live behind adapter crates.
 
-```text
-immutable shared structures
-+ worker-local mutable caches
-+ NUMA-local worker groups
-+ locality-aware work stealing
-```
-
-The semantic contracts are `Send + Sync`, but this does **not** imply that semantic evaluation should take shared locks.
-
-Expected implementation pattern:
-
-```text
-read-only semantic registry         shared
-sealed semantic blocks              shared immutable
-semantic definition tables          shared immutable
-construction builders               worker/private mutable
-expression/semantic arenas          persistent or partitioned
-worker hot caches                    worker-local
-solver contexts                      worker-local
-trace rings                          worker-local
-state mutation                       owned by executing worker
-ledger publication                   atomic serialized boundary per conflicting state/version domain
-```
-
-The ledger must not become a single global mutex for all states. Atomicity is required only across mutually dependent publication fields; independent states/pages should remain independently committable wherever correctness permits.
-
----
-
-# Assumptions Are Not Invariants
-
-`Plan.md` records two explicit assumptions verbatim. They are treated as stress-test hypotheses rather than architectural guarantees.
-
-## Firmware/context-switch assumption
-
-Correctness and acceptable scaling must not depend on custom firmware eliminating context-switch or cache-migration costs.
-
-Benchmarking must separately expose:
-
-```text
-worker migrations
-NUMA migrations
-context-switch pressure
-cache-locality loss
-ledger conflict rate
-state steal rate
-```
-
-## Solver robustness assumption
-
-Portfolio fallback must be triggered by explicit solver policy and measured behavior, not by waiting for catastrophic failure.
-
-The engine must distinguish:
+Required terminal/result classes remain distinct:
 
 ```text
 SAT
@@ -368,67 +302,175 @@ RESOURCE_LIMIT
 BACKEND_ERROR
 ```
 
-and may route or cross-check before a backend becomes pathological.
+UNKNOWN/TIMEOUT/RESOURCE_LIMIT/BACKEND_ERROR may never be silently promoted to UNSAT.
+
+Each worker owns its incremental backend contexts. Persistent solver knowledge stores canonical engine-level facts, models/cores where portable, validity keys and telemetry—not live solver-native objects.
 
 ---
 
-# Required Tests Before Implementing Broad Semantics
+# Atomic Execution Ledger
 
-The trait layer is not considered stable until the following architecture tests exist:
+`angryier-ledger` is the mandatory publication boundary for replay-visible execution mutations.
 
-1. A synthetic decoder can feed a semantic provider without XED linked.
-2. Generated and handwritten providers cannot ambiguously resolve the same form.
-3. A private rich semantic block cannot enter lowering/cache/provenance before sealing.
-4. Sealing the same canonical semantic block twice yields the same persistent content identity.
-5. Any post-seal transformation yields a distinct immutable object rather than mutating the original.
-6. Rich semantic IR can be lowered under a version key and rejected after a code-page version change.
-7. A failed ledger commit leaves state/provenance/replay visibility unchanged.
-8. Two independent state commits can proceed without a global execution lock.
-9. A JIT block referencing multiple code pages is invalidated if any referenced page version changes.
-10. Lazy-chunked and dense-cell AMX representations produce equivalent concrete/solver-visible semantics on the same tests.
-11. SMT-FP and controlled bitvector fallback agree on the designated cross-check corpus where both are applicable.
-12. Deterministic replay rejects capsules whose semantic content, semantic version, or code-page validity keys do not match.
-13. Provenance sequence gaps are detected rather than silently repaired.
+Conceptually coupled state:
+
+```text
+ExecutionState
+CodePageVersions
+block/JIT validity consequences
+ProvenanceSequence
+ReplayCheckpoint
+SemanticVersion
+SemanticContentId
+```
+
+A successful commit publishes one new epoch containing the entire mutation. Failure publishes none of it.
+
+```text
+begin(snapshot N)
+    |
+    +-- state mutation
+    +-- code-page version change
+    +-- invalidation consequence
+    +-- provenance events
+    +-- replay checkpoint
+    +-- semantic identity refs
+    |
+commit
+    |
+    v
+snapshot N+1 atomically visible
+```
+
+Required rejection classes include stale epoch, stale code version, semantic-version/content mismatch, provenance gap, replay mismatch and conflicting commit.
+
+Atomicity must not be implemented as one global mutex. Independent state/version domains must remain independently committable where correctness permits.
 
 ---
 
-# Current Scaffold Status
+# JIT and Self-Modifying Code
 
-Implemented as interface scaffold only:
+`angryier-jit` owns translated-code artifacts and isolation policy. Code-page writes advance version identity. Any block bound to an old page version becomes invalid without requiring address-based global flushing.
 
-- workspace `Cargo.toml`;
-- `angryier-semantics` crate;
-- typed semantic domains and representation policies;
-- decoder-view boundary;
-- semantic builder;
-- generated/combinator/override provider hierarchy;
-- deterministic registry contract;
-- rich-to-execution lowering boundary;
-- code-page/block validity keys;
-- atomic execution-ledger contract;
-- JIT block validity oracle;
-- stress-probe interface.
+Trusted Angryier-generated translations may eventually execute in-process. Arbitrary/native target execution belongs in a restricted worker/sandbox boundary.
 
-Architecturally locked, but not yet implemented in the Rust scaffold:
+JIT is profile-driven and remains optional until end-to-end profiling demonstrates value.
 
-- private mutable semantic construction state;
-- semantic sealing API;
-- canonical semantic serialization;
-- persistent semantic content identity;
-- derivation/provenance linkage between transformed sealed blocks.
+---
 
-Not implemented yet:
+# Provenance and Telemetry Boundary
 
-- XED adapter;
-- semantic IR storage;
-- Intel instruction semantics;
-- semantic generator;
-- execution IR;
-- solver adapters;
-- concrete/symbolic executor;
-- ledger backend;
-- JIT;
-- provenance transport;
-- QIHSE/KEYSTONE bridge.
+`angryier-provenance` owns causal event structure and adaptive Tier 0/1/2 policy. `angryier-telemetry` owns operational metrics. `angryier-storage` owns local WAL/spill and retention lifecycle.
 
-This is intentional. The present purpose is to freeze boundaries before implementation pressure makes them expensive to change.
+Correctness-critical Tier-1 events cannot be silently dropped. Under persistence backpressure, the transport may batch, spill locally, aggregate lower-value telemetry, or apply explicitly visible backpressure according to policy.
+
+Workers must not synchronously wait on QIHSE or KEYSTONE during ordinary execution.
+
+---
+
+# Knowledge and Retrieval Boundary
+
+`angryier-knowledge` owns exact/advisory validity semantics and dependency-aware invalidation. `angryier-qihse` and `angryier-keystone` are persistence/index adapters. `angryier-fusion` owns modality encoding and learned fusion.
+
+```text
+EXACT PLANE
+ContentId + canonical artifact + dependency keys
+            |
+            +--> may authorize reuse after compatibility validation
+
+ADVISORY PLANE
+SemanticFingerprint / fused embeddings / similarity
+            |
+            +--> proposes candidates only
+```
+
+Every correctness-affecting cache hit validates the cryptographically backed dependency/compatibility envelope before reuse.
+
+---
+
+# Concurrency Rules
+
+Locked concurrency model:
+
+```text
+immutable shared structures
++ worker-local mutable caches
++ worker-local solver contexts
++ NUMA-local worker groups
++ locality-aware work stealing
+```
+
+State migration cost includes solver-context rebuild, NUMA/cache locality and load-imbalance gain. The scheduler may use learned ranking only as advisory input layered over deterministic admissible policy.
+
+Strict deterministic mode records/replays scheduler decisions, seeds, solver policy decisions and event ordering needed to reproduce emergent exploration behavior.
+
+---
+
+# Environment, Summary and State Import Boundaries
+
+`angryier-models` owns environment models and exact/approximate function summaries. Every summary/model is dependency-keyed against relevant semantics, ABI/calling convention, target profile, referenced globals and environment versions.
+
+`angryier-loader` owns the unified import abstraction for:
+
+```text
+static binary
+snapshot
+checkpoint
+live-process capture
+```
+
+Imported state enters through the same internal state/profile/fidelity contracts rather than special execution paths.
+
+---
+
+# Fuzzing Boundary
+
+`angryier-fuzz` is staged deliberately:
+
+```text
+Stage 1: seed sharing
+Stage 2: seed + coverage exchange
+Stage 3: bidirectional seeds / coverage / constraints / target hints / feedback
+```
+
+High-entropy mutated inputs are treated as an explicit cache-poisoning/canonicalization stress class. Fuzzer origin never weakens exact knowledge validation.
+
+---
+
+# Plugin and Future Distribution Boundaries
+
+Internal extensibility uses stable Rust traits. A binary C ABI is deferred until an external plugin requirement justifies its compatibility burden.
+
+`angryier-distribution` reserves serializable work/state/identity envelopes now, but multi-host scheduling is not implemented until single-host NUMA scaling is proven.
+
+---
+
+# Required Architecture Tests
+
+Before broad semantic implementation, tests must demonstrate at least:
+
+1. synthetic decode objects can exercise semantics without linking XED;
+2. generated/combinator/override providers cannot ambiguously resolve a form;
+3. unsealed semantics cannot enter lowering/cache/replay/knowledge;
+4. canonical sealing is deterministic across process runs;
+5. post-seal transforms create new immutable identities and derivation records;
+6. semantic fingerprint collisions cannot authorize exact reuse;
+7. code-page changes invalidate all dependent execution/JIT artifacts;
+8. failed ledger commits expose no partial state/provenance/replay mutation;
+9. independent state domains do not require a global execution lock;
+10. lazy/dense AMX representations agree on the designated cross-check corpus;
+11. SMT-FP and controlled bitvector fallback agree where both are applicable;
+12. UNKNOWN/TIMEOUT/backend errors are never treated as UNSAT;
+13. stale dependency keys cannot authorize solver/summary/cache reuse;
+14. QIHSE/KEYSTONE loss cannot corrupt execution correctness;
+15. WAL saturation is observable and recoverable;
+16. deterministic mode can reproduce scheduler/exploration ordering;
+17. high-entropy fuzzer near-misses cannot poison alpha-equivalence/subsumption reuse.
+
+---
+
+# Scaffold Status
+
+The crate ownership and public contract boundaries above are present in the repository. Native XED integration, full Intel semantic coverage, concrete/symbolic execution internals, solver translation, NUMA scheduling, durable ledger/replay implementations, QIHSE/KEYSTONE SDK bindings, learned models, JIT and full hybrid-fuzzer adapters remain implementation work.
+
+No placeholder backend is permitted to report success for an unimplemented capability.
