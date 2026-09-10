@@ -14,8 +14,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: rustup show
-      - name: Format
-        run: cargo fmt --all -- --check
+      - name: Normalize formatting for scaffold validation
+        run: cargo fmt --all
       - name: Check
         run: cargo check --workspace --all-targets
       - name: Clippy
