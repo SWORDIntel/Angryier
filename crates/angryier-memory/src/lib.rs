@@ -92,10 +92,10 @@ impl PersistentMemory {
                 .checked_add(region.size)
                 .ok_or(MemoryError::AddressOverflow)?;
 
-            if let Some(previous_end) = previous_end {
-                if region.base < previous_end {
-                    return Err(MemoryError::RegionOverlap);
-                }
+            if let Some(previous_end) = previous_end
+                && region.base < previous_end
+            {
+                return Err(MemoryError::RegionOverlap);
             }
             previous_end = Some(end);
 
