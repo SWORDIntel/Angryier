@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use angryier_core::CodeVersionSource;
 use angryier_types::{Address, CodePageId, CodePageVersion, CodeVersionGuard, ExprId, ObjectId};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -346,6 +347,12 @@ impl LayeredMemory for PersistentMemory {
 
     fn regions(&self) -> &[MemoryRegion] {
         self.regions.as_slice()
+    }
+}
+
+impl CodeVersionSource for PersistentMemory {
+    fn code_page_version(&self, page: CodePageId) -> Option<CodePageVersion> {
+        self.code_versions.get(&page).copied()
     }
 }
 
