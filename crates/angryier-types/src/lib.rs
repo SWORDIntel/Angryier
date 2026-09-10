@@ -4,6 +4,8 @@
 //! This crate owns identifiers that must remain stable across execution, replay,
 //! provenance, persistence, and future distribution boundaries.
 
+pub type Address = u64;
+
 macro_rules! id64 {
     ($($name:ident),+ $(,)?) => {
         $(
