@@ -2,9 +2,11 @@
 
 > When you are absolutely furious your symbolic execution is taking too long and you just can't stand it anymore and you're not just angry, you're **Angryier**.
 
-Angryier is a planned native, multicore symbolic/concolic execution engine written in Rust with one overriding objective: **reduce end-to-end time-to-solution compared with Python-heavy symbolic execution workflows.**
+Angryier is a planned native, multicore binary symbolic/concolic execution and program-analysis engine written in Rust.
 
-It is not intended to be an angr rewrite or API clone. The design focuses on removing avoidable runtime overhead and attacking the actual dominant costs of binary symbolic execution: state copying, expression construction, symbolic memory, solver orchestration, scheduling, and state explosion.
+The objective is broader than making angr-style workflows faster. Angryier is being designed to improve **speed, correctness, and analyst insight simultaneously**, while accumulating reusable knowledge across analyses rather than treating every run as disposable.
+
+It is not an angr rewrite or API clone.
 
 ## Design Thesis
 
@@ -12,88 +14,182 @@ It is not intended to be an angr rewrite or API clone. The design focuses on rem
 Do not symbolically interpret work that can remain concrete.
 Do not copy state that can be shared.
 Do not serialize work that can execute independently.
-Do not optimize a layer until profiling proves it matters.
+Do not persist telemetry synchronously on the execution hot path.
+Do not treat similarity as proof.
+Do not advertise semantics that have not passed validation gates.
 ```
 
-## V1 Direction
+## Locked Direction
 
-- **Rust** native core.
-- **x86-64** first.
-- **ELF64 + PE32+** first.
-- **libVEX** lifting behind a narrow adapter.
-- Compact internal **AngryIR** shared by concrete and symbolic execution.
-- Arena-allocated, hash-consed symbolic expression DAG using compact IDs.
-- Page-based **copy-on-write memory** with sparse symbolic overlays.
-- Persistent constraint lineage rather than deep state copies.
-- **Z3** first, behind a backend-independent solver trait.
-- **Per-worker solver contexts**, never a single globally locked solver.
-- Native **work-stealing state scheduler** for multicore execution.
-- Cheap taint/concrete domain before promotion to symbolic expressions.
-- Concrete JIT only after profiling justifies it.
-- Python only as an optional API layer, never in the execution hot path.
+- **Rust-native core**; Python is optional and never in the hot path.
+- Architecture-neutral engine traits with **Intel 64 as the first production backend**.
+- **Intel XED** for Intel 64 decode and instruction-form/feature metadata.
+- Host and target feature sets are separate: binaries remain analyzable even when the host lacks the target extension.
+- Software semantics for modern Intel features, including **AVX, AVX2, AVX-512, AVX10, AMX, CET and APX** as coverage is validated.
+- **Hybrid generated semantics**: representative handwritten corpus first, then a semantics compiler/generator plus handwritten overrides for complex families.
+- Canonical typed semantic representation before compact execution lowering to **AngryIR**.
+- Concrete → taint → symbolic promotion rather than eager symbolic expression construction.
+- Arena-allocated, hash-consed expression DAGs using compact IDs.
+- Page-based copy-on-write state with sparse symbolic memory overlays.
+- Structured vector, opmask and AMX tile domains with lazy symbolic materialization.
+- **Z3 + Bitwuzla** behind a backend-independent solver interface.
+- Per-worker incremental solver state plus persistent generalized solver knowledge.
+- Native, locality-aware **work stealing** with solver/cache/NUMA affinity considered in migration cost.
+- **PROVE / EXPLORE / HUNT** fidelity profiles with mandatory per-state fidelity provenance.
+- Adaptive tiered provenance: always-retained structural Tier 1 plus triggered Tier 2 flight-recorder traces.
+- **QIHSE + KEYSTONE** as the native persistence/index/retrieval substrate, off the execution hot path.
+- Cross-run cumulative knowledge with exact validity keys and stale-knowledge handling.
+- Specialist semantic encoders feeding a **learned fusion model** for approximate retrieval.
+- Default fused representation: **1024 dimensions**, with benchmarked profiles from 384 to 4096.
+- Similarity retrieval is advisory until exact structural/validity checks succeed.
+- JIT/native block translation only after profiling proves it is justified.
 
-## Execution Model
+## Three-Plane Architecture
 
 ```text
-              ELF / PE
-                 |
-                 v
-           loader + lifter
-                 |
-                 v
-              AngryIR
-                 |
-          +------+------+
-          |             |
-          v             v
- concrete/taint      symbolic
-   fast path         execution
-          |             |
-          +------+------+
-                 |
-              branch
-                 |
-                 v
-       work-stealing scheduler
-          /       |       \
-       worker   worker   worker
-          |       |       |
-       COW state COW    COW state
-          |       |       |
-        SMT ctx SMT ctx SMT ctx
+                           ANGRYIER
+                              |
+            +-----------------+-----------------+
+            |                 |                 |
+            v                 v                 v
+      EXECUTION PLANE      TRUTH PLANE      KNOWLEDGE PLANE
+
+      concrete/taint       semantics          QIHSE
+      symbolic engine      validation         KEYSTONE
+      COW state            fidelity           graph lineage
+      worker solvers       replay             exact reuse
+      scheduler            support manifest   learned retrieval
 ```
+
+### Execution plane
+
+Optimized state, memory, expression, solver and scheduling machinery. Persistence is asynchronous/batched and must not sit directly in the worker hot path.
+
+### Truth plane
+
+Defines semantic truth, validation, replay, target-feature assumptions, support coverage and fidelity/approximation history.
+
+### Knowledge plane
+
+Persists exact artifacts, solver facts, state/constraint/taint lineage, analyst knowledge, prior-run summaries and learned semantic similarity so later analyses can reuse validated previous work.
+
+## Intel 64 Semantic Pipeline
+
+```text
+Intel XED decoded form
+        +
+Angryier semantic definitions
+        +
+handwritten overrides
+        |
+        v
+semantics compiler / generator
+        |
+        v
+canonical typed semantics
+        |
+        +--> concrete evaluation
+        +--> taint
+        +--> AngryIR
+        +--> symbolic execution
+        +--> generated tests
+        +--> support manifest
+```
+
+XED is the decoder, not the semantics engine.
+
+## Fidelity Profiles
+
+```text
+PROVE    exact-only policy; no silent approximation
+EXPLORE  conservative approximation with explicit provenance
+HUNT     aggressive bug-hunting policy; approximate results never presented as proof
+```
+
+Every finding inherits the fidelity history that made it possible.
+
+## Adaptive Provenance
+
+```text
+Tier 0  transient worker-local execution detail
+Tier 1  always-retained structural provenance
+Tier 2  deep trace around interesting events
+```
+
+Each worker maintains a bounded pre-trigger flight recorder. Tier 2 activates on high-value events such as crashes, new symbolic behavior, solver anomalies or semantic uncertainty, then automatically decays when output becomes repetitive/high-volume/low-novelty.
+
+Post-processing compacts before deleting. Ambiguous destructive cleanup may require human approval and supports quarantine-before-purge.
+
+## Cumulative Knowledge
+
+Angryier is designed to become more useful across runs.
+
+Authoritative reuse may include:
+
+```text
+exact SAT/UNSAT results
+models
+UNSAT cores
+validated branch/function summaries
+canonical semantic facts
+```
+
+Advisory retrieval may identify:
+
+```text
+similar functions
+similar constraints
+similar paths
+similar taint flows
+similar findings
+historically useful solver/search strategies
+```
+
+A similarity hit proposes a candidate. Exact machinery decides whether it is reusable.
+
+## Learned Fusion Retrieval
+
+The locked design is **specialist encoders + learned fusion**.
+
+```text
+IR/semantics
+CFG/path
+constraint DAG
+taint/dataflow
+memory/dynamic behavior
+solver profile
+provenance/fidelity
+finding/context
+analyst/context
+      |
+      v
+masked/gated learned fusion
+      |
+      v
+1024-D default semantic representation
+```
+
+All useful modalities may contribute. Missing modalities are explicitly masked.
+
+QIHSE's quantum-inspired/vector retrieval layer stores the fused similarity representation, while canonical exact artifacts remain in KV/graph/document storage.
 
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — fixed architectural decisions, state/memory/expression/solver design, scheduler, JIT policy, correctness strategy, and non-goals.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — implementation order from repository bootstrap through loader/IR, symbolic execution, COW state, solver, parallel scheduler, taint fast-path, solver optimization, JIT, and packaging. Every phase has exit criteria.
-- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — benchmark contract, workload classes, metrics schema, multicore scaling methodology, correctness requirements, and performance-regression rules.
-
-## Definition of V1
-
-V1 is reached when Angryier can:
-
-1. load an x86-64 ELF or PE binary;
-2. lift and execute supported code;
-3. mark external input symbolic;
-4. fork on symbolic branches;
-5. solve branch constraints;
-6. explore independent states across multiple CPU cores;
-7. generate a concrete input reaching a requested target;
-8. successfully replay that input against the target;
-9. emit machine-readable performance metrics; and
-10. run a reproducible comparison against angr.
-
-JIT, Bitwuzla, state merging, Python bindings, distributed execution, broad OS emulation, and additional ISAs are **not V1 blockers**.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — full three-plane architecture, state/solver/scheduler/fidelity/knowledge design.
+- [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — locked decisions from the design Q&A and currently open decisions.
+- [`docs/SEMANTICS.md`](docs/SEMANTICS.md) — Intel 64 decode, typed semantics, generator plan, AVX/AVX-512/AMX handling and validation gates.
+- [`docs/PROVENANCE_KNOWLEDGE.md`](docs/PROVENANCE_KNOWLEDGE.md) — adaptive provenance, cleanup, QIHSE/KEYSTONE mapping, cross-run reuse and learned fusion.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — implementation order and go/no-go gates.
+- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — performance, semantic correctness, provenance, cumulative reuse and retrieval benchmark contract.
 
 ## Current Status
 
-**Design/scaffold phase.** The architecture and implementation gates are defined; the Rust workspace and engine implementation have not yet been bootstrapped.
+**Design/scaffold phase.** Architecture and documentation are being frozen through design review before implementation begins.
 
-The first implementation milestone is Phase 0 in [`docs/ROADMAP.md`](docs/ROADMAP.md): create the Cargo workspace, CI, benchmark harness, angr reference runner, metrics schema, and differential micro-corpus before implementing the execution engine.
+No implementation should silently reintroduce the earlier libVEX-based design or treat decode support as semantic support.
 
 ## Performance Policy
 
-Angryier does not claim an arbitrary `10x`, `50x`, or `100x` advantage. Performance is workload-dependent. Claims must come from reproducible benchmark classes and must separate executor time from solver time.
+Angryier does not claim a universal `10x`, `50x` or `100x` advantage.
 
-The project succeeds if profiling and benchmarks demonstrate substantial speedups where engine/runtime overhead is dominant, useful multicore scaling on branch-parallel workloads, and no semantic regressions against reference execution.
+Performance, semantic coverage, fidelity and knowledge-reuse improvements must be measured separately on named reproducible workload classes. Any speedup obtained by silently weakening semantics is invalid.
