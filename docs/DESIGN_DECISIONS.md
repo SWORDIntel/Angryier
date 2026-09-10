@@ -247,6 +247,35 @@ A sealed semantic object cannot be mutated in place. Any semantic transformation
 
 This prevents replay capsules, JIT validity keys, cache entries, and cross-run knowledge from observing semantic mutation after publication.
 
+## D-026 — Dual semantic identity
+
+**Status:** Locked
+
+Every sealed semantic block has two identities with different trust roles:
+
+- **ContentId:** authoritative exact identity over canonical sealed serialization. Replay, JIT/block-cache validity, provenance, exact cross-run reuse, and exact-plane persistence use this identity.
+- **SemanticFingerprint:** normalized structural/semantic fingerprint used for candidate equivalence, retrieval, clustering, deduplication, generalized solver lookup, and learned-fusion input.
+
+A `SemanticFingerprint` match is advisory and never substitutes for exact validation against the authoritative content identity and relevant validity keys.
+
+## D-027 — Immutable semantic derivation with equivalence obligations
+
+**Status:** Locked
+
+Optimizing or otherwise transforming a sealed semantic block never mutates it in place. The transformation produces a new immutable derived block with:
+
+- an explicit parent/derivation link;
+- a declared transformation contract;
+- a new authoritative `ContentId`;
+- equivalence evidence appropriate to the claimed preservation properties;
+- its own validation/provenance record.
+
+Transformation contracts must state which properties are preserved, including value semantics, architectural side effects, exception behavior, memory ordering, floating-point behavior, masking behavior, and other relevant semantics.
+
+**PROVE** accepts only transformations whose required equivalence obligations are satisfied. **EXPLORE/HUNT** may admit explicitly marked weaker evidence under policy, but those derived artifacts must never contaminate the authoritative semantic corpus or be silently upgraded to proof.
+
+Execution-IR/JIT optimizations remain tied to the exact sealed `ContentId` from which they were derived.
+
 ---
 
 # Open Decisions
