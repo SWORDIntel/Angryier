@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use angryier_types::{
-    CodeVersionGuard, ContentId, LedgerEpoch, ProvenanceSeq, ReplayCapsuleId, SemanticVersion, StateId,
+    CodeVersionGuard, ContentId, LedgerEpoch, ProvenanceSeq, ReplayCapsuleId, SemanticVersion,
+    StateId,
 };
 use std::{
     collections::BTreeMap,
@@ -44,10 +45,34 @@ pub enum LedgerError {
     Poisoned,
 }
 
+impl core::fmt::Display for LedgerError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let message = match self {
+            Self::UnknownState => "unknown execution state",
+            Self::DuplicateState => "execution state already registered",
+            Self::StaleEpoch => "stale execution-ledger epoch",
+            Self::StaleCodeVersion => "stale code-page version",
+            Self::SemanticVersionMismatch => "semantic version mismatch",
+            Self::SemanticContentMismatch => "semantic content identity mismatch",
+            Self::ProvenanceGap => "provenance sequence gap",
+            Self::ReplayMismatch => "replay checkpoint mismatch",
+            Self::Conflict => "conflicting ledger mutation",
+            Self::Poisoned => "execution-ledger synchronization primitive poisoned",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for LedgerError {}
+
 pub trait ExecutionLedger: Send + Sync {
     type Transaction;
     fn begin(&self, base: &LedgerSnapshot) -> Result<Self::Transaction, LedgerError>;
-    fn commit(&self, tx: Self::Transaction, mutation: LedgerMutation) -> Result<LedgerSnapshot, LedgerError>;
+    fn commit(
+        &self,
+        tx: Self::Transaction,
+        mutation: LedgerMutation,
+    ) -> Result<LedgerSnapshot, LedgerError>;
     fn abort(&self, tx: Self::Transaction);
 }
 
@@ -86,7 +111,10 @@ impl InMemoryExecutionLedger {
 
     fn slot(&self, state: StateId) -> Result<Arc<Mutex<LedgerSnapshot>>, LedgerError> {
         let states = self.states.read().map_err(|_| LedgerError::Poisoned)?;
-        states.get(&state).cloned().ok_or(LedgerError::UnknownState)
+        states
+            .get(&state)
+            .cloned()
+            .ok_or(LedgerError::UnknownState)
     }
 
     fn validate_base(current: &LedgerSnapshot, base: &LedgerSnapshot) -> Result<(), LedgerError> {
@@ -114,7 +142,10 @@ impl InMemoryExecutionLedger {
         Ok(())
     }
 
-    fn validate_mutation(current: &LedgerSnapshot, mutation: &LedgerMutation) -> Result<(), LedgerError> {
+    fn validate_mutation(
+        current: &LedgerSnapshot,
+        mutation: &LedgerMutation,
+    ) -> Result<(), LedgerError> {
         if mutation.state != current.state {
             return Err(LedgerError::Conflict);
         }
@@ -138,7 +169,11 @@ impl ExecutionLedger for InMemoryExecutionLedger {
         Ok(InMemoryTransaction { base: base.clone() })
     }
 
-    fn commit(&self, tx: Self::Transaction, mutation: LedgerMutation) -> Result<LedgerSnapshot, LedgerError> {
+    fn commit(
+        &self,
+        tx: Self::Transaction,
+        mutation: LedgerMutation,
+    ) -> Result<LedgerSnapshot, LedgerError> {
         let slot = self.slot(tx.base.state)?;
         let mut current = slot.lock().map_err(|_| LedgerError::Poisoned)?;
 
@@ -210,13 +245,13 @@ mod tests {
     }
 
     #[test]
-    fn successful_commit_publishes_one_atomic_epoch() {
+    fn successful_commit_publishes_one_atomic_epoch() -> Result<(), LedgerError> {
         let ledger = InMemoryExecutionLedger::new();
         let base = snapshot(1);
-        ledger.register(base.clone()).unwrap();
+        ledger.register(base.clone())?;
 
-        let tx = ledger.begin(&base).unwrap();
-        let next = ledger.commit(tx, mutation(1)).unwrap();
+        let tx = ledger.begin(&base)?;
+        let next = ledger.commit(tx, mutation(1))?;
 
         assert_eq!(next.epoch, LedgerEpoch(1));
         assert_eq!(next.provenance, ProvenanceSeq(4));
@@ -224,61 +259,66 @@ mod tests {
         assert_eq!(next.semantic_version, SemanticVersion(2));
         assert_eq!(next.semantic_content, content(2));
         assert_eq!(next.code_versions[0].version, CodePageVersion(1));
-        assert_eq!(ledger.snapshot(StateId(1)).unwrap(), next);
+        assert_eq!(ledger.snapshot(StateId(1))?, next);
+        Ok(())
     }
 
     #[test]
-    fn stale_transaction_is_rejected_without_partial_publication() {
+    fn stale_transaction_is_rejected_without_partial_publication() -> Result<(), LedgerError> {
         let ledger = InMemoryExecutionLedger::new();
         let base = snapshot(1);
-        ledger.register(base.clone()).unwrap();
+        ledger.register(base.clone())?;
 
-        let stale = ledger.begin(&base).unwrap();
-        let fresh = ledger.begin(&base).unwrap();
-        let committed = ledger.commit(fresh, mutation(1)).unwrap();
+        let stale = ledger.begin(&base)?;
+        let fresh = ledger.begin(&base)?;
+        let committed = ledger.commit(fresh, mutation(1))?;
 
-        let error = ledger.commit(stale, mutation(1)).unwrap_err();
-        assert_eq!(error, LedgerError::StaleEpoch);
-        assert_eq!(ledger.snapshot(StateId(1)).unwrap(), committed);
+        assert_eq!(ledger.commit(stale, mutation(1)), Err(LedgerError::StaleEpoch));
+        assert_eq!(ledger.snapshot(StateId(1))?, committed);
+        Ok(())
     }
 
     #[test]
-    fn provenance_gap_fails_closed() {
+    fn provenance_gap_fails_closed() -> Result<(), LedgerError> {
         let ledger = InMemoryExecutionLedger::new();
         let base = snapshot(1);
-        ledger.register(base.clone()).unwrap();
-        let tx = ledger.begin(&base).unwrap();
+        ledger.register(base.clone())?;
+        let tx = ledger.begin(&base)?;
         let mut bad = mutation(1);
         bad.provenance_from = ProvenanceSeq(3);
 
         assert_eq!(ledger.commit(tx, bad), Err(LedgerError::ProvenanceGap));
-        assert_eq!(ledger.snapshot(StateId(1)).unwrap(), base);
+        assert_eq!(ledger.snapshot(StateId(1))?, base);
+        Ok(())
     }
 
     #[test]
-    fn independent_states_commit_without_shared_state_lock() {
+    fn independent_states_commit_without_shared_state_lock() -> Result<(), LedgerError> {
         let ledger = Arc::new(InMemoryExecutionLedger::new());
         let first = snapshot(1);
         let second = snapshot(2);
-        ledger.register(first.clone()).unwrap();
-        ledger.register(second.clone()).unwrap();
+        ledger.register(first.clone())?;
+        ledger.register(second.clone())?;
 
         let left = {
             let ledger = Arc::clone(&ledger);
-            thread::spawn(move || {
-                let tx = ledger.begin(&first).unwrap();
-                ledger.commit(tx, mutation(1)).unwrap()
+            thread::spawn(move || -> Result<LedgerSnapshot, LedgerError> {
+                let tx = ledger.begin(&first)?;
+                ledger.commit(tx, mutation(1))
             })
         };
         let right = {
             let ledger = Arc::clone(&ledger);
-            thread::spawn(move || {
-                let tx = ledger.begin(&second).unwrap();
-                ledger.commit(tx, mutation(2)).unwrap()
+            thread::spawn(move || -> Result<LedgerSnapshot, LedgerError> {
+                let tx = ledger.begin(&second)?;
+                ledger.commit(tx, mutation(2))
             })
         };
 
-        assert_eq!(left.join().unwrap().epoch, LedgerEpoch(1));
-        assert_eq!(right.join().unwrap().epoch, LedgerEpoch(1));
+        let left = left.join().map_err(|_| LedgerError::Conflict)??;
+        let right = right.join().map_err(|_| LedgerError::Conflict)??;
+        assert_eq!(left.epoch, LedgerEpoch(1));
+        assert_eq!(right.epoch, LedgerEpoch(1));
+        Ok(())
     }
 }
