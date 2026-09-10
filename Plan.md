@@ -22,3 +22,4 @@ If lazy chunking chokes the solver translation pipeline, you will need an altern
 ## Subsequent Locked Decisions
 
 - **Q29 — Semantic IR immutability:** Locked C. Two-stage: mutable/private while being constructed and validated, then sealed immutable and content-addressed before it can enter lowering, caching, provenance, replay, or cross-run knowledge.
+- **Q30 — Semantic identity:** Locked C. Dual identity: authoritative exact `ContentId` over canonical sealed serialization for replay/JIT/provenance/cache validity, plus a normalized `SemanticFingerprint` for equivalence candidates, cross-run retrieval, deduplication, and learned-fusion input. A fingerprint match alone never establishes semantic identity.
