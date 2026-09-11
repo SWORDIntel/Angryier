@@ -9,11 +9,27 @@ pub struct RegisterId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FeatureId(pub u32);
 
+/// Architecture-owned encoding-family identifier. Values are defined by the
+/// concrete architecture crate and are not decoder-generated enum values.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct EncodingClass(pub u16);
+
+/// Architecture-owned segment/address-space selector identifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SegmentId(pub u16);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AccessKind {
     Read,
     Write,
     ReadWrite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OperandVisibility {
+    Explicit,
+    Implicit,
+    Suppressed,
 }
 
 /// Describes how a write through an architectural register view affects the
@@ -67,12 +83,103 @@ impl RegisterView {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemoryBase {
+    Register(RegisterView),
+    InstructionPointer { width_bits: u16 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MemoryOperand {
+    pub memory_index: u8,
+    pub address_width_bits: u16,
+    pub segment: Option<SegmentId>,
+    pub base: Option<MemoryBase>,
+    pub index: Option<RegisterView>,
+    pub scale: u8,
+    pub displacement: i64,
+    pub displacement_width_bits: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ImmediateOperand {
+    pub value: u64,
+    pub signed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RelativeBranchOperand {
+    pub displacement: i64,
+    pub displacement_width_bits: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FarPointerOperand {
+    pub segment: u16,
+    pub offset: u64,
+    pub offset_width_bits: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OperandKind {
+    Register(RegisterView),
+    Memory(MemoryOperand),
+    AddressGeneration(MemoryOperand),
+    Immediate(ImmediateOperand),
+    RelativeBranch(RelativeBranchOperand),
+    FarPointer(FarPointerOperand),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Operand {
     pub index: u8,
     pub width_bits: u16,
     pub access: AccessKind,
-    pub register: Option<RegisterView>,
+    pub visibility: OperandVisibility,
+    pub kind: OperandKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RepetitionKind {
+    Rep,
+    Repe,
+    Repne,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PredicateMode {
+    Merge,
+    Zero,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PredicateMask {
+    pub register: RegisterView,
+    pub mode: PredicateMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RoundingMode {
+    NearestEven,
+    Down,
+    Up,
+    TowardZero,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Broadcast {
+    pub copies: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct InstructionModifiers {
+    pub encoding: EncodingClass,
+    pub lock: bool,
+    pub repetition: Option<RepetitionKind>,
+    pub predicate: Option<PredicateMask>,
+    pub rounding: Option<RoundingMode>,
+    pub suppress_all_exceptions: bool,
+    pub broadcast: Option<Broadcast>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +189,15 @@ pub struct DecodedInstruction {
     pub form_id: u32,
     pub features: Vec<FeatureId>,
     pub operands: Vec<Operand>,
+    pub modifiers: InstructionModifiers,
+}
+
+impl DecodedInstruction {
+    pub fn relative_target(&self, branch: RelativeBranchOperand) -> Address {
+        self.address
+            .wrapping_add(u64::from(self.length))
+            .wrapping_add_signed(branch.displacement)
+    }
 }
 
 pub trait Architecture: Debug + Send + Sync {
@@ -111,5 +227,23 @@ mod tests {
 
         assert_eq!(low.parent, high.parent);
         assert_ne!(low.bit_offset, high.bit_offset);
+    }
+
+    #[test]
+    fn relative_target_uses_end_of_instruction() {
+        let instruction = DecodedInstruction {
+            address: 0x1000,
+            length: 5,
+            form_id: 1,
+            features: Vec::new(),
+            operands: Vec::new(),
+            modifiers: InstructionModifiers::default(),
+        };
+        let branch = RelativeBranchOperand {
+            displacement: -5,
+            displacement_width_bits: 32,
+        };
+
+        assert_eq!(instruction.relative_target(branch), 0x1000);
     }
 }
