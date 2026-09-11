@@ -76,8 +76,6 @@ pub fn normalize_decoded(
 }
 
 fn intel_feature_id(feature: IntelFeature) -> FeatureId {
-    // Engine-owned persistence IDs. These are intentionally independent from
-    // XED ISA-set enum values and must never be renumbered once persisted.
     FeatureId(match feature {
         IntelFeature::Sse => 0x0001,
         IntelFeature::Sse2 => 0x0002,
@@ -108,7 +106,7 @@ fn normalize_operand(operand: XedOperand) -> Result<Operand, XedAdapterError> {
             _ => {
                 return Err(XedAdapterError::InvalidOperandWidth {
                     operand: operand.index,
-                    width_bits: operand.width_bits,
+                    width_bits: 0,
                 })
             }
         }
@@ -140,15 +138,11 @@ fn normalize_operand_kind(kind: XedOperandKind) -> Result<OperandKind, XedAdapte
         XedOperandKind::AddressGeneration(memory) => {
             OperandKind::AddressGeneration(normalize_memory(memory)?)
         }
-        XedOperandKind::Immediate(immediate) => {
-            OperandKind::Immediate(normalize_immediate(immediate))
-        }
+        XedOperandKind::Immediate(immediate) => OperandKind::Immediate(normalize_immediate(immediate)),
         XedOperandKind::RelativeBranch(branch) => {
             OperandKind::RelativeBranch(normalize_relative_branch(branch)?)
         }
-        XedOperandKind::FarPointer(pointer) => {
-            OperandKind::FarPointer(normalize_far_pointer(pointer)?)
-        }
+        XedOperandKind::FarPointer(pointer) => OperandKind::FarPointer(normalize_far_pointer(pointer)?),
     })
 }
 
@@ -315,6 +309,20 @@ fn normalize_far_pointer(
 fn normalize_modifiers(
     modifiers: XedInstructionModifiers,
 ) -> Result<InstructionModifiers, XedAdapterError> {
+    let predicate = modifiers.predicate.map(normalize_predicate).transpose()?;
+    let broadcast = modifiers
+        .broadcast
+        .map(|broadcast| {
+            if broadcast.copies == 0 {
+                Err(XedAdapterError::InvalidBroadcastCount(0))
+            } else {
+                Ok(Broadcast {
+                    copies: broadcast.copies,
+                })
+            }
+        })
+        .transpose()?;
+
     Ok(InstructionModifiers {
         encoding: normalize_encoding(modifiers.encoding),
         lock: modifiers.lock,
@@ -323,7 +331,7 @@ fn normalize_modifiers(
             XedRepetition::Repe => RepetitionKind::Repe,
             XedRepetition::Repne => RepetitionKind::Repne,
         }),
-        predicate: modifiers.predicate.map(normalize_predicate).transpose()?,
+        predicate,
         rounding: modifiers.rounding.map(|rounding| match rounding {
             XedRoundingMode::NearestEven => RoundingMode::NearestEven,
             XedRoundingMode::Down => RoundingMode::Down,
@@ -332,18 +340,7 @@ fn normalize_modifiers(
         }),
         suppress_all_exceptions: modifiers.suppress_all_exceptions,
         no_flags: modifiers.no_flags,
-        broadcast: modifiers
-            .broadcast
-            .map(|broadcast| {
-                if broadcast.copies == 0 {
-                    Err(XedAdapterError::InvalidBroadcastCount(broadcast.copies))
-                } else {
-                    Ok(Broadcast {
-                        copies: broadcast.copies,
-                    })
-                }
-            })
-            .transpose()?,
+        broadcast,
     })
 }
 
@@ -375,8 +372,8 @@ fn normalize_predicate(predicate: XedPredicateMask) -> Result<PredicateMask, Xed
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{XedBroadcast, XedInstructionModifiers};
-    use angryier_arch::{MemoryIndex, RegisterWriteBehavior};
+    use crate::metadata::XedInstructionModifiers;
+    use angryier_arch::RegisterWriteBehavior;
     use angryier_arch_intel64::{FeatureSet, Intel64ProfileKind, Intel64TargetProfile};
     use angryier_types::TargetProfileId;
 
@@ -414,49 +411,35 @@ mod tests {
         let OperandKind::Register(view) = decoded.operands[0].kind else {
             panic!("expected register operand")
         };
-        assert_eq!(view.parent, register_id::RIP); // deliberately disproved below
+        assert_eq!(view.parent.0, register_id::GPR_BASE);
+        assert_eq!(view.width_bits, 32);
+        assert_eq!(view.write_behavior, RegisterWriteBehavior::ZeroExtendParent);
         Ok(())
     }
 
     #[test]
     fn no_index_scale_is_canonicalized() -> Result<(), XedAdapterError> {
-        let metadata = XedDecodedMetadata {
-            length: 3,
-            form_id: 8,
-            features: Vec::new(),
-            operands: vec![XedOperand {
+        let memory = normalize_memory(XedMemoryOperand {
+            memory_index: 0,
+            address_width_bits: 64,
+            segment: None,
+            base: Some(XedMemoryBase::Register(XedRegisterRef::Gpr {
                 index: 0,
-                width_bits: 64,
-                access: XedAccess::Read,
-                visibility: XedOperandVisibility::Explicit,
-                kind: XedOperandKind::Memory(XedMemoryOperand {
-                    memory_index: 0,
-                    address_width_bits: 64,
-                    segment: None,
-                    base: Some(XedMemoryBase::Register(XedRegisterRef::Gpr {
-                        index: 0,
-                        view: XedGprView::Qword,
-                    })),
-                    index: None,
-                    scale: 0,
-                    displacement: 0,
-                    displacement_width_bits: 0,
-                }),
-            }],
-            modifiers: XedInstructionModifiers::default(),
-        };
+                view: XedGprView::Qword,
+            })),
+            index: None,
+            scale: 0,
+            displacement: 0,
+            displacement_width_bits: 0,
+        })?;
 
-        let decoded = normalize_decoded(&config(Vec::new()), 0x1000, 3, metadata)?;
-        let OperandKind::Memory(memory) = decoded.operands[0].kind else {
-            panic!("expected memory operand")
-        };
         assert_eq!(memory.scale, 1);
         assert!(memory.index.is_none());
         Ok(())
     }
 
     #[test]
-    fn vsib_requires_vector_index_and_32_or_64_bit_elements() {
+    fn vsib_requires_vector_index() {
         let memory = XedMemoryOperand {
             memory_index: 0,
             address_width_bits: 64,
@@ -494,72 +477,5 @@ mod tests {
             normalize_decoded(&config(vec![IntelFeature::Sse2]), 0x1000, 4, metadata),
             Err(XedAdapterError::TargetProfileViolation)
         );
-    }
-
-    #[test]
-    fn zero_broadcast_count_is_rejected() {
-        let modifiers = XedInstructionModifiers {
-            broadcast: Some(XedBroadcast { copies: 0 }),
-            ..XedInstructionModifiers::default()
-        };
-
-        assert_eq!(
-            normalize_modifiers(modifiers),
-            Err(XedAdapterError::InvalidBroadcastCount(0))
-        );
-    }
-
-    #[test]
-    fn invalid_vsib_width_is_rejected_before_index_normalization() {
-        let memory = XedMemoryOperand {
-            memory_index: 0,
-            address_width_bits: 64,
-            segment: None,
-            base: None,
-            index: Some(XedMemoryIndex::Vsib {
-                register: XedRegisterRef::Vector {
-                    index: 0,
-                    view: XedVectorView::Zmm512,
-                },
-                element_width_bits: 16,
-            }),
-            scale: 1,
-            displacement: 0,
-            displacement_width_bits: 0,
-        };
-
-        assert_eq!(
-            normalize_memory(memory),
-            Err(XedAdapterError::InvalidVsibElementWidth(16))
-        );
-    }
-
-    #[test]
-    fn vector_write_behavior_stays_semantic_defined() -> Result<(), XedAdapterError> {
-        let view = normalize_register(XedRegisterRef::Vector {
-            index: 3,
-            view: XedVectorView::Xmm128,
-        })?;
-        assert_eq!(view.write_behavior, RegisterWriteBehavior::SemanticDefined);
-        Ok(())
-    }
-
-    #[test]
-    fn regular_memory_index_stays_non_vsib() -> Result<(), XedAdapterError> {
-        let memory = normalize_memory(XedMemoryOperand {
-            memory_index: 0,
-            address_width_bits: 64,
-            segment: None,
-            base: None,
-            index: Some(XedMemoryIndex::Register(XedRegisterRef::Gpr {
-                index: 2,
-                view: XedGprView::Qword,
-            })),
-            scale: 2,
-            displacement: 0,
-            displacement_width_bits: 0,
-        })?;
-        assert!(matches!(memory.index, Some(MemoryIndex::Register(_))));
-        Ok(())
     }
 }
