@@ -90,12 +90,21 @@ pub enum MemoryBase {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemoryIndex {
+    Register(RegisterView),
+    Vsib {
+        register: RegisterView,
+        element_width_bits: u16,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MemoryOperand {
     pub memory_index: u8,
     pub address_width_bits: u16,
     pub segment: Option<SegmentId>,
     pub base: Option<MemoryBase>,
-    pub index: Option<RegisterView>,
+    pub index: Option<MemoryIndex>,
     pub scale: u8,
     pub displacement: i64,
     pub displacement_width_bits: u8,
@@ -179,6 +188,8 @@ pub struct InstructionModifiers {
     pub predicate: Option<PredicateMask>,
     pub rounding: Option<RoundingMode>,
     pub suppress_all_exceptions: bool,
+    /// APX NF/no-flags semantic modifier.
+    pub no_flags: bool,
     pub broadcast: Option<Broadcast>,
 }
 
