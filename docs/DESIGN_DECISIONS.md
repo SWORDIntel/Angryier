@@ -276,6 +276,14 @@ Transformation contracts must state which properties are preserved, including va
 
 Execution-IR/JIT optimizations remain tied to the exact sealed `ContentId` from which they were derived.
 
+## D-028 — Quantum-inspired scheduling is optional and advisory
+
+**Status:** Locked
+
+Angryier may use a bounded QUBO-style or related quantum-inspired optimizer to select diverse runnable states and assign them to workers. A deterministic CPU implementation is the reference and mandatory fallback. CUDA is the preferred optional NVIDIA acceleration path; OpenCL is an experimental cross-vendor path and the first fallback for NVIDIA cards too old for the supported CUDA backend.
+
+Accelerators operate only on compact scheduling features and candidates. They do not mutate execution state, execute target instructions, classify SAT/UNSAT, establish semantic truth, or authorize exact reuse. Capability negotiation follows CUDA -> OpenCL -> deterministic CPU and records why each backend was accepted or rejected. Small batches and every accelerator failure class fall back without losing work. Accelerated decisions are replay-visible, and deployment defaults require measured net benefit after data-transfer, launch, synchronization, and fallback overhead.
+
 ---
 
 # Open Decisions

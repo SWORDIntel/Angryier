@@ -6,14 +6,24 @@
 //! identity and version types come from `angryier-types`; execution-ledger and
 //! replay publication contracts live in their dedicated crates.
 
+mod block;
+
+pub use block::{
+    SealedRichSemanticBlock, SemanticBlockBuilder, SemanticEffect, SemanticEffectDefinition, SemanticValue,
+    SemanticValueDefinition,
+};
+
+use angryier_arch::{AccessKind, DecodedInstruction};
+pub use angryier_arch::{
+    FarPointerOperand, FeatureId, ImmediateOperand, MemoryOperand, OperandKind, RegisterId, RegisterView,
+    RegisterWriteBehavior, RelativeBranchOperand,
+};
 use angryier_types::{
     Address, BlockId, CodeVersionGuard, FidelityProfile, ImageId, SemanticRuleId, SemanticVersion, TargetProfileId,
 };
 use core::fmt::Debug;
 
 pub type FormId = u32;
-pub type FeatureId = u32;
-pub type RegisterId = u16;
 pub type ValueId = u32;
 pub type EffectId = u32;
 
@@ -165,11 +175,23 @@ pub enum SideEffect {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OperandClass {
+    Register,
+    Memory,
+    AddressGeneration,
+    Immediate,
+    RelativeBranch,
+    FarPointer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct OperandDescriptor {
     pub index: u8,
-    pub ty: SemanticType,
+    pub width_bits: u16,
     pub read: bool,
     pub written: bool,
+    pub class: OperandClass,
+    pub kind: OperandKind,
 }
 
 /// Decoder-facing view. XED-specific objects must not cross this boundary.
@@ -178,7 +200,51 @@ pub trait DecodedInstructionView: Debug + Send + Sync {
     fn form_id(&self) -> FormId;
     fn length(&self) -> u8;
     fn feature_ids(&self) -> &[FeatureId];
-    fn operands(&self) -> &[OperandDescriptor];
+    fn operand_count(&self) -> usize;
+    fn operand(&self, index: u8) -> Option<OperandDescriptor>;
+}
+
+impl DecodedInstructionView for DecodedInstruction {
+    fn address(&self) -> Address {
+        self.address
+    }
+
+    fn form_id(&self) -> FormId {
+        self.form_id
+    }
+
+    fn length(&self) -> u8 {
+        self.length
+    }
+
+    fn feature_ids(&self) -> &[FeatureId] {
+        &self.features
+    }
+
+    fn operand_count(&self) -> usize {
+        self.operands.len()
+    }
+
+    fn operand(&self, index: u8) -> Option<OperandDescriptor> {
+        self.operands
+            .iter()
+            .find(|operand| operand.index == index)
+            .map(|operand| OperandDescriptor {
+                index: operand.index,
+                width_bits: operand.width_bits,
+                read: matches!(operand.access, AccessKind::Read | AccessKind::ReadWrite),
+                written: matches!(operand.access, AccessKind::Write | AccessKind::ReadWrite),
+                class: match operand.kind {
+                    OperandKind::Register(_) => OperandClass::Register,
+                    OperandKind::Memory(_) => OperandClass::Memory,
+                    OperandKind::AddressGeneration(_) => OperandClass::AddressGeneration,
+                    OperandKind::Immediate(_) => OperandClass::Immediate,
+                    OperandKind::RelativeBranch(_) => OperandClass::RelativeBranch,
+                    OperandKind::FarPointer(_) => OperandClass::FarPointer,
+                },
+                kind: operand.kind,
+            })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -210,7 +276,7 @@ pub enum SemanticError {
 pub trait SemanticBuilder {
     fn constant(&mut self, ty: SemanticType, bytes_le: &[u8]) -> Result<ValueId, SemanticError>;
     fn read_register(&mut self, reg: RegisterId, ty: SemanticType) -> Result<ValueId, SemanticError>;
-    fn read_operand(&mut self, operand_index: u8) -> Result<ValueId, SemanticError>;
+    fn read_operand(&mut self, operand_index: u8, ty: SemanticType) -> Result<ValueId, SemanticError>;
     fn emit(&mut self, op: SemanticOp, ty: SemanticType, inputs: &[ValueId]) -> Result<ValueId, SemanticError>;
     fn write_register(&mut self, reg: RegisterId, value: ValueId) -> Result<EffectId, SemanticError>;
     fn write_operand(&mut self, operand_index: u8, value: ValueId) -> Result<EffectId, SemanticError>;
@@ -290,6 +356,48 @@ pub trait ExecutionIrSink {
 pub trait SemanticLowerer: Send + Sync {
     type RichBlock;
     type Output;
+    type Error;
 
-    fn lower(&self, rich: &Self::RichBlock, key: &BlockValidityKey) -> Result<Self::Output, SemanticError>;
+    fn lower(&self, rich: &Self::RichBlock, key: &BlockValidityKey) -> Result<Self::Output, Self::Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use angryier_arch::{InstructionModifiers, Operand, OperandVisibility, RegisterView};
+
+    #[test]
+    fn normalized_decode_is_directly_visible_to_semantics() {
+        let decoded = DecodedInstruction {
+            address: 0x401000,
+            length: 3,
+            form_id: 42,
+            features: vec![FeatureId(7)],
+            operands: vec![Operand {
+                index: 2,
+                width_bits: 64,
+                access: AccessKind::ReadWrite,
+                visibility: OperandVisibility::Explicit,
+                kind: OperandKind::Register(RegisterView::full(RegisterId(3), 64)),
+            }],
+            modifiers: InstructionModifiers::default(),
+        };
+
+        assert_eq!(DecodedInstructionView::address(&decoded), 0x401000);
+        assert_eq!(DecodedInstructionView::form_id(&decoded), 42);
+        assert_eq!(DecodedInstructionView::feature_ids(&decoded), &[FeatureId(7)]);
+        assert_eq!(DecodedInstructionView::operand_count(&decoded), 1);
+        assert_eq!(
+            DecodedInstructionView::operand(&decoded, 2),
+            Some(OperandDescriptor {
+                index: 2,
+                width_bits: 64,
+                read: true,
+                written: true,
+                class: OperandClass::Register,
+                kind: OperandKind::Register(RegisterView::full(RegisterId(3), 64)),
+            })
+        );
+        assert_eq!(DecodedInstructionView::operand(&decoded, 0), None);
+    }
 }

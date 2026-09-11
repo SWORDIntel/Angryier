@@ -6,6 +6,8 @@ license.workspace = true
 description = "Compact execution IR contracts for Angryier"
 
 [dependencies]
+angryier-semantic-contracts = { path = "../angryier-semantic-contracts" }
+angryier-semantics = { path = "../angryier-semantics" }
 angryier-types = { path = "../angryier-types" }
 
 [lints]

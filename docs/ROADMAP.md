@@ -87,6 +87,20 @@ Performance counters are part of the execution engine. At minimum measure:
 
 These metrics exist to improve scheduling and optimization, not merely for reporting.
 
+## Optional quantum-inspired/GPU batch planner
+
+Reserve a backend-neutral `QuantumInspiredScheduler`/batch-optimizer seam, but do not put it on the critical path before the deterministic CPU scheduler is correct and measured. It may solve bounded QUBO-style state-selection and worker-assignment problems using coverage, diversity, target distance, solver cost, affinity, working-set, NUMA, uncertainty, and historical features.
+
+Required backend order:
+
+```text
+compatible CUDA device/runtime -> CUDA
+else compatible OpenCL device  -> OpenCL
+else                            -> deterministic CPU
+```
+
+CUDA and OpenCL availability is detected at runtime against versioned capability manifests. Older NVIDIA cards that do not meet the CUDA backend's compute-capability, toolchain, kernel-target, or memory requirements must be offered to OpenCL before CPU fallback. Small batches, unsupported devices, compilation failures, timeouts, out-of-memory conditions, or planner validation failures advance through the same fallback ladder. GPU kernels consume compact scheduling features; they do not mutate execution states, interpret target instructions, decide SAT/UNSAT, or validate exact reuse.
+
 ---
 
 # Phase 0 — Repository, Contracts, and Measurement Baseline
@@ -251,6 +265,7 @@ This is a core competitive milestone, not optional scalability polish.
 - memory-pressure-aware stealing;
 - deterministic single-thread baseline;
 - scheduler performance instrumentation.
+- backend-neutral bounded batch-planner trait plus deterministic CPU reference implementation;
 
 Steal decisions should approximate:
 
@@ -272,6 +287,7 @@ steal benefit =
 - local steals outperform cross-NUMA steals where expected;
 - solver-context affinity measurably reduces rebuild work on appropriate workloads;
 - scheduler instrumentation identifies contention and poor migration decisions.
+- the CPU batch planner is deterministic and preserves all runnable work on cancellation or failure.
 
 ---
 
@@ -458,6 +474,12 @@ Use KEYSTONE as the optional ingestion/indexing/retrieval accelerator for:
 - multifactor state-merge cost model;
 - learned ranking as an optional advisory layer;
 - scheduler-performance history feeding ranking/routing decisions.
+- optional QUBO-style `QuantumInspiredScheduler` for batch selection and worker assignment;
+- optional CUDA implementation after runtime capability discovery;
+- optional OpenCL implementation as an experimental cross-vendor backend;
+- strict planner budgets, minimum batch thresholds, result validation, and deterministic CPU fallback;
+- runtime capability manifests and CUDA -> OpenCL -> CPU fallback, including older NVIDIA-card coverage;
+- replay records for accelerated candidate batches, objective/schema versions, seeds, device/backend identity, decisions, and fallback reasons.
 
 ## Exit criteria
 
@@ -466,6 +488,9 @@ Use KEYSTONE as the optional ingestion/indexing/retrieval accelerator for:
 - deterministic policies remain available;
 - target-oriented corpora show reduced time-to-interest compared with baseline DFS/BFS where applicable;
 - merge decisions reduce state count without causing solver-expression blowups that erase the gain.
+- accelerated planning improves net time-to-interest or throughput after transfer/launch overhead on at least one named workload class;
+- disabling or losing the accelerator preserves correctness, runnable work, and deterministic CPU behavior;
+- CUDA/OpenCL results never authorize truth claims or exact cache reuse.
 
 ---
 
@@ -618,6 +643,7 @@ The following are **recommended but not mandatory for a minimal Production 1.0 e
 - GUI;
 - additional ISAs;
 - AI-assisted search.
+- CUDA/OpenCL quantum-inspired batch scheduling.
 
 A recommended full-feature profile should enable QIHSE + KEYSTONE because cumulative exact lookup and similarity retrieval are expected to become increasingly valuable as the analysis corpus grows.
 
@@ -656,3 +682,7 @@ JIT proceeds only if profiling shows concrete execution remains a material wall-
 ## Gate H — before another ISA
 
 Do not allow AArch64/RISC-V work to substitute for proving the Intel 64 performance, correctness and reuse thesis.
+
+## Gate I — before accelerated scheduling becomes a deployment default
+
+The deterministic CPU scheduler must already satisfy Phase 5. CUDA/OpenCL planning must then demonstrate a net benefit after feature construction, transfer, launch, synchronization, and fallback costs; preserve all runnable work under injected device failures; correctly route CUDA-ineligible older cards through OpenCL before CPU; and remain reproducible through recorded decisions. Otherwise the accelerator stays disabled by default.

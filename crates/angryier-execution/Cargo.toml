@@ -8,6 +8,8 @@ description = "Execution plane contracts"
 [dependencies]
 angryier-types = { path = "../angryier-types" }
 angryier-ir = { path = "../angryier-ir" }
+angryier-memory = { path = "../angryier-memory" }
+angryier-state = { path = "../angryier-state" }
 
 [lints]
 workspace = true

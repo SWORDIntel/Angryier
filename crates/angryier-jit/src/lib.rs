@@ -66,7 +66,7 @@ mod tests {
     use super::*;
     use angryier_ir::IrBlockKey;
     use angryier_memory::{ByteValue, LayeredMemory, MemoryRegion, PersistentMemory};
-    use angryier_types::{BlockId, ContentId, ObjectId, TargetProfileId};
+    use angryier_types::{BlockId, ContentId, ImageId, ObjectId, TargetProfileId};
 
     fn executable_memory() -> Result<PersistentMemory, angryier_memory::MemoryError> {
         PersistentMemory::new(vec![MemoryRegion {
@@ -81,6 +81,7 @@ mod tests {
 
     fn compiled_key(address: u64, code_versions: Vec<angryier_types::CodeVersionGuard>) -> CompiledBlockKey {
         IrBlockKey {
+            image: ImageId(1),
             block: BlockId(address),
             address,
             semantic_content: ContentId([0x5a; 32]),

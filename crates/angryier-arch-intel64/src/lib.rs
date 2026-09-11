@@ -197,10 +197,7 @@ pub const fn vector_parent(index: u8) -> Result<RegisterId, Intel64RegisterError
     }
 }
 
-pub const fn vector_view(
-    index: u8,
-    kind: VectorViewKind,
-) -> Result<RegisterView, Intel64RegisterError> {
+pub const fn vector_view(index: u8, kind: VectorViewKind) -> Result<RegisterView, Intel64RegisterError> {
     let parent = match vector_parent(index) {
         Ok(parent) => parent,
         Err(error) => return Err(error),
@@ -209,18 +206,8 @@ pub const fn vector_view(
     // VEX/EVEX upper-lane clearing is instruction semantics, not an intrinsic
     // property of the architectural XMM/YMM register view.
     Ok(match kind {
-        VectorViewKind::Xmm128 => RegisterView::partial(
-            parent,
-            0,
-            128,
-            RegisterWriteBehavior::SemanticDefined,
-        ),
-        VectorViewKind::Ymm256 => RegisterView::partial(
-            parent,
-            0,
-            256,
-            RegisterWriteBehavior::SemanticDefined,
-        ),
+        VectorViewKind::Xmm128 => RegisterView::partial(parent, 0, 128, RegisterWriteBehavior::SemanticDefined),
+        VectorViewKind::Ymm256 => RegisterView::partial(parent, 0, 256, RegisterWriteBehavior::SemanticDefined),
         VectorViewKind::Zmm512 => RegisterView::full(parent, 512),
     })
 }
@@ -240,10 +227,7 @@ pub const fn opmask_view(index: u8) -> Result<RegisterView, Intel64RegisterError
 
 pub const fn x87_view(index: u8) -> Result<RegisterView, Intel64RegisterError> {
     if index < X87_COUNT {
-        Ok(RegisterView::full(
-            RegisterId(register_id::X87_BASE + index as u32),
-            80,
-        ))
+        Ok(RegisterView::full(RegisterId(register_id::X87_BASE + index as u32), 80))
     } else {
         Err(Intel64RegisterError::InvalidX87Index(index))
     }
@@ -302,10 +286,7 @@ impl Intel64RegisterFile {
             registers.push((RegisterId(register_id::X87_BASE + u32::from(index)), 80));
         }
         for index in 0..TILE_COUNT {
-            registers.push((
-                RegisterId(register_id::TILE_BASE + u32::from(index)),
-                TMM_MAX_BITS,
-            ));
+            registers.push((RegisterId(register_id::TILE_BASE + u32::from(index)), TMM_MAX_BITS));
         }
 
         registers.push((register_id::TILECFG, 512));
@@ -329,17 +310,11 @@ impl Intel64RegisterFile {
 pub const fn canonical_parent_width(register: RegisterId) -> Option<u16> {
     let raw = register.0;
 
-    if raw < register_id::GPR_BASE + GPR_COUNT as u32 {
+    if raw < register_id::GPR_BASE + GPR_COUNT as u32 || raw == register_id::RIP.0 || raw == register_id::RFLAGS.0 {
         Some(64)
-    } else if raw == register_id::RIP.0 || raw == register_id::RFLAGS.0 {
-        Some(64)
-    } else if raw >= register_id::ZMM_BASE
-        && raw < register_id::ZMM_BASE + VECTOR_COUNT as u32
-    {
+    } else if raw >= register_id::ZMM_BASE && raw < register_id::ZMM_BASE + VECTOR_COUNT as u32 {
         Some(512)
-    } else if raw >= register_id::OPMASK_BASE
-        && raw < register_id::OPMASK_BASE + OPMASK_COUNT as u32
-    {
+    } else if raw >= register_id::OPMASK_BASE && raw < register_id::OPMASK_BASE + OPMASK_COUNT as u32 {
         Some(64)
     } else if raw >= register_id::X87_BASE && raw < register_id::X87_BASE + X87_COUNT as u32 {
         Some(80)
@@ -450,10 +425,7 @@ mod tests {
         assert_eq!(architecture.register_width(gpr_parent(31)?), Some(64));
         assert_eq!(architecture.register_width(vector_parent(31)?), Some(512));
         assert_eq!(architecture.register_width(opmask_view(7)?.parent), Some(64));
-        assert_eq!(
-            architecture.register_width(tile_view(7)?.parent),
-            Some(TMM_MAX_BITS)
-        );
+        assert_eq!(architecture.register_width(tile_view(7)?.parent), Some(TMM_MAX_BITS));
         Ok(())
     }
 
@@ -461,10 +433,7 @@ mod tests {
     fn canonical_register_file_has_exactly_unique_parents() {
         let registers = Intel64RegisterFile::canonical();
 
-        assert_eq!(
-            registers.architectural_registers.len(),
-            INTEL64_PARENT_REGISTER_COUNT
-        );
+        assert_eq!(registers.architectural_registers.len(), INTEL64_PARENT_REGISTER_COUNT);
         assert!(registers.has_unique_parent_ids());
     }
 

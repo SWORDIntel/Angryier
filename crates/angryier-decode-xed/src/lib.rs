@@ -7,9 +7,9 @@
 //! output into value-only metadata, after which this crate validates and
 //! normalizes it into Angryier's architecture-neutral decode representation.
 
-mod normalize;
 pub mod error;
 pub mod metadata;
+mod normalize;
 
 pub use error::XedAdapterError;
 pub use metadata::*;
@@ -55,9 +55,7 @@ impl<B: XedDecodeBackend> Decoder for BoundXedDecoder<B> {
     type Error = XedAdapterError;
 
     fn decode(&self, address: Address, bytes: &[u8]) -> Result<DecodedInstruction, Self::Error> {
-        let metadata = self
-            .backend
-            .decode_metadata(&self.adapter.config, address, bytes)?;
+        let metadata = self.backend.decode_metadata(&self.adapter.config, address, bytes)?;
         normalize_decoded(&self.adapter.config, address, bytes.len(), metadata)
     }
 }

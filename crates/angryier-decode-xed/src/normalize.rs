@@ -1,23 +1,21 @@
 use crate::{
+    XedDecodeConfig,
     error::XedAdapterError,
     metadata::{
-        XedAccess, XedDecodedMetadata, XedEncoding, XedFarPointerOperand, XedGprView,
-        XedImmediateOperand, XedInstructionModifiers, XedMachineMode, XedMemoryBase,
-        XedMemoryIndex, XedMemoryOperand, XedOperand, XedOperandKind, XedOperandVisibility,
-        XedPredicateMask, XedRegisterRef, XedRelativeBranchOperand, XedRepetition,
-        XedRoundingMode, XedSegment, XedVectorView,
+        XedAccess, XedDecodedMetadata, XedEncoding, XedFarPointerOperand, XedGprView, XedImmediateOperand,
+        XedInstructionModifiers, XedMachineMode, XedMemoryBase, XedMemoryIndex, XedMemoryOperand, XedOperand,
+        XedOperandKind, XedOperandVisibility, XedPredicateMask, XedRegisterRef, XedRelativeBranchOperand,
+        XedRepetition, XedRoundingMode, XedSegment, XedVectorView,
     },
-    XedDecodeConfig,
 };
 use angryier_arch::{
-    AccessKind, Broadcast, DecodedInstruction, EncodingClass, FarPointerOperand, FeatureId,
-    ImmediateOperand, InstructionModifiers, MemoryBase, MemoryIndex, MemoryOperand, Operand,
-    OperandKind, OperandVisibility, PredicateMask, PredicateMode, RegisterView,
-    RelativeBranchOperand, RepetitionKind, RoundingMode, SegmentId,
+    AccessKind, Broadcast, DecodedInstruction, EncodingClass, FarPointerOperand, FeatureId, ImmediateOperand,
+    InstructionModifiers, MemoryBase, MemoryIndex, MemoryOperand, Operand, OperandKind, OperandVisibility,
+    PredicateMask, PredicateMode, RegisterView, RelativeBranchOperand, RepetitionKind, RoundingMode, SegmentId,
 };
 use angryier_arch_intel64::{
-    encoding_class, gpr_view, mmx_view, opmask_view, register_id, segment_id, tile_view,
-    vector_view, x87_view, GprViewKind, IntelFeature, VectorViewKind,
+    GprViewKind, IntelFeature, VectorViewKind, encoding_class, gpr_view, mmx_view, opmask_view, register_id,
+    segment_id, tile_view, vector_view, x87_view,
 };
 use angryier_types::Address;
 use std::collections::BTreeSet;
@@ -35,10 +33,7 @@ pub fn normalize_decoded(
     if available_bytes == 0 {
         return Err(XedAdapterError::EmptyInput);
     }
-    if metadata.length == 0
-        || metadata.length > 15
-        || usize::from(metadata.length) > available_bytes
-    {
+    if metadata.length == 0 || metadata.length > 15 || usize::from(metadata.length) > available_bytes {
         return Err(XedAdapterError::InvalidLength {
             reported: metadata.length,
             available: available_bytes,
@@ -107,7 +102,7 @@ fn normalize_operand(operand: XedOperand) -> Result<Operand, XedAdapterError> {
                 return Err(XedAdapterError::InvalidOperandWidth {
                     operand: operand.index,
                     width_bits: 0,
-                })
+                });
             }
         }
     } else {
@@ -135,13 +130,9 @@ fn normalize_operand_kind(kind: XedOperandKind) -> Result<OperandKind, XedAdapte
     Ok(match kind {
         XedOperandKind::Register(register) => OperandKind::Register(normalize_register(register)?),
         XedOperandKind::Memory(memory) => OperandKind::Memory(normalize_memory(memory)?),
-        XedOperandKind::AddressGeneration(memory) => {
-            OperandKind::AddressGeneration(normalize_memory(memory)?)
-        }
+        XedOperandKind::AddressGeneration(memory) => OperandKind::AddressGeneration(normalize_memory(memory)?),
         XedOperandKind::Immediate(immediate) => OperandKind::Immediate(normalize_immediate(immediate)),
-        XedOperandKind::RelativeBranch(branch) => {
-            OperandKind::RelativeBranch(normalize_relative_branch(branch)?)
-        }
+        XedOperandKind::RelativeBranch(branch) => OperandKind::RelativeBranch(normalize_relative_branch(branch)?),
         XedOperandKind::FarPointer(pointer) => OperandKind::FarPointer(normalize_far_pointer(pointer)?),
     })
 }
@@ -198,9 +189,7 @@ fn normalize_vsib_register(register: XedRegisterRef) -> Result<RegisterView, Xed
 
 fn normalize_memory(memory: XedMemoryOperand) -> Result<MemoryOperand, XedAdapterError> {
     if !matches!(memory.address_width_bits, 32 | 64) {
-        return Err(XedAdapterError::InvalidMemoryAddressWidth(
-            memory.address_width_bits,
-        ));
+        return Err(XedAdapterError::InvalidMemoryAddressWidth(memory.address_width_bits));
     }
     if !matches!(memory.displacement_width_bits, 0 | 8 | 16 | 32 | 64) {
         return Err(XedAdapterError::InvalidDisplacementWidth(
@@ -210,9 +199,7 @@ fn normalize_memory(memory: XedMemoryOperand) -> Result<MemoryOperand, XedAdapte
 
     let base = match memory.base {
         None => None,
-        Some(XedMemoryBase::Register(register)) => {
-            Some(MemoryBase::Register(normalize_address_register(register)?))
-        }
+        Some(XedMemoryBase::Register(register)) => Some(MemoryBase::Register(normalize_address_register(register)?)),
         Some(XedMemoryBase::InstructionPointer { width_bits }) => {
             if memory.address_width_bits != 64 || width_bits != 64 {
                 return Err(XedAdapterError::InvalidMemoryAddressWidth(width_bits));
@@ -223,9 +210,7 @@ fn normalize_memory(memory: XedMemoryOperand) -> Result<MemoryOperand, XedAdapte
 
     let index = match memory.index {
         None => None,
-        Some(XedMemoryIndex::Register(register)) => {
-            Some(MemoryIndex::Register(normalize_address_register(register)?))
-        }
+        Some(XedMemoryIndex::Register(register)) => Some(MemoryIndex::Register(normalize_address_register(register)?)),
         Some(XedMemoryIndex::Vsib {
             register,
             element_width_bits,
@@ -277,13 +262,9 @@ fn normalize_immediate(immediate: XedImmediateOperand) -> ImmediateOperand {
     }
 }
 
-fn normalize_relative_branch(
-    branch: XedRelativeBranchOperand,
-) -> Result<RelativeBranchOperand, XedAdapterError> {
+fn normalize_relative_branch(branch: XedRelativeBranchOperand) -> Result<RelativeBranchOperand, XedAdapterError> {
     if !matches!(branch.displacement_width_bits, 8 | 16 | 32) {
-        return Err(XedAdapterError::InvalidBranchWidth(
-            branch.displacement_width_bits,
-        ));
+        return Err(XedAdapterError::InvalidBranchWidth(branch.displacement_width_bits));
     }
     Ok(RelativeBranchOperand {
         displacement: branch.displacement,
@@ -291,13 +272,9 @@ fn normalize_relative_branch(
     })
 }
 
-fn normalize_far_pointer(
-    pointer: XedFarPointerOperand,
-) -> Result<FarPointerOperand, XedAdapterError> {
+fn normalize_far_pointer(pointer: XedFarPointerOperand) -> Result<FarPointerOperand, XedAdapterError> {
     if !matches!(pointer.offset_width_bits, 16 | 32 | 64) {
-        return Err(XedAdapterError::InvalidFarPointerWidth(
-            pointer.offset_width_bits,
-        ));
+        return Err(XedAdapterError::InvalidFarPointerWidth(pointer.offset_width_bits));
     }
     Ok(FarPointerOperand {
         segment: pointer.segment,
@@ -306,9 +283,7 @@ fn normalize_far_pointer(
     })
 }
 
-fn normalize_modifiers(
-    modifiers: XedInstructionModifiers,
-) -> Result<InstructionModifiers, XedAdapterError> {
+fn normalize_modifiers(modifiers: XedInstructionModifiers) -> Result<InstructionModifiers, XedAdapterError> {
     let predicate = modifiers.predicate.map(normalize_predicate).transpose()?;
     let broadcast = modifiers
         .broadcast
@@ -409,7 +384,7 @@ mod tests {
 
         let decoded = normalize_decoded(&config(Vec::new()), 0x1000, 2, metadata)?;
         let OperandKind::Register(view) = decoded.operands[0].kind else {
-            panic!("expected register operand")
+            return Err(XedAdapterError::InvalidRegisterMetadata);
         };
         assert_eq!(view.parent.0, register_id::GPR_BASE);
         assert_eq!(view.width_bits, 32);
@@ -457,10 +432,7 @@ mod tests {
             displacement_width_bits: 0,
         };
 
-        assert_eq!(
-            normalize_memory(memory),
-            Err(XedAdapterError::InvalidRegisterMetadata)
-        );
+        assert_eq!(normalize_memory(memory), Err(XedAdapterError::InvalidRegisterMetadata));
     }
 
     #[test]

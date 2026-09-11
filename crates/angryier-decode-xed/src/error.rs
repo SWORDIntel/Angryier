@@ -6,15 +6,9 @@ pub enum XedAdapterError {
     DecodeFailed,
     UnsupportedMode,
     EmptyInput,
-    InvalidLength {
-        reported: u8,
-        available: usize,
-    },
+    InvalidLength { reported: u8, available: usize },
     DuplicateOperandIndex(u8),
-    InvalidOperandWidth {
-        operand: u8,
-        width_bits: u16,
-    },
+    InvalidOperandWidth { operand: u8, width_bits: u16 },
     InvalidRegisterMetadata,
     InvalidMemoryAddressWidth(u16),
     InvalidMemoryScale(u8),
@@ -35,35 +29,25 @@ impl fmt::Display for XedAdapterError {
             Self::DecodeFailed => formatter.write_str("Intel XED decode failed"),
             Self::UnsupportedMode => formatter.write_str("unsupported XED machine mode"),
             Self::EmptyInput => formatter.write_str("cannot decode an empty byte slice"),
-            Self::InvalidLength {
-                reported,
-                available,
-            } => write!(
+            Self::InvalidLength { reported, available } => write!(
                 formatter,
                 "invalid decoded length {reported}; available input bytes: {available}"
             ),
             Self::DuplicateOperandIndex(index) => {
                 write!(formatter, "duplicate decoded operand index: {index}")
             }
-            Self::InvalidOperandWidth {
-                operand,
-                width_bits,
-            } => write!(
+            Self::InvalidOperandWidth { operand, width_bits } => write!(
                 formatter,
                 "invalid width {width_bits} bits for decoded operand {operand}"
             ),
-            Self::InvalidRegisterMetadata => {
-                formatter.write_str("invalid Intel register metadata")
-            }
+            Self::InvalidRegisterMetadata => formatter.write_str("invalid Intel register metadata"),
             Self::InvalidMemoryAddressWidth(width) => {
                 write!(formatter, "invalid Intel memory address width: {width} bits")
             }
             Self::InvalidMemoryScale(scale) => {
                 write!(formatter, "invalid Intel memory index scale: {scale}")
             }
-            Self::ScaleWithoutIndex => {
-                formatter.write_str("memory scale is present without an index register")
-            }
+            Self::ScaleWithoutIndex => formatter.write_str("memory scale is present without an index register"),
             Self::InvalidVsibElementWidth(width) => {
                 write!(formatter, "invalid VSIB element width: {width} bits")
             }
@@ -76,15 +60,11 @@ impl fmt::Display for XedAdapterError {
             Self::InvalidFarPointerWidth(width) => {
                 write!(formatter, "invalid far-pointer offset width: {width} bits")
             }
-            Self::InvalidPredicateMetadata => {
-                formatter.write_str("invalid EVEX predicate-mask metadata")
-            }
+            Self::InvalidPredicateMetadata => formatter.write_str("invalid EVEX predicate-mask metadata"),
             Self::InvalidBroadcastCount(copies) => {
                 write!(formatter, "invalid broadcast copy count: {copies}")
             }
-            Self::TargetProfileViolation => {
-                formatter.write_str("decoded instruction violates target profile")
-            }
+            Self::TargetProfileViolation => formatter.write_str("decoded instruction violates target profile"),
         }
     }
 }

@@ -59,7 +59,7 @@ These rules apply across the entire repository.
 10. **Workers do not block on QIHSE/KEYSTONE.** Persistence is asynchronous/batched with priority-aware queues and local WAL/spill.
 11. **Correctness-critical Tier-1 provenance is not silently dropped.** Backpressure is observable and recoverable.
 12. **PROVE never silently approximates.** EXPLORE and HUNT may relax policy only with explicit fidelity provenance.
-13. **Learned ranking is advisory.** It may change priority, never truth.
+13. **Learned and quantum-inspired ranking are advisory.** They may change priority or worker assignment, never truth.
 14. **Deterministic mode is mandatory.** Scheduler decisions, seeds, solver configuration, event order, and replay-relevant nondeterminism must be recordable/replayable.
 15. **JIT is evidence-driven.** It is introduced only when profiling demonstrates end-to-end value.
 
@@ -1039,6 +1039,36 @@ Deterministic baseline strategies remain available even when learned ranking exi
 
 Learned models may reorder admissible work. They do not decide truth, SAT/UNSAT, semantic support, or proof validity.
 
+### 25.2 Quantum-inspired batch scheduling
+
+After the deterministic CPU scheduler is correct and benchmarked, an optional `QuantumInspiredScheduler` may optimize bounded batches of already-admissible states. The intended formulation is a classical QUBO-style or related combinatorial objective over:
+
+- coverage and path diversity;
+- target proximity and analyst priorities;
+- estimated solver cost;
+- solver-context and cache affinity;
+- memory working-set and NUMA migration cost;
+- semantic uncertainty and fidelity debt;
+- historical outcomes supplied by the optional knowledge plane.
+
+The optimizer selects and assigns work; it does not execute states, classify solver results, validate semantics, or authorize cache reuse. Every selected state is executed by the normal CPU execution plane and remains subject to the same exact validity and fidelity rules.
+
+The scheduler owns a backend-neutral batch-optimizer contract with these implementations:
+
+```text
+compatible CUDA device/runtime    -> CUDA accelerator
+otherwise compatible OpenCL       -> OpenCL accelerator
+otherwise                         -> deterministic CPU reference
+```
+
+CUDA eligibility is capability-based, not vendor-name-based: the runtime, driver, device compute capability, available memory, and compiled kernel targets must all satisfy the backend manifest. An NVIDIA card that is too old for the supported CUDA kernel/toolchain automatically tries OpenCL when it exposes the required OpenCL device capabilities, then falls back to CPU. No GPU is rejected merely because another accelerator API is unavailable.
+
+Accelerated planning has a strict wall-time budget. Device discovery, compilation, allocation, transfer, kernel, timeout, numerical, or validation failure follows the same CUDA -> OpenCL -> CPU fallback ladder without losing runnable work. Accelerator-specific APIs and memory never enter execution-state, semantic, solver, replay, or persistence types.
+
+GPU use is justified only for sufficiently large batches whose measured scheduling benefit exceeds host/device transfer and launch overhead. Small queues remain on the CPU. CUDA/OpenCL kernels operate on compact feature matrices and assignment candidates, not COW pages, symbolic AST mutation, or arbitrary target execution.
+
+Quantum-inspired and GPU decisions are replay-visible. Deterministic mode either uses the CPU reference optimizer or records the complete candidate batch, objective/schema version, backend identity, device capability, kernel compatibility manifest, seed, budget, result, attempted fallback chain, and fallback reason.
+
 ---
 
 ## 26. Native multicore and NUMA
@@ -1570,6 +1600,7 @@ The architecture is designed so subsystem failure degrades capability without si
 | QIHSE unavailable | continue locally; queue/WAL durable events |
 | KEYSTONE unavailable | fall back to exact local/persistent paths; no truth loss |
 | learned model unavailable | deterministic search/retrieval paths remain usable |
+| CUDA/OpenCL optimizer unavailable or fails | preserve the candidate batch and use the deterministic CPU scheduler |
 | solver timeout | return TIMEOUT/UNKNOWN and apply policy; never UNSAT |
 | one solver backend fails | portfolio fallback/cross-check according to policy |
 | Tier-2 overload | reduce/summarize Tier-2, retain Tier-1 |
@@ -1671,6 +1702,10 @@ Saturate event queues and WAL I/O while fuzzing. Required Tier-1 provenance must
 
 Record and replay multi-objective search + adaptive solver-preemption runs to isolate regressions caused by policy interactions.
 
+### 45.8 Accelerated batch-planner instability
+
+Compare CPU, CUDA, and OpenCL scheduling decisions on identical bounded candidate batches. Inject device loss, compilation failure, timeout, out-of-memory, and numerically unstable scores. Runnable work must remain intact, fallback must be deterministic, and accelerator overhead must be reported separately from execution gains.
+
 ---
 
 ## 46. Architectural assumptions are hypotheses
@@ -1702,7 +1737,7 @@ The frozen implementation sequence is intentionally dependency-driven.
 8  solver-neutral API + Z3/Bitwuzla
 9  exact cache validity + generalized knowledge + invalidation graph
 10 native multicore + NUMA scheduler
-11 state merge/search/summaries/environment models/state import
+11 state merge/search/summaries/environment models/state import + optional quantum-inspired batch scheduling
 12 provenance transport + WAL + QIHSE/KEYSTONE
 13 staged hybrid fuzzing
 14 specialist encoders + learned fusion
@@ -1750,6 +1785,7 @@ Implementation details may evolve, but the following require an explicit archite
 - exact-vs-similarity trust separation;
 - staged fuzzing and late JIT policy;
 - deterministic replay/debug mode;
+- optional CUDA/OpenCL quantum-inspired scheduling remains advisory, bounded, replay-visible, and removable;
 - future distribution boundary without immediate distributed implementation.
 
 `Plan.md`, `DESIGN_DECISIONS.md`, `TRAIT_BOUNDARIES.md`, `SEMANTICS.md`, `SEMANTIC_IDENTITY.md`, `PROVENANCE_KNOWLEDGE.md`, `BENCHMARKING.md`, and `IMPLEMENTATION_PLAN.md` provide narrower supporting contracts. This document is the complete top-level architecture that ties them together.

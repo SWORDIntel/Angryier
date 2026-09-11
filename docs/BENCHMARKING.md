@@ -59,6 +59,11 @@ Metrics:
 - NUMA migrations where measurable;
 - peak runnable states;
 - peak RSS.
+- batch-planner invocations and candidate counts;
+- CPU/CUDA/OpenCL planner selection and fallbacks;
+- backend rejection reasons, attempted fallback chain, device capability, and kernel compatibility manifest;
+- feature-construction, host/device transfer, kernel, synchronization, and total planner time;
+- time-to-interest and throughput with accelerated planning enabled versus the deterministic CPU planner.
 
 ## C — Solver-heavy
 
@@ -346,6 +351,16 @@ Every run should emit versioned machine-readable metrics including at least:
   "persistence_backpressure_ms": 0,
   "knowledge_exact_hits": 0,
   "knowledge_advisory_hits": 0,
+  "scheduler_planner_backend": "cpu|cuda|opencl",
+  "scheduler_planner_batches": 0,
+  "scheduler_planner_candidates": 0,
+  "scheduler_planner_feature_ms": 0,
+  "scheduler_planner_transfer_ms": 0,
+  "scheduler_planner_kernel_ms": 0,
+  "scheduler_planner_total_ms": 0,
+  "scheduler_planner_fallbacks": 0,
+  "scheduler_planner_fallback_chain": ["cuda", "opencl", "cpu"],
+  "scheduler_planner_fallback_reason": "",
   "native_replay": "pass|fail|not_applicable",
   "result": "reached|not_reached|timeout|unknown|error"
 }

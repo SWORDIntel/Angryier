@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+angryier-arch = { path = "../angryier-arch" }
+angryier-semantic-contracts = { path = "../angryier-semantic-contracts" }
 angryier-types = { path = "../angryier-types" }
 
 [lib]

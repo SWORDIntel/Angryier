@@ -1,6 +1,12 @@
 #![forbid(unsafe_code)]
 
-use angryier_types::{Address, BlockId, CodeVersionGuard, ContentId, ExprId, TargetProfileId};
+mod lower;
+mod verify;
+
+pub use lower::{BasicSemanticLowerer, IrLoweringError};
+pub use verify::{BasicIrVerifier, IrVerificationError};
+
+use angryier_types::{Address, BlockId, CodeVersionGuard, ContentId, ExprId, ImageId, TargetProfileId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IrValueId(pub u32);
@@ -50,7 +56,10 @@ pub enum IrOp {
         ty: IrType,
         bytes_le: Vec<u8>,
     },
-    ExprRef(ExprId),
+    ExprRef {
+        expression: ExprId,
+        ty: IrType,
+    },
     Primitive {
         op: IrPrimitive,
         ty: IrType,
@@ -97,6 +106,7 @@ pub struct IrInstruction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrBlockKey {
+    pub image: ImageId,
     pub block: BlockId,
     pub address: Address,
     pub semantic_content: ContentId,

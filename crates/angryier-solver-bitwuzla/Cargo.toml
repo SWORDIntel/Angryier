@@ -7,6 +7,7 @@ description = "Bitwuzla adapter seam; no fake solver implementation"
 
 [dependencies]
 angryier-solver = { path = "../angryier-solver" }
+angryier-types = { path = "../angryier-types" }
 
 [lints]
 workspace = true

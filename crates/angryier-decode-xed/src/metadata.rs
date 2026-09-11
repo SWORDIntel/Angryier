@@ -49,28 +49,14 @@ pub enum XedVectorView {
 /// bridge translates them to these semantic register families first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum XedRegisterRef {
-    Gpr {
-        index: u8,
-        view: XedGprView,
-    },
+    Gpr { index: u8, view: XedGprView },
     InstructionPointer,
     Flags,
-    Vector {
-        index: u8,
-        view: XedVectorView,
-    },
-    Opmask {
-        index: u8,
-    },
-    X87 {
-        index: u8,
-    },
-    Mmx {
-        index: u8,
-    },
-    Tile {
-        index: u8,
-    },
+    Vector { index: u8, view: XedVectorView },
+    Opmask { index: u8 },
+    X87 { index: u8 },
+    Mmx { index: u8 },
+    Tile { index: u8 },
     TileConfig,
     Mxcsr,
 }
@@ -88,9 +74,7 @@ pub enum XedSegment {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum XedMemoryBase {
     Register(XedRegisterRef),
-    InstructionPointer {
-        width_bits: u16,
-    },
+    InstructionPointer { width_bits: u16 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

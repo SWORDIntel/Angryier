@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod interpreter;
+
+pub use interpreter::{ConcreteExecutionError, ConcreteInterpreter};
+
 use angryier_ir::IrBlock;
 use angryier_types::{Address, StateId};
 

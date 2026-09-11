@@ -81,7 +81,63 @@ pub trait SymbolicAddressResolver: Send + Sync {
     fn candidates(&self, address: ExprId, limit: usize) -> Result<Vec<Address>, Self::Error>;
 }
 
-type PageCells = BTreeMap<usize, ByteValue>;
+const SYMBOLIC_BITMAP_WORDS: usize = DEFAULT_PAGE_SIZE / u64::BITS as usize;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MemoryPage {
+    concrete: Box<[u8; DEFAULT_PAGE_SIZE]>,
+    symbolic_bitmap: Box<[u64; SYMBOLIC_BITMAP_WORDS]>,
+    symbolic: BTreeMap<usize, ExprId>,
+}
+
+impl Default for MemoryPage {
+    fn default() -> Self {
+        Self {
+            concrete: Box::new([0; DEFAULT_PAGE_SIZE]),
+            symbolic_bitmap: Box::new([0; SYMBOLIC_BITMAP_WORDS]),
+            symbolic: BTreeMap::new(),
+        }
+    }
+}
+
+impl MemoryPage {
+    fn value(&self, offset: usize) -> ByteValue {
+        let word = offset / u64::BITS as usize;
+        let bit = offset % u64::BITS as usize;
+        if self.symbolic_bitmap[word] & (1_u64 << bit) != 0 {
+            self.symbolic
+                .get(&offset)
+                .copied()
+                .map(ByteValue::Symbolic)
+                .unwrap_or(ByteValue::Concrete(self.concrete[offset]))
+        } else {
+            ByteValue::Concrete(self.concrete[offset])
+        }
+    }
+
+    fn write(&mut self, offset: usize, value: ByteValue) {
+        let word = offset / u64::BITS as usize;
+        let bit = offset % u64::BITS as usize;
+        match value {
+            ByteValue::Concrete(byte) => {
+                self.concrete[offset] = byte;
+                self.symbolic.remove(&offset);
+                self.symbolic_bitmap[word] &= !(1_u64 << bit);
+            }
+            ByteValue::Symbolic(expression) => {
+                self.symbolic.insert(offset, expression);
+                self.symbolic_bitmap[word] |= 1_u64 << bit;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryStats {
+    pub materialized_pages: usize,
+    pub concrete_capacity_bytes: usize,
+    pub symbolic_cells: usize,
+}
 
 /// Sparse, copy-on-write memory intended for execution-state snapshots.
 ///
@@ -91,7 +147,7 @@ type PageCells = BTreeMap<usize, ByteValue>;
 #[derive(Clone, Debug)]
 pub struct PersistentMemory {
     regions: Arc<Vec<MemoryRegion>>,
-    pages: Arc<BTreeMap<u64, Arc<PageCells>>>,
+    pages: Arc<BTreeMap<u64, Arc<MemoryPage>>>,
     code_versions: Arc<BTreeMap<CodePageId, CodePageVersion>>,
 }
 
@@ -145,6 +201,14 @@ impl PersistentMemory {
 
     pub fn page_id_for_address(address: Address) -> CodePageId {
         CodePageId(Self::page_number(address))
+    }
+
+    pub fn stats(&self) -> MemoryStats {
+        MemoryStats {
+            materialized_pages: self.pages.len(),
+            concrete_capacity_bytes: self.pages.len() * DEFAULT_PAGE_SIZE,
+            symbolic_cells: self.pages.values().map(|page| page.symbolic.len()).sum(),
+        }
     }
 
     pub fn code_version_guards_for_range(
@@ -278,14 +342,14 @@ impl PersistentMemory {
 
         let mut pages = (*self.pages).clone();
         for (page, changes) in grouped {
-            let mut cells = pages
+            let mut materialized = pages
                 .get(&page)
                 .map(|existing| (**existing).clone())
                 .unwrap_or_default();
             for (offset, value) in changes {
-                cells.insert(offset, value);
+                materialized.write(offset, value);
             }
-            pages.insert(page, Arc::new(cells));
+            pages.insert(page, Arc::new(materialized));
         }
 
         let mut code_versions = (*self.code_versions).clone();
@@ -324,8 +388,7 @@ impl LayeredMemory for PersistentMemory {
             let value = self
                 .pages
                 .get(&Self::page_number(current))
-                .and_then(|page| page.get(&Self::page_offset(current)))
-                .copied()
+                .map(|page| page.value(Self::page_offset(current)))
                 .unwrap_or(ByteValue::Concrete(0));
             output.push(value);
         }
@@ -424,6 +487,38 @@ mod tests {
             loaded.read(0x4000, 2)?,
             vec![ByteValue::Concrete(0x90), ByteValue::Concrete(0xc3)]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn concrete_pages_keep_symbolic_bytes_in_a_sparse_overlay() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x3000, true, false)])?;
+        let memory = memory.load_concrete(0x1fff, &[0x11, 0x22, 0x33])?;
+
+        assert_eq!(
+            memory.stats(),
+            MemoryStats {
+                materialized_pages: 2,
+                concrete_capacity_bytes: 2 * DEFAULT_PAGE_SIZE,
+                symbolic_cells: 0,
+            }
+        );
+
+        let symbolic = memory.write(0x2000, &[ByteValue::Symbolic(ExprId(9))])?;
+        assert_eq!(symbolic.stats().symbolic_cells, 1);
+        assert_eq!(
+            symbolic.read(0x1fff, 3)?,
+            vec![
+                ByteValue::Concrete(0x11),
+                ByteValue::Symbolic(ExprId(9)),
+                ByteValue::Concrete(0x33),
+            ]
+        );
+
+        let concrete = symbolic.write(0x2000, &[ByteValue::Concrete(0x44)])?;
+        assert_eq!(concrete.stats().symbolic_cells, 0);
+        assert_eq!(concrete.read(0x2000, 1)?, vec![ByteValue::Concrete(0x44)]);
+        assert_eq!(symbolic.read(0x2000, 1)?, vec![ByteValue::Symbolic(ExprId(9))]);
         Ok(())
     }
 
