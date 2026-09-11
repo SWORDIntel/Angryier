@@ -190,13 +190,13 @@ pub const fn vector_view(
             parent,
             0,
             128,
-            RegisterWriteBehavior::PreserveParent,
+            RegisterWriteBehavior::SemanticDefined,
         ),
         VectorViewKind::Ymm256 => RegisterView::partial(
             parent,
             0,
             256,
-            RegisterWriteBehavior::PreserveParent,
+            RegisterWriteBehavior::SemanticDefined,
         ),
         VectorViewKind::Zmm512 => RegisterView::full(parent, 512),
     })
@@ -204,9 +204,11 @@ pub const fn vector_view(
 
 pub const fn opmask_view(index: u8) -> Result<RegisterView, Intel64RegisterError> {
     if index < OPMASK_COUNT {
-        Ok(RegisterView::full(
+        Ok(RegisterView::partial(
             RegisterId(register_id::OPMASK_BASE + index as u32),
+            0,
             64,
+            RegisterWriteBehavior::SemanticDefined,
         ))
     } else {
         Err(Intel64RegisterError::InvalidOpmaskIndex(index))
@@ -239,9 +241,11 @@ pub const fn mmx_view(index: u8) -> Result<RegisterView, Intel64RegisterError> {
 
 pub const fn tile_view(index: u8) -> Result<RegisterView, Intel64RegisterError> {
     if index < TILE_COUNT {
-        Ok(RegisterView::full(
+        Ok(RegisterView::partial(
             RegisterId(register_id::TILE_BASE + index as u32),
+            0,
             TMM_MAX_BITS,
+            RegisterWriteBehavior::SemanticDefined,
         ))
     } else {
         Err(Intel64RegisterError::InvalidTileIndex(index))
@@ -391,6 +395,8 @@ mod tests {
         assert_eq!(xmm.width_bits, 128);
         assert_eq!(ymm.width_bits, 256);
         assert_eq!(zmm.width_bits, 512);
+        assert_eq!(xmm.write_behavior, RegisterWriteBehavior::SemanticDefined);
+        assert_eq!(ymm.write_behavior, RegisterWriteBehavior::SemanticDefined);
         Ok(())
     }
 
