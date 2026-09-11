@@ -26,6 +26,9 @@ pub enum RegisterWriteBehavior {
     PreserveParent,
     /// Bits above the view are architecturally cleared on write.
     ZeroExtendParent,
+    /// The view identifies the parent and bit range, but the instruction
+    /// semantics must define the full parent-register write effect.
+    SemanticDefined,
 }
 
 /// A decoded architectural register is represented as a view onto one stable
