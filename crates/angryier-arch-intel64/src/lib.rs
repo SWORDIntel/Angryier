@@ -47,6 +47,29 @@ pub struct Intel64TargetProfile {
     pub features: FeatureSet,
 }
 
+/// Stable encoding classes consumed by Intel 64 semantics. Raw/generated XED
+/// encoding discriminants must be translated to these values at the adapter boundary.
+pub mod encoding_class {
+    use angryier_arch::EncodingClass;
+
+    pub const LEGACY: EncodingClass = EncodingClass(1);
+    pub const VEX: EncodingClass = EncodingClass(2);
+    pub const EVEX: EncodingClass = EncodingClass(3);
+    pub const REX2: EncodingClass = EncodingClass(4);
+}
+
+/// Intel 64 segment selectors used by normalized memory operands.
+pub mod segment_id {
+    use angryier_arch::SegmentId;
+
+    pub const ES: SegmentId = SegmentId(0);
+    pub const CS: SegmentId = SegmentId(1);
+    pub const SS: SegmentId = SegmentId(2);
+    pub const DS: SegmentId = SegmentId(3);
+    pub const FS: SegmentId = SegmentId(4);
+    pub const GS: SegmentId = SegmentId(5);
+}
+
 /// Stable parent-register identifier ranges. These values are persistence and
 /// replay identifiers and must not be renumbered when new aliases are added.
 pub mod register_id {
