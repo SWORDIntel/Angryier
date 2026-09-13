@@ -836,6 +836,39 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecInterleaveLow | IrPrimitive::VecInterleaveHigh => {
+            require_arity(operation, &resolved, 2)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let total_lanes = width_bits / lane_bits;
+            if total_lanes % 2 != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let half_lanes = total_lanes / 2;
+            let mask = bit_mask(lane_bits as u16);
+            let left = as_u128(resolved[0]);
+            let right = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for i in 0..half_lanes {
+                let src_idx = match operation {
+                    IrPrimitive::VecInterleaveLow => i,
+                    IrPrimitive::VecInterleaveHigh => half_lanes + i,
+                    _ => unreachable!(),
+                };
+                let l_lane = (left >> (src_idx * lane_bits)) & mask;
+                let r_lane = (right >> (src_idx * lane_bits)) & mask;
+                let out_idx_lo = 2 * i;
+                let out_idx_hi = 2 * i + 1;
+                result |= l_lane << (out_idx_lo * lane_bits);
+                result |= r_lane << (out_idx_hi * lane_bits);
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

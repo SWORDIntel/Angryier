@@ -392,6 +392,18 @@ pub mod forms {
 
     // SSSE3 packed shuffle bytes (xmm, xmm) — byte-level shuffle
     pub const PSHUFB_XMM_XMM: u32 = 0x00FC;
+
+    // SSE2 packed unpack/interleave low (xmm, xmm)
+    pub const PUNPCKLBW_XMM_XMM: u32 = 0x00FD;
+    pub const PUNPCKLWD_XMM_XMM: u32 = 0x00FE;
+    pub const PUNPCKLDQ_XMM_XMM: u32 = 0x00FF;
+    pub const PUNPCKLQDQ_XMM_XMM: u32 = 0x0100;
+
+    // SSE2 packed unpack/interleave high (xmm, xmm)
+    pub const PUNPCKHBW_XMM_XMM: u32 = 0x0101;
+    pub const PUNPCKHWD_XMM_XMM: u32 = 0x0102;
+    pub const PUNPCKHDQ_XMM_XMM: u32 = 0x0103;
+    pub const PUNPCKHQDQ_XMM_XMM: u32 = 0x0104;
 }
 
 /// RFLAGS bit positions used by the corpus.

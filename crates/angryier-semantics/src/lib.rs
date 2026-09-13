@@ -156,6 +156,7 @@ pub enum VectorOp {
     MaskZero,
     Pack,
     Unpack,
+    UnpackHigh,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

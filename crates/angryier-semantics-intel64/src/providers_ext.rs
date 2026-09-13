@@ -2292,3 +2292,37 @@ impl SemanticProvider for PshufbXmmXmm {
         Ok(receipt(0xFC, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed unpack/interleave providers
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_unpack {
+    ($name:ident, $form:expr, $op:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, $ty)?;
+                let src = out.read_operand(1, $ty)?;
+                let result = out.emit(SemanticOp::Vector($op), $ty, &[dst, src])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_unpack!(PunpcklbwXmmXmm, forms::PUNPCKLBW_XMM_XMM, VectorOp::Unpack, I8X16, 0xFD);
+packed_unpack!(PunpcklwdXmmXmm, forms::PUNPCKLWD_XMM_XMM, VectorOp::Unpack, I16X8, 0xFE);
+packed_unpack!(PunpckldqXmmXmm, forms::PUNPCKLDQ_XMM_XMM, VectorOp::Unpack, I32X4, 0xFF);
+packed_unpack!(PunpcklqdqXmmXmm, forms::PUNPCKLQDQ_XMM_XMM, VectorOp::Unpack, I64X2, 0x100);
+packed_unpack!(PunpckhbwXmmXmm, forms::PUNPCKHBW_XMM_XMM, VectorOp::UnpackHigh, I8X16, 0x101);
+packed_unpack!(PunpckhwdXmmXmm, forms::PUNPCKHWD_XMM_XMM, VectorOp::UnpackHigh, I16X8, 0x102);
+packed_unpack!(PunpckhdqXmmXmm, forms::PUNPCKHDQ_XMM_XMM, VectorOp::UnpackHigh, I32X4, 0x103);
+packed_unpack!(PunpckhqdqXmmXmm, forms::PUNPCKHQDQ_XMM_XMM, VectorOp::UnpackHigh, I64X2, 0x104);

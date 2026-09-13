@@ -3831,3 +3831,168 @@ fn pshufb_xmm_xmm_zeroes_on_high_bit() -> Result<(), Box<dyn std::error::Error>>
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed unpack/interleave integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn punpcklbw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PUNPCKLBW: interleave low 8 bytes from each operand
+    // dst  = [0,1,2,3,4,5,6,7,8,9,A,B,C,D,E,F]
+    // src  = [0x10,0x11,...,0x1F]
+    // result = [dst[0], src[0], dst[1], src[1], ..., dst[7], src[7]]
+    let left: [u8; 16] = core::array::from_fn(|i| i as u8);
+    let right: [u8; 16] = core::array::from_fn(|i| 0x10 + i as u8);
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PUNPCKLBW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for i in 0..8 {
+        assert_eq!(bytes[2 * i], left[i], "lane {i} lo: got {:#x}", bytes[2 * i]);
+        assert_eq!(bytes[2 * i + 1], right[i], "lane {i} hi: got {:#x}", bytes[2 * i + 1]);
+    }
+    Ok(())
+}
+
+#[test]
+fn punpcklwd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PUNPCKLWD: interleave low 4 words from each operand
+    let left: [u16; 8] = [100, 200, 300, 400, 500, 600, 700, 800];
+    let right: [u16; 8] = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000];
+    let mut left_bytes = Vec::new();
+    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut right_bytes = Vec::new();
+    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &left_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &right_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PUNPCKLWD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for i in 0..4 {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[(2 * i) * 2..(2 * i + 1) * 2]);
+        let lo = u16::from_le_bytes(buf);
+        buf.copy_from_slice(&bytes[(2 * i + 1) * 2..(2 * i + 2) * 2]);
+        let hi = u16::from_le_bytes(buf);
+        assert_eq!(lo, left[i], "lane {i} lo: got {lo}");
+        assert_eq!(hi, right[i], "lane {i} hi: got {hi}");
+    }
+    Ok(())
+}
+
+#[test]
+fn punpckhbw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PUNPCKHBW: interleave high 8 bytes from each operand
+    let left: [u8; 16] = core::array::from_fn(|i| i as u8);
+    let right: [u8; 16] = core::array::from_fn(|i| 0x10 + i as u8);
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PUNPCKHBW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for i in 0..8 {
+        assert_eq!(bytes[2 * i], left[8 + i], "lane {i} lo: got {:#x}", bytes[2 * i]);
+        assert_eq!(bytes[2 * i + 1], right[8 + i], "lane {i} hi: got {:#x}", bytes[2 * i + 1]);
+    }
+    Ok(())
+}
+
+#[test]
+fn punpckldq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PUNPCKLDQ: interleave low 2 dwords from each operand
+    let left: [u32; 4] = [0x11111111, 0x22222222, 0x33333333, 0x44444444];
+    let right: [u32; 4] = [0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC, 0xDDDDDDDD];
+    let mut left_bytes = Vec::new();
+    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut right_bytes = Vec::new();
+    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &left_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &right_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PUNPCKLDQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [left[0], right[0], left[1], right[1]];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = u32::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn punpcklqdq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PUNPCKLQDQ: interleave low 1 qword from each operand
+    let left: [u64; 2] = [0x1111111111111111, 0x2222222222222222];
+    let right: [u64; 2] = [0xAAAAAAAAAAAAAAAA, 0xBBBBBBBBBBBBBBBB];
+    let mut left_bytes = Vec::new();
+    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut right_bytes = Vec::new();
+    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &left_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &right_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PUNPCKLQDQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [left[0], right[0]];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = u64::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
