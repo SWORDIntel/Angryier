@@ -282,6 +282,20 @@ fn scalar_bit_width(ty: SemanticType) -> Option<u16> {
             FloatFormat::F64 => 64,
             FloatFormat::F80 => 80,
         }),
+        SemanticType::Vector { lanes, lane } => {
+            let lane_bits = match lane {
+                angryier_semantics::ScalarType::BitVec(bits) => u32::from(bits),
+                angryier_semantics::ScalarType::Float(format) => match format {
+                    FloatFormat::F16 | FloatFormat::Bf16 => 16,
+                    FloatFormat::F32 => 32,
+                    FloatFormat::F64 => 64,
+                    FloatFormat::F80 => 80,
+                },
+            };
+            lane_bits
+                .checked_mul(u32::from(lanes))
+                .and_then(|bits| u16::try_from(bits).ok())
+        }
         _ => None,
     }
 }
@@ -421,6 +435,17 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                 _ => {
                     return Err(IrLoweringError::UnsupportedValue(
                         "unsupported lane-wise primitive",
+                    ));
+                }
+            }),
+            VectorOp::LaneWiseFloat(float) => Ok(match float {
+                FloatingOp::Add => IrPrimitive::VecLaneFAdd,
+                FloatingOp::Sub => IrPrimitive::VecLaneFSub,
+                FloatingOp::Mul => IrPrimitive::VecLaneFMul,
+                FloatingOp::Div => IrPrimitive::VecLaneFDiv,
+                _ => {
+                    return Err(IrLoweringError::UnsupportedValue(
+                        "unsupported lane-wise float operation",
                     ));
                 }
             }),

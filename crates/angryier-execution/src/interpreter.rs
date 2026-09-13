@@ -611,6 +611,45 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecLaneFAdd
+        | IrPrimitive::VecLaneFSub
+        | IrPrimitive::VecLaneFMul
+        | IrPrimitive::VecLaneFDiv => {
+            require_arity(operation, &resolved, 2)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let left = as_u128(resolved[0]);
+            let right = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let l = (left >> shift) & bit_mask(lane_bits as u16);
+                let r = (right >> shift) & bit_mask(lane_bits as u16);
+                let lf = decode_float_lane(lane_bits as u16, l)?;
+                let rf = decode_float_lane(lane_bits as u16, r)?;
+                let lane_result_f = match operation {
+                    IrPrimitive::VecLaneFAdd => lf + rf,
+                    IrPrimitive::VecLaneFSub => lf - rf,
+                    IrPrimitive::VecLaneFMul => lf * rf,
+                    IrPrimitive::VecLaneFDiv => {
+                        if rf == 0.0 {
+                            return Err(ConcreteExecutionError::DivisionByZero);
+                        }
+                        lf / rf
+                    }
+                    _ => unreachable!(),
+                };
+                let lane_result = encode_float_lane(lane_bits as u16, lane_result_f);
+                result |= lane_result << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))
@@ -658,6 +697,33 @@ fn write_float(ty: IrType, value: f64) -> ConcreteValue {
         }
         IrType::Float64 => ConcreteValue::from_bytes_le(ty, &value.to_le_bytes()),
         _ => ConcreteValue::from_bytes_le(ty, &value.to_le_bytes()),
+    }
+}
+
+/// Decodes a raw lane value (already masked) as an f64 for lane-wise float ops.
+fn decode_float_lane<R, M>(
+    lane_bits: u16,
+    value: u128,
+) -> Result<f64, ConcreteExecutionError<R, M>> {
+    match lane_bits {
+        32 => {
+            let bytes = (value as u32).to_le_bytes();
+            Ok(f64::from(f32::from_le_bytes(bytes)))
+        }
+        64 => {
+            let bytes = (value as u64).to_le_bytes();
+            Ok(f64::from_le_bytes(bytes))
+        }
+        _ => Err(ConcreteExecutionError::UnsupportedType(IrType::Bits(lane_bits))),
+    }
+}
+
+/// Encodes an f64 into a raw lane value for lane-wise float ops.
+fn encode_float_lane(lane_bits: u16, value: f64) -> u128 {
+    match lane_bits {
+        32 => (value as f32).to_bits() as u128,
+        64 => value.to_bits() as u128,
+        _ => 0,
     }
 }
 

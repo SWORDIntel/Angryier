@@ -304,6 +304,32 @@ pub mod forms {
     // HLT / UD2
     pub const HLT: u32 = 0x00BF;
     pub const UD2: u32 = 0x00C0;
+
+    // SSE scalar single-precision (xmm, xmm)
+    pub const ADDSS_XMM_XMM: u32 = 0x00C1;
+    pub const SUBSS_XMM_XMM: u32 = 0x00C2;
+    pub const MULSS_XMM_XMM: u32 = 0x00C3;
+    pub const DIVSS_XMM_XMM: u32 = 0x00C4;
+    pub const SQRTSS_XMM_XMM: u32 = 0x00C5;
+
+    // SSE scalar double-precision (xmm, xmm)
+    pub const ADDSD_XMM_XMM: u32 = 0x00C6;
+    pub const SUBSD_XMM_XMM: u32 = 0x00C7;
+    pub const MULSD_XMM_XMM: u32 = 0x00C8;
+    pub const DIVSD_XMM_XMM: u32 = 0x00C9;
+    pub const SQRTSD_XMM_XMM: u32 = 0x00CA;
+
+    // SSE packed single-precision (xmm, xmm) — 4x32 lanes
+    pub const ADDPS_XMM_XMM: u32 = 0x00CB;
+    pub const SUBPS_XMM_XMM: u32 = 0x00CC;
+    pub const MULPS_XMM_XMM: u32 = 0x00CD;
+    pub const DIVPS_XMM_XMM: u32 = 0x00CE;
+
+    // SSE packed double-precision (xmm, xmm) — 2x64 lanes
+    pub const ADDPD_XMM_XMM: u32 = 0x00CF;
+    pub const SUBPD_XMM_XMM: u32 = 0x00D0;
+    pub const MULPD_XMM_XMM: u32 = 0x00D1;
+    pub const DIVPD_XMM_XMM: u32 = 0x00D2;
 }
 
 /// RFLAGS bit positions used by the corpus.

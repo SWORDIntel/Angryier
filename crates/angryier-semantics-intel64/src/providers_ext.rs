@@ -14,8 +14,9 @@
 use crate::{forms, rflags, rule_id};
 use angryier_arch_intel64::register_id;
 use angryier_semantics::{
-    DecodedInstructionView, PrimitiveOp, RegisterId, ScalarType, SemanticBuilder, SemanticContext, SemanticError,
-    SemanticOp, SemanticOrigin, SemanticProvider, SemanticReceipt, SemanticType, SideEffect, ValueId,
+    DecodedInstructionView, FloatFormat, FloatingOp, PrimitiveOp, RegisterId, ScalarType, SemanticBuilder,
+    SemanticContext, SemanticError, SemanticOp, SemanticOrigin, SemanticProvider, SemanticReceipt, SemanticType,
+    SideEffect, ValueId, VectorOp,
 };
 use angryier_types::SemanticRuleId;
 
@@ -24,6 +25,10 @@ const U32: SemanticType = SemanticType::Scalar(ScalarType::BitVec(32));
 const U16: SemanticType = SemanticType::Scalar(ScalarType::BitVec(16));
 const U8: SemanticType = SemanticType::Scalar(ScalarType::BitVec(8));
 const U1: SemanticType = SemanticType::Scalar(ScalarType::BitVec(1));
+const F32: SemanticType = SemanticType::Scalar(ScalarType::Float(FloatFormat::F32));
+const F64: SemanticType = SemanticType::Scalar(ScalarType::Float(FloatFormat::F64));
+const F32X4: SemanticType = SemanticType::Vector { lanes: 4, lane: ScalarType::Float(FloatFormat::F32) };
+const F64X2: SemanticType = SemanticType::Vector { lanes: 2, lane: ScalarType::Float(FloatFormat::F64) };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1390,5 +1395,462 @@ impl SemanticProvider for ImulR32R32Imm32 {
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(0xB2, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE scalar float providers
+// ---------------------------------------------------------------------------
+
+/// ADDSS xmm, xmm: scalar single-precision add on lane 0.
+/// Simplified: treats the XMM as a single f32 (upper lanes not modeled).
+#[derive(Clone, Copy, Debug)]
+pub struct AddssXmmXmm;
+
+impl SemanticProvider for AddssXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xC1) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::ADDSS_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F32)?;
+        let src = out.read_operand(1, F32)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Add), F32, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xC1, context))
+    }
+}
+
+/// SUBSS xmm, xmm: scalar single-precision subtract on lane 0.
+#[derive(Clone, Copy, Debug)]
+pub struct SubssXmmXmm;
+
+impl SemanticProvider for SubssXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xC2) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::SUBSS_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F32)?;
+        let src = out.read_operand(1, F32)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Sub), F32, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xC2, context))
+    }
+}
+
+/// MULSS xmm, xmm: scalar single-precision multiply on lane 0.
+#[derive(Clone, Copy, Debug)]
+pub struct MulssXmmXmm;
+
+impl SemanticProvider for MulssXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xC3) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::MULSS_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F32)?;
+        let src = out.read_operand(1, F32)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Mul), F32, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xC3, context))
+    }
+}
+
+/// DIVSS xmm, xmm: scalar single-precision divide on lane 0.
+#[derive(Clone, Copy, Debug)]
+pub struct DivssXmmXmm;
+
+impl SemanticProvider for DivssXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xC4) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::DIVSS_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F32)?;
+        let src = out.read_operand(1, F32)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Div), F32, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xC4, context))
+    }
+}
+
+/// SQRTSS xmm, xmm: scalar single-precision square root on lane 0.
+#[derive(Clone, Copy, Debug)]
+pub struct SqrtssXmmXmm;
+
+impl SemanticProvider for SqrtssXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xC5) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::SQRTSS_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, F32)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Sqrt), F32, &[src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xC5, context))
+    }
+}
+
+/// ADDSD xmm, xmm: scalar double-precision add on lane 0.
+#[derive(Clone, Copy, Debug)]
+pub struct AddsdXmmXmm;
+
+impl SemanticProvider for AddsdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xC6) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::ADDSD_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F64)?;
+        let src = out.read_operand(1, F64)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Add), F64, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xC6, context))
+    }
+}
+
+/// SUBSD xmm, xmm: scalar double-precision subtract on lane 0.
+#[derive(Clone, Copy, Debug)]
+pub struct SubsdXmmXmm;
+
+impl SemanticProvider for SubsdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xC7) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::SUBSD_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F64)?;
+        let src = out.read_operand(1, F64)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Sub), F64, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xC7, context))
+    }
+}
+
+/// MULSD xmm, xmm: scalar double-precision multiply on lane 0.
+#[derive(Clone, Copy, Debug)]
+pub struct MulsdXmmXmm;
+
+impl SemanticProvider for MulsdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xC8) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::MULSD_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F64)?;
+        let src = out.read_operand(1, F64)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Mul), F64, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xC8, context))
+    }
+}
+
+/// DIVSD xmm, xmm: scalar double-precision divide on lane 0.
+#[derive(Clone, Copy, Debug)]
+pub struct DivsdXmmXmm;
+
+impl SemanticProvider for DivsdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xC9) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::DIVSD_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F64)?;
+        let src = out.read_operand(1, F64)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Div), F64, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xC9, context))
+    }
+}
+
+/// SQRTSD xmm, xmm: scalar double-precision square root on lane 0.
+#[derive(Clone, Copy, Debug)]
+pub struct SqrtsdXmmXmm;
+
+impl SemanticProvider for SqrtsdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xCA) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::SQRTSD_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, F64)?;
+        let result = out.emit(SemanticOp::Float(FloatingOp::Sqrt), F64, &[src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xCA, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE packed float providers
+// ---------------------------------------------------------------------------
+
+/// ADDPS xmm, xmm: packed single-precision add (4x32 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct AddpsXmmXmm;
+
+impl SemanticProvider for AddpsXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xCB) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::ADDPS_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F32X4)?;
+        let src = out.read_operand(1, F32X4)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Add)), F32X4, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xCB, context))
+    }
+}
+
+/// SUBPS xmm, xmm: packed single-precision subtract (4x32 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct SubpsXmmXmm;
+
+impl SemanticProvider for SubpsXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xCC) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::SUBPS_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F32X4)?;
+        let src = out.read_operand(1, F32X4)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Sub)), F32X4, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xCC, context))
+    }
+}
+
+/// MULPS xmm, xmm: packed single-precision multiply (4x32 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct MulpsXmmXmm;
+
+impl SemanticProvider for MulpsXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xCD) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::MULPS_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F32X4)?;
+        let src = out.read_operand(1, F32X4)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Mul)), F32X4, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xCD, context))
+    }
+}
+
+/// DIVPS xmm, xmm: packed single-precision divide (4x32 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct DivpsXmmXmm;
+
+impl SemanticProvider for DivpsXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xCE) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::DIVPS_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F32X4)?;
+        let src = out.read_operand(1, F32X4)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Div)), F32X4, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xCE, context))
+    }
+}
+
+/// ADDPD xmm, xmm: packed double-precision add (2x64 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct AddpdXmmXmm;
+
+impl SemanticProvider for AddpdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xCF) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::ADDPD_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F64X2)?;
+        let src = out.read_operand(1, F64X2)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Add)), F64X2, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xCF, context))
+    }
+}
+
+/// SUBPD xmm, xmm: packed double-precision subtract (2x64 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct SubpdXmmXmm;
+
+impl SemanticProvider for SubpdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD0) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::SUBPD_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F64X2)?;
+        let src = out.read_operand(1, F64X2)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Sub)), F64X2, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD0, context))
+    }
+}
+
+/// MULPD xmm, xmm: packed double-precision multiply (2x64 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct MulpdXmmXmm;
+
+impl SemanticProvider for MulpdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD1) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::MULPD_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F64X2)?;
+        let src = out.read_operand(1, F64X2)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Mul)), F64X2, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD1, context))
+    }
+}
+
+/// DIVPD xmm, xmm: packed double-precision divide (2x64 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct DivpdXmmXmm;
+
+impl SemanticProvider for DivpdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD2) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::DIVPD_XMM_XMM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, F64X2)?;
+        let src = out.read_operand(1, F64X2)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Div)), F64X2, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD2, context))
     }
 }
