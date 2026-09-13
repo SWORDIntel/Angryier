@@ -353,6 +353,16 @@ pub mod forms {
     pub const PAND_XMM_XMM: u32 = 0x00DD;
     pub const POR_XMM_XMM: u32 = 0x00DE;
     pub const PXOR_XMM_XMM: u32 = 0x00DF;
+
+    // SSE2 packed shifts (xmm, imm8) — uniform count per lane
+    pub const PSLLW_XMM_IMM8: u32 = 0x00E0;
+    pub const PSRLW_XMM_IMM8: u32 = 0x00E1;
+    pub const PSRAW_XMM_IMM8: u32 = 0x00E2;
+    pub const PSLLD_XMM_IMM8: u32 = 0x00E3;
+    pub const PSRLD_XMM_IMM8: u32 = 0x00E4;
+    pub const PSRAD_XMM_IMM8: u32 = 0x00E5;
+    pub const PSLLQ_XMM_IMM8: u32 = 0x00E6;
+    pub const PSRLQ_XMM_IMM8: u32 = 0x00E7;
 }
 
 /// RFLAGS bit positions used by the corpus.

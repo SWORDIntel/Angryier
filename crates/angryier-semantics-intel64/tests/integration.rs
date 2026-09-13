@@ -3235,3 +3235,180 @@ fn pxor_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed shift integration tests
+// ---------------------------------------------------------------------------
+
+fn imm8_operand(index: u8, value: u64) -> Operand {
+    Operand {
+        index,
+        width_bits: 8,
+        access: AccessKind::Read,
+        visibility: OperandVisibility::Explicit,
+        kind: OperandKind::Immediate(angryier_arch::ImmediateOperand { value, signed: false }),
+    }
+}
+
+#[test]
+fn psllw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // 8x16-bit: [1,2,3,...,8] << 2 = [4,8,12,...,32]
+    let mut left = Vec::new();
+    for v in [1u16, 2, 3, 4, 5, 6, 7, 8] {
+        left.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+
+    let decoded = make_decoded(
+        forms::PSLLW_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 2),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [4u16, 8, 12, 16, 20, 24, 28, 32];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psrlw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // 8x16-bit: [256,512,...,2048] >> 2 = [64,128,...,512]
+    let mut left = Vec::new();
+    for v in [256u16, 512, 768, 1024, 1280, 1536, 1792, 2048] {
+        left.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+
+    let decoded = make_decoded(
+        forms::PSRLW_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 2),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [64u16, 128, 192, 256, 320, 384, 448, 512];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psraw_xmm_imm8_preserves_sign() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // 8x16-bit: [0xFF00, 0x8000, 0x4000, ...] >> 4 — sign-extended for negative values
+    let mut left = Vec::new();
+    for v in [0xFF00u16, 0x8000, 0x4000, 0x0001, 0xFFE0, 0x8001, 0x7FFF, 0x0000] {
+        left.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+
+    let decoded = make_decoded(
+        forms::PSRAW_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 4),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    // 0xFF00 >> 4 (arithmetic) = 0xFFF0
+    // 0x8000 >> 4 (arithmetic) = 0xF800
+    // 0x4000 >> 4 (arithmetic) = 0x0400
+    // 0x0001 >> 4 = 0x0000
+    // 0xFFE0 >> 4 (arithmetic) = 0xFFFE
+    // 0x8001 >> 4 (arithmetic) = 0xF800
+    // 0x7FFF >> 4 = 0x07FF
+    // 0x0000 >> 4 = 0x0000
+    let expected = [0xFFF0u16, 0xF800, 0x0400, 0x0000, 0xFFFE, 0xF800, 0x07FF, 0x0000];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#06x}, expected {exp:#06x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pslld_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // 4x32-bit: [1,2,3,4] << 3 = [8,16,24,32]
+    let mut left = Vec::new();
+    for v in [1u32, 2, 3, 4] {
+        left.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+
+    let decoded = make_decoded(
+        forms::PSLLD_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 3),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [8u32, 16, 24, 32];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = u32::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psrlq_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // 2x64-bit: [0x100, 0x200] >> 4 = [0x10, 0x20]
+    let mut left = Vec::new();
+    for v in [0x100u64, 0x200] {
+        left.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+
+    let decoded = make_decoded(
+        forms::PSRLQ_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 4),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [0x10u64, 0x20];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = u64::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}");
+    }
+    Ok(())
+}

@@ -69,6 +69,9 @@ pub enum IrPrimitive {
     VecLaneFSub,
     VecLaneFMul,
     VecLaneFDiv,
+    VecLaneShl,
+    VecLaneLShr,
+    VecLaneAShr,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

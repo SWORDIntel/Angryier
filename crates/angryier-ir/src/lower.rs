@@ -432,6 +432,9 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                 PrimitiveOp::And => IrPrimitive::VecLaneAnd,
                 PrimitiveOp::Or => IrPrimitive::VecLaneOr,
                 PrimitiveOp::Xor => IrPrimitive::VecLaneXor,
+                PrimitiveOp::ShiftLeft => IrPrimitive::VecLaneShl,
+                PrimitiveOp::LogicalShiftRight => IrPrimitive::VecLaneLShr,
+                PrimitiveOp::ArithmeticShiftRight => IrPrimitive::VecLaneAShr,
                 _ => {
                     return Err(IrLoweringError::UnsupportedValue(
                         "unsupported lane-wise primitive",

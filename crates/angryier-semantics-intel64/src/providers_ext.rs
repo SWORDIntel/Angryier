@@ -11,6 +11,7 @@
 //! supported by the IR lowerer and concrete interpreter, so they work
 //! end-to-end through the full pipeline.
 
+use angryier_arch::OperandKind;
 use crate::{forms, rflags, rule_id};
 use angryier_arch_intel64::register_id;
 use angryier_semantics::{
@@ -44,6 +45,23 @@ fn const_u64(out: &mut dyn SemanticBuilder, value: u64) -> Result<ValueId, Seman
 
 fn const_u32(out: &mut dyn SemanticBuilder, value: u32) -> Result<ValueId, SemanticError> {
     out.constant(U32, &value.to_le_bytes())
+}
+
+/// Creates a vector constant with a uniform lane value.
+/// `lane_bytes` is the byte width of each lane; `lanes` is the lane count.
+fn vec_const_uniform(
+    out: &mut dyn SemanticBuilder,
+    ty: SemanticType,
+    lane_value: u64,
+    lane_bytes: usize,
+    lanes: usize,
+) -> Result<ValueId, SemanticError> {
+    let lane = lane_value.to_le_bytes();
+    let mut bytes = Vec::with_capacity(lane_bytes * lanes);
+    for _ in 0..lanes {
+        bytes.extend_from_slice(&lane[..lane_bytes]);
+    }
+    out.constant(ty, &bytes)
 }
 
 fn fall_through(out: &mut dyn SemanticBuilder, insn: &dyn DecodedInstructionView) -> Result<(), SemanticError> {
@@ -2096,3 +2114,44 @@ impl SemanticProvider for PxorXmmXmm {
         Ok(receipt(0xDF, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed shift providers (imm8)
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_shift_imm8 {
+    ($name:ident, $form:expr, $op:expr, $ty:expr, $lane_bytes:expr, $lanes:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, $ty)?;
+                // Extract the immediate shift count from the decoded instruction
+                let count = insn.operand(1)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                let count_vec = vec_const_uniform(out, $ty, count, $lane_bytes, $lanes)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $ty, &[dst, count_vec])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_shift_imm8!(PsllwXmmImm8, forms::PSLLW_XMM_IMM8, PrimitiveOp::ShiftLeft, I16X8, 2, 8, 0xE0);
+packed_shift_imm8!(PsrlwXmmImm8, forms::PSRLW_XMM_IMM8, PrimitiveOp::LogicalShiftRight, I16X8, 2, 8, 0xE1);
+packed_shift_imm8!(PsrawXmmImm8, forms::PSRAW_XMM_IMM8, PrimitiveOp::ArithmeticShiftRight, I16X8, 2, 8, 0xE2);
+packed_shift_imm8!(PslldXmmImm8, forms::PSLLD_XMM_IMM8, PrimitiveOp::ShiftLeft, I32X4, 4, 4, 0xE3);
+packed_shift_imm8!(PsrldXmmImm8, forms::PSRLD_XMM_IMM8, PrimitiveOp::LogicalShiftRight, I32X4, 4, 4, 0xE4);
+packed_shift_imm8!(PsradXmmImm8, forms::PSRAD_XMM_IMM8, PrimitiveOp::ArithmeticShiftRight, I32X4, 4, 4, 0xE5);
+packed_shift_imm8!(PsllqXmmImm8, forms::PSLLQ_XMM_IMM8, PrimitiveOp::ShiftLeft, I64X2, 8, 2, 0xE6);
+packed_shift_imm8!(PsrlqXmmImm8, forms::PSRLQ_XMM_IMM8, PrimitiveOp::LogicalShiftRight, I64X2, 8, 2, 0xE7);
