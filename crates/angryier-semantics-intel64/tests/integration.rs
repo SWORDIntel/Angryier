@@ -2920,3 +2920,318 @@ fn mulpd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     assert!((r1 - 10.0).abs() < f64::EPSILON, "lane 1: 2.5*4.0=10.0, got {r1}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed integer integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn paddb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 16x8-bit: [1,2,3,...,16] + [10,10,...,10] = [11,12,13,...,26]
+    let left: [u8; 16] = core::array::from_fn(|i| (i + 1) as u8);
+    let right: [u8; 16] = [10; 16];
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PADDB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, &byte) in bytes.iter().enumerate() {
+        let expected = ((i + 1) + 10) as u8;
+        assert_eq!(byte, expected, "lane {i}: {} + 10 = {}, got {}", i + 1, expected, byte);
+    }
+    Ok(())
+}
+
+#[test]
+fn psubb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let left: [u8; 16] = core::array::from_fn(|i| (i + 20) as u8);
+    let right: [u8; 16] = core::array::from_fn(|i| (i + 1) as u8);
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PSUBB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, &byte) in bytes.iter().enumerate() {
+        let expected = ((i + 20) - (i + 1)) as u8;
+        assert_eq!(byte, expected, "lane {i}: {} - {} = {}, got {}", i + 20, i + 1, expected, byte);
+    }
+    Ok(())
+}
+
+#[test]
+fn paddw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 8x16-bit: [100,200,...,800] + [1000,1000,...,1000] = [1100,1200,...,1800]
+    let mut left = Vec::new();
+    for i in 0..8u16 {
+        left.extend_from_slice(&((i + 1) * 100).to_le_bytes());
+    }
+    let mut right = Vec::new();
+    for _ in 0..8 {
+        right.extend_from_slice(&1000u16.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PADDW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for i in 0..8 {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        let expected = ((i as u16 + 1) * 100) + 1000;
+        assert_eq!(result, expected, "lane {i}: {} + 1000 = {}, got {}", (i + 1) * 100, expected, result);
+    }
+    Ok(())
+}
+
+#[test]
+fn pmullw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 8x16-bit: [1,2,3,...,8] * [2,2,...,2] = [2,4,6,...,16]
+    let mut left = Vec::new();
+    for i in 0..8u16 {
+        left.extend_from_slice(&(i + 1).to_le_bytes());
+    }
+    let mut right = Vec::new();
+    for _ in 0..8 {
+        right.extend_from_slice(&2u16.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PMULLW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for i in 0..8 {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        let expected = (i as u16 + 1) * 2;
+        assert_eq!(result, expected, "lane {i}: {} * 2 = {}, got {}", i + 1, expected, result);
+    }
+    Ok(())
+}
+
+#[test]
+fn paddd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 4x32-bit: [1,2,3,4] + [100,200,300,400] = [101,202,303,404]
+    let mut left = Vec::new();
+    for v in [1u32, 2, 3, 4] {
+        left.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut right = Vec::new();
+    for v in [100u32, 200, 300, 400] {
+        right.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PADDD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [101u32, 202, 303, 404];
+    for i in 0..4 {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = u32::from_le_bytes(buf);
+        assert_eq!(result, expected[i], "lane {i}: got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psubd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 4x32-bit: [1000,2000,3000,4000] - [100,200,300,400] = [900,1800,2700,3600]
+    let mut left = Vec::new();
+    for v in [1000u32, 2000, 3000, 4000] {
+        left.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut right = Vec::new();
+    for v in [100u32, 200, 300, 400] {
+        right.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PSUBD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [900u32, 1800, 2700, 3600];
+    for i in 0..4 {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = u32::from_le_bytes(buf);
+        assert_eq!(result, expected[i], "lane {i}: got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn paddq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 2x64-bit: [100, 200] + [1000, 2000] = [1100, 2200]
+    let mut left = Vec::new();
+    for v in [100u64, 200] {
+        left.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut right = Vec::new();
+    for v in [1000u64, 2000] {
+        right.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PADDQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [1100u64, 2200];
+    for i in 0..2 {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = u64::from_le_bytes(buf);
+        assert_eq!(result, expected[i], "lane {i}: got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pand_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 0xFF00 & 0xF0F0 = 0xF000
+    let left: [u8; 16] = [0xFF; 16];
+    let right: [u8; 16] = [0xF0; 16];
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PAND_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, &byte) in bytes.iter().enumerate() {
+        assert_eq!(byte, 0xF0, "lane {i}: 0xFF & 0xF0 = 0xF0, got {:#x}", byte);
+    }
+    Ok(())
+}
+
+#[test]
+fn por_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 0x0F | 0xF0 = 0xFF
+    let left: [u8; 16] = [0x0F; 16];
+    let right: [u8; 16] = [0xF0; 16];
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::POR_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, &byte) in bytes.iter().enumerate() {
+        assert_eq!(byte, 0xFF, "lane {i}: 0x0F | 0xF0 = 0xFF, got {:#x}", byte);
+    }
+    Ok(())
+}
+
+#[test]
+fn pxor_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 0xFF ^ 0x0F = 0xF0
+    let left: [u8; 16] = [0xFF; 16];
+    let right: [u8; 16] = [0x0F; 16];
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PXOR_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, &byte) in bytes.iter().enumerate() {
+        assert_eq!(byte, 0xF0, "lane {i}: 0xFF ^ 0x0F = 0xF0, got {:#x}", byte);
+    }
+    Ok(())
+}

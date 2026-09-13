@@ -330,6 +330,29 @@ pub mod forms {
     pub const SUBPD_XMM_XMM: u32 = 0x00D0;
     pub const MULPD_XMM_XMM: u32 = 0x00D1;
     pub const DIVPD_XMM_XMM: u32 = 0x00D2;
+
+    // SSE2 packed integer byte (xmm, xmm) — 16x8 lanes
+    pub const PADDB_XMM_XMM: u32 = 0x00D3;
+    pub const PSUBB_XMM_XMM: u32 = 0x00D4;
+
+    // SSE2 packed integer word (xmm, xmm) — 8x16 lanes
+    pub const PADDW_XMM_XMM: u32 = 0x00D5;
+    pub const PSUBW_XMM_XMM: u32 = 0x00D6;
+    pub const PMULLW_XMM_XMM: u32 = 0x00D7;
+
+    // SSE2 packed integer dword (xmm, xmm) — 4x32 lanes
+    pub const PADDD_XMM_XMM: u32 = 0x00D8;
+    pub const PSUBD_XMM_XMM: u32 = 0x00D9;
+    pub const PMULLD_XMM_XMM: u32 = 0x00DA;
+
+    // SSE2 packed integer qword (xmm, xmm) — 2x64 lanes
+    pub const PADDQ_XMM_XMM: u32 = 0x00DB;
+    pub const PSUBQ_XMM_XMM: u32 = 0x00DC;
+
+    // SSE2 packed logical (xmm, xmm) — full 128-bit
+    pub const PAND_XMM_XMM: u32 = 0x00DD;
+    pub const POR_XMM_XMM: u32 = 0x00DE;
+    pub const PXOR_XMM_XMM: u32 = 0x00DF;
 }
 
 /// RFLAGS bit positions used by the corpus.

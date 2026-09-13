@@ -29,6 +29,10 @@ const F32: SemanticType = SemanticType::Scalar(ScalarType::Float(FloatFormat::F3
 const F64: SemanticType = SemanticType::Scalar(ScalarType::Float(FloatFormat::F64));
 const F32X4: SemanticType = SemanticType::Vector { lanes: 4, lane: ScalarType::Float(FloatFormat::F32) };
 const F64X2: SemanticType = SemanticType::Vector { lanes: 2, lane: ScalarType::Float(FloatFormat::F64) };
+const I8X16: SemanticType = SemanticType::Vector { lanes: 16, lane: ScalarType::BitVec(8) };
+const I16X8: SemanticType = SemanticType::Vector { lanes: 8, lane: ScalarType::BitVec(16) };
+const I32X4: SemanticType = SemanticType::Vector { lanes: 4, lane: ScalarType::BitVec(32) };
+const I64X2: SemanticType = SemanticType::Vector { lanes: 2, lane: ScalarType::BitVec(64) };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1852,5 +1856,243 @@ impl SemanticProvider for DivpdXmmXmm {
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(0xD2, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed integer providers
+// ---------------------------------------------------------------------------
+
+/// PADDB xmm, xmm: packed byte add (16x8 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PaddbXmmXmm;
+
+impl SemanticProvider for PaddbXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD3) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PADDB_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Add)), I8X16, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD3, context))
+    }
+}
+
+/// PSUBB xmm, xmm: packed byte subtract (16x8 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PsubbXmmXmm;
+
+impl SemanticProvider for PsubbXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD4) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSUBB_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Sub)), I8X16, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD4, context))
+    }
+}
+
+/// PADDW xmm, xmm: packed word add (8x16 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PaddwXmmXmm;
+
+impl SemanticProvider for PaddwXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD5) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PADDW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let src = out.read_operand(1, I16X8)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Add)), I16X8, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD5, context))
+    }
+}
+
+/// PSUBW xmm, xmm: packed word subtract (8x16 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PsubwXmmXmm;
+
+impl SemanticProvider for PsubwXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD6) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSUBW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let src = out.read_operand(1, I16X8)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Sub)), I16X8, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD6, context))
+    }
+}
+
+/// PMULLW xmm, xmm: packed word multiply low (8x16 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PmullwXmmXmm;
+
+impl SemanticProvider for PmullwXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD7) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PMULLW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let src = out.read_operand(1, I16X8)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Mul)), I16X8, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD7, context))
+    }
+}
+
+/// PADDD xmm, xmm: packed dword add (4x32 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PadddXmmXmm;
+
+impl SemanticProvider for PadddXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD8) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PADDD_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I32X4)?;
+        let src = out.read_operand(1, I32X4)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Add)), I32X4, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD8, context))
+    }
+}
+
+/// PSUBD xmm, xmm: packed dword subtract (4x32 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PsubdXmmXmm;
+
+impl SemanticProvider for PsubdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xD9) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSUBD_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I32X4)?;
+        let src = out.read_operand(1, I32X4)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Sub)), I32X4, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xD9, context))
+    }
+}
+
+/// PMULLD xmm, xmm: packed dword multiply low (4x32 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PmulldXmmXmm;
+
+impl SemanticProvider for PmulldXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xDA) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PMULLD_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I32X4)?;
+        let src = out.read_operand(1, I32X4)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Mul)), I32X4, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xDA, context))
+    }
+}
+
+/// PADDQ xmm, xmm: packed qword add (2x64 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PaddqXmmXmm;
+
+impl SemanticProvider for PaddqXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xDB) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PADDQ_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I64X2)?;
+        let src = out.read_operand(1, I64X2)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Add)), I64X2, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xDB, context))
+    }
+}
+
+/// PSUBQ xmm, xmm: packed qword subtract (2x64 lanes, wrapping).
+#[derive(Clone, Copy, Debug)]
+pub struct PsubqXmmXmm;
+
+impl SemanticProvider for PsubqXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xDC) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSUBQ_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I64X2)?;
+        let src = out.read_operand(1, I64X2)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Sub)), I64X2, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xDC, context))
+    }
+}
+
+/// PAND xmm, xmm: packed bitwise AND (full 128-bit).
+#[derive(Clone, Copy, Debug)]
+pub struct PandXmmXmm;
+
+impl SemanticProvider for PandXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xDD) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PAND_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::And)), I8X16, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xDD, context))
+    }
+}
+
+/// POR xmm, xmm: packed bitwise OR (full 128-bit).
+#[derive(Clone, Copy, Debug)]
+pub struct PorXmmXmm;
+
+impl SemanticProvider for PorXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xDE) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::POR_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Or)), I8X16, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xDE, context))
+    }
+}
+
+/// PXOR xmm, xmm: packed bitwise XOR (full 128-bit).
+#[derive(Clone, Copy, Debug)]
+pub struct PxorXmmXmm;
+
+impl SemanticProvider for PxorXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xDF) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PXOR_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)), I8X16, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xDF, context))
     }
 }
