@@ -995,6 +995,37 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecSad8 => {
+            require_arity(operation, &resolved, 2)?;
+            // PSADBW: 16x8-bit unsigned → 2x64-bit (128-bit mode)
+            // For each 8-byte block, compute sum of absolute byte differences.
+            //   result[0] = sum(|left[i] - right[i]| for i in 0..8)
+            //   result[1] = sum(|left[i] - right[i]| for i in 8..16)
+            let (width_bits, out_lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if out_lane_bits != 64 || width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let out_mask = bit_mask(out_lane_bits as u16);
+            let left = as_u128(resolved[0]);
+            let right = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for block in 0..2 {
+                let mut sum: u128 = 0;
+                for i in 0..8 {
+                    let byte_idx = block * 8 + i;
+                    let l = ((left >> (byte_idx * 8)) & 0xFF) as u8;
+                    let r = ((right >> (byte_idx * 8)) & 0xFF) as u8;
+                    let diff = (l as i16 - r as i16).unsigned_abs() as u128;
+                    sum = sum.wrapping_add(diff);
+                }
+                let lane = sum & out_mask;
+                result |= lane << (block * out_lane_bits);
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

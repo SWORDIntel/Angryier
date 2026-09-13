@@ -415,6 +415,9 @@ pub mod forms {
 
     // SSE2 packed multiply and add (xmm, xmm) — 8x16→4x32
     pub const PMADDWD_XMM_XMM: u32 = 0x0109;
+
+    // SSE2 packed sum of absolute differences (xmm, xmm) — 16x8→2x64
+    pub const PSADBW_XMM_XMM: u32 = 0x010A;
 }
 
 /// RFLAGS bit positions used by the corpus.

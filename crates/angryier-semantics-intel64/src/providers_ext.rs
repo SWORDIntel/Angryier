@@ -2435,3 +2435,29 @@ impl SemanticProvider for PmaddwdXmmXmm {
         Ok(receipt(0x109, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed sum of absolute differences provider
+// ---------------------------------------------------------------------------
+
+/// PSADBW xmm, xmm: packed sum of absolute differences.
+/// Computes the sum of absolute differences of 8-byte blocks:
+///   result[0] = sum(|left[i] - right[i]| for i in 0..8)
+///   result[1] = sum(|left[i] - right[i]| for i in 8..16)
+/// Produces 2x64-bit results from 16x8-bit unsigned inputs.
+#[derive(Clone, Copy, Debug)]
+pub struct PsadbwXmmXmm;
+
+impl SemanticProvider for PsadbwXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x10A) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSADBW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Sad8), I64X2, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x10A, context))
+    }
+}

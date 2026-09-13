@@ -4189,3 +4189,46 @@ fn pmaddwd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed sum of absolute differences integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn psadbw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSADBW: 16x8-bit unsigned → 2x64-bit
+    //   result[0] = sum(|left[i] - right[i]| for i in 0..8)
+    //   result[1] = sum(|left[i] - right[i]| for i in 8..16)
+    // left  = [10, 20, 30, 40, 50, 60, 70, 80, 100, 200, 0, 0, 0, 0, 0, 0]
+    // right = [5, 10, 15, 20, 25, 30, 35, 40, 50, 100, 0, 0, 0, 0, 0, 0]
+    // block 0: |10-5|+|20-10|+|30-15|+|40-20|+|50-25|+|60-30|+|70-35|+|80-40|
+    //        = 5+10+15+20+25+30+35+40 = 180
+    // block 1: |100-50|+|200-100|+0+0+0+0+0+0 = 50+100 = 150
+    let left: [u8; 16] = [10, 20, 30, 40, 50, 60, 70, 80, 100, 200, 0, 0, 0, 0, 0, 0];
+    let right: [u8; 16] = [5, 10, 15, 20, 25, 30, 35, 40, 50, 100, 0, 0, 0, 0, 0, 0];
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PSADBW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    // Block 0 (low 64 bits): 180
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&bytes[0..8]);
+    let result0 = u64::from_le_bytes(buf);
+    assert_eq!(result0, 180, "block 0: got {result0}, expected 180");
+    // Block 1 (high 64 bits): 150
+    buf.copy_from_slice(&bytes[8..16]);
+    let result1 = u64::from_le_bytes(buf);
+    assert_eq!(result1, 150, "block 1: got {result1}, expected 150");
+    Ok(())
+}
