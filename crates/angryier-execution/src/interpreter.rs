@@ -913,6 +913,50 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecPackSaturateU => {
+            require_arity(operation, &resolved, 2)?;
+            let (width_bits, out_lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if out_lane_bits == 0 || width_bits == 0 || width_bits % out_lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            // Source lane width is 2x output lane width (PACKUSWB: 16→8, PACKUSDW: 32→16)
+            let src_lane_bits = out_lane_bits * 2;
+            let out_lanes = width_bits / out_lane_bits;
+            let src_lanes_per_operand = out_lanes / 2;
+            let src_mask = bit_mask(src_lane_bits as u16);
+            let out_mask = bit_mask(out_lane_bits as u16);
+            // Unsigned saturation limits for output lane
+            let sat_max = (1i128 << out_lane_bits) - 1;
+            let sat_min = 0i128;
+            let left = as_u128(resolved[0]);
+            let right = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for i in 0..src_lanes_per_operand {
+                // First source → first half of output
+                let l_raw = (left >> (i * src_lane_bits)) & src_mask;
+                let l_sign_bit = 1u128 << (src_lane_bits - 1);
+                let l_signed = if l_raw & l_sign_bit != 0 {
+                    (l_raw | (!src_mask)) as i128
+                } else {
+                    l_raw as i128
+                };
+                let l_saturated = l_signed.clamp(sat_min, sat_max) as u128 & out_mask;
+                result |= l_saturated << (i * out_lane_bits);
+                // Second source → second half of output
+                let r_raw = (right >> (i * src_lane_bits)) & src_mask;
+                let r_signed = if r_raw & l_sign_bit != 0 {
+                    (r_raw | (!src_mask)) as i128
+                } else {
+                    r_raw as i128
+                };
+                let r_saturated = r_signed.clamp(sat_min, sat_max) as u128 & out_mask;
+                result |= r_saturated << ((src_lanes_per_operand + i) * out_lane_bits);
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

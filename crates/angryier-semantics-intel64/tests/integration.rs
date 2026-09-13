@@ -4070,3 +4070,77 @@ fn packssdw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2/SSE4 packed unsigned saturate integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn packuswb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PACKUSWB: 8x16-bit signed → 16x8-bit unsigned, saturate to [0, 255]
+    // dst = [100, 200, -100, 300, 50, -50, 0, 255]
+    // src = [256, -1, 128, -200, 0, 1, 100, 200]
+    // Expected: [100, 200, 0, 255, 50, 0, 0, 255, 255, 0, 128, 0, 0, 1, 100, 200]
+    let left: [i16; 8] = [100, 200, -100, 300, 50, -50, 0, 255];
+    let right: [i16; 8] = [256, -1, 128, -200, 0, 1, 100, 200];
+    let mut left_bytes = Vec::new();
+    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut right_bytes = Vec::new();
+    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &left_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &right_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PACKUSWB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u8; 16] = [
+        100, 200, 0, 255, 50, 0, 0, 255,
+        255, 0, 128, 0, 0, 1, 100, 200,
+    ];
+    for (i, &exp) in expected.iter().enumerate() {
+        assert_eq!(bytes[i], exp, "lane {i}: got {:#x}, expected {exp:#x}", bytes[i]);
+    }
+    Ok(())
+}
+
+#[test]
+fn packusdw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PACKUSDW: 4x32-bit signed → 8x16-bit unsigned, saturate to [0, 65535]
+    // dst = [100, 70000, -100, -1]
+    // src = [65535, 65536, 0, -1000]
+    // Expected: [100, 65535, 0, 0, 65535, 65535, 0, 0]
+    let left: [i32; 4] = [100, 70000, -100, -1];
+    let right: [i32; 4] = [65535, 65536, 0, -1000];
+    let initial = with_bytes(&state, XMM0, &cast_i32_bytes(&left))?;
+    let initial = with_bytes(&initial, XMM1, &cast_i32_bytes(&right))?;
+
+    let decoded = make_decoded(
+        forms::PACKUSDW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u16; 8] = [100, 65535, 0, 0, 65535, 65535, 0, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result}, expected {exp}");
+    }
+    Ok(())
+}

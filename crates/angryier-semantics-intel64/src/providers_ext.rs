@@ -2368,3 +2368,45 @@ impl SemanticProvider for PackssdwXmmXmm {
         Ok(receipt(0x106, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2/SSE4 packed unsigned saturate providers
+// ---------------------------------------------------------------------------
+
+/// PACKUSWB xmm, xmm: pack 8x16-bit signed → 16x8-bit unsigned with saturation.
+/// Saturates to [0, 255]. First 8 bytes from dst, second 8 bytes from src.
+#[derive(Clone, Copy, Debug)]
+pub struct PackuswbXmmXmm;
+
+impl SemanticProvider for PackuswbXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x107) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PACKUSWB_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let src = out.read_operand(1, I16X8)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::PackUnsigned), I8X16, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x107, context))
+    }
+}
+
+/// PACKUSDW xmm, xmm: pack 4x32-bit signed → 8x16-bit unsigned with saturation.
+/// Saturates to [0, 65535]. First 4 words from dst, second 4 words from src.
+#[derive(Clone, Copy, Debug)]
+pub struct PackusdwXmmXmm;
+
+impl SemanticProvider for PackusdwXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x108) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PACKUSDW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I32X4)?;
+        let src = out.read_operand(1, I32X4)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::PackUnsigned), I16X8, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x108, context))
+    }
+}

@@ -408,6 +408,10 @@ pub mod forms {
     // SSE2 packed saturate (xmm, xmm) — signed saturation pack
     pub const PACKSSWB_XMM_XMM: u32 = 0x0105;
     pub const PACKSSDW_XMM_XMM: u32 = 0x0106;
+
+    // SSE2/SSE4 packed saturate (xmm, xmm) — unsigned saturation pack
+    pub const PACKUSWB_XMM_XMM: u32 = 0x0107;
+    pub const PACKUSDW_XMM_XMM: u32 = 0x0108;
 }
 
 /// RFLAGS bit positions used by the corpus.
