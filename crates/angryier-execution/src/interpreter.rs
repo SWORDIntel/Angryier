@@ -957,6 +957,44 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecMadd16 => {
+            require_arity(operation, &resolved, 2)?;
+            // PMADDWD: 8x16-bit signed → 4x32-bit signed
+            // For each pair of adjacent 16-bit lanes, multiply and add:
+            //   result[i] = (int16)left[2i] * (int16)right[2i] + (int16)left[2i+1] * (int16)right[2i+1]
+            let (width_bits, out_lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if out_lane_bits == 0 || width_bits == 0 || width_bits % out_lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let src_lane_bits = out_lane_bits / 2;
+            if src_lane_bits != 16 || out_lane_bits != 32 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let out_lanes = width_bits / out_lane_bits;
+            let src_mask = bit_mask(src_lane_bits as u16);
+            let out_mask = bit_mask(out_lane_bits as u16);
+            let left = as_u128(resolved[0]);
+            let right = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for i in 0..out_lanes {
+                let l0 = (left >> ((2 * i) * src_lane_bits)) & src_mask;
+                let l1 = (left >> ((2 * i + 1) * src_lane_bits)) & src_mask;
+                let r0 = (right >> ((2 * i) * src_lane_bits)) & src_mask;
+                let r1 = (right >> ((2 * i + 1) * src_lane_bits)) & src_mask;
+                let sign_bit = 1u128 << (src_lane_bits - 1);
+                let l0s = if l0 & sign_bit != 0 { (l0 | (!src_mask)) as i128 } else { l0 as i128 };
+                let l1s = if l1 & sign_bit != 0 { (l1 | (!src_mask)) as i128 } else { l1 as i128 };
+                let r0s = if r0 & sign_bit != 0 { (r0 | (!src_mask)) as i128 } else { r0 as i128 };
+                let r1s = if r1 & sign_bit != 0 { (r1 | (!src_mask)) as i128 } else { r1 as i128 };
+                let product = l0s.wrapping_mul(r0s).wrapping_add(l1s.wrapping_mul(r1s));
+                let lane = (product as u128) & out_mask;
+                result |= lane << (i * out_lane_bits);
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

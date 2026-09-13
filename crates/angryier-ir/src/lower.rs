@@ -480,6 +480,7 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::UnpackHigh => Ok(IrPrimitive::VecInterleaveHigh),
             VectorOp::Pack => Ok(IrPrimitive::VecPackSaturate),
             VectorOp::PackUnsigned => Ok(IrPrimitive::VecPackSaturateU),
+            VectorOp::Madd16 => Ok(IrPrimitive::VecMadd16),
             _ => Err(IrLoweringError::UnsupportedValue(
                 "non-lane-wise vector operation",
             )),

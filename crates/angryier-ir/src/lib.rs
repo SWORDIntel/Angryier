@@ -85,6 +85,7 @@ pub enum IrPrimitive {
     VecInterleaveHigh,
     VecPackSaturate,
     VecPackSaturateU,
+    VecMadd16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

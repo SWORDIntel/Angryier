@@ -474,6 +474,7 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::Unpack => out.byte(9),
                 VectorOp::UnpackHigh => out.byte(10),
                 VectorOp::PackUnsigned => out.byte(11),
+                VectorOp::Madd16 => out.byte(12),
             }
         }
         SemanticOp::Tile(op) => {

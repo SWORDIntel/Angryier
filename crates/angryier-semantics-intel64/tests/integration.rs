@@ -4144,3 +4144,48 @@ fn packusdw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed multiply and add integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pmaddwd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMADDWD: 8x16-bit signed → 4x32-bit signed
+    //   result[i] = left[2i] * right[2i] + left[2i+1] * right[2i+1]
+    // left  = [1, 2, 3, 4, -1, -2, 100, 200]
+    // right = [10, 20, 30, 40, -10, -20, 1, 2]
+    // result[0] = 1*10 + 2*20 = 10 + 40 = 50
+    // result[1] = 3*30 + 4*40 = 90 + 160 = 250
+    // result[2] = -1*-10 + -2*-20 = 10 + 40 = 50
+    // result[3] = 100*1 + 200*2 = 100 + 400 = 500
+    let left: [i16; 8] = [1, 2, 3, 4, -1, -2, 100, 200];
+    let right: [i16; 8] = [10, 20, 30, 40, -10, -20, 1, 2];
+    let mut left_bytes = Vec::new();
+    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut right_bytes = Vec::new();
+    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &left_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &right_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMADDWD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i32; 4] = [50, 250, 50, 500];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = i32::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result}, expected {exp}");
+    }
+    Ok(())
+}

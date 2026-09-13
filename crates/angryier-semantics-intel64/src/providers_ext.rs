@@ -2410,3 +2410,28 @@ impl SemanticProvider for PackusdwXmmXmm {
         Ok(receipt(0x108, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed multiply and add provider
+// ---------------------------------------------------------------------------
+
+/// PMADDWD xmm, xmm: packed multiply and add.
+/// Multiplies 8x16-bit signed lanes pairwise, then adds adjacent products
+/// to produce 4x32-bit signed results.
+///   result[i] = (int16)dst[2i] * (int16)src[2i] + (int16)dst[2i+1] * (int16)src[2i+1]
+#[derive(Clone, Copy, Debug)]
+pub struct PmaddwdXmmXmm;
+
+impl SemanticProvider for PmaddwdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x109) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PMADDWD_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let src = out.read_operand(1, I16X8)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Madd16), I32X4, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x109, context))
+    }
+}
