@@ -371,6 +371,20 @@ pub mod forms {
     pub const PCMPGTB_XMM_XMM: u32 = 0x00EB;
     pub const PCMPGTW_XMM_XMM: u32 = 0x00EC;
     pub const PCMPGTD_XMM_XMM: u32 = 0x00ED;
+
+    // SSE4 packed integer min/max (xmm, xmm) — lane-wise
+    pub const PMAXSB_XMM_XMM: u32 = 0x00EE;
+    pub const PMAXSW_XMM_XMM: u32 = 0x00EF;
+    pub const PMAXSD_XMM_XMM: u32 = 0x00F0;
+    pub const PMAXUB_XMM_XMM: u32 = 0x00F1;
+    pub const PMAXUW_XMM_XMM: u32 = 0x00F2;
+    pub const PMAXUD_XMM_XMM: u32 = 0x00F3;
+    pub const PMINSB_XMM_XMM: u32 = 0x00F4;
+    pub const PMINSW_XMM_XMM: u32 = 0x00F5;
+    pub const PMINSD_XMM_XMM: u32 = 0x00F6;
+    pub const PMINUB_XMM_XMM: u32 = 0x00F7;
+    pub const PMINUW_XMM_XMM: u32 = 0x00F8;
+    pub const PMINUD_XMM_XMM: u32 = 0x00F9;
 }
 
 /// RFLAGS bit positions used by the corpus.

@@ -2187,3 +2187,45 @@ packed_cmp!(PcmpeqdXmmXmm, forms::PCMPEQD_XMM_XMM, PrimitiveOp::MaskEq, I32X4, 0
 packed_cmp!(PcmpgtbXmmXmm, forms::PCMPGTB_XMM_XMM, PrimitiveOp::MaskSgt, I8X16, 0xEB);
 packed_cmp!(PcmpgtwXmmXmm, forms::PCMPGTW_XMM_XMM, PrimitiveOp::MaskSgt, I16X8, 0xEC);
 packed_cmp!(PcmpgtdXmmXmm, forms::PCMPGTD_XMM_XMM, PrimitiveOp::MaskSgt, I32X4, 0xED);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4 packed min/max providers
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_minmax {
+    ($name:ident, $form:expr, $op:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, $ty)?;
+                let src = out.read_operand(1, $ty)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $ty, &[dst, src])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+// Signed max
+packed_minmax!(PmaxsbXmmXmm, forms::PMAXSB_XMM_XMM, PrimitiveOp::MaxS, I8X16, 0xEE);
+packed_minmax!(PmaxswXmmXmm, forms::PMAXSW_XMM_XMM, PrimitiveOp::MaxS, I16X8, 0xEF);
+packed_minmax!(PmaxsdXmmXmm, forms::PMAXSD_XMM_XMM, PrimitiveOp::MaxS, I32X4, 0xF0);
+// Unsigned max
+packed_minmax!(PmaxubXmmXmm, forms::PMAXUB_XMM_XMM, PrimitiveOp::MaxU, I8X16, 0xF1);
+packed_minmax!(PmaxuwXmmXmm, forms::PMAXUW_XMM_XMM, PrimitiveOp::MaxU, I16X8, 0xF2);
+packed_minmax!(PmaxudXmmXmm, forms::PMAXUD_XMM_XMM, PrimitiveOp::MaxU, I32X4, 0xF3);
+// Signed min
+packed_minmax!(PminsbXmmXmm, forms::PMINSB_XMM_XMM, PrimitiveOp::MinS, I8X16, 0xF4);
+packed_minmax!(PminswXmmXmm, forms::PMINSW_XMM_XMM, PrimitiveOp::MinS, I16X8, 0xF5);
+packed_minmax!(PminsdXmmXmm, forms::PMINSD_XMM_XMM, PrimitiveOp::MinS, I32X4, 0xF6);
+// Unsigned min
+packed_minmax!(PminubXmmXmm, forms::PMINUB_XMM_XMM, PrimitiveOp::MinU, I8X16, 0xF7);
+packed_minmax!(PminuwXmmXmm, forms::PMINUW_XMM_XMM, PrimitiveOp::MinU, I16X8, 0xF8);
+packed_minmax!(PminudXmmXmm, forms::PMINUD_XMM_XMM, PrimitiveOp::MinU, I32X4, 0xF9);

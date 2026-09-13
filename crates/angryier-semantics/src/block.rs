@@ -518,6 +518,10 @@ fn primitive_tag(op: PrimitiveOp) -> u8 {
         PrimitiveOp::CountTrailingZeros => 26,
         PrimitiveOp::MaskEq => 27,
         PrimitiveOp::MaskSgt => 28,
+        PrimitiveOp::MaxU => 29,
+        PrimitiveOp::MinU => 30,
+        PrimitiveOp::MaxS => 31,
+        PrimitiveOp::MinS => 32,
     }
 }
 

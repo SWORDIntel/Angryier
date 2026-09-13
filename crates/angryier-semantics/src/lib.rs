@@ -125,6 +125,10 @@ pub enum PrimitiveOp {
     CountTrailingZeros,
     MaskEq,
     MaskSgt,
+    MaxU,
+    MinU,
+    MaxS,
+    MinS,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

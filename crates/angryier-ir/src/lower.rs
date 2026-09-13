@@ -415,6 +415,11 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                     "mask comparison is only valid in lane-wise vector context",
                 ));
             }
+            PrimitiveOp::MaxU | PrimitiveOp::MinU | PrimitiveOp::MaxS | PrimitiveOp::MinS => {
+                return Err(IrLoweringError::UnsupportedValue(
+                    "min/max is only valid in lane-wise vector context",
+                ));
+            }
         }),
         SemanticOp::Float(op) => Ok(match op {
             FloatingOp::Add => IrPrimitive::FAdd,
@@ -442,6 +447,10 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                 PrimitiveOp::ArithmeticShiftRight => IrPrimitive::VecLaneAShr,
                 PrimitiveOp::MaskEq => IrPrimitive::VecLaneMaskEq,
                 PrimitiveOp::MaskSgt => IrPrimitive::VecLaneMaskSgt,
+                PrimitiveOp::MaxU => IrPrimitive::VecLaneMaxU,
+                PrimitiveOp::MinU => IrPrimitive::VecLaneMinU,
+                PrimitiveOp::MaxS => IrPrimitive::VecLaneMaxS,
+                PrimitiveOp::MinS => IrPrimitive::VecLaneMinS,
                 _ => {
                     return Err(IrLoweringError::UnsupportedValue(
                         "unsupported lane-wise primitive",
