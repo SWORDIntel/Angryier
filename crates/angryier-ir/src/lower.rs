@@ -482,6 +482,7 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::PackUnsigned => Ok(IrPrimitive::VecPackSaturateU),
             VectorOp::Madd16 => Ok(IrPrimitive::VecMadd16),
             VectorOp::Sad8 => Ok(IrPrimitive::VecSad8),
+            VectorOp::Shuffle32 => Ok(IrPrimitive::VecShuffle32),
             _ => Err(IrLoweringError::UnsupportedValue(
                 "non-lane-wise vector operation",
             )),

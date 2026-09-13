@@ -2461,3 +2461,35 @@ impl SemanticProvider for PsadbwXmmXmm {
         Ok(receipt(0x10A, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed shuffle doublewords provider
+// ---------------------------------------------------------------------------
+
+/// PSHUFD xmm, xmm/m128, imm8: shuffle 32-bit doublewords.
+/// Each 2-bit field of imm8 selects which source lane goes to the
+/// corresponding destination lane:
+///   imm8[1:0] → dst[0], imm8[3:2] → dst[1],
+///   imm8[5:4] → dst[2], imm8[7:6] → dst[3]
+#[derive(Clone, Copy, Debug)]
+pub struct PshufdXmmImm8;
+
+impl SemanticProvider for PshufdXmmImm8 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x10B) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSHUFD_XMM_IMM8 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I32X4)?;
+        let imm = insn.operand(1)
+            .and_then(|op| match op.kind {
+                OperandKind::Immediate(imm) => Some(imm.value),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let imm_const = const_u64(out, imm)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Shuffle32), I32X4, &[dst, imm_const])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x10B, context))
+    }
+}

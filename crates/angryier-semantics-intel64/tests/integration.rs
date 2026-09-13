@@ -4232,3 +4232,40 @@ fn psadbw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(result1, 150, "block 1: got {result1}, expected 150");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed shuffle doublewords integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pshufd_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // PSHUFD: 4x32-bit → 4x32-bit, lane shuffle by imm8
+    // src = [0x11111111, 0x22222222, 0x33333333, 0x44444444]
+    // imm8 = 0x1B = 00 01 10 11 → dst[0]=src[3], dst[1]=src[2], dst[2]=src[1], dst[3]=src[0]
+    // Expected: [0x44444444, 0x33333333, 0x22222222, 0x11111111]
+    let src: [u32; 4] = [0x11111111, 0x22222222, 0x33333333, 0x44444444];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSHUFD_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 0x1B),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u32; 4] = [0x44444444, 0x33333333, 0x22222222, 0x11111111];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = u32::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}

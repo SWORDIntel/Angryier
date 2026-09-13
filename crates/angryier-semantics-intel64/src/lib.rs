@@ -418,6 +418,9 @@ pub mod forms {
 
     // SSE2 packed sum of absolute differences (xmm, xmm) — 16x8→2x64
     pub const PSADBW_XMM_XMM: u32 = 0x010A;
+
+    // SSE2 packed shuffle doublewords (xmm, imm8) — 4x32→4x32
+    pub const PSHUFD_XMM_IMM8: u32 = 0x010B;
 }
 
 /// RFLAGS bit positions used by the corpus.

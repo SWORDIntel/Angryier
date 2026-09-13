@@ -160,6 +160,7 @@ pub enum VectorOp {
     PackUnsigned,
     Madd16,
     Sad8,
+    Shuffle32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
