@@ -1,6 +1,6 @@
 # Implementation Plan
 
-> **Status:** Architecture frozen. Phases 0–3 and Phase 5 foundations are implemented. Phase 4 (handwritten semantic corpus) is partially implemented — 187 forms now registered covering integer arithmetic, flags, shifts, comparison, control flow, immediate operands, CL shifts, unary ops, conditional branches, memory load/store, multiply/divide, rotates, stack push/pop, LEA, XCHG/TEST/XADD, partial writes, MOVZX/MOVSX, CMOVcc, BT/BTS/BTR/BTC, flag manipulation (CLC/STC/CMC), SETcc, ADC/SBB, sign extension (CBW/CWDE/CDQE/CWD/CDQ), CMPXCHG, PUSH imm, CALL/RET, additional conditional branches (JLE/JG/JA/JB/JBE/JAE), 32-bit arithmetic, additional CMOVcc/SETcc/branches, BSWAP, 32-bit shifts/rotates, additional memory/immediate forms, 32-bit multiply/divide, NOP variants, HLT/UD2. All 187 forms seal successfully; 64-bit-executable forms verified end-to-end through concrete execution. Phase 6 foundations (replay engine, WAL, provenance store), Phase 7 foundations (taint engine), Phase 9 foundations (knowledge store, QIHSE/KEYSTONE adapters, fusion model, semantic compiler), Phase 10 foundations (work-stealing scheduler, distribution codec), Phase 11 foundations (environment models, telemetry, benchmark sink, plugin registry, image loader, fuzz bridge), Phase 12 foundations (QIHSE/KEYSTONE in-memory adapters), Phase 13 foundations (fuzz bridge), Phase 14 foundations (fusion model), and Phase 16 foundations (work codec) are also partially implemented in-memory. Phase 8 (native solver backends) and Phases 13–16 native integrations remain scaffolded.
+> **Status:** Architecture frozen. Phases 0–3 and Phase 5 foundations are implemented. Phase 4 (handwritten semantic corpus) is partially implemented — 192 forms now registered covering integer arithmetic, flags, shifts, comparison, control flow, immediate operands, CL shifts, unary ops, conditional branches, memory load/store, multiply/divide, rotates, stack push/pop, LEA, XCHG/TEST/XADD, partial writes, MOVZX/MOVSX, CMOVcc, BT/BTS/BTR/BTC, flag manipulation (CLC/STC/CMC), SETcc, ADC/SBB, sign extension (CBW/CWDE/CDQE/CWD/CDQ), CMPXCHG, PUSH imm, CALL/RET, additional conditional branches (JLE/JG/JA/JB/JBE/JAE), 32-bit arithmetic, additional CMOVcc/SETcc/branches, BSWAP, bit-scan/popcount (BSF/BSR/POPCNT/TZCNT/LZCNT), 32-bit shifts/rotates, additional memory/immediate forms, 32-bit multiply/divide, NOP variants, HLT/UD2. Phase 4b IR primitives added: rotate, popcount, bit-scan, float arithmetic (f32/f64), vector lane-wise integer ops. All 192 forms seal successfully; 64-bit-executable forms and bit-scan/popcount verified end-to-end through concrete execution. Phase 6 foundations (replay engine, WAL, provenance store), Phase 7 foundations (taint engine), Phase 9 foundations (knowledge store, QIHSE/KEYSTONE adapters, fusion model, semantic compiler), Phase 10 foundations (work-stealing scheduler, distribution codec), Phase 11 foundations (environment models, telemetry, benchmark sink, plugin registry, image loader, fuzz bridge), Phase 12 foundations (QIHSE/KEYSTONE in-memory adapters), Phase 13 foundations (fuzz bridge), Phase 14 foundations (fusion model), and Phase 16 foundations (work codec) are also partially implemented in-memory. Phase 8 (native solver backends) and Phases 13–16 native integrations remain scaffolded.
 
 `Plan.md` is the operational architectural baseline. This document defines implementation order and validation gates without weakening or reinterpreting any locked architectural decision.
 
@@ -117,7 +117,7 @@ Only sealed blocks may be lowered, cached, persisted, replayed, or used by JIT v
 
 Before building the semantic generator, implement a deliberately small but structurally representative corpus.
 
-Implemented forms (187 total, in `angryier-semantics-intel64`):
+Implemented forms (192 total, in `angryier-semantics-intel64`):
 
 **Original 93 foundational forms:**
 
@@ -144,7 +144,7 @@ Implemented forms (187 total, in `angryier-semantics-intel64`):
 - **Conditional moves (r64):** CMOVA, CMOVB, CMOVBE, CMOVAE, CMOVS, CMOVNS, CMOVC, CMOVNC, CMOVLE, CMOVG
 - **Additional SETcc:** SETA, SETB, SETBE, SETAE, SETS, SETNS, SETC, SETNC, SETLE, SETG
 - **Additional branches:** JO, JNO, JPE, JPO (rel32)
-- **Bit manipulation:** BSWAP r64 (composed from shifts/masks); BSF, BSR, POPCNT, TZCNT, LZCNT (form IDs registered; provider implementation pending Phase 4b IR primitives)
+- **Bit manipulation:** BSWAP r64 (composed from shifts/masks); BSF, BSR, POPCNT, TZCNT, LZCNT (implemented with dedicated IR primitives — CountTrailingZeros, CountLeadingZeros, Popcount)
 - **32-bit shifts/rotates:** SHL/SHR/SAR r32,imm8; SHL/SHR/SAR r32,CL; ROL/ROR r32,imm8
 - **Additional memory forms:** MOV r32,[m32]; MOV [m32],r32; ADD/SUB/CMP r32,[m32]; MOV r8,[m8]; MOV [m8],r8; ADD/SUB/CMP r8,[m8]
 - **Additional immediates:** ADD/SUB/CMP r32,imm8; AND/OR/XOR/TEST r64,imm32; AND/OR/XOR/TEST r32,imm32
@@ -154,27 +154,31 @@ Implemented forms (187 total, in `angryier-semantics-intel64`):
 
 Flag coverage: ZF, SF, CF are computed and written to RFLAGS. PF, AF, OF are cleared but not fully computed (documented simplification for this phase). INC/DEC preserve CF. NEG sets CF = (operand != 0). NOT modifies no flags. TEST clears CF (logical operation).
 
-Each provider emits rich semantic IR through `SemanticBlockBuilder`, seals deterministically, lowers through `BasicSemanticLowerer`, and executes concretely through `ConcreteInterpreter`. The full pipeline is tested end-to-end with 9 unit tests + 96 integration tests.
+Each provider emits rich semantic IR through `SemanticBlockBuilder`, seals deterministically, lowers through `BasicSemanticLowerer`, and executes concretely through `ConcreteInterpreter`. The full pipeline is tested end-to-end with 9 unit tests + 104 integration tests + 17 interpreter unit tests.
 
-**Execution-plane limitation:** The current `BasicSemanticLowerer` only supports full-width (64-bit) register reads and writes. 32-bit and 8-bit forms seal correctly (verified by the `all_providers_seal_successfully` unit test) but cannot execute through the concrete interpreter until the lowerer supports partial-register operations. Integration tests cover all 64-bit-executable new forms (BSWAP, AND/OR/XOR/TEST r64,imm32, CMOVA, SETA/SETB/SETS, JO/JNO, IMUL r64,r64,imm32, MOVQ, NOP3/9).
+**Phase 4b IR primitive extensions:** RotateLeft, RotateRight, Popcount, CountLeadingZeros, CountTrailingZeros added to PrimitiveOp/IrPrimitive. FAdd/FSub/FMul/FDiv/FSqrt/FConvert added to IrPrimitive for float arithmetic (f32/f64 evaluated in interpreter). VecLaneAdd/Sub/Mul/And/Or/Xor added for lane-wise integer vector operations (IrType::Vector now carries lane_bits).
+
+**Execution-plane limitation:** The current `BasicSemanticLowerer` only supports full-width (64-bit) register reads and writes. 32-bit and 8-bit forms seal correctly (verified by the `all_providers_seal_successfully` unit test) but cannot execute through the concrete interpreter until the lowerer supports partial-register operations. Integration tests cover all 64-bit-executable forms including BSWAP, bit-scan/popcount, AND/OR/XOR/TEST r64,imm32, CMOVA, SETA/SETB/SETS, JO/JNO, IMUL r64,r64,imm32, MOVQ, NOP3/9.
 
 Remaining families for full Phase 4 completion:
 
 - partial-register lowering support (32-bit/8-bit execution);
-- BSF, BSR, POPCNT, TZCNT, LZCNT provider implementations (require new IR primitives);
 - rotates with CL (32-bit);
-- scalar floating point;
-- packed integer SIMD;
-- packed floating point SIMD;
+- scalar floating-point semantic providers (IR primitives ready, providers not yet written);
+- packed integer SIMD semantic providers (IR primitives ready for lane-wise ops, providers not yet written);
+- packed floating-point SIMD semantic providers;
 - AVX upper-lane behavior;
 - AVX-512 masking and zero/merge semantics;
 - gather/scatter representative cases;
 - AMX tile configuration and representative tile operation;
-- exception/unsupported behavior (HLT/UD2 trap execution in lowerer).
+- exception/unsupported behavior (HLT/UD2 trap execution in lowerer);
+- float compare IR primitive (currently returns unsupported in lowerer);
+- float16/bfloat16/float80 interpreter support;
+- vector shuffle/permute/broadcast/blend/pack/unpack IR primitives.
 
 The objective is to force the rich IR and execution IR contracts to stabilize before automation amplifies design mistakes.
 
-**Exit gate:** corpus passes differential concrete tests and supports deterministic semantic sealing/lowering. **Partially passed — 187 forms registered, all seal successfully, 64-bit forms verified end-to-end; partial-register lowering and remaining families pending.**
+**Exit gate:** corpus passes differential concrete tests and supports deterministic semantic sealing/lowering. **Partially passed — 192 forms registered, all seal successfully, 64-bit forms and bit-scan/popcount verified end-to-end; float and vector IR primitives implemented and interpreter-tested; partial-register lowering, float/vector semantic providers, and remaining families pending.**
 
 ---
 
