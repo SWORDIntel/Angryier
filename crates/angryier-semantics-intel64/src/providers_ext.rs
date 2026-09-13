@@ -2326,3 +2326,45 @@ packed_unpack!(PunpckhbwXmmXmm, forms::PUNPCKHBW_XMM_XMM, VectorOp::UnpackHigh, 
 packed_unpack!(PunpckhwdXmmXmm, forms::PUNPCKHWD_XMM_XMM, VectorOp::UnpackHigh, I16X8, 0x102);
 packed_unpack!(PunpckhdqXmmXmm, forms::PUNPCKHDQ_XMM_XMM, VectorOp::UnpackHigh, I32X4, 0x103);
 packed_unpack!(PunpckhqdqXmmXmm, forms::PUNPCKHQDQ_XMM_XMM, VectorOp::UnpackHigh, I64X2, 0x104);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed saturate providers
+// ---------------------------------------------------------------------------
+
+/// PACKSSWB xmm, xmm: pack 8x16-bit signed → 16x8-bit signed with saturation.
+/// First 8 bytes from dst (16-bit lanes), second 8 bytes from src (16-bit lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct PacksswbXmmXmm;
+
+impl SemanticProvider for PacksswbXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x105) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PACKSSWB_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let src = out.read_operand(1, I16X8)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Pack), I8X16, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x105, context))
+    }
+}
+
+/// PACKSSDW xmm, xmm: pack 4x32-bit signed → 8x16-bit signed with saturation.
+/// First 4 words from dst (32-bit lanes), second 4 words from src (32-bit lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct PackssdwXmmXmm;
+
+impl SemanticProvider for PackssdwXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x106) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PACKSSDW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I32X4)?;
+        let src = out.read_operand(1, I32X4)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Pack), I16X8, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x106, context))
+    }
+}

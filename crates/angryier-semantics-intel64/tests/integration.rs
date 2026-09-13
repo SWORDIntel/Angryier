@@ -3996,3 +3996,77 @@ fn punpcklqdq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed saturate integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn packsswb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PACKSSWB: 8x16-bit signed → 16x8-bit signed, saturate to [-128, 127]
+    // dst = [100, 200, -100, -200, 50, -50, 0, 127]
+    // src = [128, -129, 255, -256, 0, 1, -1, 100]
+    // Expected: [100, 127, -100, -128, 50, -50, 0, 127, 127, -128, 127, -128, 0, 1, -1, 100]
+    let left: [i16; 8] = [100, 200, -100, -200, 50, -50, 0, 127];
+    let right: [i16; 8] = [128, -129, 255, -256, 0, 1, -1, 100];
+    let mut left_bytes = Vec::new();
+    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut right_bytes = Vec::new();
+    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &left_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &right_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PACKSSWB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i8; 16] = [
+        100, 127, -100, -128, 50, -50, 0, 127,
+        127, -128, 127, -128, 0, 1, -1, 100,
+    ];
+    for (i, &exp) in expected.iter().enumerate() {
+        assert_eq!(bytes[i] as i8, exp, "lane {i}: got {:#x}, expected {exp}", bytes[i]);
+    }
+    Ok(())
+}
+
+#[test]
+fn packssdw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PACKSSDW: 4x32-bit signed → 8x16-bit signed, saturate to [-32768, 32767]
+    // dst = [100, 40000, -100, -40000]
+    // src = [32767, 32768, -32768, -32769]
+    // Expected: [100, 32767, -100, -32768, 32767, 32767, -32768, -32768]
+    let left: [i32; 4] = [100, 40000, -100, -40000];
+    let right: [i32; 4] = [32767, 32768, -32768, -32769];
+    let initial = with_bytes(&state, XMM0, &cast_i32_bytes(&left))?;
+    let initial = with_bytes(&initial, XMM1, &cast_i32_bytes(&right))?;
+
+    let decoded = make_decoded(
+        forms::PACKSSDW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [100, 32767, -100, -32768, 32767, 32767, -32768, -32768];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = i16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result}, expected {exp}");
+    }
+    Ok(())
+}
