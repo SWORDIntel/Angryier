@@ -1,6 +1,6 @@
 # Implementation Plan
 
-> **Status:** Architecture frozen. Phases 0–3 and Phase 5 foundations are implemented. Phase 4 (handwritten semantic corpus) is partially implemented — 249 forms now registered covering integer arithmetic, flags, shifts, comparison, control flow, immediate operands, CL shifts, unary ops, conditional branches, memory load/store, multiply/divide, rotates, stack push/pop, LEA, XCHG/TEST/XADD, partial writes, MOVZX/MOVSX, CMOVcc, BT/BTS/BTR/BTC, flag manipulation (CLC/STC/CMC), SETcc, ADC/SBB, sign extension (CBW/CWDE/CDQE/CWD/CDQ), CMPXCHG, PUSH imm, CALL/RET, additional conditional branches (JLE/JG/JA/JB/JBE/JAE), 32-bit arithmetic, additional CMOVcc/SETcc/branches, BSWAP, bit-scan/popcount (BSF/BSR/POPCNT/TZCNT/LZCNT), 32-bit shifts/rotates, additional memory/immediate forms, 32-bit multiply/divide, NOP variants, HLT/UD2, SSE scalar float (ADDSS/SD, SUBSS/SD, MULSS/SD, DIVSS/SD, SQRTSS/SD), SSE packed float (ADDPS/PD, SUBPS/PD, MULPS/PD, DIVPS/PD), SSE2 packed integer (PADDB/W/D/Q, PSUBB/W/D/Q, PMULLW/D, PAND/POR/PXOR), SSE2 packed shifts (PSLLW/D/Q, PSRLW/D/Q, PSRAW/D with imm8), SSE2 packed compares (PCMPEQB/W/D, PCMPGTB/W/D), SSE4 packed min/max (PMAXSB/W/D, PMAXUB/W/D, PMINSB/W/D, PMINUB/W/D). Phase 4b IR primitives added: rotate, popcount, bit-scan, float arithmetic (f32/f64), vector lane-wise integer, float, shift, mask comparison, and min/max ops. All 249 forms seal successfully; 64-bit-executable forms, bit-scan/popcount, SSE float, SSE2 packed integer, SSE2 packed shifts, SSE2 packed compares, and SSE4 packed min/max verified end-to-end through concrete execution. Phase 6 foundations (replay engine, WAL, provenance store), Phase 7 foundations (taint engine), Phase 9 foundations (knowledge store, QIHSE/KEYSTONE adapters, fusion model, semantic compiler), Phase 10 foundations (work-stealing scheduler, distribution codec), Phase 11 foundations (environment models, telemetry, benchmark sink, plugin registry, image loader, fuzz bridge), Phase 12 foundations (QIHSE/KEYSTONE in-memory adapters), Phase 13 foundations (fuzz bridge), Phase 14 foundations (fusion model), and Phase 16 foundations (work codec) are also partially implemented in-memory. Phase 8 (native solver backends) and Phases 13–16 native integrations remain scaffolded.
+> **Status:** Architecture frozen. Phases 0–3 and Phase 5 foundations are implemented. Phase 4 (handwritten semantic corpus) is partially implemented — 251 forms now registered covering integer arithmetic, flags, shifts, comparison, control flow, immediate operands, CL shifts, unary ops, conditional branches, memory load/store, multiply/divide, rotates, stack push/pop, LEA, XCHG/TEST/XADD, partial writes, MOVZX/MOVSX, CMOVcc, BT/BTS/BTR/BTC, flag manipulation (CLC/STC/CMC), SETcc, ADC/SBB, sign extension (CBW/CWDE/CDQE/CWD/CDQ), CMPXCHG, PUSH imm, CALL/RET, additional conditional branches (JLE/JG/JA/JB/JBE/JAE), 32-bit arithmetic, additional CMOVcc/SETcc/branches, BSWAP, bit-scan/popcount (BSF/BSR/POPCNT/TZCNT/LZCNT), 32-bit shifts/rotates, additional memory/immediate forms, 32-bit multiply/divide, NOP variants, HLT/UD2, SSE scalar float (ADDSS/SD, SUBSS/SD, MULSS/SD, DIVSS/SD, SQRTSS/SD), SSE packed float (ADDPS/PD, SUBPS/PD, MULPS/PD, DIVPS/PD), SSE2 packed integer (PADDB/W/D/Q, PSUBB/W/D/Q, PMULLW/D, PAND/POR/PXOR), SSE2 packed shifts (PSLLW/D/Q, PSRLW/D/Q, PSRAW/D with imm8), SSE2 packed compares (PCMPEQB/W/D, PCMPGTB/W/D), SSE4 packed min/max (PMAXSB/W/D, PMAXUB/W/D, PMINSB/W/D, PMINUB/W/D), SSE2 packed multiply high (PMULHW, PMULHUW). Phase 4b IR primitives added: rotate, popcount, bit-scan, float arithmetic (f32/f64), vector lane-wise integer, float, shift, mask comparison, min/max, and multiply-high ops. All 251 forms seal successfully; 64-bit-executable forms, bit-scan/popcount, SSE float, SSE2 packed integer, SSE2 packed shifts, SSE2 packed compares, SSE4 packed min/max, and SSE2 packed multiply high verified end-to-end through concrete execution. Phase 6 foundations (replay engine, WAL, provenance store), Phase 7 foundations (taint engine), Phase 9 foundations (knowledge store, QIHSE/KEYSTONE adapters, fusion model, semantic compiler), Phase 10 foundations (work-stealing scheduler, distribution codec), Phase 11 foundations (environment models, telemetry, benchmark sink, plugin registry, image loader, fuzz bridge), Phase 12 foundations (QIHSE/KEYSTONE in-memory adapters), Phase 13 foundations (fuzz bridge), Phase 14 foundations (fusion model), and Phase 16 foundations (work codec) are also partially implemented in-memory. Phase 8 (native solver backends) and Phases 13–16 native integrations remain scaffolded.
 
 `Plan.md` is the operational architectural baseline. This document defines implementation order and validation gates without weakening or reinterpreting any locked architectural decision.
 
@@ -117,7 +117,7 @@ Only sealed blocks may be lowered, cached, persisted, replayed, or used by JIT v
 
 Before building the semantic generator, implement a deliberately small but structurally representative corpus.
 
-Implemented forms (249 total, in `angryier-semantics-intel64`):
+Implemented forms (251 total, in `angryier-semantics-intel64`):
 
 **Original 93 foundational forms:**
 
@@ -154,9 +154,9 @@ Implemented forms (249 total, in `angryier-semantics-intel64`):
 
 Flag coverage: ZF, SF, CF are computed and written to RFLAGS. PF, AF, OF are cleared but not fully computed (documented simplification for this phase). INC/DEC preserve CF. NEG sets CF = (operand != 0). NOT modifies no flags. TEST clears CF (logical operation).
 
-Each provider emits rich semantic IR through `SemanticBlockBuilder`, seals deterministically, lowers through `BasicSemanticLowerer`, and executes concretely through `ConcreteInterpreter`. The full pipeline is tested end-to-end with 9 unit tests + 136 integration tests + 17 interpreter unit tests.
+Each provider emits rich semantic IR through `SemanticBlockBuilder`, seals deterministically, lowers through `BasicSemanticLowerer`, and executes concretely through `ConcreteInterpreter`. The full pipeline is tested end-to-end with 9 unit tests + 138 integration tests + 17 interpreter unit tests.
 
-**Phase 4b expansion (57 new SSE/SSE2/SSE4 forms + IR primitive extensions):**
+**Phase 4b expansion (59 new SSE/SSE2/SSE4 forms + IR primitive extensions):**
 
 - **Scalar single-precision (xmm, xmm):** ADDSS, SUBSS, MULSS, DIVSS, SQRTSS — simplified to treat XMM as scalar f32 (upper lanes not modeled)
 - **Scalar double-precision (xmm, xmm):** ADDSD, SUBSD, MULSD, DIVSD, SQRTSD — simplified to treat XMM as scalar f64
@@ -170,6 +170,7 @@ Each provider emits rich semantic IR through `SemanticBlockBuilder`, seals deter
 - **Packed shifts (xmm, imm8):** PSLLW/PSRLW/PSRAW, PSLLD/PSRLD/PSRAD, PSLLQ/PSRLQ — uniform count per lane
 - **Packed compares (xmm, xmm):** PCMPEQB/W/D (equality mask), PCMPGTB/W/D (signed greater-than mask)
 - **Packed min/max (xmm, xmm):** PMAXSB/W/D, PMAXUB/W/D, PMINSB/W/D, PMINUB/W/D — signed and unsigned lane-wise min/max
+- **Packed multiply high (xmm, xmm):** PMULHW (signed), PMULHUW (unsigned) — high 16 bits of 32-bit product, 8x16 lanes
 
 **Phase 4b IR primitive extensions:** RotateLeft, RotateRight, Popcount, CountLeadingZeros, CountTrailingZeros added to PrimitiveOp/IrPrimitive. FAdd/FSub/FMul/FDiv/FSqrt/FConvert added to IrPrimitive for float arithmetic (f32/f64 evaluated in interpreter). VecLaneAdd/Sub/Mul/And/Or/Xor and VecLaneFAdd/FSub/FMul/FDiv added for lane-wise integer and float vector operations (IrType::Vector now carries lane_bits).
 
@@ -189,12 +190,12 @@ Remaining families for full Phase 4 completion:
 - float16/bfloat16/float80 interpreter support;
 - vector shuffle/permute/broadcast/blend/pack/unpack IR primitives;
 - SSE/AVX memory operand forms (currently register-to-register only);
-- additional packed integer ops (PMULHW, PUNPCK, PACKSS);
+- additional packed integer ops (PUNPCK, PACKSS, PSHUFB);
 - packed shift with register count (PSLLW xmm,xmm etc.).
 
 The objective is to force the rich IR and execution IR contracts to stabilize before automation amplifies design mistakes.
 
-**Exit gate:** corpus passes differential concrete tests and supports deterministic semantic sealing/lowering. **Partially passed — 249 forms registered, all seal successfully, 64-bit forms, bit-scan/popcount, SSE float, SSE2 packed integer, SSE2 packed shifts, SSE2 packed compares, and SSE4 packed min/max verified end-to-end; partial-register lowering, upper-lane preservation, and remaining families pending.**
+**Exit gate:** corpus passes differential concrete tests and supports deterministic semantic sealing/lowering. **Partially passed — 251 forms registered, all seal successfully, 64-bit forms, bit-scan/popcount, SSE float, SSE2 packed integer, SSE2 packed shifts, SSE2 packed compares, SSE4 packed min/max, and SSE2 packed multiply high verified end-to-end; partial-register lowering, upper-lane preservation, and remaining families pending.**
 
 ---
 
