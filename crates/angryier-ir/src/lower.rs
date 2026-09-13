@@ -6,7 +6,7 @@ use angryier_semantic_contracts::SealedSemanticBlock;
 use angryier_semantics::{
     BlockValidityKey, DecodedInstructionView, FloatFormat, FloatingOp, OperandKind, PrimitiveOp,
     RegisterWriteBehavior, SealedRichSemanticBlock, SemanticEffectDefinition, SemanticLowerer,
-    SemanticOp, SemanticType, SemanticValue, SemanticValueDefinition, ValueId,
+    SemanticOp, SemanticType, SemanticValue, SemanticValueDefinition, ValueId, VectorOp,
 };
 use angryier_types::{Address, ContentId};
 use std::collections::{BTreeMap, HashMap};
@@ -359,7 +359,7 @@ fn lower_type(ty: SemanticType) -> Result<IrType, IrLoweringError> {
                 .checked_mul(u32::from(lanes))
                 .and_then(|bits| u16::try_from(bits).ok())
                 .ok_or(IrLoweringError::UnsupportedValue("oversized vector type"))?;
-            IrType::Vector { width_bits: width }
+            IrType::Vector { width_bits: width, lane_bits: u16::try_from(lane_bits).unwrap_or(0) }
         }
         SemanticType::Opmask { lanes } => IrType::Opmask { width_bits: lanes },
         SemanticType::Tile { .. } => IrType::Tile,
@@ -410,7 +410,25 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                 ));
             }
         }),
-        SemanticOp::Vector(_) | SemanticOp::Tile(_) => {
+        SemanticOp::Vector(op) => match op {
+            VectorOp::LaneWise(scalar) => Ok(match scalar {
+                PrimitiveOp::Add => IrPrimitive::VecLaneAdd,
+                PrimitiveOp::Sub => IrPrimitive::VecLaneSub,
+                PrimitiveOp::Mul => IrPrimitive::VecLaneMul,
+                PrimitiveOp::And => IrPrimitive::VecLaneAnd,
+                PrimitiveOp::Or => IrPrimitive::VecLaneOr,
+                PrimitiveOp::Xor => IrPrimitive::VecLaneXor,
+                _ => {
+                    return Err(IrLoweringError::UnsupportedValue(
+                        "unsupported lane-wise primitive",
+                    ));
+                }
+            }),
+            _ => Err(IrLoweringError::UnsupportedValue(
+                "non-lane-wise vector operation",
+            )),
+        },
+        SemanticOp::Tile(_) => {
             Err(IrLoweringError::UnsupportedValue("non-primitive operation"))
         }
     }

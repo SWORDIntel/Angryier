@@ -19,7 +19,7 @@ pub enum IrType {
     Float32,
     Float64,
     Float80,
-    Vector { width_bits: u16 },
+    Vector { width_bits: u16, lane_bits: u16 },
     Opmask { width_bits: u16 },
     Tile,
 }
@@ -59,6 +59,12 @@ pub enum IrPrimitive {
     FDiv,
     FSqrt,
     FConvert,
+    VecLaneAdd,
+    VecLaneSub,
+    VecLaneMul,
+    VecLaneAnd,
+    VecLaneOr,
+    VecLaneXor,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -128,7 +128,7 @@ fn produced_type(op: &IrOp) -> Option<IrType> {
 
 fn validate_type(ty: IrType) -> Result<(), IrVerificationError> {
     match ty {
-        IrType::Bits(0) | IrType::Vector { width_bits: 0 } | IrType::Opmask { width_bits: 0 } => {
+        IrType::Bits(0) | IrType::Vector { width_bits: 0, .. } | IrType::Opmask { width_bits: 0 } => {
             Err(IrVerificationError::InvalidType(ty))
         }
         _ => Ok(()),
@@ -137,7 +137,7 @@ fn validate_type(ty: IrType) -> Result<(), IrVerificationError> {
 
 fn expected_bytes(ty: IrType) -> Option<usize> {
     let bits = match ty {
-        IrType::Bits(bits) | IrType::Vector { width_bits: bits } | IrType::Opmask { width_bits: bits } => {
+        IrType::Bits(bits) | IrType::Vector { width_bits: bits, .. } | IrType::Opmask { width_bits: bits } => {
             usize::from(bits)
         }
         IrType::Float16 | IrType::BFloat16 => 16,
