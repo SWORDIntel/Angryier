@@ -281,6 +281,8 @@ pub trait SemanticBuilder {
     fn write_register(&mut self, reg: RegisterId, value: ValueId) -> Result<EffectId, SemanticError>;
     fn write_operand(&mut self, operand_index: u8, value: ValueId) -> Result<EffectId, SemanticError>;
     fn side_effect(&mut self, effect: SideEffect, inputs: &[ValueId]) -> Result<EffectId, SemanticError>;
+    fn jump(&mut self, target: ValueId) -> Result<EffectId, SemanticError>;
+    fn branch(&mut self, condition: ValueId, taken: ValueId, not_taken: ValueId) -> Result<EffectId, SemanticError>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

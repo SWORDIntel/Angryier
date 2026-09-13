@@ -1,4 +1,8 @@
-# Angryier Semantic Identity Contract
+# Semantic Identity Contract
+
+> **Implementation status:** Implemented. `angryier-types` provides `ContentId` and `SemanticFingerprint` as distinct newtypes with domain-separated identity frames. Content identity is deterministic across process runs and payload length is part of the identity frame. Tests verify that semantic fingerprints have an independent identity domain from content IDs.
+
+---
 
 ## Status
 

@@ -175,32 +175,65 @@ QIHSE's quantum-inspired/vector retrieval layer stores the fused similarity repr
 
 ## Repository Blueprint
 
-The architecture is frozen; the repository now contains the complete **interface/contract scaffold** for the major subsystems. A scaffolded crate reserves ownership and exposes the intended boundary. It does **not** imply that its backend is implemented.
+The architecture is frozen; the repository contains the complete **interface/contract scaffold** for all major subsystems, with real implementations in the foundation crates. A scaffolded crate reserves ownership and exposes the intended boundary. It does **not** imply that its backend is implemented.
 
-The workspace includes architecture/Intel 64, XED adaptation, semantics and generation, semantic identity/evidence, execution IR, expressions, memory, state, taint, execution, atomic ledger, replay, solver orchestration plus Z3/Bitwuzla seams, NUMA-aware scheduling, provenance, cumulative knowledge, learned fusion, environment models, loading/state import, fuzzing, telemetry, WAL/storage, JIT, QIHSE, KEYSTONE, plugins, benchmarking, CLI and future distribution boundaries.
+The 32-crate workspace includes architecture/Intel 64, XED adaptation, semantics and generation, semantic identity/evidence, execution IR, expressions, memory, state, taint, execution, atomic ledger, replay, solver orchestration plus Z3/Bitwuzla seams, NUMA-aware scheduling, provenance, cumulative knowledge, learned fusion, environment models, loading/state import, fuzzing, telemetry, WAL/storage, JIT, QIHSE, KEYSTONE, plugins, benchmarking, CLI and future distribution boundaries.
+
+See [`docs/architecture/crates.md`](docs/architecture/crates.md) for the full crate map with per-crate implementation status.
 
 ## Documentation
 
+Full documentation index: [`docs/README.md`](docs/README.md)
+
+### Architecture (split by subsystem)
+
+- [`docs/architecture/overview.md`](docs/architecture/overview.md) — mission, non-goals, global invariants, three-plane architecture.
+- [`docs/architecture/crates.md`](docs/architecture/crates.md) — 32-crate map, implementation status per crate, dependency direction.
+- [`docs/architecture/identity.md`](docs/architecture/identity.md) — shared identity model, version domains, Intel 64 target profiles.
+- [`docs/architecture/decode.md`](docs/architecture/decode.md) — Intel XED decode boundary.
+- [`docs/architecture/semantic-pipeline.md`](docs/architecture/semantic-pipeline.md) — hybrid semantics, two-level IR, sealing, dual identity, vector/mask/AMX, floating-point.
+- [`docs/architecture/execution.md`](docs/architecture/execution.md) — runtime values, expression DAG, layered memory, persistent state, fidelity profiles.
+- [`docs/architecture/solver.md`](docs/architecture/solver.md) — solver architecture, query model, portfolio, persistent knowledge.
+- [`docs/architecture/scheduler.md`](docs/architecture/scheduler.md) — search, multicore, NUMA, quantum-inspired scheduling.
+- [`docs/architecture/provenance.md`](docs/architecture/provenance.md) — provenance tiers, flight recorder, telemetry, WAL, retention.
+- [`docs/architecture/ledger-replay.md`](docs/architecture/ledger-replay.md) — atomic ledger, replay capsules, code-page invalidation.
+- [`docs/architecture/knowledge.md`](docs/architecture/knowledge.md) — QIHSE/KEYSTONE, cumulative knowledge, learned fusion, retrieval pipeline.
+- [`docs/architecture/jit-fuzzing-distribution.md`](docs/architecture/jit-fuzzing-distribution.md) — JIT, fuzzing, multi-host, plugins.
+- [`docs/architecture/security.md`](docs/architecture/security.md) — trust boundaries, failure containment, stress scenarios, freeze rule.
+
+### Design
+
+- [`docs/design/decisions.md`](docs/design/decisions.md) — 28 locked design decisions (D-001–D-028) and open decisions.
+- [`docs/design/trait-boundaries.md`](docs/design/trait-boundaries.md) — Rust ownership map, interface contracts, required architecture tests.
+
+### Semantics
+
+- [`docs/semantics/intel64.md`](docs/semantics/intel64.md) — Intel 64 decode, typed semantics, generator plan, AVX/AVX-512/AMX, validation gates.
+- [`docs/semantics/identity.md`](docs/semantics/identity.md) — `ContentId`, semantic fingerprints, derivation and validity rules.
+
+### Status
+
+- [`docs/status/scaffold.md`](docs/status/scaffold.md) — per-crate implementation status, what's implemented vs scaffolded, test coverage.
+- [`docs/status/implementation-plan.md`](docs/status/implementation-plan.md) — phase-by-phase implementation order with exit gates.
+
+### Top-level
+
 - [`Plan.md`](Plan.md) — operational architecture lock and Q9–Q54 decision baseline.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — complete frozen three-plane system architecture and invariants.
-- [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — implementation order and phase exit gates.
-- [`docs/CRATE_MAP.md`](docs/CRATE_MAP.md) — ownership map from architecture components to Rust crates.
-- [`docs/SCAFFOLD_STATUS.md`](docs/SCAFFOLD_STATUS.md) — explicit distinction between scaffolded contracts and implemented functionality.
-- [`docs/DESIGN_DECISIONS.md`](docs/DESIGN_DECISIONS.md) — locked design decisions and replacement-decision policy.
-- [`docs/SEMANTICS.md`](docs/SEMANTICS.md) — Intel 64 decode, typed semantics, generator plan, AVX/AVX-512/AMX handling and validation gates.
-- [`docs/SEMANTIC_IDENTITY.md`](docs/SEMANTIC_IDENTITY.md) — `ContentId`, semantic fingerprints, derivation and validity rules.
-- [`docs/TRAIT_BOUNDARIES.md`](docs/TRAIT_BOUNDARIES.md) — semantic/execution/ledger interface contracts.
-- [`docs/PROVENANCE_KNOWLEDGE.md`](docs/PROVENANCE_KNOWLEDGE.md) — adaptive provenance, cleanup, QIHSE/KEYSTONE mapping, cross-run reuse and learned fusion.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — broader implementation roadmap and go/no-go gates.
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — performance, semantic correctness, provenance, cumulative reuse and retrieval benchmark contract.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — build/check instructions, architecture rules, code style, commit and PR conventions.
 
 ## Current Status
 
-**Architecture frozen; full interface/contract scaffold present; engine implementation not yet complete.**
+**Architecture frozen. Phases 0–3 and Phase 5 foundations implemented. Phase 4 (handwritten semantic corpus) partially implemented — 93 foundational Intel 64 forms verified end-to-end. Phase 6 foundations (replay, WAL, provenance), Phase 7 foundations (taint), Phase 9 foundations (knowledge, QIHSE/KEYSTONE, fusion, semantic compiler), Phase 10 foundations (scheduler, distribution codec), Phase 11 foundations (models, telemetry, benchmark, plugins, loader, fuzz), Phase 12 foundations (QIHSE/KEYSTONE adapters), Phase 13 foundations (fuzz bridge), Phase 14 foundations (fusion model), and Phase 16 foundations (work codec) partially implemented in-memory.**
 
-The repository intentionally does not fake missing native backends. Native XED integration, Intel semantic coverage, COW memory internals, concrete/symbolic execution, Z3/Bitwuzla translation, scheduler implementation, durable replay/ledger storage, QIHSE/KEYSTONE bindings, learned models, fuzzing adapters and JIT remain implementation work and must fail explicitly until real implementations exist.
+Implemented: shared IDs/versions, ISA-neutral arch traits, Intel 64 register/feature model, XED normalization boundary, typed semantic IR with sealing, AngryIR lowering and verification, expression DAG with hash-consing and constant folding, layered COW memory, persistent state with fork, concrete interpreter, solver-neutral query model with portfolio router and batch solver, atomic ledger with concurrent commit validation, handwritten Intel 64 semantic corpus (93 forms with RFLAGS ZF/SF/CF), in-memory replay engine + capsule store, in-memory taint engine with promotion, in-memory provenance store with adaptive governor, in-memory WAL with checkpoint replay, in-memory work-stealing scheduler with NUMA model, in-memory knowledge store with dependency graph, in-memory environment model + summary provider, in-memory telemetry sink with metric aggregation, in-memory image loader + state importer, in-memory fuzz bridge with stage gating, in-memory fusion model with specialist encoders, in-memory QIHSE adapter with fingerprint query, in-memory KEYSTONE adapter with inverted index, in-memory work codec with binary frame round-trip, in-memory plugin registry, in-memory benchmark sink with summary, in-memory semantic compiler with coverage manifest, in-memory semantic transformation contracts with fidelity acceptance policy, basic CLI with status/crates/version subcommands, **native Z3 solver FFI** (`angryier-solver-z3-ffi`, real SAT/UNSAT with model extraction; wired into safe `angryier-solver-z3` adapter behind `ffi` feature via `Z3Backend::native_ffi`), **native Bitwuzla solver FFI** (`angryier-solver-bitwuzla-ffi`, real SAT/UNSAT with model extraction; wired into safe `angryier-solver-bitwuzla` adapter behind `ffi` feature via `BitwuzlaBackend::native_ffi`), **native Intel XED decoder FFI** (`angryier-arch-xed-ffi`, real Intel 64 instruction decoding; wired through `angryier-decode-xed` safe normalization boundary).
 
-Repository checks are defined by `scripts/check.sh` and `.github/workflows/ci.yml`: formatting, workspace compilation, Clippy with warnings denied, and tests. The scaffold is only considered build-clean once those checks have actually passed.
+Scaffolded (fail-closed): full Intel semantic corpus, durable WAL/persistence, native QIHSE/KEYSTONE SDK bindings, learned embedding training, native JIT, fuzzer-specific adapters, live process capture, distributed scheduler.
+
+The repository intentionally does not fake missing native backends. All unimplemented integrations must fail explicitly until real implementations exist. See [`docs/status/scaffold.md`](docs/status/scaffold.md) for details.
+
+Repository checks are defined by `scripts/check.sh` and `.github/workflows/ci.yml`: formatting, workspace compilation, Clippy with warnings denied, and tests. All 78 test suites pass (0 failures, 585 tests total).
 
 ## Performance Policy
 

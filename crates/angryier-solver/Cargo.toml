@@ -9,5 +9,14 @@ description = "Solver-neutral query and portfolio contracts"
 angryier-types = { path = "../angryier-types" }
 sha2 = "0.10"
 
+[features]
+ffi = []
+
+[dev-dependencies]
+angryier-solver-z3 = { path = "../angryier-solver-z3", features = ["ffi"] }
+angryier-solver-bitwuzla = { path = "../angryier-solver-bitwuzla", features = ["ffi"] }
+angryier-expr = { path = "../angryier-expr" }
+
 [lints]
 workspace = true
+

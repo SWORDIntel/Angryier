@@ -1,6 +1,8 @@
-# Angryier Trait Boundaries
+# Trait Boundaries
 
-This document defines the concrete Rust ownership and interface boundaries implied by `Plan.md` and the frozen architecture. It is a contract document: crate existence reserves responsibility, but does not claim that a backend is implemented.
+> **Implementation status:** Contract-level. The crate ownership and public contract boundaries below are present in the repository. Native XED integration, full Intel semantic coverage, concrete/symbolic execution internals, solver translation, NUMA scheduling, durable ledger/replay implementations, QIHSE/KEYSTONE SDK bindings, learned models, JIT and full hybrid-fuzzer adapters remain implementation work. No placeholder backend is permitted to report success for an unimplemented capability.
+
+---
 
 ## Primary invariant
 
@@ -269,7 +271,7 @@ Virtual-address equality alone can never authorize reuse.
 
 # State, Memory and Expression Boundaries
 
-`angryier-state` owns persistent state roots and fidelity history. `angryier-memory` owns page-backed copy-on-write memory and sparse symbolic overlays. `angryier-expr` owns hash-consed expression DAGs and canonicalization. `angryier-taint` owns dataflow provenance and concrete→taint→symbolic promotion decisions.
+`angryier-state` owns persistent state roots and fidelity history. `angryier-memory` owns page-backed copy-on-write memory and sparse symbolic overlays. `angryier-expr` owns hash-consed expression DAGs and canonicalization. `angryier-taint` owns dataflow provenance and concrete->taint->symbolic promotion decisions.
 
 The normal design direction is:
 
@@ -466,11 +468,3 @@ Before broad semantic implementation, tests must demonstrate at least:
 15. WAL saturation is observable and recoverable;
 16. deterministic mode can reproduce scheduler/exploration ordering;
 17. high-entropy fuzzer near-misses cannot poison alpha-equivalence/subsumption reuse.
-
----
-
-# Scaffold Status
-
-The crate ownership and public contract boundaries above are present in the repository. Native XED integration, full Intel semantic coverage, concrete/symbolic execution internals, solver translation, NUMA scheduling, durable ledger/replay implementations, QIHSE/KEYSTONE SDK bindings, learned models, JIT and full hybrid-fuzzer adapters remain implementation work.
-
-No placeholder backend is permitted to report success for an unimplemented capability.

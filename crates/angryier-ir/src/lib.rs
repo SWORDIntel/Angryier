@@ -3,7 +3,7 @@
 mod lower;
 mod verify;
 
-pub use lower::{BasicSemanticLowerer, IrLoweringError};
+pub use lower::{BasicSemanticLowerer, CachedSemanticLowerer, IrLoweringError};
 pub use verify::{BasicIrVerifier, IrVerificationError};
 
 use angryier_types::{Address, BlockId, CodeVersionGuard, ContentId, ExprId, ImageId, TargetProfileId};

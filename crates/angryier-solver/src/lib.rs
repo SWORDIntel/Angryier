@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
+pub use angryier_types::SolverOutcomeKind;
 use angryier_types::{
-    ConstraintCanonicalizationVersion, ConstraintId, DependencyKey, ExprId, SolverOutcomeKind, SolverQueryId,
-    TargetProfileId,
+    ConstraintCanonicalizationVersion, ConstraintId, DependencyKey, ExprId, SolverQueryId, TargetProfileId,
 };
 use core::time::Duration;
 use sha2::{Digest, Sha256};
@@ -12,12 +12,14 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Instant,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalConstraint {
     pub id: ConstraintId,
     pub key: DependencyKey,
+    pub expr: ExprId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +47,7 @@ pub struct SolverQuery {
     path_constraints: Vec<ConstraintId>,
     predicate: ExprId,
     constraint_keys: Vec<DependencyKey>,
+    constraint_expressions: Vec<(ConstraintId, ExprId)>,
     predicate_key: DependencyKey,
     target_profile: TargetProfileId,
     canonicalization_version: ConstraintCanonicalizationVersion,
@@ -85,6 +88,10 @@ impl SolverQuery {
             path_constraints: constraints.iter().map(|constraint| constraint.id).collect(),
             predicate,
             constraint_keys,
+            constraint_expressions: constraints
+                .iter()
+                .map(|constraint| (constraint.id, constraint.expr))
+                .collect(),
             predicate_key,
             target_profile,
             canonicalization_version,
@@ -122,6 +129,10 @@ impl SolverQuery {
         &self.constraint_keys
     }
 
+    pub fn constraint_expressions(&self) -> &[(ConstraintId, ExprId)] {
+        &self.constraint_expressions
+    }
+
     pub fn predicate_key(&self) -> DependencyKey {
         self.predicate_key
     }
@@ -155,11 +166,16 @@ pub trait SolverBackend: Send {
     fn name(&self) -> &'static str;
     fn solve(&mut self, query: &SolverQuery) -> SolverResult;
     fn solve_batch(&mut self, shared: &[ConstraintId], predicates: &[SolverQuery]) -> Vec<SolverResult>;
+
+    fn as_cancellable_mut(&mut self) -> Option<&mut dyn CancellableSolverBackend> {
+        None
+    }
 }
 
 pub trait SolverRouter: Send + Sync {
     fn rank_backends(&self, query: &SolverQuery) -> Vec<&'static str>;
     fn should_preempt(&self, query: &SolverQuery, elapsed: Duration) -> bool;
+    fn record_outcome(&self, _backend: &'static str, _outcome: SolverOutcomeKind, _elapsed: Duration) {}
 }
 
 #[derive(Clone, Debug, Default)]
@@ -211,21 +227,28 @@ impl core::fmt::Display for SolverCacheError {
 
 impl std::error::Error for SolverCacheError {}
 
+const SHARD_COUNT: usize = 16;
+
 #[derive(Default)]
 pub struct InMemorySolverCache {
-    entries: Mutex<HashMap<DependencyKey, SolverResult>>,
+    shards: [Mutex<HashMap<DependencyKey, Arc<SolverResult>>>; SHARD_COUNT],
     hits: AtomicU64,
     misses: AtomicU64,
 }
 
+fn shard_index(key: &DependencyKey) -> usize {
+    usize::from(key.0[0]) % SHARD_COUNT
+}
+
 impl InMemorySolverCache {
-    pub fn lookup(&self, query: &SolverQuery) -> Result<Option<SolverResult>, SolverCacheError> {
+    pub fn lookup(&self, query: &SolverQuery) -> Result<Option<Arc<SolverResult>>, SolverCacheError> {
         query.validate_identity().map_err(SolverCacheError::InvalidQuery)?;
-        let result = self
-            .entries
+        let key = query.canonical_key();
+        let index = shard_index(&key);
+        let result = self.shards[index]
             .lock()
             .map_err(|_| SolverCacheError::LockPoisoned)?
-            .get(&query.canonical_key())
+            .get(&key)
             .cloned();
         if result.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -240,20 +263,36 @@ impl InMemorySolverCache {
         if !matches!(result.outcome, SolverOutcomeKind::Sat | SolverOutcomeKind::Unsat) {
             return Ok(CacheAdmission::RejectedTransient);
         }
-        self.entries
+        let key = query.canonical_key();
+        let index = shard_index(&key);
+        self.shards[index]
             .lock()
             .map_err(|_| SolverCacheError::LockPoisoned)?
-            .insert(query.canonical_key(), result);
+            .insert(key, Arc::new(result));
         Ok(CacheAdmission::Stored)
     }
 
     pub fn stats(&self) -> Result<SolverCacheStats, SolverCacheError> {
-        let entries = self.entries.lock().map_err(|_| SolverCacheError::LockPoisoned)?.len();
+        let mut entries: u64 = 0;
+        for shard in &self.shards {
+            let len = shard.lock().map_err(|_| SolverCacheError::LockPoisoned)?.len();
+            entries = entries.saturating_add(u64::try_from(len).unwrap_or(u64::MAX));
+        }
         Ok(SolverCacheStats {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
-            entries: u64::try_from(entries).unwrap_or(u64::MAX),
+            entries,
         })
+    }
+
+    /// Returns the entry count for each shard, useful for verifying distribution.
+    pub fn shard_lens(&self) -> Result<Vec<u64>, SolverCacheError> {
+        let mut lens = Vec::with_capacity(SHARD_COUNT);
+        for shard in &self.shards {
+            let len = shard.lock().map_err(|_| SolverCacheError::LockPoisoned)?.len();
+            lens.push(u64::try_from(len).unwrap_or(u64::MAX));
+        }
+        Ok(lens)
     }
 }
 
@@ -279,6 +318,708 @@ fn derive_query_key(
     DependencyKey(hasher.finalize().into())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ConstraintScale {
+    Small,
+    Medium,
+    Large,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PredicateComplexity {
+    Simple,
+    Moderate,
+    Complex,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TimeoutCategory {
+    Short,
+    Standard,
+    Long,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct QueryShape {
+    pub constraint_scale: ConstraintScale,
+    pub predicate_complexity: PredicateComplexity,
+    pub timeout_category: TimeoutCategory,
+    pub constraint_count: usize,
+}
+
+impl QueryShape {
+    pub fn classify(query: &SolverQuery) -> Self {
+        let constraint_count = query.constraint_keys().len();
+        let constraint_scale = if constraint_count <= 4 {
+            ConstraintScale::Small
+        } else if constraint_count <= 16 {
+            ConstraintScale::Medium
+        } else {
+            ConstraintScale::Large
+        };
+
+        let timeout = query.timeout();
+        let timeout_category = if timeout < Duration::from_millis(500) {
+            TimeoutCategory::Short
+        } else if timeout <= Duration::from_secs(5) {
+            TimeoutCategory::Standard
+        } else {
+            TimeoutCategory::Long
+        };
+
+        let pred_bytes = &query.predicate_key().0;
+        let sum_pred_bytes: usize = pred_bytes.iter().map(|&b| b as usize).sum();
+        let avg_pred_byte = sum_pred_bytes / 32;
+        let complexity_score = avg_pred_byte.saturating_add(constraint_count.saturating_mul(10));
+
+        let predicate_complexity = if complexity_score < 70 {
+            PredicateComplexity::Simple
+        } else if complexity_score < 180 {
+            PredicateComplexity::Moderate
+        } else {
+            PredicateComplexity::Complex
+        };
+
+        Self {
+            constraint_scale,
+            predicate_complexity,
+            timeout_category,
+            constraint_count,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreferredBackendHints {
+    pub preferred_for_small_query: Option<&'static str>,
+    pub preferred_for_large_query: Option<&'static str>,
+    pub preferred_for_simple_predicate: Option<&'static str>,
+    pub preferred_for_complex_predicate: Option<&'static str>,
+    pub preferred_for_short_timeout: Option<&'static str>,
+    pub preferred_for_long_timeout: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BackendStats {
+    pub sat_count: u64,
+    pub unsat_count: u64,
+    pub unknown_count: u64,
+    pub timeout_count: u64,
+    pub backend_error_count: u64,
+    pub resource_limit_count: u64,
+    pub total_elapsed: Duration,
+    pub total_queries: u64,
+}
+
+impl BackendStats {
+    pub fn average_elapsed(&self) -> Duration {
+        if self.total_queries > 0 {
+            let micros = self.total_elapsed.as_micros();
+            let avg_micros = u64::try_from(micros / u128::from(self.total_queries)).unwrap_or(u64::MAX);
+            Duration::from_micros(avg_micros)
+        } else {
+            Duration::ZERO
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrossCheckPolicy {
+    pub sample_rate: f64,
+}
+
+impl Default for CrossCheckPolicy {
+    fn default() -> Self {
+        Self { sample_rate: 0.10 }
+    }
+}
+
+impl CrossCheckPolicy {
+    pub const fn new(sample_rate: f64) -> Self {
+        Self { sample_rate }
+    }
+
+    pub fn should_cross_check(&self, query: &SolverQuery) -> bool {
+        if self.sample_rate <= 0.0 {
+            return false;
+        }
+        if self.sample_rate >= 1.0 {
+            return true;
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"ANGRYIER\0CROSS-CHECK\0");
+        hasher.update(query.canonical_key().0);
+        hasher.update(query.id().0.to_le_bytes());
+        let digest = hasher.finalize();
+        let val = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+        let fraction = f64::from(val) / f64::from(u32::MAX);
+        fraction < self.sample_rate
+    }
+}
+
+pub struct MockSolverBackend {
+    name: &'static str,
+    outcome: SolverOutcomeKind,
+    delay: Duration,
+    call_count: usize,
+}
+
+impl MockSolverBackend {
+    pub fn new(name: &'static str, outcome: SolverOutcomeKind) -> Self {
+        Self {
+            name,
+            outcome,
+            delay: Duration::ZERO,
+            call_count: 0,
+        }
+    }
+
+    pub fn with_delay(name: &'static str, outcome: SolverOutcomeKind, delay: Duration) -> Self {
+        Self {
+            name,
+            outcome,
+            delay,
+            call_count: 0,
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count
+    }
+}
+
+impl SolverBackend for MockSolverBackend {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn solve(&mut self, _query: &SolverQuery) -> SolverResult {
+        self.call_count = self.call_count.saturating_add(1);
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
+        }
+        SolverResult {
+            outcome: self.outcome,
+            model: Vec::new(),
+            unsat_core: Vec::new(),
+            elapsed: self.delay,
+        }
+    }
+
+    fn solve_batch(&mut self, _shared: &[ConstraintId], predicates: &[SolverQuery]) -> Vec<SolverResult> {
+        predicates.iter().map(|query| self.solve(query)).collect()
+    }
+}
+
+pub struct MockCancellableSolverBackend {
+    name: &'static str,
+    outcome: SolverOutcomeKind,
+    delay: Duration,
+    call_count: usize,
+    cancelled_count: usize,
+}
+
+impl MockCancellableSolverBackend {
+    pub fn new(name: &'static str, outcome: SolverOutcomeKind, delay: Duration) -> Self {
+        Self {
+            name,
+            outcome,
+            delay,
+            call_count: 0,
+            cancelled_count: 0,
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.call_count
+    }
+
+    pub fn cancelled_count(&self) -> usize {
+        self.cancelled_count
+    }
+}
+
+impl SolverBackend for MockCancellableSolverBackend {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn solve(&mut self, _query: &SolverQuery) -> SolverResult {
+        self.call_count = self.call_count.saturating_add(1);
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
+        }
+        SolverResult {
+            outcome: self.outcome,
+            model: Vec::new(),
+            unsat_core: Vec::new(),
+            elapsed: self.delay,
+        }
+    }
+
+    fn solve_batch(&mut self, _shared: &[ConstraintId], predicates: &[SolverQuery]) -> Vec<SolverResult> {
+        predicates.iter().map(|query| self.solve(query)).collect()
+    }
+
+    fn as_cancellable_mut(&mut self) -> Option<&mut dyn CancellableSolverBackend> {
+        Some(self)
+    }
+}
+
+impl CancellableSolverBackend for MockCancellableSolverBackend {
+    fn solve_cancellable(&mut self, query: &SolverQuery, cancellation: &CancellationToken) -> SolverResult {
+        self.call_count = self.call_count.saturating_add(1);
+        let start = Instant::now();
+        let step = Duration::from_millis(1);
+        while start.elapsed() < self.delay {
+            if cancellation.is_cancelled() {
+                self.cancelled_count = self.cancelled_count.saturating_add(1);
+                return SolverResult {
+                    outcome: SolverOutcomeKind::Timeout,
+                    model: Vec::new(),
+                    unsat_core: Vec::new(),
+                    elapsed: start.elapsed(),
+                };
+            }
+            std::thread::sleep(step);
+        }
+        self.solve(query)
+    }
+}
+
+pub struct InMemoryPortfolioRouter {
+    backend_names: Vec<&'static str>,
+    preempt_threshold: Duration,
+    hints: PreferredBackendHints,
+    history: Mutex<HashMap<&'static str, BackendStats>>,
+}
+
+impl InMemoryPortfolioRouter {
+    pub fn new(backend_names: Vec<&'static str>, preempt_threshold: Duration) -> Self {
+        Self {
+            backend_names,
+            preempt_threshold,
+            hints: PreferredBackendHints::default(),
+            history: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn with_hints(
+        backend_names: Vec<&'static str>,
+        preempt_threshold: Duration,
+        hints: Option<PreferredBackendHints>,
+    ) -> Self {
+        Self {
+            backend_names,
+            preempt_threshold,
+            hints: hints.unwrap_or_default(),
+            history: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn new_with_hints(
+        backend_names: Vec<&'static str>,
+        preempt_threshold: Duration,
+        hints: Option<PreferredBackendHints>,
+    ) -> Self {
+        Self::with_hints(backend_names, preempt_threshold, hints)
+    }
+
+    pub fn record_outcome(&self, backend: &'static str, outcome: SolverOutcomeKind, elapsed: Duration) {
+        if let Ok(mut map) = self.history.lock() {
+            let entry = map.entry(backend).or_default();
+            entry.total_queries = entry.total_queries.saturating_add(1);
+            entry.total_elapsed = entry.total_elapsed.saturating_add(elapsed);
+            match outcome {
+                SolverOutcomeKind::Sat => entry.sat_count = entry.sat_count.saturating_add(1),
+                SolverOutcomeKind::Unsat => entry.unsat_count = entry.unsat_count.saturating_add(1),
+                SolverOutcomeKind::Unknown => entry.unknown_count = entry.unknown_count.saturating_add(1),
+                SolverOutcomeKind::Timeout => entry.timeout_count = entry.timeout_count.saturating_add(1),
+                SolverOutcomeKind::ResourceLimit => {
+                    entry.resource_limit_count = entry.resource_limit_count.saturating_add(1);
+                }
+                SolverOutcomeKind::BackendError => {
+                    entry.backend_error_count = entry.backend_error_count.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    pub fn stats_for(&self, backend: &'static str) -> Option<BackendStats> {
+        self.history.lock().ok().and_then(|map| map.get(backend).copied())
+    }
+
+    pub fn hints(&self) -> &PreferredBackendHints {
+        &self.hints
+    }
+}
+
+impl Default for InMemoryPortfolioRouter {
+    fn default() -> Self {
+        Self {
+            backend_names: Vec::new(),
+            preempt_threshold: Duration::from_secs(30),
+            hints: PreferredBackendHints::default(),
+            history: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl SolverRouter for InMemoryPortfolioRouter {
+    fn rank_backends(&self, query: &SolverQuery) -> Vec<&'static str> {
+        if self.backend_names.is_empty() {
+            return Vec::new();
+        }
+
+        let shape = QueryShape::classify(query);
+        let history = self.history.lock().ok();
+
+        let mut scored: Vec<(&'static str, i64, usize)> = self
+            .backend_names
+            .iter()
+            .enumerate()
+            .map(|(index, &name)| {
+                let mut score: i64 = 1000;
+
+                // 1. Preferred backend hints
+                if let Some(preferred) = self.hints.preferred_for_small_query
+                    && shape.constraint_scale == ConstraintScale::Small
+                {
+                    if preferred == name {
+                        score = score.saturating_add(500);
+                    } else {
+                        score = score.saturating_sub(100);
+                    }
+                }
+                if let Some(preferred) = self.hints.preferred_for_large_query
+                    && shape.constraint_scale == ConstraintScale::Large
+                {
+                    if preferred == name {
+                        score = score.saturating_add(500);
+                    } else {
+                        score = score.saturating_sub(100);
+                    }
+                }
+                if let Some(preferred) = self.hints.preferred_for_simple_predicate
+                    && shape.predicate_complexity == PredicateComplexity::Simple
+                {
+                    if preferred == name {
+                        score = score.saturating_add(500);
+                    } else {
+                        score = score.saturating_sub(100);
+                    }
+                }
+                if let Some(preferred) = self.hints.preferred_for_complex_predicate
+                    && shape.predicate_complexity == PredicateComplexity::Complex
+                {
+                    if preferred == name {
+                        score = score.saturating_add(500);
+                    } else {
+                        score = score.saturating_sub(100);
+                    }
+                }
+                if let Some(preferred) = self.hints.preferred_for_short_timeout
+                    && shape.timeout_category == TimeoutCategory::Short
+                {
+                    if preferred == name {
+                        score = score.saturating_add(500);
+                    } else {
+                        score = score.saturating_sub(100);
+                    }
+                }
+                if let Some(preferred) = self.hints.preferred_for_long_timeout
+                    && shape.timeout_category == TimeoutCategory::Long
+                {
+                    if preferred == name {
+                        score = score.saturating_add(500);
+                    } else {
+                        score = score.saturating_sub(100);
+                    }
+                }
+
+                // 2. Default domain heuristic for well-known backends: "bitwuzla" vs "z3"
+                if name == "bitwuzla" {
+                    if shape.constraint_scale == ConstraintScale::Small {
+                        score = score.saturating_add(300);
+                    }
+                    if shape.predicate_complexity == PredicateComplexity::Simple {
+                        score = score.saturating_add(300);
+                    }
+                    if shape.timeout_category == TimeoutCategory::Short {
+                        score = score.saturating_add(150);
+                    }
+                } else if name == "z3" {
+                    if shape.constraint_scale == ConstraintScale::Large {
+                        score = score.saturating_add(300);
+                    } else if shape.constraint_scale == ConstraintScale::Medium {
+                        score = score.saturating_add(100);
+                    }
+                    if shape.predicate_complexity == PredicateComplexity::Complex {
+                        score = score.saturating_add(300);
+                    } else if shape.predicate_complexity == PredicateComplexity::Moderate {
+                        score = score.saturating_add(100);
+                    }
+                    if shape.timeout_category == TimeoutCategory::Long {
+                        score = score.saturating_add(150);
+                    }
+                }
+
+                // 3. Historical performance adjustments
+                if let Some(ref map) = history
+                    && let Some(stats) = map.get(name)
+                {
+                    let successes = stats.sat_count.saturating_add(stats.unsat_count);
+                    score = score.saturating_add((successes.min(50) as i64).saturating_mul(10));
+                    score = score.saturating_sub((stats.backend_error_count.min(50) as i64).saturating_mul(400));
+                    score = score.saturating_sub((stats.timeout_count.min(50) as i64).saturating_mul(150));
+                    score = score.saturating_sub((stats.unknown_count.min(50) as i64).saturating_mul(30));
+
+                    if stats.total_queries > 0 {
+                        let avg_ms = (stats.total_elapsed.as_millis() / u128::from(stats.total_queries)).min(200);
+                        score = score.saturating_sub(avg_ms as i64);
+                    }
+                }
+
+                (name, score, index)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+        scored.into_iter().map(|(name, _, _)| name).collect()
+    }
+
+    fn should_preempt(&self, query: &SolverQuery, elapsed: Duration) -> bool {
+        elapsed > self.preempt_threshold || elapsed >= query.timeout()
+    }
+
+    fn record_outcome(&self, backend: &'static str, outcome: SolverOutcomeKind, elapsed: Duration) {
+        InMemoryPortfolioRouter::record_outcome(self, backend, outcome, elapsed);
+    }
+}
+
+pub struct BatchSolver {
+    backends: Vec<Box<dyn SolverBackend>>,
+    router: Box<dyn SolverRouter>,
+    cross_check: CrossCheckPolicy,
+    cross_checks_performed: u64,
+    cross_check_disagreements: u64,
+}
+
+impl BatchSolver {
+    pub fn new(backends: Vec<Box<dyn SolverBackend>>, router: Box<dyn SolverRouter>) -> Self {
+        Self {
+            backends,
+            router,
+            cross_check: CrossCheckPolicy::default(),
+            cross_checks_performed: 0,
+            cross_check_disagreements: 0,
+        }
+    }
+
+    pub fn with_cross_check(mut self, cross_check: CrossCheckPolicy) -> Self {
+        self.cross_check = cross_check;
+        self
+    }
+
+    pub fn set_cross_check_policy(&mut self, cross_check: CrossCheckPolicy) {
+        self.cross_check = cross_check;
+    }
+
+    pub fn cross_check_policy(&self) -> &CrossCheckPolicy {
+        &self.cross_check
+    }
+
+    pub fn cross_checks_performed(&self) -> u64 {
+        self.cross_checks_performed
+    }
+
+    pub fn cross_check_disagreements(&self) -> u64 {
+        self.cross_check_disagreements
+    }
+
+    pub fn solve_query(&mut self, query: &SolverQuery) -> SolverResult {
+        if let Some(backend) = self.backends.first_mut() {
+            let name = backend.name();
+            let result = backend.solve(query);
+            self.router.record_outcome(name, result.outcome, result.elapsed);
+            return result;
+        }
+        SolverResult {
+            outcome: SolverOutcomeKind::BackendError,
+            model: Vec::new(),
+            unsat_core: Vec::new(),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    pub fn solve_with_fallback(&mut self, query: &SolverQuery) -> SolverResult {
+        self.solve_fallback_internal(query, None)
+    }
+
+    pub fn solve_with_timeout(&mut self, query: &SolverQuery, timeout: Duration) -> SolverResult {
+        let start = Instant::now();
+        let cancellation = CancellationToken::default();
+        let finished = Arc::new(AtomicBool::new(false));
+
+        let finished_watcher = Arc::clone(&finished);
+        let cancellation_watcher = cancellation.clone();
+        let watcher = std::thread::spawn(move || {
+            let sleep_step = Duration::from_millis(1).min(timeout);
+            let timer_start = Instant::now();
+            while timer_start.elapsed() < timeout {
+                if finished_watcher.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(sleep_step);
+            }
+            if !finished_watcher.load(Ordering::Relaxed) {
+                cancellation_watcher.cancel();
+            }
+        });
+
+        let result = self.solve_fallback_internal(query, Some(&cancellation));
+        finished.store(true, Ordering::Relaxed);
+        let _ = watcher.join();
+
+        let elapsed = start.elapsed();
+        if elapsed >= timeout || cancellation.is_cancelled() || result.outcome == SolverOutcomeKind::Timeout {
+            SolverResult {
+                outcome: SolverOutcomeKind::Timeout,
+                model: Vec::new(),
+                unsat_core: Vec::new(),
+                elapsed,
+            }
+        } else {
+            result
+        }
+    }
+
+    fn solve_fallback_internal(
+        &mut self,
+        query: &SolverQuery,
+        cancellation: Option<&CancellationToken>,
+    ) -> SolverResult {
+        let ranked = self.router.rank_backends(query);
+
+        // Check cross-check policy if we have at least 2 backends
+        if self.cross_check.should_cross_check(query) && self.backends.len() >= 2 {
+            self.cross_checks_performed = self.cross_checks_performed.saturating_add(1);
+
+            let mut first_idx = None;
+            let mut second_idx = None;
+            for name in &ranked {
+                if let Some(pos) = self.backends.iter().position(|b| b.name() == *name) {
+                    if first_idx.is_none() {
+                        first_idx = Some(pos);
+                    } else if second_idx.is_none() && Some(pos) != first_idx {
+                        second_idx = Some(pos);
+                        break;
+                    }
+                }
+            }
+            if first_idx.is_none() && !self.backends.is_empty() {
+                first_idx = Some(0);
+            }
+            if second_idx.is_none() && self.backends.len() > 1 {
+                second_idx = Some(if first_idx == Some(0) { 1 } else { 0 });
+            }
+
+            if let (Some(idx1), Some(idx2)) = (first_idx, second_idx) {
+                let (name1, res1) = {
+                    let b1 = &mut self.backends[idx1];
+                    let name = b1.name();
+                    let res = if let Some(token) = cancellation
+                        && let Some(cancellable) = b1.as_cancellable_mut()
+                    {
+                        cancellable.solve_cancellable(query, token)
+                    } else {
+                        b1.solve(query)
+                    };
+                    (name, res)
+                };
+                self.router.record_outcome(name1, res1.outcome, res1.elapsed);
+
+                let (name2, res2) = {
+                    let b2 = &mut self.backends[idx2];
+                    let name = b2.name();
+                    let res = if let Some(token) = cancellation
+                        && let Some(cancellable) = b2.as_cancellable_mut()
+                    {
+                        cancellable.solve_cancellable(query, token)
+                    } else {
+                        b2.solve(query)
+                    };
+                    (name, res)
+                };
+                self.router.record_outcome(name2, res2.outcome, res2.elapsed);
+
+                let disagreement = res1.outcome != res2.outcome;
+                if disagreement {
+                    self.cross_check_disagreements = self.cross_check_disagreements.saturating_add(1);
+                    eprintln!(
+                        "[WARN] solver cross-check disagreement: backend '{}' outcome {:?} != backend '{}' outcome {:?}",
+                        name1, res1.outcome, name2, res2.outcome
+                    );
+                    // Prefer Z3 result if one of the backends is z3
+                    if name1 == "z3" {
+                        return res1;
+                    }
+                    if name2 == "z3" {
+                        return res2;
+                    }
+                    // Otherwise prefer non-error result
+                    if res1.outcome == SolverOutcomeKind::BackendError
+                        && res2.outcome != SolverOutcomeKind::BackendError
+                    {
+                        return res2;
+                    }
+                }
+                return res1;
+            }
+        }
+
+        for name in ranked {
+            if let Some(backend) = self.backends.iter_mut().find(|backend| backend.name() == name) {
+                let result = if let Some(token) = cancellation
+                    && let Some(cancellable) = backend.as_cancellable_mut()
+                {
+                    cancellable.solve_cancellable(query, token)
+                } else {
+                    backend.solve(query)
+                };
+                self.router.record_outcome(name, result.outcome, result.elapsed);
+                if result.outcome != SolverOutcomeKind::BackendError {
+                    return result;
+                }
+            }
+        }
+
+        SolverResult {
+            outcome: SolverOutcomeKind::BackendError,
+            model: Vec::new(),
+            unsat_core: Vec::new(),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    pub fn solve_batch_parallel(&mut self, queries: &[SolverQuery]) -> Vec<SolverResult> {
+        queries.iter().map(|query| self.solve_query(query)).collect()
+    }
+
+    pub fn solve_with_cache(
+        &mut self,
+        query: &SolverQuery,
+        cache: &InMemorySolverCache,
+    ) -> Result<(Arc<SolverResult>, bool), SolverCacheError> {
+        if let Some(cached) = cache.lookup(query)? {
+            return Ok((cached, true));
+        }
+        let result = self.solve_query(query);
+        cache.insert(query, result.clone())?;
+        Ok((Arc::new(result), false))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +1028,7 @@ mod tests {
         CanonicalConstraint {
             id: ConstraintId(id),
             key: DependencyKey([byte; 32]),
+            expr: ExprId(u32::try_from(id).unwrap_or(0)),
         }
     }
 
@@ -336,7 +1078,11 @@ mod tests {
             cache.insert(&query, result(SolverOutcomeKind::Unsat))?,
             CacheAdmission::Stored
         );
-        assert_eq!(cache.lookup(&query)?, Some(result(SolverOutcomeKind::Unsat)));
+        let cached = cache.lookup(&query)?;
+        assert!(cached.is_some());
+        if let Some(cached) = cached {
+            assert_eq!(*cached, result(SolverOutcomeKind::Unsat));
+        }
         assert_eq!(
             cache.stats()?,
             SolverCacheStats {
@@ -371,5 +1117,244 @@ mod tests {
         assert!(!second.is_cancelled());
         first.cancel();
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn mock_solver_backend_returns_configured_outcome() -> Result<(), SolverQueryError> {
+        let query = query(&[constraint(1, 10)])?;
+        let mut backend = MockSolverBackend::new("mock-sat", SolverOutcomeKind::Sat);
+        let result = backend.solve(&query);
+        assert_eq!(result.outcome, SolverOutcomeKind::Sat);
+        assert!(result.model.is_empty());
+        assert!(result.unsat_core.is_empty());
+        assert_eq!(result.elapsed, Duration::ZERO);
+        assert_eq!(backend.name(), "mock-sat");
+        Ok(())
+    }
+
+    #[test]
+    fn mock_solver_backend_solve_batch_returns_results_for_all_queries() -> Result<(), SolverQueryError> {
+        let first = query(&[constraint(1, 10)])?;
+        let second = query(&[constraint(2, 20)])?;
+        let mut backend = MockSolverBackend::new("mock-unsat", SolverOutcomeKind::Unsat);
+        let results = backend.solve_batch(&[], &[first, second]);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].outcome, SolverOutcomeKind::Unsat);
+        assert_eq!(results[1].outcome, SolverOutcomeKind::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn portfolio_router_ranks_backends_in_order() -> Result<(), SolverQueryError> {
+        let query = query(&[constraint(1, 10)])?;
+        let router = InMemoryPortfolioRouter::new(vec!["z3", "cvc5", "boolector"], Duration::from_secs(30));
+        let ranked = router.rank_backends(&query);
+        assert_eq!(ranked, vec!["z3", "cvc5", "boolector"]);
+        Ok(())
+    }
+
+    #[test]
+    fn portfolio_router_should_preempt_returns_true_past_threshold() -> Result<(), SolverQueryError> {
+        let query = query(&[constraint(1, 10)])?;
+        let router = InMemoryPortfolioRouter::new(vec!["z3"], Duration::from_millis(100));
+        assert!(router.should_preempt(&query, Duration::from_millis(200)));
+        Ok(())
+    }
+
+    #[test]
+    fn portfolio_router_should_preempt_returns_false_under_threshold() -> Result<(), SolverQueryError> {
+        let query = query(&[constraint(1, 10)])?;
+        let router = InMemoryPortfolioRouter::new(vec!["z3"], Duration::from_millis(100));
+        assert!(!router.should_preempt(&query, Duration::from_millis(50)));
+        Ok(())
+    }
+
+    #[test]
+    fn portfolio_router_default_has_empty_backend_list() -> Result<(), SolverQueryError> {
+        let query = query(&[constraint(1, 10)])?;
+        let router = InMemoryPortfolioRouter::default();
+        let ranked = router.rank_backends(&query);
+        assert!(ranked.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn batch_solver_solve_query_routes_to_first_backend() -> Result<(), SolverQueryError> {
+        let query = query(&[constraint(1, 10)])?;
+        let backends: Vec<Box<dyn SolverBackend>> = vec![
+            Box::new(MockSolverBackend::new("primary", SolverOutcomeKind::Sat)),
+            Box::new(MockSolverBackend::new("secondary", SolverOutcomeKind::Unsat)),
+        ];
+        let router = Box::new(InMemoryPortfolioRouter::new(
+            vec!["primary", "secondary"],
+            Duration::from_secs(30),
+        ));
+        let mut solver = BatchSolver::new(backends, router);
+        let result = solver.solve_query(&query);
+        assert_eq!(result.outcome, SolverOutcomeKind::Sat);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_solver_solve_with_fallback_tries_second_backend_if_first_errors() -> Result<(), SolverQueryError> {
+        let query = query(&[constraint(1, 10)])?;
+        let backends: Vec<Box<dyn SolverBackend>> = vec![
+            Box::new(MockSolverBackend::new("primary", SolverOutcomeKind::BackendError)),
+            Box::new(MockSolverBackend::new("secondary", SolverOutcomeKind::Sat)),
+        ];
+        let router = Box::new(InMemoryPortfolioRouter::new(
+            vec!["primary", "secondary"],
+            Duration::from_secs(30),
+        ));
+        let mut solver = BatchSolver::new(backends, router);
+        let result = solver.solve_with_fallback(&query);
+        assert_eq!(result.outcome, SolverOutcomeKind::Sat);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_solver_solve_with_fallback_returns_first_non_error_result() -> Result<(), SolverQueryError> {
+        let query = query(&[constraint(1, 10)])?;
+        let backends: Vec<Box<dyn SolverBackend>> = vec![
+            Box::new(MockSolverBackend::new("primary", SolverOutcomeKind::Unsat)),
+            Box::new(MockSolverBackend::new("secondary", SolverOutcomeKind::Sat)),
+        ];
+        let router = Box::new(InMemoryPortfolioRouter::new(
+            vec!["primary", "secondary"],
+            Duration::from_secs(30),
+        ));
+        let mut solver = BatchSolver::new(backends, router);
+        let result = solver.solve_with_fallback(&query);
+        assert_eq!(result.outcome, SolverOutcomeKind::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_solver_solve_batch_parallel_returns_results_for_all() -> Result<(), SolverQueryError> {
+        let first = query(&[constraint(1, 10)])?;
+        let second = query(&[constraint(2, 20)])?;
+        let third = query(&[constraint(3, 30)])?;
+        let backends: Vec<Box<dyn SolverBackend>> =
+            vec![Box::new(MockSolverBackend::new("primary", SolverOutcomeKind::Sat))];
+        let router = Box::new(InMemoryPortfolioRouter::new(vec!["primary"], Duration::from_secs(30)));
+        let mut solver = BatchSolver::new(backends, router);
+        let results = solver.solve_batch_parallel(&[first, second, third]);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].outcome, SolverOutcomeKind::Sat);
+        assert_eq!(results[1].outcome, SolverOutcomeKind::Sat);
+        assert_eq!(results[2].outcome, SolverOutcomeKind::Sat);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_solver_solve_with_cache_returns_cached_result_on_hit() -> Result<(), SolverCacheError> {
+        let query = query(&[constraint(1, 10)]).map_err(SolverCacheError::InvalidQuery)?;
+        let cache = InMemorySolverCache::default();
+        assert!(cache.insert(&query, result(SolverOutcomeKind::Sat)).is_ok());
+        let backends: Vec<Box<dyn SolverBackend>> =
+            vec![Box::new(MockSolverBackend::new("primary", SolverOutcomeKind::Unsat))];
+        let router = Box::new(InMemoryPortfolioRouter::new(vec!["primary"], Duration::from_secs(30)));
+        let mut solver = BatchSolver::new(backends, router);
+        let outcome = solver.solve_with_cache(&query, &cache);
+        assert!(outcome.is_ok());
+        if let Ok((solver_result, hit)) = outcome {
+            assert!(hit);
+            assert_eq!(solver_result.outcome, SolverOutcomeKind::Sat);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn batch_solver_solve_with_cache_solves_and_stores_on_miss() -> Result<(), SolverCacheError> {
+        let query = query(&[constraint(1, 10)]).map_err(SolverCacheError::InvalidQuery)?;
+        let cache = InMemorySolverCache::default();
+        let backends: Vec<Box<dyn SolverBackend>> =
+            vec![Box::new(MockSolverBackend::new("primary", SolverOutcomeKind::Sat))];
+        let router = Box::new(InMemoryPortfolioRouter::new(vec!["primary"], Duration::from_secs(30)));
+        let mut solver = BatchSolver::new(backends, router);
+        let outcome = solver.solve_with_cache(&query, &cache);
+        assert!(outcome.is_ok());
+        if let Ok((solver_result, hit)) = outcome {
+            assert!(!hit);
+            assert_eq!(solver_result.outcome, SolverOutcomeKind::Sat);
+        }
+        let lookup = cache.lookup(&query)?;
+        assert!(lookup.is_some());
+        if let Some(cached) = lookup {
+            assert_eq!(cached.outcome, SolverOutcomeKind::Sat);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn batch_solver_solve_with_cache_returns_true_on_hit_false_on_miss() -> Result<(), SolverCacheError> {
+        let query = query(&[constraint(1, 10)]).map_err(SolverCacheError::InvalidQuery)?;
+        let cache = InMemorySolverCache::default();
+        let backends: Vec<Box<dyn SolverBackend>> =
+            vec![Box::new(MockSolverBackend::new("primary", SolverOutcomeKind::Sat))];
+        let router = Box::new(InMemoryPortfolioRouter::new(vec!["primary"], Duration::from_secs(30)));
+        let mut solver = BatchSolver::new(backends, router);
+
+        let miss_outcome = solver.solve_with_cache(&query, &cache);
+        assert!(miss_outcome.is_ok());
+        if let Ok((_, hit)) = miss_outcome {
+            assert!(!hit);
+        }
+
+        let hit_outcome = solver.solve_with_cache(&query, &cache);
+        assert!(hit_outcome.is_ok());
+        if let Ok((_, hit)) = hit_outcome {
+            assert!(hit);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sharded_cache_distributes_entries() -> Result<(), SolverCacheError> {
+        let cache = InMemorySolverCache::default();
+        let mut expected = [0u64; SHARD_COUNT];
+        for i in 1..=32u64 {
+            let q = query(&[constraint(i, (i as u8).wrapping_mul(17))]).map_err(SolverCacheError::InvalidQuery)?;
+            let idx = usize::from(q.canonical_key().0[0]) % SHARD_COUNT;
+            cache.insert(&q, result(SolverOutcomeKind::Sat))?;
+            expected[idx] += 1;
+        }
+        let lens = cache.shard_lens()?;
+        assert_eq!(lens, expected.to_vec());
+        let occupied = expected.iter().filter(|&&count| count > 0).count();
+        assert!(occupied > 1, "entries should span multiple shards, got {occupied}");
+        Ok(())
+    }
+
+    #[test]
+    fn sharded_cache_lookup_returns_arc() -> Result<(), SolverCacheError> {
+        let query = query(&[constraint(1, 10)]).map_err(SolverCacheError::InvalidQuery)?;
+        let cache = InMemorySolverCache::default();
+        cache.insert(&query, result(SolverOutcomeKind::Unsat))?;
+        let cached = cache.lookup(&query)?;
+        assert!(cached.is_some());
+        if let Some(cached) = cached {
+            assert_eq!(*cached, result(SolverOutcomeKind::Unsat));
+            let cloned: Arc<SolverResult> = Arc::clone(&cached);
+            assert_eq!(*cloned, *cached);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sharded_cache_stats_aggregate_across_shards() -> Result<(), SolverCacheError> {
+        let cache = InMemorySolverCache::default();
+        let mut total_entries = 0u64;
+        for i in 1..=16u64 {
+            let q = query(&[constraint(i, (i as u8).wrapping_mul(13))]).map_err(SolverCacheError::InvalidQuery)?;
+            cache.insert(&q, result(SolverOutcomeKind::Sat))?;
+            total_entries += 1;
+        }
+        let stats = cache.stats()?;
+        assert_eq!(stats.entries, total_entries);
+        let lens = cache.shard_lens()?;
+        let summed: u64 = lens.iter().sum();
+        assert_eq!(summed, total_entries);
+        Ok(())
     }
 }

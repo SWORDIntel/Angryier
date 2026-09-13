@@ -1,0 +1,22 @@
+[package]
+name = "angryier-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pipeline glue wiring loader, decoder, semantics, IR, interpreter, and SimProcedures for end-to-end execution"
+
+[dependencies]
+angryier-arch = { path = "../angryier-arch" }
+angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
+angryier-execution = { path = "../angryier-execution" }
+angryier-ir = { path = "../angryier-ir" }
+angryier-loader = { path = "../angryier-loader" }
+angryier-memory = { path = "../angryier-memory" }
+angryier-models = { path = "../angryier-models" }
+angryier-semantics = { path = "../angryier-semantics" }
+angryier-semantics-intel64 = { path = "../angryier-semantics-intel64" }
+angryier-state = { path = "../angryier-state" }
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true

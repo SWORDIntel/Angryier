@@ -306,4 +306,212 @@ mod tests {
         assert_eq!(right.epoch, LedgerEpoch(1));
         Ok(())
     }
+
+    #[test]
+    fn register_duplicate_state_fails() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+        assert_eq!(ledger.register(base), Err(LedgerError::DuplicateState));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_unknown_state_fails() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        assert_eq!(ledger.snapshot(StateId(1)), Err(LedgerError::UnknownState));
+        Ok(())
+    }
+
+    #[test]
+    fn begin_unknown_state_fails() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        let result = ledger.begin(&base);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert_eq!(e, LedgerError::UnknownState);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn commit_with_wrong_state_fails() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+        let tx = ledger.begin(&base)?;
+        let mut bad = mutation(1);
+        bad.state = StateId(2);
+        assert_eq!(ledger.commit(tx, bad), Err(LedgerError::Conflict));
+        assert_eq!(ledger.snapshot(StateId(1))?, base);
+        Ok(())
+    }
+
+    #[test]
+    fn begin_with_stale_code_version_fails() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+        let mut drifted = base;
+        drifted.code_versions = vec![CodeVersionGuard {
+            page: CodePageId(1),
+            version: CodePageVersion(7),
+        }];
+        let result = ledger.begin(&drifted);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert_eq!(e, LedgerError::StaleCodeVersion);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn begin_with_semantic_version_mismatch_fails() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+        let mut drifted = base;
+        drifted.semantic_version = SemanticVersion(99);
+        let result = ledger.begin(&drifted);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert_eq!(e, LedgerError::SemanticVersionMismatch);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn begin_with_semantic_content_mismatch_fails() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+        let mut drifted = base;
+        drifted.semantic_content = content(77);
+        let result = ledger.begin(&drifted);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert_eq!(e, LedgerError::SemanticContentMismatch);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn begin_with_replay_mismatch_fails() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+        let mut drifted = base;
+        drifted.replay = Some(ReplayCapsuleId(42));
+        let result = ledger.begin(&drifted);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert_eq!(e, LedgerError::ReplayMismatch);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn commit_with_provenance_to_less_than_from_fails() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+
+        // First commit advances provenance to 4 so a subsequent mutation can
+        // legitimately reference it as `provenance_from`.
+        let tx = ledger.begin(&base)?;
+        let first = mutation(1);
+        ledger.commit(tx, first)?;
+
+        let refreshed = ledger.snapshot(StateId(1))?;
+        let tx2 = ledger.begin(&refreshed)?;
+        let mut bad = mutation(1);
+        bad.provenance_from = ProvenanceSeq(4);
+        bad.provenance_to = ProvenanceSeq(2);
+        assert_eq!(ledger.commit(tx2, bad), Err(LedgerError::ProvenanceGap));
+        assert_eq!(ledger.snapshot(StateId(1))?, refreshed);
+        Ok(())
+    }
+
+    #[test]
+    fn abort_does_not_modify_state() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+        let tx = ledger.begin(&base)?;
+        ledger.abort(tx);
+        assert_eq!(ledger.snapshot(StateId(1))?, base);
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_commits_increment_epoch() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+
+        let tx = ledger.begin(&base)?;
+        let first = ledger.commit(tx, mutation(1))?;
+        assert_eq!(first.epoch, LedgerEpoch(1));
+
+        let tx = ledger.begin(&first)?;
+        let mut second_mutation = mutation(1);
+        second_mutation.provenance_from = first.provenance;
+        let second = ledger.commit(tx, second_mutation)?;
+        assert_eq!(second.epoch, LedgerEpoch(2));
+        assert_eq!(ledger.snapshot(StateId(1))?, second);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_commits_to_same_state_one_wins() -> Result<(), LedgerError> {
+        let ledger = Arc::new(InMemoryExecutionLedger::new());
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+
+        // Both transactions begin from the same base snapshot before either commits.
+        let tx_a = ledger.begin(&base)?;
+        let tx_b = ledger.begin(&base)?;
+
+        let ledger_a = Arc::clone(&ledger);
+        let handle =
+            thread::spawn(move || -> Result<LedgerSnapshot, LedgerError> { ledger_a.commit(tx_a, mutation(1)) });
+
+        let winner = handle.join().map_err(|_| LedgerError::Conflict)??;
+        assert_eq!(winner.epoch, LedgerEpoch(1));
+
+        // The second transaction must observe a stale epoch and fail closed.
+        assert_eq!(ledger.commit(tx_b, mutation(1)), Err(LedgerError::StaleEpoch));
+        assert_eq!(ledger.snapshot(StateId(1))?, winner);
+        Ok(())
+    }
+
+    #[test]
+    fn ledger_error_display_is_non_empty() {
+        let errors = [
+            LedgerError::UnknownState,
+            LedgerError::DuplicateState,
+            LedgerError::StaleEpoch,
+            LedgerError::StaleCodeVersion,
+            LedgerError::SemanticVersionMismatch,
+            LedgerError::SemanticContentMismatch,
+            LedgerError::ProvenanceGap,
+            LedgerError::ReplayMismatch,
+            LedgerError::Conflict,
+            LedgerError::Poisoned,
+        ];
+        for error in errors {
+            assert!(!error.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn register_and_snapshot_roundtrip() -> Result<(), LedgerError> {
+        let ledger = InMemoryExecutionLedger::new();
+        let base = snapshot(1);
+        ledger.register(base.clone())?;
+        let observed = ledger.snapshot(StateId(1))?;
+        assert_eq!(observed, base);
+        Ok(())
+    }
 }

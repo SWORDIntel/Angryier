@@ -1,0 +1,15 @@
+[package]
+name = "angryier-solver-z3-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Z3 solver backend via FFI"
+
+[dependencies]
+angryier-solver = { path = "../angryier-solver" }
+angryier-expr = { path = "../angryier-expr" }
+angryier-types = { path = "../angryier-types" }
+z3-sys = "0.13"
+
+[lints.rust]
+unsafe_code = "allow"

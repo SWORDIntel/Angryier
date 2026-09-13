@@ -1,0 +1,397 @@
+//! Native Intel XED decoder via FFI.
+//!
+//! This crate is the unsafe native bridge that links `libxed` (built from source
+//! by the `xed-sys` crate) and translates raw XED decode output into Angryier's
+//! value-only [`XedDecodedMetadata`]. The metadata is then validated and
+//! normalized into [`DecodedInstruction`] by the safe
+//! [`angryier_decode_xed`](::angryier_decode_xed) adapter.
+//!
+//! No raw `xed_sys` type crosses this crate's public API. The [`XedDecoder`]
+//! type implements [`angriarch::Decoder`](::angryier_arch::Decoder) and returns
+//! fully-normalized [`DecodedInstruction`] values.
+//!
+//! # Build requirements
+//!
+//! `xed-sys` builds Intel XED from source at compile time. You need:
+//!
+//! - Python 3.8 or later (to build XED).
+//! - A C compiler.
+//!
+//! If the `bindgen` feature is enabled (it is by default when regenerating
+//! bindings), `clang` is also required.
+
+mod backend;
+mod feature;
+mod register;
+
+pub use backend::NativeXedBackend;
+
+use angryier_arch::{DecodedInstruction, Decoder};
+use angryier_arch_intel64::{FeatureSet, Intel64ProfileKind, Intel64TargetProfile, IntelFeature};
+use angryier_decode_xed::{BoundXedDecoder, XedAdapterError, XedDecodeConfig, XedDecoderAdapter, XedMachineMode};
+use angryier_types::{Address, TargetProfileId};
+
+/// All Intel feature families, used for the default permissive target profile.
+const ALL_INTEL_FEATURES: [IntelFeature; 18] = [
+    IntelFeature::Sse,
+    IntelFeature::Sse2,
+    IntelFeature::Sse3,
+    IntelFeature::Ssse3,
+    IntelFeature::Sse41,
+    IntelFeature::Sse42,
+    IntelFeature::AesNi,
+    IntelFeature::Sha,
+    IntelFeature::Bmi1,
+    IntelFeature::Bmi2,
+    IntelFeature::Avx,
+    IntelFeature::Avx2,
+    IntelFeature::Avx512,
+    IntelFeature::AvxVnni,
+    IntelFeature::Avx10,
+    IntelFeature::Amx,
+    IntelFeature::Cet,
+    IntelFeature::Apx,
+];
+
+/// A native Intel XED decoder.
+///
+/// Wraps the safe [`BoundXedDecoder`] with the [`NativeXedBackend`] and a
+/// permissive Intel 64 target profile (all feature families enabled) so that
+/// any valid x86-64 instruction decodes without a target-profile violation.
+///
+/// Implements [`Decoder`] for single-instruction decoding and provides
+/// [`decode_batch`](Self::decode_batch) for linear sweep decoding.
+#[derive(Debug)]
+pub struct XedDecoder {
+    inner: BoundXedDecoder<NativeXedBackend>,
+}
+
+impl XedDecoder {
+    /// Creates a new native XED decoder with a permissive Intel 64 target
+    /// profile (all feature families enabled).
+    pub fn new() -> Self {
+        Self::with_profile_id(TargetProfileId(1))
+    }
+
+    /// Creates a new native XED decoder with a specific target profile id and
+    /// all feature families enabled.
+    pub fn with_profile_id(profile_id: TargetProfileId) -> Self {
+        let config = XedDecodeConfig {
+            mode: XedMachineMode::Intel64,
+            profile: Intel64TargetProfile {
+                id: profile_id,
+                kind: Intel64ProfileKind::Custom,
+                features: FeatureSet {
+                    features: ALL_INTEL_FEATURES.to_vec(),
+                    xcr0: 0,
+                },
+            },
+        };
+        Self {
+            inner: BoundXedDecoder {
+                adapter: XedDecoderAdapter { config },
+                backend: NativeXedBackend,
+            },
+        }
+    }
+
+    /// Decodes a single instruction from the given byte slice.
+    ///
+    /// This is the primary decode entry point. It takes the raw instruction
+    /// bytes and the instruction's address and returns a fully-normalized
+    /// [`DecodedInstruction`].
+    pub fn decode(&self, address: Address, bytes: &[u8]) -> Result<DecodedInstruction, XedAdapterError> {
+        Decoder::decode(self, address, bytes)
+    }
+
+    /// Decodes a sequence of bytes into multiple instructions via linear sweep.
+    ///
+    /// Starting at `start_address`, each instruction is decoded and the sweep
+    /// advances by the decoded instruction length. Decoding stops when the
+    /// input is exhausted. If a decode error is encountered, it is returned
+    /// immediately (short-circuiting the sweep).
+    pub fn decode_batch(
+        &self,
+        bytes: &[u8],
+        start_address: Address,
+    ) -> Result<Vec<DecodedInstruction>, XedAdapterError> {
+        let mut instructions = Vec::new();
+        let mut offset = 0usize;
+        let mut address = start_address;
+
+        while offset < bytes.len() {
+            let decoded = self.decode(address, &bytes[offset..])?;
+            let length = decoded.length as usize;
+            instructions.push(decoded);
+            address = address.wrapping_add(length as u64);
+            offset += length;
+        }
+
+        Ok(instructions)
+    }
+}
+
+impl Default for XedDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Decoder for XedDecoder {
+    type Error = XedAdapterError;
+
+    fn decode(&self, address: Address, bytes: &[u8]) -> Result<DecodedInstruction, Self::Error> {
+        self.inner.decode(address, bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use angryier_arch::{AccessKind, OperandKind, OperandVisibility};
+    use angryier_arch_intel64::register_id::GPR_BASE;
+
+    // XED iclass enumerant values (from xed-sys bindings).
+    const ICLASS_MOV: u32 = 499;
+    const ICLASS_ADD: u32 = 10;
+    const ICLASS_NOP: u32 = 554;
+    const ICLASS_RET_NEAR: u32 = 822;
+    const ICLASS_PUSH: u32 = 749;
+    const ICLASS_POP: u32 = 689;
+
+    /// Decodes bytes and asserts the length and iclass (form_id).
+    fn decode_checked(
+        decoder: &XedDecoder,
+        bytes: &[u8],
+        expected_len: u8,
+        expected_form_id: u32,
+    ) -> Result<DecodedInstruction, XedAdapterError> {
+        let decoded = decoder.decode(0x4000, bytes)?;
+        assert_eq!(decoded.length, expected_len, "wrong length for {bytes:02x?}");
+        assert_eq!(
+            decoded.form_id, expected_form_id,
+            "wrong form_id (iclass) for {bytes:02x?}"
+        );
+        Ok(decoded)
+    }
+
+    /// Extracts a register view from an operand, asserting it is a register.
+    fn as_register(operand: &angryier_arch::Operand) -> &angryier_arch::RegisterView {
+        assert!(
+            matches!(operand.kind, OperandKind::Register(_)),
+            "operand {operand:?} should be a register"
+        );
+        if let OperandKind::Register(reg) = &operand.kind {
+            reg
+        } else {
+            unreachable!()
+        }
+    }
+
+    /// Extracts a memory operand, asserting the operand is a memory operand.
+    fn as_memory(operand: &angryier_arch::Operand) -> &angryier_arch::MemoryOperand {
+        assert!(
+            matches!(operand.kind, OperandKind::Memory(_)),
+            "operand {operand:?} should be memory"
+        );
+        if let OperandKind::Memory(mem) = &operand.kind {
+            mem
+        } else {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn decode_mov_rbp_rsp() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        let decoded = decode_checked(&decoder, &[0x48, 0x89, 0xe5], 3, ICLASS_MOV)?;
+
+        // Two register operands: RBP (write), RSP (read).
+        assert_eq!(decoded.operands.len(), 2, "MOV RBP,RSP should have 2 operands");
+
+        let op0 = &decoded.operands[0];
+        assert_eq!(op0.access, AccessKind::Write);
+        assert_eq!(op0.visibility, OperandVisibility::Explicit);
+        let reg0 = as_register(op0);
+        assert_eq!(reg0.parent.0, GPR_BASE + 5, "operand 0 should be RBP parent");
+        assert_eq!(reg0.width_bits, 64);
+
+        let op1 = &decoded.operands[1];
+        assert_eq!(op1.access, AccessKind::Read);
+        let reg1 = as_register(op1);
+        assert_eq!(reg1.parent.0, GPR_BASE + 4, "operand 1 should be RSP parent");
+        assert_eq!(reg1.width_bits, 64);
+        Ok(())
+    }
+
+    #[test]
+    fn decode_mov_rcx_rax() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        let decoded = decode_checked(&decoder, &[0x48, 0x89, 0xc1], 3, ICLASS_MOV)?;
+
+        assert_eq!(decoded.operands.len(), 2);
+
+        let op0 = &decoded.operands[0];
+        assert_eq!(op0.access, AccessKind::Write);
+        let reg0 = as_register(op0);
+        assert_eq!(reg0.parent.0, GPR_BASE + 1, "operand 0 should be RCX parent");
+
+        let op1 = &decoded.operands[1];
+        assert_eq!(op1.access, AccessKind::Read);
+        let reg1 = as_register(op1);
+        assert_eq!(reg1.parent.0, GPR_BASE, "operand 1 should be RAX parent");
+        Ok(())
+    }
+
+    #[test]
+    fn decode_add_rax_5() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        let decoded = decode_checked(&decoder, &[0x48, 0x83, 0xc0, 0x05], 4, ICLASS_ADD)?;
+
+        // XED reports REG0 (RAX, read-write), IMM0 (5, read), and a suppressed
+        // RFLAGS operand. The RFLAGS operand is suppressed but valid.
+        let has_rax = decoded.operands.iter().any(|op| {
+            matches!(&op.kind, OperandKind::Register(reg) if reg.parent.0 == GPR_BASE)
+                && op.access == AccessKind::ReadWrite
+        });
+        assert!(has_rax, "ADD RAX,5 should have a read-write RAX operand");
+
+        let imm = decoded
+            .operands
+            .iter()
+            .find(|op| matches!(&op.kind, OperandKind::Immediate(_)));
+        assert!(imm.is_some(), "ADD RAX,5 should have an immediate operand");
+        if let Some(OperandKind::Immediate(immediate)) = imm.map(|op| &op.kind) {
+            assert_eq!(immediate.value, 5);
+            assert!(immediate.signed);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn decode_nop() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        let decoded = decode_checked(&decoder, &[0x90], 1, ICLASS_NOP)?;
+        assert!(decoded.operands.is_empty(), "NOP should have no operands");
+        Ok(())
+    }
+
+    #[test]
+    fn decode_ret() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        let decoded = decode_checked(&decoder, &[0xc3], 1, ICLASS_RET_NEAR)?;
+        // RET has a memory read operand (stack pop) and a suppressed RIP write.
+        let has_mem = decoded
+            .operands
+            .iter()
+            .any(|op| matches!(&op.kind, OperandKind::Memory(_)));
+        assert!(has_mem, "RET should have a memory operand");
+        Ok(())
+    }
+
+    #[test]
+    fn decode_push_rbp() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        let decoded = decode_checked(&decoder, &[0x55], 1, ICLASS_PUSH)?;
+
+        // PUSH has an explicit RBP (read) and a memory write operand.
+        let has_rbp = decoded.operands.iter().any(|op| {
+            matches!(&op.kind, OperandKind::Register(reg) if reg.parent.0 == GPR_BASE + 5)
+                && op.access == AccessKind::Read
+        });
+        assert!(has_rbp, "PUSH RBP should have a read RBP operand");
+
+        let has_mem_write = decoded
+            .operands
+            .iter()
+            .any(|op| matches!(&op.kind, OperandKind::Memory(_)) && op.access == AccessKind::Write);
+        assert!(has_mem_write, "PUSH RBP should have a memory write operand");
+        Ok(())
+    }
+
+    #[test]
+    fn decode_pop_rbp() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        let decoded = decode_checked(&decoder, &[0x5d], 1, ICLASS_POP)?;
+
+        // POP has an explicit RBP (write) and a memory read operand.
+        let has_rbp_write = decoded.operands.iter().any(|op| {
+            matches!(&op.kind, OperandKind::Register(reg) if reg.parent.0 == GPR_BASE + 5)
+                && op.access == AccessKind::Write
+        });
+        assert!(has_rbp_write, "POP RBP should have a write RBP operand");
+
+        let has_mem_read = decoded
+            .operands
+            .iter()
+            .any(|op| matches!(&op.kind, OperandKind::Memory(_)) && op.access == AccessKind::Read);
+        assert!(has_mem_read, "POP RBP should have a memory read operand");
+        Ok(())
+    }
+
+    #[test]
+    fn decode_mov_rax_mem_displacement() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        let bytes = [0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00];
+        let decoded = decode_checked(&decoder, &bytes, 8, ICLASS_MOV)?;
+
+        // Two operands: RAX (write) and a memory operand with displacement 0x28.
+        assert_eq!(decoded.operands.len(), 2, "MOV RAX,[0x28] should have 2 operands");
+
+        let mem_op = decoded
+            .operands
+            .iter()
+            .find(|op| matches!(&op.kind, OperandKind::Memory(_)));
+        assert!(mem_op.is_some(), "MOV RAX,[0x28] should have a memory operand");
+        if let Some(op) = mem_op {
+            let memory = as_memory(op);
+            assert_eq!(memory.displacement, 0x28);
+            assert_eq!(memory.displacement_width_bits, 32);
+            assert_eq!(memory.address_width_bits, 64);
+            assert!(memory.base.is_none(), "no base register for [disp32]");
+            assert!(memory.index.is_none(), "no index register for [disp32]");
+            assert_eq!(memory.scale, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn decode_batch_linear_sweep() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        // PUSH RBP ; MOV RBP,RSP ; NOP ; RET
+        let bytes: &[u8] = &[0x55, 0x48, 0x89, 0xe5, 0x90, 0xc3];
+        let instructions = decoder.decode_batch(bytes, 0x1000)?;
+
+        assert_eq!(instructions.len(), 4);
+        assert_eq!(instructions[0].length, 1);
+        assert_eq!(instructions[0].form_id, ICLASS_PUSH);
+        assert_eq!(instructions[1].length, 3);
+        assert_eq!(instructions[1].form_id, ICLASS_MOV);
+        assert_eq!(instructions[2].length, 1);
+        assert_eq!(instructions[2].form_id, ICLASS_NOP);
+        assert_eq!(instructions[3].length, 1);
+        assert_eq!(instructions[3].form_id, ICLASS_RET_NEAR);
+
+        // Addresses advance by instruction length.
+        assert_eq!(instructions[0].address, 0x1000);
+        assert_eq!(instructions[1].address, 0x1001);
+        assert_eq!(instructions[2].address, 0x1004);
+        assert_eq!(instructions[3].address, 0x1005);
+        Ok(())
+    }
+
+    #[test]
+    fn decode_empty_input_errors() {
+        let decoder = XedDecoder::new();
+        let result = decoder.decode(0x4000, &[]);
+        assert_eq!(result, Err(XedAdapterError::EmptyInput));
+    }
+
+    #[test]
+    fn decode_invalid_bytes_errors() {
+        let decoder = XedDecoder::new();
+        // 0x06 is PUSH ES, invalid in 64-bit mode.
+        let result = decoder.decode(0x4000, &[0x06]);
+        assert_eq!(result, Err(XedAdapterError::DecodeFailed));
+    }
+}

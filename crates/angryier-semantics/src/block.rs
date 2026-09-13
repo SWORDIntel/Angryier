@@ -25,9 +25,26 @@ pub struct SemanticValue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticEffectDefinition {
-    WriteRegister { register: RegisterId, value: ValueId },
-    WriteOperand { operand_index: u8, value: ValueId },
-    SideEffect { effect: SideEffect, inputs: Vec<ValueId> },
+    WriteRegister {
+        register: RegisterId,
+        value: ValueId,
+    },
+    WriteOperand {
+        operand_index: u8,
+        value: ValueId,
+    },
+    SideEffect {
+        effect: SideEffect,
+        inputs: Vec<ValueId>,
+    },
+    Jump {
+        target: ValueId,
+    },
+    Branch {
+        condition: ValueId,
+        taken: ValueId,
+        not_taken: ValueId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,6 +188,24 @@ impl SemanticBuilder for SemanticBlockBuilder {
         self.push_effect(SemanticEffectDefinition::SideEffect {
             effect,
             inputs: inputs.to_vec(),
+        })
+    }
+
+    fn jump(&mut self, target: ValueId) -> Result<EffectId, SemanticError> {
+        if !self.value_exists(target) {
+            return Err(SemanticError::InvalidSemanticDefinition);
+        }
+        self.push_effect(SemanticEffectDefinition::Jump { target })
+    }
+
+    fn branch(&mut self, condition: ValueId, taken: ValueId, not_taken: ValueId) -> Result<EffectId, SemanticError> {
+        if !self.value_exists(condition) || !self.value_exists(taken) || !self.value_exists(not_taken) {
+            return Err(SemanticError::InvalidSemanticDefinition);
+        }
+        self.push_effect(SemanticEffectDefinition::Branch {
+            condition,
+            taken,
+            not_taken,
         })
     }
 }
@@ -334,6 +369,20 @@ fn encode_block(
                 out.byte(2);
                 encode_side_effect(&mut out, *effect);
                 encode_value_ids(&mut out, inputs);
+            }
+            SemanticEffectDefinition::Jump { target } => {
+                out.byte(3);
+                out.u32(*target);
+            }
+            SemanticEffectDefinition::Branch {
+                condition,
+                taken,
+                not_taken,
+            } => {
+                out.byte(4);
+                out.u32(*condition);
+                out.u32(*taken);
+                out.u32(*not_taken);
             }
         }
     }

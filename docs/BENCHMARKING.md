@@ -1,5 +1,7 @@
 # Angryier Benchmarking Contract
 
+> **Implementation status:** Contract only. `angryier-bench` is scaffolded. No benchmark harness, corpus, or metrics schema is implemented yet.
+
 Performance claims are accepted only when they are reproducible, semantically comparable, and split by workload class.
 
 A symbolic-execution benchmark is invalid if one engine solves a weaker problem, uses a looser environment model, silently concretizes, or reaches a result with a different fidelity policy.

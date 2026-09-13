@@ -128,7 +128,7 @@ impl SemanticFingerprint {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DependencyKey(pub [u8; 32]);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FidelityProfile {
     Prove,
     Explore,
@@ -155,7 +155,7 @@ pub enum SolverOutcomeKind {
     BackendError,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RetentionProfile {
     Forensic,
     Research,
@@ -176,13 +176,13 @@ pub struct CodeVersionGuard {
     pub version: CodePageVersion,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SecurityContext {
     pub classification: u32,
     pub compartment: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AnalysisContext {
     pub run_id: RunId,
     pub target_profile: TargetProfileId,

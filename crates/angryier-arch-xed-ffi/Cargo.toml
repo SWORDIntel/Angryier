@@ -1,0 +1,17 @@
+[package]
+name = "angryier-arch-xed-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Intel XED decoder via FFI"
+
+[dependencies]
+angryier-arch = { path = "../angryier-arch" }
+angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
+angryier-decode-xed = { path = "../angryier-decode-xed" }
+angryier-types = { path = "../angryier-types" }
+xed-sys = "0.6"
+
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "allow"

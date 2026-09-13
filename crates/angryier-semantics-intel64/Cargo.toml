@@ -1,0 +1,25 @@
+[package]
+name = "angryier-semantics-intel64"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Handwritten Intel 64 semantic corpus"
+
+[dependencies]
+angryier-arch = { path = "../angryier-arch" }
+angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
+angryier-semantic-contracts = { path = "../angryier-semantic-contracts" }
+angryier-semantics = { path = "../angryier-semantics" }
+angryier-types = { path = "../angryier-types" }
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+angryier-execution = { path = "../angryier-execution" }
+angryier-ir = { path = "../angryier-ir" }
+angryier-memory = { path = "../angryier-memory" }
+angryier-state = { path = "../angryier-state" }
+
+[lints]
+workspace = true

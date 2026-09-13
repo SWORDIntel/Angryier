@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{
-        Mutex,
+        RwLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -86,6 +86,12 @@ pub trait ExprArena: Send + Sync {
     fn normalization_version(&self) -> ExpressionNormalizationVersion;
 }
 
+/// Object-safe trait for reading expression nodes by ID.
+/// Used by native solver FFI bridges to translate expression trees to solver ASTs.
+pub trait ExprReader: Send + Sync {
+    fn read(&self, id: ExprId) -> Option<ExprNode>;
+}
+
 pub trait HotCanonicalizer: Send + Sync {
     fn canonicalize(&self, node: ExprNode) -> ExprNode;
 }
@@ -157,7 +163,7 @@ struct ArenaShard {
 
 pub struct ShardedExprArena {
     version: ExpressionNormalizationVersion,
-    shards: [Mutex<ArenaShard>; SHARD_COUNT],
+    shards: [RwLock<ArenaShard>; SHARD_COUNT],
     requests: AtomicU64,
     hits: AtomicU64,
     nodes: AtomicU64,
@@ -167,7 +173,7 @@ impl ShardedExprArena {
     pub fn new(version: ExpressionNormalizationVersion) -> Self {
         Self {
             version,
-            shards: std::array::from_fn(|_| Mutex::new(ArenaShard::default())),
+            shards: std::array::from_fn(|_| RwLock::new(ArenaShard::default())),
             requests: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             nodes: AtomicU64::new(0),
@@ -184,7 +190,7 @@ impl ShardedExprArena {
 
     fn record(&self, id: ExprId) -> Result<ExprRecord, ExprArenaError> {
         let (shard, local) = decode_id(id);
-        let shard = self.shards[shard].lock().map_err(|_| ExprArenaError::LockPoisoned)?;
+        let shard = self.shards[shard].read().map_err(|_| ExprArenaError::LockPoisoned)?;
         shard
             .records
             .get(local)
@@ -301,7 +307,7 @@ impl ExprArena for ShardedExprArena {
         let dependency = self.build_dependency(&node)?;
         let shard_index = usize::from(dependency.key.0[0]) % SHARD_COUNT;
         let mut shard = self.shards[shard_index]
-            .lock()
+            .write()
             .map_err(|_| ExprArenaError::LockPoisoned)?;
         if let Some(existing) = shard.by_node.get(&node).copied() {
             self.hits.fetch_add(1, Ordering::Relaxed);
@@ -331,6 +337,12 @@ impl ExprArena for ShardedExprArena {
 
     fn normalization_version(&self) -> ExpressionNormalizationVersion {
         self.version
+    }
+}
+
+impl ExprReader for ShardedExprArena {
+    fn read(&self, id: ExprId) -> Option<ExprNode> {
+        self.get(id)
     }
 }
 
@@ -696,6 +708,376 @@ mod tests {
             })?;
             assert_eq!(arena.get(id).map(|node| node.sort), Some(sort));
         }
+        Ok(())
+    }
+
+    fn bitvec_constant(value: u128, bits: u16) -> ExprNode {
+        let len = usize::from(bits).div_ceil(8);
+        let bytes = value.to_le_bytes();
+        ExprNode {
+            sort: ExprSort::BitVec(bits),
+            op: ExprOp::Constant,
+            operands: Vec::new(),
+            immediate: bytes[..len].to_vec(),
+        }
+    }
+
+    fn bool_constant(value: bool) -> ExprNode {
+        ExprNode {
+            sort: ExprSort::Bool,
+            op: ExprOp::Constant,
+            operands: Vec::new(),
+            immediate: vec![u8::from(value)],
+        }
+    }
+
+    fn binary_bitvec_op(op: ExprOp, left: ExprId, right: ExprId) -> ExprNode {
+        ExprNode {
+            sort: ExprSort::BitVec(8),
+            op,
+            operands: vec![left, right],
+            immediate: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn constant_fold_add() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(bitvec_constant(20, 8))?;
+        let right = arena.intern(bitvec_constant(22, 8))?;
+        let sum = arena.intern(binary_bitvec_op(ExprOp::Add, left, right))?;
+        assert_eq!(arena.get(sum), Some(bitvec_constant(42, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_sub() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(bitvec_constant(100, 8))?;
+        let right = arena.intern(bitvec_constant(30, 8))?;
+        let diff = arena.intern(binary_bitvec_op(ExprOp::Sub, left, right))?;
+        assert_eq!(arena.get(diff), Some(bitvec_constant(70, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_mul() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(bitvec_constant(5, 8))?;
+        let right = arena.intern(bitvec_constant(6, 8))?;
+        let product = arena.intern(binary_bitvec_op(ExprOp::Mul, left, right))?;
+        assert_eq!(arena.get(product), Some(bitvec_constant(30, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_and() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(bitvec_constant(0xff, 8))?;
+        let right = arena.intern(bitvec_constant(0x0f, 8))?;
+        let result = arena.intern(binary_bitvec_op(ExprOp::And, left, right))?;
+        assert_eq!(arena.get(result), Some(bitvec_constant(0x0f, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_or() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(bitvec_constant(0xf0, 8))?;
+        let right = arena.intern(bitvec_constant(0x0f, 8))?;
+        let result = arena.intern(binary_bitvec_op(ExprOp::Or, left, right))?;
+        assert_eq!(arena.get(result), Some(bitvec_constant(0xff, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_xor() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(bitvec_constant(0xff, 8))?;
+        let right = arena.intern(bitvec_constant(0x0f, 8))?;
+        let result = arena.intern(binary_bitvec_op(ExprOp::Xor, left, right))?;
+        assert_eq!(arena.get(result), Some(bitvec_constant(0xf0, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_not() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let operand = arena.intern(bitvec_constant(0x0f, 8))?;
+        let result = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(8),
+            op: ExprOp::Not,
+            operands: vec![operand],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(arena.get(result), Some(bitvec_constant(0xf0, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_eq_true() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(bitvec_constant(42, 8))?;
+        let right = arena.intern(bitvec_constant(42, 8))?;
+        let result = arena.intern(ExprNode {
+            sort: ExprSort::Bool,
+            op: ExprOp::Eq,
+            operands: vec![left, right],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(arena.get(result), Some(bool_constant(true)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_eq_false() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(bitvec_constant(42, 8))?;
+        let right = arena.intern(bitvec_constant(43, 8))?;
+        let result = arena.intern(ExprNode {
+            sort: ExprSort::Bool,
+            op: ExprOp::Eq,
+            operands: vec![left, right],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(arena.get(result), Some(bool_constant(false)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_ite_true_branch() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let cond = arena.intern(bool_constant(true))?;
+        let true_branch = arena.intern(bitvec_constant(42, 8))?;
+        let false_branch = arena.intern(bitvec_constant(99, 8))?;
+        let result = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(8),
+            op: ExprOp::Ite,
+            operands: vec![cond, true_branch, false_branch],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(arena.get(result), Some(bitvec_constant(42, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_ite_false_branch() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let cond = arena.intern(bool_constant(false))?;
+        let true_branch = arena.intern(bitvec_constant(42, 8))?;
+        let false_branch = arena.intern(bitvec_constant(99, 8))?;
+        let result = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(8),
+            op: ExprOp::Ite,
+            operands: vec![cond, true_branch, false_branch],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(arena.get(result), Some(bitvec_constant(99, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn hash_consing_returns_same_id() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let first = arena.intern(symbol(7))?;
+        let second = arena.intern(symbol(7))?;
+        assert_eq!(first, second);
+        assert_eq!(arena.stats().nodes, 1);
+        assert_eq!(arena.stats().intern_hits, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn hash_consing_commutative_canonicalization() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(symbol(1))?;
+        let right = arena.intern(symbol(2))?;
+        let first = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Xor,
+            operands: vec![left, right],
+            immediate: Vec::new(),
+        })?;
+        let second = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Xor,
+            operands: vec![right, left],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(first, second);
+        assert_eq!(arena.stats().intern_hits, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn symbol_has_correct_sources() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let id = arena.intern(symbol(123))?;
+        let summary = arena.dependency_summary(id).ok_or(ExprArenaError::UnknownOperand(id))?;
+        assert_eq!(summary.symbolic_sources, vec![123]);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_sort_zero_width_rejected() {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let result = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(0),
+            op: ExprOp::Constant,
+            operands: Vec::new(),
+            immediate: Vec::new(),
+        });
+        assert_eq!(result, Err(ExprArenaError::InvalidSort));
+    }
+
+    #[test]
+    fn invalid_sort_float_zero_exponent_rejected() {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let result = arena.intern(ExprNode {
+            sort: ExprSort::Float {
+                exponent_bits: 0,
+                significand_bits: 8,
+            },
+            op: ExprOp::Symbol,
+            operands: Vec::new(),
+            immediate: 1_u64.to_le_bytes().to_vec(),
+        });
+        assert_eq!(result, Err(ExprArenaError::InvalidSort));
+    }
+
+    #[test]
+    fn dependency_key_is_stable() -> Result<(), ExprArenaError> {
+        let arena_a = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let arena_b = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left_a = arena_a.intern(symbol(10))?;
+        let right_a = arena_a.intern(symbol(20))?;
+        let expr_a = arena_a.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Add,
+            operands: vec![left_a, right_a],
+            immediate: Vec::new(),
+        })?;
+        let left_b = arena_b.intern(symbol(10))?;
+        let right_b = arena_b.intern(symbol(20))?;
+        let expr_b = arena_b.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Add,
+            operands: vec![left_b, right_b],
+            immediate: Vec::new(),
+        })?;
+        let summary_a = arena_a
+            .dependency_summary(expr_a)
+            .ok_or(ExprArenaError::UnknownOperand(expr_a))?;
+        let summary_b = arena_b
+            .dependency_summary(expr_b)
+            .ok_or(ExprArenaError::UnknownOperand(expr_b))?;
+        assert_eq!(summary_a.key, summary_b.key);
+        Ok(())
+    }
+
+    #[test]
+    fn different_expressions_have_different_keys() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(symbol(10))?;
+        let right = arena.intern(symbol(20))?;
+        let add = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Add,
+            operands: vec![left, right],
+            immediate: Vec::new(),
+        })?;
+        let sub = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Sub,
+            operands: vec![left, right],
+            immediate: Vec::new(),
+        })?;
+        let add_summary = arena
+            .dependency_summary(add)
+            .ok_or(ExprArenaError::UnknownOperand(add))?;
+        let sub_summary = arena
+            .dependency_summary(sub)
+            .ok_or(ExprArenaError::UnknownOperand(sub))?;
+        assert_ne!(add_summary.key, sub_summary.key);
+        Ok(())
+    }
+
+    #[test]
+    fn arena_stats_track_interns() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let a = arena.intern(symbol(1))?;
+        let b = arena.intern(symbol(2))?;
+        let _ = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Add,
+            operands: vec![a, b],
+            immediate: Vec::new(),
+        })?;
+        let stats = arena.stats();
+        assert_eq!(stats.intern_requests, 3);
+        assert_eq!(stats.nodes, 3);
+        assert_eq!(stats.intern_hits, 0);
+        let _ = arena.intern(symbol(1))?;
+        let stats_after = arena.stats();
+        assert_eq!(stats_after.intern_requests, 4);
+        assert_eq!(stats_after.intern_hits, 1);
+        assert_eq!(stats_after.nodes, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn get_returns_interned_node() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let node = symbol(55);
+        let id = arena.intern(node.clone())?;
+        assert_eq!(arena.get(id), Some(node));
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_reads_dont_block() -> Result<(), ExprArenaError> {
+        let arena = std::sync::Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+        let id = arena.intern(symbol(42))?;
+        let arena_a = arena.clone();
+        let arena_b = arena.clone();
+        let handle_a = std::thread::spawn(move || arena_a.get(id));
+        let handle_b = std::thread::spawn(move || arena_b.get(id));
+        let result_a = handle_a.join().map_err(|_| ExprArenaError::LockPoisoned)?;
+        let result_b = handle_b.join().map_err(|_| ExprArenaError::LockPoisoned)?;
+        assert!(result_a.is_some());
+        assert!(result_b.is_some());
+        assert_eq!(result_a, result_b);
+        Ok(())
+    }
+
+    #[test]
+    fn write_blocks_reads() -> Result<(), ExprArenaError> {
+        let arena = std::sync::Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+        let id = arena.intern(symbol(99))?;
+        let arena_writer = arena.clone();
+        let arena_reader = arena.clone();
+        let writer = std::thread::spawn(move || arena_writer.intern(symbol(100)));
+        let reader = std::thread::spawn(move || arena_reader.get(id));
+        let write_result = writer.join().map_err(|_| ExprArenaError::LockPoisoned)?;
+        let read_result = reader.join().map_err(|_| ExprArenaError::LockPoisoned)?;
+        assert!(write_result.is_ok());
+        assert!(read_result.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn read_does_not_block_read() -> Result<(), ExprArenaError> {
+        let arena = std::sync::Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+        let id = arena.intern(symbol(7))?;
+        let arena_a = arena.clone();
+        let arena_b = arena.clone();
+        let handle_a = std::thread::spawn(move || arena_a.dependency_summary(id));
+        let handle_b = std::thread::spawn(move || arena_b.dependency_summary(id));
+        let summary_a = handle_a.join().map_err(|_| ExprArenaError::LockPoisoned)?;
+        let summary_b = handle_b.join().map_err(|_| ExprArenaError::LockPoisoned)?;
+        assert!(summary_a.is_some());
+        assert!(summary_b.is_some());
+        assert_eq!(summary_a, summary_b);
         Ok(())
     }
 }

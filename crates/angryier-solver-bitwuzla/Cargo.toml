@@ -5,9 +5,14 @@ edition.workspace = true
 license.workspace = true
 description = "Bitwuzla adapter seam; no fake solver implementation"
 
+[features]
+ffi = ["dep:angryier-solver-bitwuzla-ffi", "dep:angryier-expr"]
+
 [dependencies]
 angryier-solver = { path = "../angryier-solver" }
 angryier-types = { path = "../angryier-types" }
+angryier-solver-bitwuzla-ffi = { path = "../angryier-solver-bitwuzla-ffi", optional = true }
+angryier-expr = { path = "../angryier-expr", optional = true }
 
 [lints]
 workspace = true

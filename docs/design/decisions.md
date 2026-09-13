@@ -1,4 +1,8 @@
-# Angryier Design Decisions
+# Locked Design Decisions
+
+> **Implementation status:** All 28 decisions are locked. These are the immutable architectural choices that govern implementation. Any change requires an explicit replacement decision and migration note.
+
+---
 
 This document records decisions that are considered **locked** unless new evidence demonstrates that the chosen design is materially inferior. It exists to prevent later implementation work from silently drifting away from the design review.
 
@@ -157,7 +161,7 @@ This allows sibling states and branch alternatives to exploit shared context exp
 
 State migration considers scheduler load, solver-context rebuild cost, memory/cache locality, and NUMA placement rather than using queue depth alone.
 
-## D-017 — Adaptive concrete → taint → symbolic promotion
+## D-017 — Adaptive concrete -> taint -> symbolic promotion
 
 **Status:** Locked
 

@@ -492,4 +492,274 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn register_read_after_write() -> Result<(), RegisterError> {
+        let registers = PersistentRegisters::from_widths([(1, 8)])?;
+        let written = registers.write(1, &[0xab; 8])?;
+
+        assert!(written.read(1).is_ok());
+        if let Ok(value) = written.read(1) {
+            assert_eq!(value, vec![0xab; 8]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn register_write_overwrites_previous() -> Result<(), RegisterError> {
+        let registers = PersistentRegisters::from_widths([(1, 4)])?;
+        let first = registers.write(1, &[0x11; 4])?;
+        let second = first.write(1, &[0x22; 4])?;
+
+        assert!(second.read(1).is_ok());
+        if let Ok(value) = second.read(1) {
+            assert_eq!(value, vec![0x22; 4]);
+        }
+        assert!(first.read(1).is_ok());
+        if let Ok(value) = first.read(1) {
+            assert_eq!(value, vec![0x11; 4]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn register_read_uninitialized_returns_zero() -> Result<(), RegisterError> {
+        let registers = PersistentRegisters::from_widths([(1, 8), (2, 4)])?;
+
+        assert!(registers.read(1).is_ok());
+        if let Ok(value) = registers.read(1) {
+            assert_eq!(value, vec![0; 8]);
+        }
+        assert!(registers.read(2).is_ok());
+        if let Ok(value) = registers.read(2) {
+            assert_eq!(value, vec![0; 4]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn register_fork_creates_independent_copy() -> Result<(), RegisterError> {
+        let registers = PersistentRegisters::from_widths([(1, 8)])?;
+        let fork = registers.clone();
+        let changed = registers.write(1, &[0xff; 8])?;
+
+        assert!(fork.read(1).is_ok());
+        if let Ok(value) = fork.read(1) {
+            assert_eq!(value, vec![0; 8]);
+        }
+        assert!(changed.read(1).is_ok());
+        if let Ok(value) = changed.read(1) {
+            assert_eq!(value, vec![0xff; 8]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn register_fork_write_does_not_affect_original() -> Result<(), RegisterError> {
+        let registers = PersistentRegisters::from_widths([(1, 8)])?;
+        let fork = registers.clone();
+        let fork_changed = fork.write(1, &[0xee; 8])?;
+
+        assert!(registers.read(1).is_ok());
+        if let Ok(value) = registers.read(1) {
+            assert_eq!(value, vec![0; 8]);
+        }
+        assert!(fork_changed.read(1).is_ok());
+        if let Ok(value) = fork_changed.read(1) {
+            assert_eq!(value, vec![0xee; 8]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fidelity_ledger_records_entries() {
+        let ledger = FidelityLedger::new(FidelityProfile::Prove);
+        let recorded = ledger.record(AnalysisDebtKind::Concretized, 7);
+
+        assert_eq!(recorded.entries.len(), 1);
+        assert_eq!(
+            recorded.entries[0],
+            FidelityEntry {
+                kind: AnalysisDebtKind::Concretized,
+                source: 7
+            }
+        );
+        assert_eq!(ledger.entries.len(), 0);
+    }
+
+    #[test]
+    fn fidelity_ledger_is_exact_when_no_debt() {
+        let ledger = FidelityLedger::new(FidelityProfile::Prove);
+
+        assert!(ledger.is_exact());
+        assert!(ledger.entries.is_empty());
+    }
+
+    #[test]
+    fn fidelity_ledger_is_not_exact_with_debt() {
+        let ledger = FidelityLedger::new(FidelityProfile::Explore);
+        let recorded = ledger.record(AnalysisDebtKind::Concretized, 1);
+
+        assert!(!recorded.is_exact());
+        assert!(ledger.is_exact());
+    }
+
+    #[test]
+    fn constraint_lineage_append_and_materialize() {
+        let root = PersistentConstraintLineage::new();
+        let first = root.append(ConstraintId(10));
+        let second = first.append(ConstraintId(20));
+        let third = second.append(ConstraintId(30));
+
+        assert_eq!(
+            third.materialize(),
+            vec![ConstraintId(10), ConstraintId(20), ConstraintId(30)]
+        );
+    }
+
+    #[test]
+    fn constraint_lineage_len_increments() {
+        let lineage = PersistentConstraintLineage::new();
+
+        assert_eq!(lineage.len(), 0);
+        let first = lineage.append(ConstraintId(1));
+        assert_eq!(first.len(), 1);
+        let second = first.append(ConstraintId(2));
+        assert_eq!(second.len(), 2);
+        let third = second.append(ConstraintId(3));
+        assert_eq!(third.len(), 3);
+    }
+
+    #[test]
+    fn constraint_lineage_empty_has_zero_len() {
+        let lineage = PersistentConstraintLineage::new();
+
+        assert_eq!(lineage.len(), 0);
+        assert!(lineage.is_empty());
+        assert!(lineage.materialize().is_empty());
+    }
+
+    #[test]
+    fn ownership_claim_succeeds_for_unowned() -> Result<(), OwnershipError> {
+        let ownership = StateOwnership::default();
+        let claimed = ownership.claim(7)?;
+
+        assert_eq!(claimed.worker, Some(7));
+        assert_eq!(claimed.transfer_sequence, 0);
+        assert_eq!(ownership.worker, None);
+        Ok(())
+    }
+
+    #[test]
+    fn ownership_claim_fails_for_owned() {
+        let claimed = StateOwnership {
+            worker: Some(2),
+            transfer_sequence: 0,
+        };
+        let result = claimed.claim(5);
+
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(
+                error,
+                OwnershipError {
+                    expected_worker: 5,
+                    actual_worker: Some(2)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn ownership_transfer_succeeds_for_owner() -> Result<(), OwnershipError> {
+        let claimed = StateOwnership {
+            worker: Some(3),
+            transfer_sequence: 0,
+        };
+        let transferred = claimed.transfer(3, 9)?;
+
+        assert_eq!(transferred.worker, Some(9));
+        assert_eq!(transferred.transfer_sequence, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn ownership_transfer_fails_for_non_owner() {
+        let claimed = StateOwnership {
+            worker: Some(4),
+            transfer_sequence: 0,
+        };
+        let result = claimed.transfer(2, 8);
+
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(
+                error,
+                OwnershipError {
+                    expected_worker: 2,
+                    actual_worker: Some(4)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn register_error_display_is_non_empty() {
+        let cases = [
+            RegisterError::DuplicateRegister(1),
+            RegisterError::InvalidWidth(2),
+            RegisterError::UnknownRegister(3),
+            RegisterError::WidthMismatch {
+                register: 4,
+                expected: 8,
+                actual: 4,
+            },
+            RegisterError::SymbolicValue(5),
+        ];
+
+        for error in cases {
+            let message = format!("{error}");
+            assert!(!message.is_empty(), "Display output was empty for {error:?}");
+        }
+    }
+
+    #[test]
+    fn ownership_error_display_is_non_empty() {
+        let cases = [
+            OwnershipError {
+                expected_worker: 1,
+                actual_worker: None,
+            },
+            OwnershipError {
+                expected_worker: 2,
+                actual_worker: Some(3),
+            },
+        ];
+
+        for error in cases {
+            let message = format!("{error}");
+            assert!(!message.is_empty(), "Display output was empty for {error:?}");
+        }
+    }
+
+    #[test]
+    fn symbolic_register_value_preserves_expr_id() -> Result<(), RegisterError> {
+        let registers = PersistentRegisters::from_widths([(1, 8)])?;
+        let symbolic = registers.write_symbolic(1, ExprId(99))?;
+
+        let value = symbolic.read_value(1)?;
+        assert!(
+            matches!(value, RegisterValue::Symbolic { .. }),
+            "expected a symbolic register value, got {value:?}"
+        );
+        if let RegisterValue::Symbolic {
+            expression,
+            width_bytes,
+        } = value
+        {
+            assert_eq!(expression, ExprId(99));
+            assert_eq!(width_bytes, 8);
+        }
+        Ok(())
+    }
 }

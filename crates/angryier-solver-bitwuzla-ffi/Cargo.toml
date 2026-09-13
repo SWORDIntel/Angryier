@@ -1,0 +1,16 @@
+[package]
+name = "angryier-solver-bitwuzla-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Bitwuzla solver backend via FFI"
+
+[dependencies]
+angryier-solver = { path = "../angryier-solver" }
+angryier-expr = { path = "../angryier-expr" }
+angryier-types = { path = "../angryier-types" }
+bitwuzla-sys = { version = "0.8", features = ["vendor-cadical"] }
+
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "allow"

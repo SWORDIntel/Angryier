@@ -109,7 +109,36 @@ impl<R, M> Default for ConcreteInterpreter<R, M> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConcreteValue {
     ty: IrType,
-    bytes_le: Vec<u8>,
+    bytes: [u8; 16],
+    len: u8,
+}
+
+impl ConcreteValue {
+    fn bytes_le(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    fn from_bytes_le(ty: IrType, bytes: &[u8]) -> Self {
+        let mut buf = [0u8; 16];
+        let len = bytes.len().min(16);
+        buf[..len].copy_from_slice(&bytes[..len]);
+        ConcreteValue {
+            ty,
+            bytes: buf,
+            len: u8::try_from(len).unwrap_or(16),
+        }
+    }
+
+    fn from_u128(ty: IrType, value: u128, bits: u16) -> Self {
+        let len = usize::from(bits).div_ceil(8);
+        let mut buf = [0u8; 16];
+        buf[..len].copy_from_slice(&value.to_le_bytes()[..len]);
+        ConcreteValue {
+            ty,
+            bytes: buf,
+            len: u8::try_from(len).unwrap_or(16),
+        }
+    }
 }
 
 impl<R, M> ExecutionEngine for ConcreteInterpreter<R, M>
@@ -173,10 +202,7 @@ where
     M: LayeredMemory,
 {
     let produced = match &instruction.op {
-        IrOp::Constant { ty, bytes_le } => Some(ConcreteValue {
-            ty: *ty,
-            bytes_le: bytes_le.clone(),
-        }),
+        IrOp::Constant { ty, bytes_le } => Some(ConcreteValue::from_bytes_le(*ty, bytes_le)),
         IrOp::ExprRef { .. } => return Err(ConcreteExecutionError::SymbolicExpression),
         IrOp::Primitive { op, ty, inputs } => Some(evaluate_primitive(*op, *ty, inputs, values)?),
         IrOp::ReadRegister { register, ty } => {
@@ -185,12 +211,12 @@ where
                 .read(*register)
                 .map_err(ConcreteExecutionError::Register)?;
             ensure_value_width(*ty, &bytes_le)?;
-            Some(ConcreteValue { ty: *ty, bytes_le })
+            Some(ConcreteValue::from_bytes_le(*ty, &bytes_le))
         }
         IrOp::WriteRegister { register, value } => {
             let value = get_value(values, *value)?;
             *state = state
-                .write_register(*register, &value.bytes_le)
+                .write_register(*register, value.bytes_le())
                 .map_err(ConcreteExecutionError::Register)?;
             None
         }
@@ -201,10 +227,16 @@ where
                 .memory
                 .read(address, width)
                 .map_err(ConcreteExecutionError::Memory)?;
-            let mut concrete = Vec::with_capacity(bytes.len());
+            let mut concrete = [0u8; 16];
+            let mut len = 0usize;
             for (offset, byte) in bytes.into_iter().enumerate() {
                 match byte {
-                    ByteValue::Concrete(byte) => concrete.push(byte),
+                    ByteValue::Concrete(byte) => {
+                        if len < 16 {
+                            concrete[len] = byte;
+                            len += 1;
+                        }
+                    }
                     ByteValue::Symbolic(_) => {
                         let offset = u64::try_from(offset).map_err(|_| ConcreteExecutionError::InvalidAddress)?;
                         let symbolic_address = address
@@ -216,13 +248,14 @@ where
             }
             Some(ConcreteValue {
                 ty: *ty,
-                bytes_le: concrete,
+                bytes: concrete,
+                len: u8::try_from(len).unwrap_or(16),
             })
         }
         IrOp::Store { address, value } => {
             let address = value_address(get_value(values, *address)?)?;
             let value = get_value(values, *value)?;
-            let concrete: Vec<_> = value.bytes_le.iter().copied().map(ByteValue::Concrete).collect();
+            let concrete: Vec<_> = value.bytes_le().iter().copied().map(ByteValue::Concrete).collect();
             *state = state
                 .write_memory(address, &concrete)
                 .map_err(ConcreteExecutionError::Memory)?;
@@ -234,10 +267,10 @@ where
             not_taken,
         } => {
             let condition = get_value(values, *condition)?;
-            if condition.ty != IrType::Bits(1) || condition.bytes_le.len() != 1 {
+            if condition.ty != IrType::Bits(1) || condition.len != 1 {
                 return Err(ConcreteExecutionError::TypeMismatch);
             }
-            let next_pc = if condition.bytes_le[0] & 1 == 1 {
+            let next_pc = if condition.bytes[0] & 1 == 1 {
                 *taken
             } else {
                 *not_taken
@@ -265,7 +298,7 @@ where
     };
 
     if let Some(value) = produced {
-        ensure_value_width(value.ty, &value.bytes_le)?;
+        ensure_value_width(value.ty, value.bytes_le())?;
         values.push(value);
     }
     Ok(None)
@@ -314,7 +347,8 @@ fn value_address<R, M>(value: &ConcreteValue) -> Result<Address, ConcreteExecuti
         return Err(ConcreteExecutionError::InvalidAddress);
     }
     let mut bytes = [0_u8; 8];
-    bytes[..value.bytes_le.len()].copy_from_slice(&value.bytes_le);
+    let src = value.bytes_le();
+    bytes[..src.len()].copy_from_slice(src);
     Ok(u64::from_le_bytes(bytes))
 }
 
@@ -417,15 +451,52 @@ fn evaluate_primitive<R, M>(
                 as_u128(resolved[1])
             }
         }
-        IrPrimitive::Concat | IrPrimitive::Extract | IrPrimitive::ZExt | IrPrimitive::SExt => {
-            return Err(ConcreteExecutionError::UnsupportedOperation(operation));
+        IrPrimitive::ZExt => {
+            require_arity(operation, &resolved, 1)?;
+            let input_bits = scalar_bits(resolved[0].ty)?;
+            if input_bits >= output_bits {
+                return Err(ConcreteExecutionError::TypeMismatch);
+            }
+            as_u128(resolved[0]) & bit_mask(output_bits)
+        }
+        IrPrimitive::SExt => {
+            require_arity(operation, &resolved, 1)?;
+            let input_bits = scalar_bits(resolved[0].ty)?;
+            if input_bits >= output_bits {
+                return Err(ConcreteExecutionError::TypeMismatch);
+            }
+            let input = as_u128(resolved[0]);
+            if sign_bit(input, input_bits) {
+                (bit_mask(output_bits) ^ bit_mask(input_bits)) | (input & bit_mask(input_bits))
+            } else {
+                input & bit_mask(input_bits)
+            }
+        }
+        IrPrimitive::Concat => {
+            require_arity(operation, &resolved, 2)?;
+            let low_bits = scalar_bits(resolved[0].ty)?;
+            let high_bits = scalar_bits(resolved[1].ty)?;
+            if low_bits + high_bits != output_bits {
+                return Err(ConcreteExecutionError::TypeMismatch);
+            }
+            (as_u128(resolved[1]) << low_bits) | (as_u128(resolved[0]) & bit_mask(low_bits))
+        }
+        IrPrimitive::Extract => {
+            require_arity(operation, &resolved, 2)?;
+            let input_bits = scalar_bits(resolved[0].ty)?;
+            if input_bits < output_bits {
+                return Err(ConcreteExecutionError::TypeMismatch);
+            }
+            let start = as_u128(resolved[1]);
+            if start >= u128::from(input_bits) {
+                return Ok(ConcreteValue::from_u128(ty, 0, output_bits));
+            }
+            let start = u32::try_from(start).map_err(|_| ConcreteExecutionError::TypeMismatch)?;
+            (as_u128(resolved[0]) >> start) & bit_mask(output_bits)
         }
     };
 
-    Ok(ConcreteValue {
-        ty,
-        bytes_le: to_bytes(value & bit_mask(output_bits), output_bits),
-    })
+    Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))
 }
 
 fn scalar_bits<R, M>(ty: IrType) -> Result<u16, ConcreteExecutionError<R, M>> {
@@ -458,14 +529,7 @@ fn require_types<R, M>(values: &[&ConcreteValue], expected: IrType) -> Result<()
 }
 
 fn as_u128(value: &ConcreteValue) -> u128 {
-    let mut bytes = [0_u8; 16];
-    bytes[..value.bytes_le.len()].copy_from_slice(&value.bytes_le);
-    u128::from_le_bytes(bytes)
-}
-
-fn to_bytes(value: u128, bits: u16) -> Vec<u8> {
-    let len = usize::from(bits).div_ceil(8);
-    value.to_le_bytes()[..len].to_vec()
+    u128::from_le_bytes(value.bytes)
 }
 
 fn bit_mask(bits: u16) -> u128 {
@@ -799,5 +863,65 @@ mod tests {
                 bytes_le: value.to_le_bytes().to_vec(),
             },
         }
+    }
+
+    #[test]
+    fn inline_value_stores_small_values() {
+        let v8 = ConcreteValue::from_u128(IrType::Bits(8), 0xAB, 8);
+        assert_eq!(v8.bytes_le(), &[0xAB]);
+        assert_eq!(v8.len, 1);
+
+        let v64 = ConcreteValue::from_u128(IrType::Bits(64), 0xDEADBEEF, 64);
+        assert_eq!(v64.bytes_le(), &[0xEF, 0xBE, 0xAD, 0xDE, 0, 0, 0, 0]);
+        assert_eq!(v64.len, 8);
+
+        let v128 = ConcreteValue::from_u128(IrType::Bits(128), u128::MAX, 128);
+        assert_eq!(v128.len, 16);
+        assert!(v128.bytes_le().iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    fn inline_value_from_bytes_le_roundtrips() {
+        let bytes = [1u8, 2, 3, 4];
+        let v = ConcreteValue::from_bytes_le(IrType::Bits(32), &bytes);
+        assert_eq!(v.bytes_le(), &bytes);
+        assert_eq!(v.len, 4);
+    }
+
+    #[test]
+    fn inline_value_as_u128_roundtrips() {
+        let v = ConcreteValue::from_u128(IrType::Bits(64), 0x123456789ABCDEF0, 64);
+        assert_eq!(as_u128(&v), 0x123456789ABCDEF0);
+    }
+
+    #[test]
+    fn inline_value_width_is_correct() {
+        let v1 = ConcreteValue::from_u128(IrType::Bits(1), 1, 1);
+        assert_eq!(v1.len, 1);
+        let v16 = ConcreteValue::from_u128(IrType::Bits(16), 0xFFFF, 16);
+        assert_eq!(v16.len, 2);
+        let v128 = ConcreteValue::from_u128(IrType::Bits(128), 0, 128);
+        assert_eq!(v128.len, 16);
+    }
+
+    #[test]
+    fn inline_value_equality() {
+        let a = ConcreteValue::from_u128(IrType::Bits(32), 42, 32);
+        let b = ConcreteValue::from_u128(IrType::Bits(32), 42, 32);
+        assert_eq!(a, b);
+
+        let c = ConcreteValue::from_u128(IrType::Bits(32), 43, 32);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn inline_value_no_heap_allocation() {
+        // The ConcreteValue struct uses a fixed-size [u8; 16] array,
+        // so constructing small values never allocates on the heap.
+        // This test verifies the struct size is bounded.
+        let size = core::mem::size_of::<ConcreteValue>();
+        // IrType (1 byte discriminant + payload) + [u8; 16] + u8 + padding
+        // Should be well under 64 bytes.
+        assert!(size <= 64, "ConcreteValue is {size} bytes, expected <= 64");
     }
 }

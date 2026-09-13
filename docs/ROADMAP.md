@@ -1,9 +1,29 @@
 # Angryier Implementation Roadmap
 
+> **Status:** Phases 0–3 and Phase 5 foundations are implemented. Phase 4 (handwritten semantic corpus) is partially implemented — 93 foundational Intel 64 forms verified end-to-end. Phase 6 foundations (replay, WAL, provenance), Phase 7 foundations (taint), Phase 9 foundations (knowledge store, QIHSE/KEYSTONE adapters, fusion model, semantic compiler), Phase 10 foundations (work-stealing scheduler, distribution codec), Phase 11 foundations (environment models, telemetry, benchmark sink, plugin registry, image loader, fuzz bridge), Phase 12 foundations (QIHSE/KEYSTONE in-memory adapters), Phase 13 foundations (fuzz bridge), Phase 14 foundations (fusion model), and Phase 16 foundations (work codec) are partially implemented in-memory.
+>
+> **Native integrations landed:** Z3 solver FFI (`angryier-solver-z3-ffi`, 4 tests, wired into safe `angryier-solver-z3` adapter behind `ffi` feature), Bitwuzla solver FFI (`angryier-solver-bitwuzla-ffi`, 4 tests, wired into safe `angryier-solver-bitwuzla` adapter behind `ffi` feature), and Intel XED decoder FFI (`angryier-arch-xed-ffi`, 11 tests, wired through `angryier-decode-xed` safe normalization boundary). All three return real SAT/UNSAT/decode outcomes and are validated end-to-end.
+>
+> **Validation baseline:** 634 tests, 0 failures. `cargo fmt` clean. Workspace Clippy clean with warnings denied. Workspace build clean. Default build has zero native dependencies; native backends are opt-in via Cargo features.
+>
+> **Recent progress:** ELF64 parser landed (`angryier-loader`, 24 tests). SimProcedure library landed (`angryier-models`, 27 tests — strlen/strcmp/malloc/free/memcpy/memset/puts/exit stubs). Symbolic-address memory policy landed (`angryier-memory`, 41 tests — Concretize/FullArrays/RegionBased strategies, ConcretizationResolver, byte-granular COW coexistence). Solver portfolio router upgraded (`angryier-solver`, 29 tests — per-query dispatch via QueryShape classifier, CrossCheckPolicy, hard timeout enforcement, backend history tracking, 9 integration tests).
+>
+> **Reality check:** No real binary has ever been loaded, decoded, and executed end-to-end by this engine. The ELF64 parser, SimProcedures, symbolic-address memory, and solver router exist as components but are **not yet wired into the execution pipeline**. The 93 handwritten semantic forms are verified against the author's own expectations, not against hardware or an independent oracle. There is no CFG recovery, no state merging, no scripting layer, and no concolic fast path. The performance work done so far was measured on synthetic microbenchmarks, not on real execution traces. This roadmap has been reordered to make contact with reality — a real binary running end-to-end — before measuring multicore scaling or claiming performance wins.
+>
+> **Dual-mode architecture:** Angryier's competitive thesis is not "angr, but faster" and not "SymQEMU, but Rust." It is **both modes in one engine, sharing the same AngryIR semantics**: a concolic fast path for coverage and input generation (SymCC/QSYM-class speed), and a full symbolic exploration mode for analysis depth (angr-class capability). The two modes share XED decode, AngryIR lowering, solver portfolio, environment models, and ELF64 loading. They differ in execution engine and state representation. The engine switches per-state based on the PROVE/EXPLORE/HUNT exploration profile. This is the answer to Gate J: Angryier is the only engine that does both natively, in safe Rust, at multicore scale.
+>
+> See [implementation plan](status/implementation-plan.md) for phase exit gates and [scaffold status](status/scaffold.md) for per-crate implementation state.
+
 This roadmap is ordered around the primary technical objective: make Angryier materially faster and smarter than Python-heavy symbolic-execution systems on real analysis workloads.
 
 The roadmap therefore prioritizes:
 
+- **contact with reality** — a real binary running end-to-end before any performance claim;
+- **environment modeling** — libc/syscall/SimProcedure equivalents without which real binaries cannot run;
+- **semantic ground truth** — differential testing against hardware or an independent oracle, not self-verification;
+- **symbolic-address memory policy** — the hard problem that defines a symbolic engine's soundness;
+- **dual-mode execution** — a concolic fast path (SymCC/QSYM-class speed) and a full symbolic exploration mode (angr-class depth), sharing the same AngryIR semantics, switching per-state based on exploration profile;
+- **Fuzzy-SAT solver tier** — approximate mutation-based solving for simple branch constraints, falling back to Z3/Bitwuzla for complex ones;
 - native multicore execution;
 - persistent/COW state economics;
 - low-overhead immutable expression sharing;
@@ -12,6 +32,8 @@ The roadmap therefore prioritizes:
 - exact and generalized UNSAT reuse;
 - NUMA-aware work placement;
 - search strategies that spend compute where it has the highest expected value;
+- **state merging / Veritesting** — the real lever against path explosion, not raw parallelism;
+- **programmability** — a scripting layer for user-authored hooks, exploration predicates, and state inspection;
 - optional cumulative knowledge and similarity retrieval through QIHSE and KEYSTONE.
 
 Enterprise-only hardening, elaborate governance machinery, process-isolation frameworks, and similar work do **not** block the core performance programme unless measurements or deployment requirements later prove they are necessary.
@@ -20,9 +42,172 @@ A phase advances only when its exit criteria are satisfied.
 
 ---
 
+# Current Execution Order
+
+The native Z3/Bitwuzla/XED integrations are landed and wired. The next milestones on the critical path to Production 1.0, in recommended execution order:
+
+```text
+1. Wire the pipeline  — connect Elf64Loader + SimProcedureRegistry +
+                       PersistentMemory + BatchSolver into the concrete
+                       interpreter. Load a real statically-linked x86-64
+                       binary, decode with XED, execute end-to-end, hit a
+                       SimProcedure, solve a branch, generate a new input.
+                       (Gate 0: first real binary runs end-to-end)
+
+2. Phase 6 (revised)  — concolic fast path: compile AngryIR blocks into a
+                       tight dispatch loop that runs a single concrete state
+                       and builds symbolic shadow constraints alongside.
+                       QSYM-style optimistic solving and pruning by default.
+                       PROVE/EXPLORE/HUNT profiles as real mode switches.
+                       Fuzzy-SAT solver tier for simple branch constraints.
+                       (Gate A: symbolic correctness + canonical identity
+                        stable; fast path measured on real binaries)
+
+3. Phase 5 finish     — OS-thread worker pool, worker-local deques,
+                       NUMA-group queues, solver-context affinity,
+                       instrumentation. Both modes must be parallelizable:
+                       the concolic fast path parallelizes across inputs
+                       (like QSYM), the full symbolic mode parallelizes
+                       across states (like angr+).
+                       (Gate B: useful physical-core scaling on REAL binaries
+                        in BOTH modes; report per-state memory footprint at
+                        10k live states and solver-context migration cost at
+                        depth 500)
+
+4. Phase 8            — constraint slicing, exact query reuse, incremental
+                       contexts, UNSAT-core reuse, portfolio routing
+                       (Gate C: exact reuse proven correct before
+                        generalization; measured reuse hit rate on real
+                        traces, not synthetic)
+
+5. Phase 7            — semantic generator + broad Intel 64 coverage
+                       (Gate D: handwritten corpus + differential oracle
+                        prove the required shapes; x87/FPU included)
+
+6. Phase 10           — search intelligence, state merging / Veritesting,
+                       CFG recovery, state economics, optional QUBO
+                       batch planner with CUDA → OpenCL → CPU fallback
+                       (Gate J: Angryier's dual-mode synthesis — concolic
+                        fast path + full symbolic — beats both angr AND
+                        SymQEMU/SymCC on a named workload class)
+
+7. Phase 13 (revised) — JIT via cranelift or custom, only if profiling
+                       shows the fast interpreter is still the bottleneck.
+                       The concolic fast path (step 2) uses a fast
+                       interpreter, not a JIT. Upgrade to JIT is an
+                       optimization, not a prerequisite.
+                       (Gate G: JIT proceeds only if profiling shows the
+                        fast interpreter remains the bottleneck)
+
+8. Phase 15           — scripting layer (PyO3 or embedded scripting), stable
+                        Rust API, CLI documentation, reproducible release
+                        builds
+
+9. Production 1.0     — validation + reproducible correctness/performance
+                       reports
+```
+
+The single highest-risk milestone is **Phase 5 (Gate B)**. But Gate B is only
+meaningful if measured on real binaries (Gate 0), with a symbolic-address
+memory policy (Phase 3), and with environment models (Phase 1). A synthetic
+branch tree will pass Gate B and teach nothing, because real path explosion is
+exponential and 32 cores is a constant factor against it. The real lever
+against path explosion is state merging (Phase 10), not raw parallelism.
+
+**Positioning:** The competitive landscape is not angr vs. Angryier. It is:
+
+```text
+SymCC:    compiled symbolic propagation, source-only, fastest concolic
+SymQEMU:  SymCC ideas in QEMU TCG, binary-only, fast concolic
+QSYM:     Pin DBI + instruction-level concolic, fast, deliberately unsound
+Fuzzolic: QEMU tracing + Fuzzy-SAT, interesting solver architecture
+angr:     IR-based symbolic emulator, deep analysis, slow execution
+```
+
+Angryier does not compete with SymCC on source-instrumented speed. It does
+not compete with angr on analysis breadth (yet). It competes by being the
+only engine that does **both modes** — concolic fast path and full symbolic
+exploration — natively, sharing the same AngryIR semantics, in safe Rust,
+at multicore scale. The concolic fast path handles coverage and input
+generation (QSYM/SymQEMU-class). The full symbolic mode handles analysis
+depth, CFG recovery, state merging, and differential validation (angr-class).
+The engine switches per-state based on the PROVE/EXPLORE/HUNT profile. Gate
+J forces this to be proven on a named workload, not asserted.
+
+---
+
 # Competitive Performance Mandate
 
 The following are first-class design goals, not later polish.
+
+## Contact with reality
+
+No performance claim is credible until it is measured on a real binary loaded, decoded, and executed end-to-end. Synthetic microbenchmarks tune the engine against the author's assumptions, not against reality. The first milestone after solver wiring is a real binary running through the full pipeline, with concrete replay validation: generate an input, run the real binary natively, confirm it reaches the target state.
+
+## Environment modeling
+
+Real symbolic execution is dominated by environment modeling, not ALU semantics. A stripped glibc hello-world hits `fs:[0x28]` (TLS stack canary), `rep stosb`/ERMS `memcpy`, SSE2 `pcmpeqb`/`pmovmskb` in `strlen`, `cpuid`, `rdtsc`, `syscall`, and possibly x87 in `printf`. Without libc models, syscall stubs, and SimProcedure equivalents, the engine either path-explodes inside glibc's loops or cannot run the program at all. This is not a Phase 14 nice-to-have; it gates whether any real binary can run.
+
+## Semantic ground truth
+
+Handwritten semantics verified against the author's own expectations are circular. The oracle must be independent: differential execution against hardware (execute the instruction natively, compare every register bit including AF/PF/OF-on-shift-by-zero), or cross-check against VEX/QEMU, or a formal model like Sail/K. XED gives encodings, not meaning. The semantic generator (Phase 7) needs a machine-readable source of truth for ~1,500 mnemonics and their flag semantics; that source cannot be "handwrite it and hope."
+
+## Symbolic-address memory policy
+
+Page-backed COW with O(1) fork is a concrete-memory optimization. The thing that defines a symbolic engine's soundness, completeness, and solver load is what happens on `mov rax, [rbx]` when `rbx` is symbolic. The policy must be explicit and configurable:
+
+- **concretization** (angr's default — bounded range for reads, single address for writes, with pluggable strategies);
+- **full theory-of-arrays** (sound but solver-heavy);
+- **region-based symbolic memory** (compromise).
+
+Each has documented failure modes (missed bugs, unsound merges, solver death). Byte-granular symbolic content must coexist with page-granular COW — one symbolic byte must not make an entire page unshareable and unforkable in O(1).
+
+## State merging / Veritesting
+
+Path explosion is exponential. 32 cores is a constant factor against it. The real lever is state-space reduction: Veritesting (statically merging states), loop summarization, function summaries, under-constrained execution, CFG-guided pruning. Merging states fundamentally conflicts with a fork-heavy COW architecture (you must reunify memory, registers, and solver contexts), but without it, parallelism buys almost nothing against exponential blowup. State merging is on the critical path, not deferred to Phase 10 as optional.
+
+## Dual-mode execution
+
+The single most important architectural decision in this roadmap is that Angryier has **two execution modes** sharing the same AngryIR semantics:
+
+```text
+Concolic fast path (EXPLORE/HUNT):
+  - single concrete state, no state tree
+  - symbolic shadow constraints built alongside concrete execution
+  - QSYM-style optimistic solving and pruning
+  - Fuzzy-SAT for simple branch constraints, Z3/Bitwuzla for complex ones
+  - parallelizes across inputs (like QSYM/SymCC)
+  - goal: coverage and input generation at near-native speed
+
+Full symbolic mode (PROVE):
+  - state forking, COW memory, full symbolic state tree
+  - solver calls at branches, state merging / Veritesting
+  - CFG recovery, dataflow, function summaries
+  - parallelizes across states (like angr+)
+  - goal: analysis depth, correctness proofs, differential validation
+```
+
+Both modes use the same XED decoder, AngryIR lowering, environment models, and solver portfolio. The difference is the execution engine and state representation. The engine switches per-state based on the PROVE/EXPLORE/HUNT profile.
+
+**Why not just build one mode?** SymQEMU is fast but can't do full symbolic exploration. angr can do full symbolic but is slow. Building both in one engine, sharing semantics, is the only way to get both speed and depth. The concolic fast path is for coverage; the full symbolic mode is for analysis. Neither alone is the product.
+
+**Why a fast interpreter, not a JIT, for the concolic path?** A fast interpreter (compiled AngryIR dispatch loop with symbolic shadows) gets 5-10× over the current interpreter, is fully safe Rust, and validates the architecture. A real JIT (cranelift or custom) is Phase 13 work — an optimization, not a prerequisite. Don't build a JIT until profiling shows the fast interpreter is the bottleneck.
+
+## Fuzzy-SAT solver tier
+
+Most fuzzing-generated branch constraints are simple (`x == 0x42`, `x < 0x100`). A full SMT solver is unnecessarily general for these. Fuzzolic's Fuzzy-SAT idea — mutate candidate byte vectors and evaluate the constraint directly — is much cheaper and fits naturally into Angryier's solver portfolio:
+
+```text
+Tier 1: Fuzzy-SAT (mutation-based, cheap, approximate, unsound)
+Tier 2: Z3/Bitwuzla incremental (exact, medium cost)
+Tier 3: Z3/Bitwuzla full (exact, expensive)
+```
+
+The portfolio router (already built) routes simple constraints to Fuzzy-SAT and complex ones to Z3/Bitwuzla. Fuzzy-SAT falls back to Z3 when it can't find a solution within a budget. This is a new crate (`angryier-solver-fuzzy`) implementing the existing `SolverBackend` trait with `name() = "fuzzy"`.
+
+## Programmability
+
+Every serious symbolic-execution task needs user-authored hooks for function summaries, exploration predicates, and state inspection. angr's moat is that a person types `simgr.explore(find=lambda s: b"Good Job" in s.posix.dumps(1))` in a REPL and iterates in seconds. A CLI is not a substitute for a programmable engine. The scripting layer (PyO3, embedded Lua, or a Rust plugin ABI) must be first-class, not a Phase 15 afterthought.
 
 ## Multicore state ownership
 
@@ -105,9 +290,11 @@ CUDA and OpenCL availability is detected at runtime against versioned capability
 
 # Phase 0 — Repository, Contracts, and Measurement Baseline
 
+> **Status: foundations implemented.** Cargo workspace, CI, metrics schema, benchmark harness, micro-binary corpus, support-manifest schema, and performance counter boundaries are scaffolded. Reference benchmark harness and comparison-engine runs remain future work.
+
 ## Build
 
-- Cargo workspace matching `ARCHITECTURE.md` crate boundaries.
+- Cargo workspace matching [architecture/crates.md](architecture/crates.md) crate boundaries.
 - CI for formatting, clippy, unit tests, and benchmark smoke tests.
 - Versioned JSON metrics schema.
 - Reference benchmark harness capable of running Angryier and comparison engines under equivalent limits.
@@ -124,12 +311,14 @@ CUDA and OpenCL availability is detected at runtime against versioned capability
 
 ---
 
-# Phase 1 — Loader + Intel 64 Decode + Handwritten Semantic Corpus
+# Phase 1 — Loader + Intel 64 Decode + Handwritten Semantic Corpus + Environment Modeling
+
+> **Status: partially implemented.** Architecture-neutral core trait, Intel 64 register/feature model, XED FFI adapter (`angryier-arch-xed-ffi`, 11 tests), safe normalized XED metadata boundary (`angryier-decode-xed`), normalized `DecodedInstruction`, 93-form handwritten semantic corpus, AngryIR lowering, concrete interpreter, and block cache are done. Real ELF64/PE32+ loaders, environment models (libc/syscall/SimProcedure equivalents), TLS/dynamic-linking/CRT-startup handling, and differential semantic testing harness remain future work. The current `angryier-loader` is in-memory only and rejects real binaries. The current `angryier-models` is an in-memory operation table, not a SimProcedure library.
 
 ## Build
 
-- ELF64 loader;
-- PE32+ loader;
+- ELF64 loader (segments, sections, entry point, relocations, dynamic linking, TLS);
+- PE32+ loader (sections, imports, TLS, CRT startup);
 - architecture-neutral core trait;
 - Intel 64 register/feature model;
 - Intel XED FFI adapter;
@@ -138,7 +327,9 @@ CUDA and OpenCL availability is detected at runtime against versioned capability
 - representative handwritten semantic corpus;
 - minimal AngryIR lowering;
 - concrete interpreter;
-- block cache keyed by image/address/code/semantic identity.
+- block cache keyed by image/address/code/semantic identity;
+- **environment model library** — libc function summaries (malloc, free, strlen, strcmp, printf, memcpy, etc.), syscall stubs (read, write, mmap, brk, exit, etc.), SimProcedure equivalents, symbolic filesystem/sockets;
+- **differential semantic testing harness** — cross-check handwritten semantics against hardware execution (every register bit including AF/PF/OF) or against VEX/QEMU, not against the author's own expectations.
 
 ## Corpus requirements
 
@@ -162,11 +353,17 @@ The handwritten corpus must exercise:
 - curated concrete blocks match reference/native results where applicable;
 - unsupported forms fail explicitly;
 - XED decode support is never conflated with semantic support;
-- the semantic representation covers every semantic shape in the representative corpus.
+- the semantic representation covers every semantic shape in the representative corpus;
+- **a real dynamically-linked binary loads, decodes, and executes end-to-end through the full pipeline** (Gate 0);
+- **concrete replay validation passes** — generated inputs, when run on the real binary natively, reach the target state;
+- **differential semantic testing passes** — handwritten forms agree with the independent oracle (hardware or VEX/QEMU) on all register bits, not just the author's expectations;
+- **environment models handle at least**: `__libc_start_main` / CRT startup, `malloc`/`free`, `strlen`/`strcmp`/`memcpy`, `read`/`write`/`mmap`/`brk`/`exit` syscalls, TLS stack canary access (`fs:[0x28]`).
 
 ---
 
 # Phase 2 — Typed Values + Symbolic Expression Core
+
+> **Status: foundations implemented.** Compact `ExprId` arena with sharded `RwLock`-based reads, structural hashing/hash-consing, constant folding, dependency metadata, solver-independent expression fingerprints, and bitvector/bool domains are done. Floating-point, vector, opmask, tile domains, lazy lane/tile symbolic materialization, and shared-immutable arena instrumentation remain future work.
 
 ## Build
 
@@ -192,7 +389,9 @@ The handwritten corpus must exercise:
 
 ---
 
-# Phase 3 — COW Memory + Persistent State
+# Phase 3 — COW Memory + Persistent State + Symbolic-Address Policy
+
+> **Status: foundations implemented.** Sparse symbolic overlays (per-page `BTreeMap` for concrete and symbolic bytes), state fork primitive via `Arc` sharing, persistent constraint lineage, explicit worker/state ownership metadata, code-page versions, and state/fidelity metadata slots are done. Page-based concrete backing with real COW page ownership, symbolic/taint bitmap, compact COW register file, and **symbolic-address memory policy** remain future work — the current memory crate uses sparse maps rather than OS page-table-backed COW and has no documented policy for `mov rax, [rbx]` when `rbx` is symbolic.
 
 ## Build
 
@@ -205,7 +404,12 @@ The handwritten corpus must exercise:
 - state fork primitive;
 - explicit worker/state ownership metadata;
 - code-page versions for self-modifying-code/JIT invalidation;
-- state/fidelity metadata slots.
+- state/fidelity metadata slots;
+- **symbolic-address memory policy** — explicit, configurable, per-state:
+  - concretization strategies (bounded range for reads, single address for writes, pluggable strategy trait);
+  - theory-of-arrays option (sound but solver-heavy, opt-in);
+  - region-based symbolic memory (compromise between concretization and full arrays);
+- **byte-granular symbolic content coexistence with page-granular COW** — one symbolic byte must not make an entire page unshareable or unforkable in O(1).
 
 ## Exit criteria
 
@@ -213,11 +417,19 @@ The handwritten corpus must exercise:
 - sibling states share unchanged pages;
 - one symbolic byte does not materialize an entire page symbolically;
 - state transfer between workers does not require deep copying;
-- COW and state-fork costs are measurable under multicore pressure.
+- COW and state-fork costs are measurable under multicore pressure;
+- **symbolic-address policy is documented and tested** — concretization, arrays, and region-based modes all produce correct results on a differential test suite;
+- **byte-granular symbolic content does not break page-granular COW sharing** — verified with a test that writes one symbolic byte to a shared page and confirms the rest of the page remains shared.
 
 ---
 
 # Phase 4 — Solver Backends + Canonical Query Layer
+
+> **Status: partially implemented.** Backend-independent solver trait, Z3 backend (FFI + safe adapter wiring, 4+2 tests), Bitwuzla backend (FFI + safe adapter wiring, 4+2 tests), SAT/UNSAT/UNKNOWN/BACKEND_ERROR outcomes, solver-independent canonical query representation, exact canonical query fingerprint, normalized local query cache (16 shards with `Arc<SolverResult>`), shared-context batched-query API, per-query portfolio dispatch (`QueryShape` classifier), `CrossCheckPolicy`, hard timeout enforcement, and backend history tracking are done (29 tests + 9 integration tests). Per-worker incremental contexts and basic DFS/BFS exploration remain future work. The FFI backends are wired into the safe adapter crates behind `ffi` Cargo features and the portfolio router supports per-query dispatch, but the FFI backends are not yet instantiated in the router at runtime.
+>
+> **Fuzzy-SAT tier:** A new `angryier-solver-fuzzy` crate (Phase 6) will add a mutation-based approximate solver for simple branch constraints, plugged into the portfolio router as a third backend with `name() = "fuzzy"`. The router already routes by query shape; Fuzzy-SAT will receive simple constraints and fall back to Z3/Bitwuzla for complex ones.
+>
+> **Architectural tension noted:** Per-worker incremental solver contexts (push/pop over a shared constraint prefix) require a state to stay with its solver context. Work-stealing moves states between workers, breaking prefix alignment. This tension must be resolved in Phase 5 — either pin states to workers (losing load balance) or rebuild solver contexts on migration (losing incrementality). The measured cost of solver-context migration at path depth 500 must be reported before Gate B.
 
 ## Build
 
@@ -248,6 +460,8 @@ The handwritten corpus must exercise:
 # Phase 5 — Native Multicore + NUMA Scheduler
 
 This is a core competitive milestone, not optional scalability polish.
+
+> **Status: foundations implemented.** In-memory work-stealing scheduler with per-worker queues, NUMA distance model, greedy scoring, and deterministic single-thread baseline is done. OS-thread worker pool, worker-local deques, NUMA-group queues, global emergency queue, solver-context affinity, memory-working-set-aware migration cost, and scheduler performance instrumentation remain future work. This is the make-or-break milestone (Gate B).
 
 ## Build
 
@@ -288,30 +502,58 @@ steal benefit =
 - solver-context affinity measurably reduces rebuild work on appropriate workloads;
 - scheduler instrumentation identifies contention and poor migration decisions.
 - the CPU batch planner is deterministic and preserves all runnable work on cancellation or failure.
+- **Gate B is measured on real binaries from Phase 1 (Gate 0), not synthetic branch trees** — a synthetic tree of independent cheap branches will pass Gate B and teach nothing, because real path explosion is exponential and 32 cores is a constant factor against it;
+- **per-state memory footprint including solver context is reported at 10k live states** — memory, not scheduling, is what has killed every parallel symbolic engine before this one;
+- **solver-context migration cost is reported at path depth 500** — the tension between incremental contexts and work-stealing (noted in Phase 4) must be resolved with measured data, not assumptions.
 
 ---
 
-# Phase 6 — Concrete/Taint Fast Path + Symbolic Promotion
+# Phase 6 — Concolic Fast Path + Symbolic Shadows + Dual-Mode Execution
+
+> **Status: foundations implemented.** In-memory taint engine with labels, states, promotion threshold, transform/merge/sink is done. The concolic fast path, symbolic shadow builder, QSYM-style path policy, Fuzzy-SAT solver tier, PROVE/EXPLORE/HUNT mode switches, and per-state fidelity ledger remain future work.
+>
+> **This is now the architectural centerpiece, not a Phase 6 afterthought.** The concolic fast path is what makes Angryier competitive with SymQEMU/QSYM for coverage and input generation. The full symbolic mode (current interpreter + COW + forking) is what makes Angryier competitive with angr for analysis depth. Both modes share the same AngryIR semantics. This phase builds the concolic fast path and the mode-switching infrastructure.
+>
+> **Design:** The concolic fast path compiles AngryIR blocks into a tight tagged-union dispatch loop that:
+> - runs a single concrete state (no state tree, no COW fork, no plugin system);
+> - builds symbolic shadow constraints alongside concrete execution (SymCC's idea, but in the interpreter);
+> - calls the solver only at branches, not at every operation;
+> - uses QSYM-style optimistic solving and pruning by default (configurable to sound for PROVE mode);
+> - routes simple constraints to Fuzzy-SAT, complex ones to Z3/Bitwuzla via the portfolio router.
+>
+> **Why a fast interpreter, not a JIT:** A fast interpreter gets 5-10× over the current interpreter, is fully safe Rust, and validates the dual-mode thesis. A real JIT (cranelift) is Phase 13 work — an optimization, not a prerequisite. Don't build a JIT until profiling shows the fast interpreter is the bottleneck.
 
 ## Build
 
-- cheap taint/dataflow domain;
-- taint propagation through canonical semantics/AngryIR;
-- concrete-to-symbolic promotion policy;
-- concrete-only path with zero symbolic-node allocation where possible;
-- PROVE / EXPLORE / HUNT profiles;
-- per-state fidelity ledger.
+- concolic fast path: compile AngryIR blocks into a tight dispatch loop with symbolic shadows;
+- symbolic shadow builder: construct constraint expressions alongside concrete execution, no solver calls until branches;
+- QSYM-style optimistic solving: try cheap concretization before full SMT, prune uninteresting branches;
+- QSYM-style pruning: configurable unsoundness for EXPLORE/HUNT, strict soundness for PROVE;
+- Fuzzy-SAT solver tier (`angryier-solver-fuzzy`): mutation-based approximate solver for simple constraints;
+- PROVE / EXPLORE / HUNT profiles as real mode switches:
+  - **PROVE**: full symbolic, sound, state forking, solver at every branch (current interpreter);
+  - **EXPLORE**: concolic fast path, optimistic solving, pruning, Fuzzy-SAT for simple constraints;
+  - **HUNT**: concolic fast path + fuzzer integration, maximum pruning, unsound by design;
+- per-state fidelity ledger: track which mode each state is in and why;
+- mode-switching infrastructure: a state can transition from EXPLORE to PROVE when it hits a complex branch that needs full symbolic reasoning.
 
 ## Exit criteria
 
-- mostly concrete workloads create materially fewer symbolic nodes than always-symbolic execution;
-- concrete/taint paths outperform equivalent always-symbolic execution;
-- PROVE rejects unsupported approximation;
-- EXPLORE/HUNT approximations remain explicitly identified.
+- concolic fast path executes real binaries (from Gate 0) at 5-10× the speed of the full symbolic interpreter;
+- symbolic shadow constraints are correct: branch inversion produces valid test cases;
+- PROVE mode is sound (no missed paths); EXPLORE/HUNT modes are explicitly unsound and documented;
+- Fuzzy-SAT handles simple constraints (`x == C`, `x < C`, `x != C`) correctly and faster than Z3;
+- mode switching works: a state in EXPLORE mode that hits a complex branch transitions to PROVE mode;
+- all measurements are on real binaries, not synthetic trees;
+- the dual-mode thesis is validated: Angryier does both modes, sharing AngryIR, in one engine.
 
 ---
 
 # Phase 7 — Semantic Generator + Broad Intel 64 Coverage
+
+> **Status: foundations implemented.** In-memory semantic compiler with origin parsing, coverage manifest, duplicate form rejection is done. 93 handwritten Intel 64 forms are verified end-to-end (against the author's expectations — not yet against an independent oracle). Versioned semantic-definition schema, deterministic generated output, handwritten override mechanism, CI regeneration/diff gate, and expansion to full Intel extension families remain future work. Gate D: the handwritten corpus plus the differential oracle (from Phase 1) must prove the required semantic shapes before the generator scales.
+>
+> **Ground-truth problem:** XED gives encodings, not meaning. The semantic generator needs a machine-readable source of truth for ~1,500 mnemonics and their flag semantics. The oracle must be independent (hardware differential testing, VEX/QEMU cross-check, or a formal model like Sail/K). Strata alone took Heule's team years to cover a fraction of the ISA; the generator cannot shortcut that without an independent oracle. Undefined flag behavior (AF/PF/OF-on-shift-by-zero), x87/FPU, MMX, segment/TLS state, and self-modifying code have burned VEX for two decades and must be handled explicitly.
 
 ## Build
 
@@ -327,6 +569,7 @@ steal benefit =
 
 ```text
 scalar Intel 64
+x87 FPU / MMX
 SSE through SSE4.x
 AES/SHA/BMI-class extensions
 AVX
@@ -344,11 +587,15 @@ APX
 - generated and handwritten semantics use one validation pipeline;
 - families are advertised only after required forms pass validation;
 - host feature absence never removes software target semantics;
-- representative semantic families can be expanded without hand-writing every form.
+- representative semantic families can be expanded without hand-writing every form;
+- **all generated and handwritten forms pass the differential oracle** (hardware or VEX/QEMU cross-check) — not just the author's expectations;
+- **undefined flag behavior is explicitly documented** — AF/PF/OF-on-shift-by-zero and other SDM-undefined cases have a defined Angryier behavior.
 
 ---
 
 # Phase 8 — Solver Reuse, Slicing, and Preemption
+
+> **Status: foundations implemented.** Solver-independent canonical query representation, exact canonical query fingerprint, 16-shard local query cache with `Arc<SolverResult>`, and portfolio router trait are done. Dependency-driven constraint slicing, exact query reuse across sibling states, incremental-context reuse, solver cancellation/preemption, portfolio routing by query shape, cross-check policies, UNSAT-core reuse, alpha-equivalence/subsumption experiments, and cache-admission policy remain future work. Gate C: exact canonical-query reuse must be proven correct before any generalized reuse is allowed.
 
 ## Build
 
@@ -385,7 +632,9 @@ when the exact validity and implication conditions are satisfied.
 - generalized UNSAT reuse is independently validated;
 - preemption reduces pathological solver wall time;
 - cumulative reuse measurably reduces query count and total solver time;
-- cache storage/lookup cost is below the recomputation cost it is intended to avoid.
+- cache storage/lookup cost is below the recomputation cost it is intended to avoid;
+- **reuse hit rate is measured on real execution traces** (from Phase 1/Gate 0), not synthetic benchmarks — sibling-state queries differ by the branch condition and are by construction not identical, so the real hit rate must be reported, not assumed;
+- **comparison to existing work** — KLEE's counterexample caching (2008) and Claripy's simplifier already occupy this space; the improvement over those baselines must be measured, not claimed.
 
 ---
 
@@ -394,6 +643,8 @@ when the exact validity and implication conditions are satisfied.
 Angryier must remain fully usable without either repository. These integrations are optional because core symbolic execution must not depend on external persistence or retrieval systems.
 
 They are nevertheless **highly recommended** for repeated analysis, large corpora, similarity searching, exact artifact lookup and cumulative knowledge.
+
+> **Status: foundations implemented.** In-memory QIHSE adapter with exact fetch, fingerprint vector query, duplicate rejection and in-memory KEYSTONE adapter with inverted index, substring lookup, duplicate rejection are done. Git submodule integration, feature-gated adapter wiring, asynchronous/batched execution-event bridge, local buffering/spooling fallback, and persistence-disabled mode remain future work. Gate E: must show measurable value without putting synchronous persistence on the execution hot path.
 
 ## Intended Git submodules
 
@@ -459,7 +710,15 @@ Use KEYSTONE as the optional ingestion/indexing/retrieval accelerator for:
 
 ---
 
-# Phase 10 — Search Intelligence and State Economics
+# Phase 10 — Search Intelligence, State Merging, and State Economics
+
+> **Status: not started.** Composable search objective, coverage novelty, target distance, taint relevance, solver-cost estimate, uncertainty/fidelity signals, loop accounting, analyst-specified targets, multifactor state-merge cost model, learned ranking, state merging / Veritesting, CFG recovery, function identification, and optional QUBO-style `QuantumInspiredScheduler` with CUDA → OpenCL → CPU fallback all remain future work. Depends on Phase 5 (multicore scheduler) and Phase 6 (fidelity ledger) foundations.
+>
+> **Why state merging is on the critical path:** Path explosion is exponential. 32 cores is a constant factor against it. The real lever is state-space reduction: Veritesting (statically merging states), loop summarization, function summaries, under-constrained execution, CFG-guided pruning. Merging states fundamentally conflicts with a fork-heavy COW architecture (you must reunify memory, registers, and solver contexts), but without it, parallelism buys almost nothing against exponential blowup. This phase was previously deferred to the end of the roadmap; it is now on the critical path.
+>
+> **Why CFG recovery is here:** Search intelligence needs a CFG to be intelligent about. Without function identification, calling convention recovery, and variable reconstruction, there is no structure to guide exploration. angr's `CFGFast` and `CFGEmulated` are mature; Angryier has none.
+>
+> **Positioning gate (Gate J):** If the pitch is throughput, the bar is not angr — it is SymCC, SymQEMU, QSYM, and Fuzzolic, which get 10–100× over angr by not interpreting at all. Gate J forces the question: name the workload class where Angryier beats both angr AND SymQEMU/SymCC by enough to matter, or admit the positioning is "angr, but Rust."
 
 ## Build
 
@@ -474,6 +733,8 @@ Use KEYSTONE as the optional ingestion/indexing/retrieval accelerator for:
 - multifactor state-merge cost model;
 - learned ranking as an optional advisory layer;
 - scheduler-performance history feeding ranking/routing decisions.
+- **state merging / Veritesting** — static state merging across basic blocks, loop summarization, function summaries, under-constrained execution;
+- **CFG recovery** — `CFGFast`-equivalent (static disassembly + function identification), `CFGEmulated`-equivalent (symbolic execution-guided CFG), calling convention recovery, variable reconstruction;
 - optional QUBO-style `QuantumInspiredScheduler` for batch selection and worker assignment;
 - optional CUDA implementation after runtime capability discovery;
 - optional OpenCL implementation as an experimental cross-vendor backend;
@@ -487,16 +748,21 @@ Use KEYSTONE as the optional ingestion/indexing/retrieval accelerator for:
 - learned ranking can be disabled;
 - deterministic policies remain available;
 - target-oriented corpora show reduced time-to-interest compared with baseline DFS/BFS where applicable;
-- merge decisions reduce state count without causing solver-expression blowups that erase the gain.
+- merge decisions reduce state count without causing solver-expression blowups that erase the gain;
+- **state merging / Veritesting reduces state count on a real binary** — not just a synthetic tree;
+- **CFG recovery produces a usable CFG on a real binary** — function identification, calling conventions, and basic blocks are recovered;
 - accelerated planning improves net time-to-interest or throughput after transfer/launch overhead on at least one named workload class;
 - disabling or losing the accelerator preserves correctness, runnable work, and deterministic CPU behavior;
-- CUDA/OpenCL results never authorize truth claims or exact cache reuse.
+- CUDA/OpenCL results never authorize truth claims or exact cache reuse;
+- **Gate J: a named workload class is identified where Angryier beats both angr AND SymQEMU/SymCC by enough to matter** — or the positioning is honestly stated as "angr, but Rust and multicore."
 
 ---
 
 # Phase 11 — Learned Fusion Retrieval
 
 This phase is most useful when the optional QIHSE/KEYSTONE integrations are enabled, but the encoders themselves must remain separable from core execution.
+
+> **Status: foundations implemented.** In-memory fusion model with identity/constant encoders, element-wise averaging is done. Specialist encoders for semantic/AngryIR structure, CFG/path topology, constraint DAGs, taint/dataflow, dynamic/memory behavior, solver profile, findings/context, plus learned gated/attention-style fusion, missing-modality masks, and similarity retrieval through QIHSE remain future work. Gate F: similarity retrieval must demonstrate useful precision/recall and remain advisory.
 
 ## Build
 
@@ -532,6 +798,8 @@ Then build:
 
 Provenance is retained because it improves debugging and analyst insight, but implementation should remain proportional to measured value.
 
+> **Status: foundations implemented.** In-memory provenance store with adaptive trace governor, batching sink, tier-based eviction is done. Tier 0/1/2 event schema, Tier 1 structural provenance, per-worker circular flight recorder, Tier 2 triggers, structural repetition summarization, post-processing canonicalization/deduplication, and bounded asynchronous transport remain future work.
+
 ## Build
 
 - Tier 0/1/2 event schema;
@@ -551,16 +819,20 @@ Provenance is retained because it improves debugging and analyst insight, but im
 
 ---
 
-# Phase 13 — JIT / Specialized Concrete Execution
+# Phase 13 — JIT / Specialized Concrete Execution (Upgrade for Concolic Fast Path)
 
 ## Build only if profiling justifies it
+
+> **Status: foundations implemented.** JIT validity contract and code-page versioning are done. The concolic fast path (Phase 6) uses a fast interpreter, not a JIT. This phase upgrades the fast interpreter to a real JIT (cranelift or custom) only if profiling shows the fast interpreter is still the bottleneck after Phase 6 is complete.
+>
+> **Relationship to Phase 6:** Phase 6 builds the concolic fast path as a fast interpreter (fully safe Rust, 5-10× over the current interpreter). This phase upgrades it to a JIT if needed. The JIT is an optimization, not a prerequisite for the dual-mode thesis. If the fast interpreter is fast enough, this phase may be deferred indefinitely.
 
 Potential maturity path:
 
 ```text
-cold block -> compact interpreter
-warm block -> specialized cached executor
-hot block  -> native translation
+cold block -> compact interpreter (Phase 0-5)
+warm block -> fast concolic interpreter with symbolic shadows (Phase 6)
+hot block  -> JIT via cranelift or custom (Phase 13, if profiling demands)
 ```
 
 Requirements:
@@ -570,17 +842,21 @@ Requirements:
 - code-page version guards;
 - targeted self-modifying-code invalidation;
 - host-feature guards;
-- software semantic fallback.
+- software semantic fallback;
+- **unsafe code isolation**: JIT requires writing executable memory (`mmap(PROT_EXEC)`). This must be isolated in a dedicated FFI crate (`angryier-jit-ffi`) that locally permits `unsafe_code`, following the Z3/Bitwuzla/XED pattern. The safe adapter crate (`angryier-jit`) preserves `#![forbid(unsafe_code)]`.
 
 ## Exit criteria
 
 - JIT and interpreter are semantically equivalent on the differential suite;
 - compile/cache overhead is exposed;
-- end-to-end performance improves on concrete-heavy classes.
+- end-to-end performance improves on concrete-heavy classes **beyond what the fast interpreter already delivers**;
+- if the fast interpreter is already fast enough, this phase is documented as "not needed for Production 1.0" and deferred.
 
 ---
 
 # Phase 14 — Hybrid Fuzzing + Environment Models
+
+> **Status: foundations implemented.** In-memory fuzz bridge with stage-gated seed/coverage/hint submission and in-memory environment model with operation table, fidelity enforcement, summary provider are done. Versioned syscall/library/environment models, deterministic summary contracts, testcase import/export, coverage/seed exchange, constraint and target-hint exchange, and bidirectional hybrid fuzzing interface remain future work.
 
 ## Build
 
@@ -599,12 +875,17 @@ Requirements:
 
 ---
 
-# Phase 15 — API Stabilization, Packaging, and Optional Distribution Seam
+# Phase 15 — API Stabilization, Scripting Layer, Packaging, and Optional Distribution Seam
+
+> **Status: foundations implemented.** In-memory work codec with deterministic binary frame encode/decode round-trip and basic CLI with version/status/crates/help subcommands are done. Stable Rust library API, CLI documentation, scripting layer (PyO3 or embedded scripting), reproducible release builds, versioned support manifests, benchmark report generation, and serialization boundaries for future multi-host work units remain future work.
+>
+> **Why the scripting layer is first-class:** Every serious symbolic-execution task needs user-authored hooks for function summaries, exploration predicates, and state inspection. angr's moat is that a person types `simgr.explore(find=lambda s: b"Good Job" in s.posix.dumps(1))` in a REPL and iterates in seconds. Forcing users to write Rust and recompile per target is a fundamental blocker for adoption. The scripting layer must be first-class, not a Phase 15 afterthought. Options: PyO3 bindings (recreates angr's shape with FFI overhead), embedded Lua/DSL (lighter but less ecosystem), or a Rust plugin ABI (fast but high barrier). The chosen approach must be decided before Phase 10, because search intelligence and CFG recovery need user hooks.
 
 ## Build
 
 - stable Rust library API;
 - CLI documentation;
+- **scripting layer** — PyO3 bindings, embedded Lua, or Rust plugin ABI; user can write hooks, exploration predicates, and state inspection without recompiling;
 - optional PyO3 bindings;
 - reproducible release builds;
 - versioned support manifests;
@@ -619,18 +900,23 @@ Multi-host execution is not required for initial production readiness; only the 
 
 Production 1.0 requires:
 
-1. ELF64 and PE32+ loading for the declared scope;
-2. Intel 64 XED decoding with explicit semantic-support manifest;
-3. production semantic coverage for declared Intel extension families;
-4. concrete/taint/concolic/symbolic execution;
-5. COW state and sparse symbolic memory;
-6. Z3 + Bitwuzla solver support;
-7. canonical solver-query identities and exact reuse;
-8. native multicore exploration with worker/state ownership and useful physical-core scaling;
-9. NUMA-aware work placement where applicable;
-10. solver affinity, timeout and preemption;
-11. search policies demonstrably better than simple baselines on at least some target classes;
-12. reproducible correctness and performance reports.
+1. ELF64 and PE32+ loading for the declared scope — **partial** (ELF64 parser done, 24 tests; PE32+ pending);
+2. Intel 64 XED decoding with explicit semantic-support manifest — **done** (`angryier-arch-xed-ffi`, 11 tests);
+3. production semantic coverage for declared Intel extension families — **partial** (93 handwritten forms; generator pending; differential oracle pending);
+4. **dual-mode execution** — concolic fast path + full symbolic exploration, sharing AngryIR — **pending** (concolic fast path is Phase 6 work; full symbolic interpreter exists);
+5. COW state and sparse symbolic memory — **partial** (sparse memory done; symbolic-address policy done, 41 tests; page-backed COW pending);
+6. Z3 + Bitwuzla solver support — **done** (FFI + safe adapter wiring, 8+4 tests; portfolio router upgraded with per-query dispatch, 29 tests);
+7. **Fuzzy-SAT solver tier** — **pending** (new crate `angryier-solver-fuzzy` needed);
+8. canonical solver-query identities and exact reuse — **partial** (identity + cache done; reuse wiring pending; real-trace measurement pending);
+9. native multicore exploration with worker/state ownership and useful physical-core scaling — **pending** (in-memory scheduler only; Gate B must be measured on real binaries in BOTH modes);
+10. NUMA-aware work placement where applicable — **partial** (distance model exists; OS-thread pool pending);
+11. solver affinity, timeout and preemption — **partial** (timeout enforcement done in portfolio router; per-worker incremental contexts pending);
+12. search policies demonstrably better than simple baselines on at least some target classes — **pending** (includes state merging / Veritesting and CFG recovery);
+13. reproducible correctness and performance reports — **partial** (bench sink exists; reproducible harness pending);
+14. **environment model library** (libc/syscall/SimProcedure equivalents, TLS, dynamic linking, CRT startup) — **partial** (SimProcedure stubs done, 27 tests; TLS/dynamic linking/CRT startup pending);
+15. **differential semantic testing** (cross-check against hardware or VEX/QEMU) — **pending** (93 forms verified against author expectations only);
+16. **scripting layer** (PyO3, embedded Lua, or Rust plugin ABI for user-authored hooks) — **pending** (CLI only);
+17. **a real binary running end-to-end** (Gate 0) — **partial** (the `angryier-runtime` crate wires the full concrete pipeline: Elf64Loader → PersistentMemory → Decoder → Intel64CorpusRegistry → SemanticBlockBuilder → SealedRichSemanticBlock → BasicSemanticLowerer → IrBlock → ConcreteInterpreter → SimProcedureRegistry; 4 end-to-end tests pass with a synthetic decoder and a real ELF64 image; real XED decode, BatchSolver integration, branch inversion, input generation, and concrete replay validation are still pending);
 
 The following are **recommended but not mandatory for a minimal Production 1.0 engine**:
 
@@ -638,7 +924,7 @@ The following are **recommended but not mandatory for a minimal Production 1.0 e
 - KEYSTONE submodule integration;
 - persistent cross-run similarity search;
 - learned-fusion retrieval;
-- JIT;
+- JIT (Phase 13 — only if the fast interpreter from Phase 6 is the bottleneck);
 - distributed execution;
 - GUI;
 - additional ISAs;
@@ -651,21 +937,27 @@ A recommended full-feature profile should enable QIHSE + KEYSTONE because cumula
 
 # Go / No-Go Gates
 
-## Gate A — after Phase 4
+## Gate 0 — after Pipeline Wiring
 
-Proceed only if symbolic results are correct and canonical solver identities are stable.
+Proceed only if a real statically-linked x86-64 binary loads, decodes, and executes end-to-end through the full pipeline (Elf64Loader → XED decode → AngryIR → concrete interpreter → SimProcedure → BatchSolver → branch inversion → new input), with concrete replay validation. No performance claim is credible until this gate passes.
+
+**Current status: partial.** The `angryier-runtime` crate wires the concrete execution pipeline end-to-end (Elf64Loader → PersistentMemory → Decoder → Intel64CorpusRegistry → SemanticBlockBuilder → BasicSemanticLowerer → ConcreteInterpreter → SimProcedureRegistry). 4 tests pass with a synthetic decoder and a real ELF64 image. Still pending: real XED decode (requires native FFI feature), BatchSolver integration, branch inversion, new input generation, and concrete replay validation.
+
+## Gate A — after Phase 6 (Concolic Fast Path)
+
+Proceed only if symbolic results are correct, canonical solver identities are stable, and the concolic fast path produces valid test cases on real binaries. The dual-mode thesis (concolic fast path + full symbolic, sharing AngryIR) must be validated: both modes produce the same semantic results on the differential suite.
 
 ## Gate B — after Phase 5
 
-Proceed only if branch-parallel workloads show useful multicore scaling. Otherwise investigate allocator contention, shared-object lifetime overhead, solver-context migration, queue policy, cache locality and NUMA placement before adding major features.
+Proceed only if branch-parallel workloads show useful multicore scaling **on real binaries (Gate 0)** in **both modes** (concolic fast path parallelizes across inputs, full symbolic parallelizes across states), not synthetic branch trees. Otherwise investigate allocator contention, shared-object lifetime overhead, solver-context migration, queue policy, cache locality and NUMA placement before adding major features. Report per-state memory footprint at 10k live states and solver-context migration cost at path depth 500.
 
 ## Gate C — before generalized solver reuse
 
-Do not allow alpha-equivalence, implication or subsumption results to suppress solver work until exact canonical-query reuse is proven correct.
+Do not allow alpha-equivalence, implication or subsumption results to suppress solver work until exact canonical-query reuse is proven correct **on real execution traces**.
 
 ## Gate D — before broad generated semantics
 
-Do not build a giant semantic DSL until the handwritten corpus demonstrates the required semantic shapes.
+Do not build a giant semantic DSL until the handwritten corpus **plus the differential oracle** demonstrates the required semantic shapes. The oracle must be independent (hardware or VEX/QEMU), not the author's expectations.
 
 ## Gate E — before QIHSE/KEYSTONE become recommended in deployment defaults
 
@@ -677,7 +969,7 @@ Similarity retrieval must demonstrate useful precision/recall and remain advisor
 
 ## Gate G — before JIT
 
-JIT proceeds only if profiling shows concrete execution remains a material wall-time component.
+JIT proceeds only if profiling shows the Phase 6 fast interpreter (concolic fast path) remains a material wall-time component after all other optimizations. If the fast interpreter is already fast enough for the target workload class, JIT is deferred indefinitely.
 
 ## Gate H — before another ISA
 
@@ -686,3 +978,73 @@ Do not allow AArch64/RISC-V work to substitute for proving the Intel 64 performa
 ## Gate I — before accelerated scheduling becomes a deployment default
 
 The deterministic CPU scheduler must already satisfy Phase 5. CUDA/OpenCL planning must then demonstrate a net benefit after feature construction, transfer, launch, synchronization, and fallback costs; preserve all runnable work under injected device failures; correctly route CUDA-ineligible older cards through OpenCL before CPU; and remain reproducible through recorded decisions. Otherwise the accelerator stays disabled by default.
+
+## Gate J — before claiming throughput advantage
+
+Angryier's competitive thesis is the **dual-mode synthesis**: concolic fast path + full symbolic exploration, sharing the same AngryIR semantics, in safe Rust, at multicore scale. The named workload class where Angryier beats both angr AND SymQEMU/SymCC is: **workloads that need both coverage speed and analysis depth** — e.g., vulnerability triage where you need fast input generation to reach deep code, then full symbolic reasoning to prove reachability and generate a minimal PoC. SymQEMU can't do the analysis; angr can't do the coverage speed. Angryier does both, switching per-state. Gate J requires this to be demonstrated on a named workload, not asserted. If the dual-mode thesis fails to materialize as a measurable advantage, the positioning falls back to "angr, but Rust and multicore" and no throughput advantage over instrumentation-based concolic engines is claimed.
+
+---
+
+# Optional Fallback Paths
+
+The dual-mode synthesis is the primary thesis. If specific components underperform, the following fallback paths are available. Each is explicitly optional — none is on the critical path for Production 1.0. They exist as documented backup plans, not commitments.
+
+## Fallback A — angr SimProcedure contracts as reference
+
+**When:** Angryier's environment model library is incomplete for a target's libc/syscall surface.
+
+**What:** Use angr's SimProcedure behavior contracts as the specification reference. angr's SimProcedures are the most complete open-source libc/syscall model for symbolic execution: `__libc_start_main`, TLS stack-canary access, `printf` format strings, `malloc`/`free` heap models, file I/O, sockets, and hundreds of other functions. Building all of this from scratch is years of work.
+
+**How:** This is a documentation/specification dependency, not a code dependency. angr's SimProcedures are Python and tied to angr's SimState — they cannot be directly imported. Instead, Angryier's SimProcedure library follows angr's SimProcedure behavior contracts where applicable, ported to Rust. Each SimProcedure documents its angr counterpart and any deviations.
+
+**Cost:** Low. No code dependency. Just a specification reference.
+
+**Trigger:** When a target binary requires a libc function that Angryier doesn't model, and angr has a working SimProcedure for it, port the angr contract rather than designing from scratch.
+
+## Fallback B — QSYM-class path policy (already in Phase 6)
+
+**When:** Full symbolic execution is too slow for fuzzing workloads.
+
+**What:** QSYM's deliberately unsound path policy: optimistic solving (try cheap concretization before full SMT), aggressive pruning (drop uninteresting branches), no state tree (single concrete state with constraint log).
+
+**How:** Already in the roadmap as Phase 6's EXPLORE/HUNT profiles. The concolic fast path uses QSYM-class path policy by default. PROVE mode is the sound alternative.
+
+**Cost:** Already built into Phase 6. No additional work.
+
+**Trigger:** Default for EXPLORE/HUNT modes. No fallback needed — it's the primary path for coverage workloads.
+
+## Fallback C — Fuzzy-SAT solver tier (already in Phase 6)
+
+**When:** Z3/Bitwuzla are too slow for simple branch constraints (`x == C`, `x < C`, `x != C`).
+
+**What:** Fuzzolic's Fuzzy-SAT idea: mutate candidate byte vectors and evaluate the constraint directly, without invoking an SMT solver. Falls back to Z3/Bitwuzla for complex constraints.
+
+**How:** Already in the roadmap as the Tier 1 solver in the portfolio. New crate `angryier-solver-fuzzy` implementing `SolverBackend` with `name() = "fuzzy"`.
+
+**Cost:** Low. A new crate with no external dependencies. Plugs into the existing portfolio router.
+
+**Trigger:** Default for simple constraints in EXPLORE/HUNT modes. The portfolio router routes by query shape.
+
+## Fallback D — JIT via cranelift (Phase 13, if profiling demands)
+
+**When:** The Phase 6 fast interpreter (concolic fast path) is not fast enough after all other optimizations.
+
+**What:** Upgrade the fast interpreter to a real JIT using cranelift (or a custom backend). Compile hot AngryIR blocks to native machine code with symbolic shadow calls.
+
+**How:** Already in the roadmap as Phase 13. The JIT requires an unsafe FFI crate (`angryier-jit-ffi`) for executable memory allocation, following the Z3/Bitwuzla/XED pattern. The safe adapter crate preserves `#![forbid(unsafe_code)]`.
+
+**Cost:** High. A real JIT is a significant engineering effort. But it's an incremental upgrade of the fast interpreter, not a new architecture.
+
+**Trigger:** Gate G — profiling shows the fast interpreter is the bottleneck on real workloads. If the fast interpreter is already fast enough, this phase is deferred indefinitely.
+
+## Explicitly rejected paths
+
+The following paths are **not** fallback options. They are documented here to prevent future reconsideration.
+
+### QEMU / SymQEMU integration — rejected
+
+**Why rejected:** QEMU is C. Integrating it means a large FFI surface, a massive unsafe boundary, and a dependency that violates the Rust-native thesis. QEMU's TCG is not designed to be embedded as a library — it's a full system emulator. Maintaining a QEMU fork is a research project, not a production path. If Angryier needs SymQEMU-class speed, build a real JIT (Fallback D). Do not embed QEMU.
+
+### SymCC / LLVM pass — rejected for Production 1.0
+
+**Why rejected:** SymCC requires LLVM and source access. It only works for source-available targets, not opaque binaries. It's a completely different execution model from Angryier's interpreter. Adding it means maintaining an LLVM pass, which is a significant ongoing burden. SymCC's approach is the fastest known for source-available targets, but Angryier's thesis is binary-only analysis. If a source-available path is needed in the far future, an LLVM pass could be added as a Phase 16+ research direction, but it is not a production path for Angryier.
