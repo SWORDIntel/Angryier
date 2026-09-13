@@ -363,6 +363,14 @@ pub mod forms {
     pub const PSRAD_XMM_IMM8: u32 = 0x00E5;
     pub const PSLLQ_XMM_IMM8: u32 = 0x00E6;
     pub const PSRLQ_XMM_IMM8: u32 = 0x00E7;
+
+    // SSE2 packed integer compare (xmm, xmm) — lane-wise mask
+    pub const PCMPEQB_XMM_XMM: u32 = 0x00E8;
+    pub const PCMPEQW_XMM_XMM: u32 = 0x00E9;
+    pub const PCMPEQD_XMM_XMM: u32 = 0x00EA;
+    pub const PCMPGTB_XMM_XMM: u32 = 0x00EB;
+    pub const PCMPGTW_XMM_XMM: u32 = 0x00EC;
+    pub const PCMPGTD_XMM_XMM: u32 = 0x00ED;
 }
 
 /// RFLAGS bit positions used by the corpus.

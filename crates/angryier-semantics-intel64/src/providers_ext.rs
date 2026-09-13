@@ -2155,3 +2155,35 @@ packed_shift_imm8!(PsrldXmmImm8, forms::PSRLD_XMM_IMM8, PrimitiveOp::LogicalShif
 packed_shift_imm8!(PsradXmmImm8, forms::PSRAD_XMM_IMM8, PrimitiveOp::ArithmeticShiftRight, I32X4, 4, 4, 0xE5);
 packed_shift_imm8!(PsllqXmmImm8, forms::PSLLQ_XMM_IMM8, PrimitiveOp::ShiftLeft, I64X2, 8, 2, 0xE6);
 packed_shift_imm8!(PsrlqXmmImm8, forms::PSRLQ_XMM_IMM8, PrimitiveOp::LogicalShiftRight, I64X2, 8, 2, 0xE7);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed compare providers
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_cmp {
+    ($name:ident, $form:expr, $op:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, $ty)?;
+                let src = out.read_operand(1, $ty)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $ty, &[dst, src])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_cmp!(PcmpeqbXmmXmm, forms::PCMPEQB_XMM_XMM, PrimitiveOp::MaskEq, I8X16, 0xE8);
+packed_cmp!(PcmpeqwXmmXmm, forms::PCMPEQW_XMM_XMM, PrimitiveOp::MaskEq, I16X8, 0xE9);
+packed_cmp!(PcmpeqdXmmXmm, forms::PCMPEQD_XMM_XMM, PrimitiveOp::MaskEq, I32X4, 0xEA);
+packed_cmp!(PcmpgtbXmmXmm, forms::PCMPGTB_XMM_XMM, PrimitiveOp::MaskSgt, I8X16, 0xEB);
+packed_cmp!(PcmpgtwXmmXmm, forms::PCMPGTW_XMM_XMM, PrimitiveOp::MaskSgt, I16X8, 0xEC);
+packed_cmp!(PcmpgtdXmmXmm, forms::PCMPGTD_XMM_XMM, PrimitiveOp::MaskSgt, I32X4, 0xED);

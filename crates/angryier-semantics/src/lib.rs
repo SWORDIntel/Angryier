@@ -123,6 +123,8 @@ pub enum PrimitiveOp {
     Popcount,
     CountLeadingZeros,
     CountTrailingZeros,
+    MaskEq,
+    MaskSgt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

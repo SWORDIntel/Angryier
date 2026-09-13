@@ -3250,6 +3250,18 @@ fn imm8_operand(index: u8, value: u64) -> Operand {
     }
 }
 
+fn cast_i8_bytes(values: &[i8]) -> Vec<u8> {
+    values.iter().map(|&v| v as u8).collect()
+}
+
+fn cast_i32_bytes(values: &[i32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for &v in values {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    bytes
+}
+
 #[test]
 fn psllw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16)])?;
@@ -3408,6 +3420,135 @@ fn psrlq_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
         let result = u64::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed compare integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pcmpeqb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 16x8-bit: [1,2,3,...,16] vs [1,99,3,99,...] -> [0xFF, 0, 0xFF, 0, ...]
+    let left: [u8; 16] = core::array::from_fn(|i| (i + 1) as u8);
+    let mut right = [0u8; 16];
+    for (i, v) in right.iter_mut().enumerate() {
+        *v = if i % 2 == 0 { (i + 1) as u8 } else { 99 };
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PCMPEQB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, &byte) in bytes.iter().enumerate() {
+        let expected = if i % 2 == 0 { 0xFF } else { 0x00 };
+        assert_eq!(byte, expected, "lane {i}: got {:#x}", byte);
+    }
+    Ok(())
+}
+
+#[test]
+fn pcmpeqd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 4x32-bit: [100, 200, 300, 400] vs [100, 999, 300, 999] -> [0xFFFFFFFF, 0, 0xFFFFFFFF, 0]
+    let mut left = Vec::new();
+    for v in [100u32, 200, 300, 400] {
+        left.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut right = Vec::new();
+    for v in [100u32, 999, 300, 999] {
+        right.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left)?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PCMPEQD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [0xFFFFFFFFu32, 0, 0xFFFFFFFF, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = u32::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pcmpgtb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 16x8-bit signed: [10, -5, 100, -100, ...] > [5, 0, 50, 0, ...]
+    let left: [i8; 16] = [10, -5, 100, -100, 20, -20, 50, -50, 1, -1, 2, -2, 3, -3, 4, -4];
+    let right: [i8; 16] = [5, 0, 50, 0, 10, 0, 25, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let initial = with_bytes(&state, XMM0, &cast_i8_bytes(&left))?;
+    let initial = with_bytes(&initial, XMM1, &cast_i8_bytes(&right))?;
+
+    let decoded = make_decoded(
+        forms::PCMPGTB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, &byte) in bytes.iter().enumerate() {
+        let l = left[i];
+        let r = right[i];
+        let expected = if l > r { 0xFF } else { 0x00 };
+        assert_eq!(byte, expected, "lane {i}: {l} > {r} = {}, got {:#x}", l > r, byte);
+    }
+    Ok(())
+}
+
+#[test]
+fn pcmpgtd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 4x32-bit signed: [100, -100, 1000, -1000] > [50, 0, 500, 0]
+    let left: [i32; 4] = [100, -100, 1000, -1000];
+    let right: [i32; 4] = [50, 0, 500, 0];
+    let initial = with_bytes(&state, XMM0, &cast_i32_bytes(&left))?;
+    let initial = with_bytes(&initial, XMM1, &cast_i32_bytes(&right))?;
+
+    let decoded = make_decoded(
+        forms::PCMPGTD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected = [0xFFFFFFFFu32, 0, 0xFFFFFFFF, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = u32::from_le_bytes(buf);
         assert_eq!(result, exp, "lane {i}: got {result:#x}");
     }
     Ok(())

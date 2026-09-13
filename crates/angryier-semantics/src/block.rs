@@ -516,6 +516,8 @@ fn primitive_tag(op: PrimitiveOp) -> u8 {
         PrimitiveOp::Popcount => 24,
         PrimitiveOp::CountLeadingZeros => 25,
         PrimitiveOp::CountTrailingZeros => 26,
+        PrimitiveOp::MaskEq => 27,
+        PrimitiveOp::MaskSgt => 28,
     }
 }
 
