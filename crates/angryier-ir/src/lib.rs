@@ -53,6 +53,12 @@ pub enum IrPrimitive {
     Popcnt,
     Clz,
     Ctz,
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+    FSqrt,
+    FConvert,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

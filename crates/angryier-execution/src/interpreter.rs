@@ -312,10 +312,7 @@ fn get_value<R, M>(values: &[ConcreteValue], id: IrValueId) -> Result<&ConcreteV
 }
 
 fn type_bytes<R, M>(ty: IrType) -> Result<usize, ConcreteExecutionError<R, M>> {
-    let bits = match ty {
-        IrType::Bits(bits) => bits,
-        _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
-    };
+    let bits = scalar_bits(ty)?;
     usize::from(bits)
         .checked_add(7)
         .and_then(|bits| bits.checked_div(8))
@@ -548,6 +545,36 @@ fn evaluate_primitive<R, M>(
                 input.trailing_zeros() as u128
             }
         }
+        IrPrimitive::FAdd | IrPrimitive::FSub | IrPrimitive::FMul | IrPrimitive::FDiv => {
+            require_arity(operation, &resolved, 2)?;
+            require_types(&resolved, ty)?;
+            let left = read_float(resolved[0])?;
+            let right = read_float(resolved[1])?;
+            let result = match operation {
+                IrPrimitive::FAdd => left + right,
+                IrPrimitive::FSub => left - right,
+                IrPrimitive::FMul => left * right,
+                IrPrimitive::FDiv => {
+                    if right == 0.0 {
+                        return Err(ConcreteExecutionError::DivisionByZero);
+                    }
+                    left / right
+                }
+                _ => unreachable!(),
+            };
+            return Ok(write_float(ty, result));
+        }
+        IrPrimitive::FSqrt => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = read_float(resolved[0])?;
+            return Ok(write_float(ty, input.sqrt()));
+        }
+        IrPrimitive::FConvert => {
+            require_arity(operation, &resolved, 1)?;
+            let input = read_float(resolved[0])?;
+            return Ok(write_float(ty, input));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))
@@ -556,7 +583,43 @@ fn evaluate_primitive<R, M>(
 fn scalar_bits<R, M>(ty: IrType) -> Result<u16, ConcreteExecutionError<R, M>> {
     match ty {
         IrType::Bits(bits) if bits > 0 && bits <= 128 => Ok(bits),
+        IrType::Float16 => Ok(16),
+        IrType::BFloat16 => Ok(16),
+        IrType::Float32 => Ok(32),
+        IrType::Float64 => Ok(64),
+        IrType::Float80 => Ok(80),
         _ => Err(ConcreteExecutionError::UnsupportedType(ty)),
+    }
+}
+
+/// Reads a ConcreteValue as an f64. Supports Float32 and Float64.
+fn read_float<R, M>(value: &ConcreteValue) -> Result<f64, ConcreteExecutionError<R, M>> {
+    match value.ty {
+        IrType::Float32 => {
+            let bytes: [u8; 4] = value.bytes_le().try_into().map_err(|_| {
+                ConcreteExecutionError::UnsupportedType(IrType::Float32)
+            })?;
+            Ok(f64::from(f32::from_le_bytes(bytes)))
+        }
+        IrType::Float64 => {
+            let bytes: [u8; 8] = value.bytes_le().try_into().map_err(|_| {
+                ConcreteExecutionError::UnsupportedType(IrType::Float64)
+            })?;
+            Ok(f64::from_le_bytes(bytes))
+        }
+        _ => Err(ConcreteExecutionError::UnsupportedType(value.ty)),
+    }
+}
+
+/// Writes an f64 into a ConcreteValue of the given float type.
+fn write_float(ty: IrType, value: f64) -> ConcreteValue {
+    match ty {
+        IrType::Float32 => {
+            let f = value as f32;
+            ConcreteValue::from_bytes_le(ty, &f.to_le_bytes())
+        }
+        IrType::Float64 => ConcreteValue::from_bytes_le(ty, &value.to_le_bytes()),
+        _ => ConcreteValue::from_bytes_le(ty, &value.to_le_bytes()),
     }
 }
 
@@ -977,5 +1040,173 @@ mod tests {
         // IrType (1 byte discriminant + payload) + [u8; 16] + u8 + padding
         // Should be well under 64 bytes.
         assert!(size <= 64, "ConcreteValue is {size} bytes, expected <= 64");
+    }
+
+    #[test]
+    fn float64_add_executes() -> Result<(), Box<dyn std::error::Error>> {
+        let initial = state()?;
+        let candidate = block(
+            &initial.memory,
+            vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: IrOp::Constant {
+                        ty: IrType::Float64,
+                        bytes_le: 3.5f64.to_le_bytes().to_vec(),
+                    },
+                },
+                IrInstruction {
+                    result: Some(IrValueId(1)),
+                    op: IrOp::Constant {
+                        ty: IrType::Float64,
+                        bytes_le: 2.25f64.to_le_bytes().to_vec(),
+                    },
+                },
+                IrInstruction {
+                    result: Some(IrValueId(2)),
+                    op: IrOp::Primitive {
+                        op: IrPrimitive::FAdd,
+                        ty: IrType::Float64,
+                        inputs: vec![IrValueId(0), IrValueId(1)],
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::WriteRegister {
+                        register: 1,
+                        value: IrValueId(2),
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Jump { target: 0x2000 },
+                },
+            ],
+        )?;
+
+        let (executed, _outcome) = interpreter().execute_block(&initial, &candidate, ExecutionMode::Concrete)?;
+
+        let bytes = executed.registers.read(1)?;
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes);
+        let result = f64::from_le_bytes(buf);
+        assert!((result - 5.75).abs() < f64::EPSILON, "3.5 + 2.25 should be 5.75, got {result}");
+        Ok(())
+    }
+
+    #[test]
+    fn float64_sqrt_executes() -> Result<(), Box<dyn std::error::Error>> {
+        let initial = state()?;
+        let candidate = block(
+            &initial.memory,
+            vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: IrOp::Constant {
+                        ty: IrType::Float64,
+                        bytes_le: 16.0f64.to_le_bytes().to_vec(),
+                    },
+                },
+                IrInstruction {
+                    result: Some(IrValueId(1)),
+                    op: IrOp::Primitive {
+                        op: IrPrimitive::FSqrt,
+                        ty: IrType::Float64,
+                        inputs: vec![IrValueId(0)],
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::WriteRegister {
+                        register: 1,
+                        value: IrValueId(1),
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Jump { target: 0x2000 },
+                },
+            ],
+        )?;
+
+        let (executed, _outcome) = interpreter().execute_block(&initial, &candidate, ExecutionMode::Concrete)?;
+
+        let bytes = executed.registers.read(1)?;
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes);
+        let result = f64::from_le_bytes(buf);
+        assert!((result - 4.0).abs() < f64::EPSILON, "sqrt(16) should be 4.0, got {result}");
+        Ok(())
+    }
+
+    #[test]
+    fn float32_mul_executes() -> Result<(), Box<dyn std::error::Error>> {
+        let memory = PersistentMemory::new(vec![
+            MemoryRegion {
+                object: ObjectId(1),
+                base: 0x1000,
+                size: 0x1000,
+                readable: true,
+                writable: true,
+                executable: true,
+            },
+        ])?;
+        let initial = ExecutionState {
+            id: StateId(7),
+            parent: None,
+            target_profile: TargetProfileId(3),
+            registers: PersistentRegisters::from_widths([(1, 4)])?,
+            memory,
+            constraints: PersistentConstraintLineage::new(),
+            ownership: StateOwnership::default(),
+            fidelity: FidelityLedger::new(FidelityProfile::Prove),
+        };
+        let candidate = block(
+            &initial.memory,
+            vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: IrOp::Constant {
+                        ty: IrType::Float32,
+                        bytes_le: 2.5f32.to_le_bytes().to_vec(),
+                    },
+                },
+                IrInstruction {
+                    result: Some(IrValueId(1)),
+                    op: IrOp::Constant {
+                        ty: IrType::Float32,
+                        bytes_le: 4.0f32.to_le_bytes().to_vec(),
+                    },
+                },
+                IrInstruction {
+                    result: Some(IrValueId(2)),
+                    op: IrOp::Primitive {
+                        op: IrPrimitive::FMul,
+                        ty: IrType::Float32,
+                        inputs: vec![IrValueId(0), IrValueId(1)],
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::WriteRegister {
+                        register: 1,
+                        value: IrValueId(2),
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Jump { target: 0x2000 },
+                },
+            ],
+        )?;
+
+        let (executed, _outcome) = interpreter().execute_block(&initial, &candidate, ExecutionMode::Concrete)?;
+
+        let bytes = executed.registers.read(1)?;
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[..4]);
+        let result = f32::from_le_bytes(buf);
+        assert!((result - 10.0).abs() < f32::EPSILON, "2.5 * 4.0 should be 10.0, got {result}");
+        Ok(())
     }
 }

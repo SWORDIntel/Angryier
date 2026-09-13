@@ -4,9 +4,9 @@ use crate::{
 };
 use angryier_semantic_contracts::SealedSemanticBlock;
 use angryier_semantics::{
-    BlockValidityKey, DecodedInstructionView, FloatFormat, OperandKind, PrimitiveOp, RegisterWriteBehavior,
-    SealedRichSemanticBlock, SemanticEffectDefinition, SemanticLowerer, SemanticOp, SemanticType, SemanticValue,
-    SemanticValueDefinition, ValueId,
+    BlockValidityKey, DecodedInstructionView, FloatFormat, FloatingOp, OperandKind, PrimitiveOp,
+    RegisterWriteBehavior, SealedRichSemanticBlock, SemanticEffectDefinition, SemanticLowerer,
+    SemanticOp, SemanticType, SemanticValue, SemanticValueDefinition, ValueId,
 };
 use angryier_types::{Address, ContentId};
 use std::collections::{BTreeMap, HashMap};
@@ -367,38 +367,53 @@ fn lower_type(ty: SemanticType) -> Result<IrType, IrLoweringError> {
 }
 
 fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
-    let SemanticOp::Primitive(op) = op else {
-        return Err(IrLoweringError::UnsupportedValue("non-primitive operation"));
-    };
-    Ok(match op {
-        PrimitiveOp::Add => IrPrimitive::Add,
-        PrimitiveOp::Sub => IrPrimitive::Sub,
-        PrimitiveOp::Mul => IrPrimitive::Mul,
-        PrimitiveOp::UnsignedDiv => IrPrimitive::UDiv,
-        PrimitiveOp::SignedDiv => IrPrimitive::SDiv,
-        PrimitiveOp::And => IrPrimitive::And,
-        PrimitiveOp::Or => IrPrimitive::Or,
-        PrimitiveOp::Xor => IrPrimitive::Xor,
-        PrimitiveOp::Not => IrPrimitive::Not,
-        PrimitiveOp::ShiftLeft => IrPrimitive::Shl,
-        PrimitiveOp::LogicalShiftRight => IrPrimitive::LShr,
-        PrimitiveOp::ArithmeticShiftRight => IrPrimitive::AShr,
-        PrimitiveOp::Eq => IrPrimitive::Eq,
-        PrimitiveOp::Ult => IrPrimitive::Ult,
-        PrimitiveOp::Ule => IrPrimitive::Ule,
-        PrimitiveOp::Slt => IrPrimitive::Slt,
-        PrimitiveOp::Sle => IrPrimitive::Sle,
-        PrimitiveOp::Select => IrPrimitive::Select,
-        PrimitiveOp::Concat => IrPrimitive::Concat,
-        PrimitiveOp::Extract => IrPrimitive::Extract,
-        PrimitiveOp::ZeroExtend => IrPrimitive::ZExt,
-        PrimitiveOp::SignExtend => IrPrimitive::SExt,
-        PrimitiveOp::RotateLeft => IrPrimitive::RotL,
-        PrimitiveOp::RotateRight => IrPrimitive::RotR,
-        PrimitiveOp::Popcount => IrPrimitive::Popcnt,
-        PrimitiveOp::CountLeadingZeros => IrPrimitive::Clz,
-        PrimitiveOp::CountTrailingZeros => IrPrimitive::Ctz,
-    })
+    match op {
+        SemanticOp::Primitive(op) => Ok(match op {
+            PrimitiveOp::Add => IrPrimitive::Add,
+            PrimitiveOp::Sub => IrPrimitive::Sub,
+            PrimitiveOp::Mul => IrPrimitive::Mul,
+            PrimitiveOp::UnsignedDiv => IrPrimitive::UDiv,
+            PrimitiveOp::SignedDiv => IrPrimitive::SDiv,
+            PrimitiveOp::And => IrPrimitive::And,
+            PrimitiveOp::Or => IrPrimitive::Or,
+            PrimitiveOp::Xor => IrPrimitive::Xor,
+            PrimitiveOp::Not => IrPrimitive::Not,
+            PrimitiveOp::ShiftLeft => IrPrimitive::Shl,
+            PrimitiveOp::LogicalShiftRight => IrPrimitive::LShr,
+            PrimitiveOp::ArithmeticShiftRight => IrPrimitive::AShr,
+            PrimitiveOp::Eq => IrPrimitive::Eq,
+            PrimitiveOp::Ult => IrPrimitive::Ult,
+            PrimitiveOp::Ule => IrPrimitive::Ule,
+            PrimitiveOp::Slt => IrPrimitive::Slt,
+            PrimitiveOp::Sle => IrPrimitive::Sle,
+            PrimitiveOp::Select => IrPrimitive::Select,
+            PrimitiveOp::Concat => IrPrimitive::Concat,
+            PrimitiveOp::Extract => IrPrimitive::Extract,
+            PrimitiveOp::ZeroExtend => IrPrimitive::ZExt,
+            PrimitiveOp::SignExtend => IrPrimitive::SExt,
+            PrimitiveOp::RotateLeft => IrPrimitive::RotL,
+            PrimitiveOp::RotateRight => IrPrimitive::RotR,
+            PrimitiveOp::Popcount => IrPrimitive::Popcnt,
+            PrimitiveOp::CountLeadingZeros => IrPrimitive::Clz,
+            PrimitiveOp::CountTrailingZeros => IrPrimitive::Ctz,
+        }),
+        SemanticOp::Float(op) => Ok(match op {
+            FloatingOp::Add => IrPrimitive::FAdd,
+            FloatingOp::Sub => IrPrimitive::FSub,
+            FloatingOp::Mul => IrPrimitive::FMul,
+            FloatingOp::Div => IrPrimitive::FDiv,
+            FloatingOp::Sqrt => IrPrimitive::FSqrt,
+            FloatingOp::Convert => IrPrimitive::FConvert,
+            FloatingOp::Compare => {
+                return Err(IrLoweringError::UnsupportedValue(
+                    "float compare not yet supported",
+                ));
+            }
+        }),
+        SemanticOp::Vector(_) | SemanticOp::Tile(_) => {
+            Err(IrLoweringError::UnsupportedValue("non-primitive operation"))
+        }
+    }
 }
 
 /// A [`SemanticLowerer`] decorator that wraps [`BasicSemanticLowerer`] with an
