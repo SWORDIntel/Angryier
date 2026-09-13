@@ -772,6 +772,44 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecLaneMulHiS | IrPrimitive::VecLaneMulHiU => {
+            require_arity(operation, &resolved, 2)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let mask = bit_mask(lane_bits as u16);
+            let left = as_u128(resolved[0]);
+            let right = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let l = (left >> shift) & mask;
+                let r = (right >> shift) & mask;
+                let lane_result = match operation {
+                    IrPrimitive::VecLaneMulHiU => {
+                        // Unsigned: high bits of (l * r) where l, r are lane_bits wide
+                        let product = l.wrapping_mul(r);
+                        (product >> lane_bits) & mask
+                    }
+                    IrPrimitive::VecLaneMulHiS => {
+                        // Signed: sign-extend l and r, multiply, take high bits
+                        let sign_bit = 1u128 << (lane_bits - 1);
+                        let l_signed = if l & sign_bit != 0 { (l | (!mask)) as i128 } else { l as i128 };
+                        let r_signed = if r & sign_bit != 0 { (r | (!mask)) as i128 } else { r as i128 };
+                        let product = l_signed.wrapping_mul(r_signed);
+                        ((product >> lane_bits) as u128) & mask
+                    }
+                    _ => unreachable!(),
+                };
+                result |= lane_result << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

@@ -78,6 +78,8 @@ pub enum IrPrimitive {
     VecLaneMinU,
     VecLaneMaxS,
     VecLaneMinS,
+    VecLaneMulHiS,
+    VecLaneMulHiU,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

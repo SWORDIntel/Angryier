@@ -522,6 +522,8 @@ fn primitive_tag(op: PrimitiveOp) -> u8 {
         PrimitiveOp::MinU => 30,
         PrimitiveOp::MaxS => 31,
         PrimitiveOp::MinS => 32,
+        PrimitiveOp::MulHighS => 33,
+        PrimitiveOp::MulHighU => 34,
     }
 }
 

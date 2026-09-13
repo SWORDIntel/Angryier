@@ -129,6 +129,8 @@ pub enum PrimitiveOp {
     MinU,
     MaxS,
     MinS,
+    MulHighS,
+    MulHighU,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

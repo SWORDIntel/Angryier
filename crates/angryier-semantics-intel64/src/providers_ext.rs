@@ -2229,3 +2229,43 @@ packed_minmax!(PminsdXmmXmm, forms::PMINSD_XMM_XMM, PrimitiveOp::MinS, I32X4, 0x
 packed_minmax!(PminubXmmXmm, forms::PMINUB_XMM_XMM, PrimitiveOp::MinU, I8X16, 0xF7);
 packed_minmax!(PminuwXmmXmm, forms::PMINUW_XMM_XMM, PrimitiveOp::MinU, I16X8, 0xF8);
 packed_minmax!(PminudXmmXmm, forms::PMINUD_XMM_XMM, PrimitiveOp::MinU, I32X4, 0xF9);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed multiply high providers
+// ---------------------------------------------------------------------------
+
+/// PMULHW xmm, xmm: packed signed multiply high (8x16 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct PmulhwXmmXmm;
+
+impl SemanticProvider for PmulhwXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xFA) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PMULHW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let src = out.read_operand(1, I16X8)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::MulHighS)), I16X8, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xFA, context))
+    }
+}
+
+/// PMULHUW xmm, xmm: packed unsigned multiply high (8x16 lanes).
+#[derive(Clone, Copy, Debug)]
+pub struct PmulhuwXmmXmm;
+
+impl SemanticProvider for PmulhuwXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xFB) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PMULHUW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let src = out.read_operand(1, I16X8)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::MulHighU)), I16X8, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xFB, context))
+    }
+}

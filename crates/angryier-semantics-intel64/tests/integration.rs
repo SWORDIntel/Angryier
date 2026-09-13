@@ -3680,3 +3680,93 @@ fn pminuw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed multiply high integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pmulhw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 8x16-bit signed: high 16 of (l * r) for each lane
+    // [100, 200, -100, 300, ...] * [1000, 100, 200, 50, ...]
+    // 100*1000 = 100000 = 0x186A0, high 16 bits = 0x0001
+    // 200*100 = 20000 = 0x4E20, high 16 bits = 0x0000
+    // -100*200 = -20000 = 0xFFFFB1E0, high 16 bits = 0xFFFF
+    // 300*50 = 15000 = 0x3A98, high 16 bits = 0x0000
+    let left: [i16; 8] = [100, 200, -100, 300, 1, -1, 2, -2];
+    let right: [i16; 8] = [1000, 100, 200, 50, 100, 100, 100, 100];
+    let mut left_bytes = Vec::new();
+    for v in left {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut right_bytes = Vec::new();
+    for v in right {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &right_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMULHW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, (&l, &r)) in left.iter().zip(right.iter()).enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = i16::from_le_bytes(buf);
+        let expected = (((i32::from(l) * i32::from(r)) >> 16) & 0xFFFF) as i16;
+        assert_eq!(result, expected, "lane {i}: {l} * {r} high = {expected}, got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmulhuw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 8x16-bit unsigned: high 16 of (l * r) for each lane
+    // [100, 200, 40000, 300, ...] * [1000, 100, 1000, 50, ...]
+    // 100*1000 = 100000, high 16 = 1
+    // 200*100 = 20000, high 16 = 0
+    // 40000*1000 = 40000000 = 0x2625A00, high 16 = 0x0262 = 610
+    // 300*50 = 15000, high 16 = 0
+    let left: [u16; 8] = [100, 200, 40000, 300, 1, 2, 3, 4];
+    let right: [u16; 8] = [1000, 100, 1000, 50, 100, 100, 100, 100];
+    let mut left_bytes = Vec::new();
+    for v in left {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut right_bytes = Vec::new();
+    for v in right {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    let initial = with_bytes(&state, XMM0, &left_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &right_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMULHUW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, (&l, &r)) in left.iter().zip(right.iter()).enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        let expected = ((u32::from(l) * u32::from(r)) >> 16) as u16;
+        assert_eq!(result, expected, "lane {i}: {l} * {r} high = {expected}, got {result}");
+    }
+    Ok(())
+}

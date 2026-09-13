@@ -385,6 +385,10 @@ pub mod forms {
     pub const PMINUB_XMM_XMM: u32 = 0x00F7;
     pub const PMINUW_XMM_XMM: u32 = 0x00F8;
     pub const PMINUD_XMM_XMM: u32 = 0x00F9;
+
+    // SSE2 packed multiply high (xmm, xmm) — 8x16 lanes
+    pub const PMULHW_XMM_XMM: u32 = 0x00FA;
+    pub const PMULHUW_XMM_XMM: u32 = 0x00FB;
 }
 
 /// RFLAGS bit positions used by the corpus.
