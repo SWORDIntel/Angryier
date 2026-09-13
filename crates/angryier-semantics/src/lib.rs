@@ -118,6 +118,11 @@ pub enum PrimitiveOp {
     Extract,
     ZeroExtend,
     SignExtend,
+    RotateLeft,
+    RotateRight,
+    Popcount,
+    CountLeadingZeros,
+    CountTrailingZeros,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

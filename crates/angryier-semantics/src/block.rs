@@ -511,6 +511,11 @@ fn primitive_tag(op: PrimitiveOp) -> u8 {
         PrimitiveOp::Extract => 19,
         PrimitiveOp::ZeroExtend => 20,
         PrimitiveOp::SignExtend => 21,
+        PrimitiveOp::RotateLeft => 22,
+        PrimitiveOp::RotateRight => 23,
+        PrimitiveOp::Popcount => 24,
+        PrimitiveOp::CountLeadingZeros => 25,
+        PrimitiveOp::CountTrailingZeros => 26,
     }
 }
 

@@ -393,6 +393,11 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
         PrimitiveOp::Extract => IrPrimitive::Extract,
         PrimitiveOp::ZeroExtend => IrPrimitive::ZExt,
         PrimitiveOp::SignExtend => IrPrimitive::SExt,
+        PrimitiveOp::RotateLeft => IrPrimitive::RotL,
+        PrimitiveOp::RotateRight => IrPrimitive::RotR,
+        PrimitiveOp::Popcount => IrPrimitive::Popcnt,
+        PrimitiveOp::CountLeadingZeros => IrPrimitive::Clz,
+        PrimitiveOp::CountTrailingZeros => IrPrimitive::Ctz,
     })
 }
 

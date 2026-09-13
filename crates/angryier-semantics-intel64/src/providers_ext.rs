@@ -187,6 +187,45 @@ fn read_flag_not_set(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, 
     out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[flag_64, zero])
 }
 
+/// Writes ZF from a 1-bit condition value (1 = set ZF, 0 = clear ZF).
+fn write_zf_from_cond(out: &mut dyn SemanticBuilder, cond: ValueId) -> Result<(), SemanticError> {
+    let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
+    let zf_clear_mask = !(1u64 << rflags::ZF_BIT);
+    let mask = out.constant(U64, &zf_clear_mask.to_le_bytes())?;
+    let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
+    let zf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cond])?;
+    let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
+    let zf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[zf_64, zf_bit])?;
+    let new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[cleared, zf_shifted])?;
+    out.write_register(register_id::RFLAGS, new_rflags)?;
+    Ok(())
+}
+
+/// Writes ZF and CF from 1-bit condition values in a single RFLAGS update.
+fn write_zf_cf_from_cond(
+    out: &mut dyn SemanticBuilder,
+    zf_cond: ValueId,
+    cf_cond: ValueId,
+) -> Result<(), SemanticError> {
+    let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
+    let clear_mask = !((1u64 << rflags::ZF_BIT) | (1u64 << rflags::CF_BIT));
+    let mask = out.constant(U64, &clear_mask.to_le_bytes())?;
+    let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
+
+    let zf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[zf_cond])?;
+    let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
+    let zf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[zf_64, zf_bit])?;
+
+    let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_cond])?;
+    let cf_bit = const_u64(out, u64::from(rflags::CF_BIT))?;
+    let cf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[cf_64, cf_bit])?;
+
+    let with_zf = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[cleared, zf_shifted])?;
+    let new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[with_zf, cf_shifted])?;
+    out.write_register(register_id::RFLAGS, new_rflags)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Register aliasing / partial writes
 // ---------------------------------------------------------------------------
@@ -568,6 +607,119 @@ impl SemanticProvider for BswapR64 {
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(0x8D, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bit scan / popcount (using new IR primitives)
+// ---------------------------------------------------------------------------
+
+/// BSF r64, r64: bit scan forward. dest = index of least significant set bit.
+/// ZF=1 if source is 0 (dest undefined). ZF=0 if source != 0.
+#[derive(Clone, Copy, Debug)]
+pub struct BsfR64R64;
+impl SemanticProvider for BsfR64R64 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x88) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::BSF_R64_R64 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, U64)?;
+        let zero = const_u64(out, 0)?;
+        let src_is_zero = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[src, zero])?;
+        // CTZ returns 64 when input is 0, but BSF leaves dest undefined in that case.
+        // We write CTZ unconditionally; when src=0 the value is architecturally undefined.
+        let ctz = out.emit(SemanticOp::Primitive(PrimitiveOp::CountTrailingZeros), U64, &[src])?;
+        out.write_operand(0, ctz)?;
+        // ZF = (src == 0)
+        write_zf_from_cond(out, src_is_zero)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x88, context))
+    }
+}
+
+/// BSR r64, r64: bit scan reverse. dest = index of most significant set bit.
+/// ZF=1 if source is 0 (dest undefined). ZF=0 if source != 0.
+#[derive(Clone, Copy, Debug)]
+pub struct BsrR64R64;
+impl SemanticProvider for BsrR64R64 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x89) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::BSR_R64_R64 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, U64)?;
+        let zero = const_u64(out, 0)?;
+        let src_is_zero = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[src, zero])?;
+        // CLZ returns 64 when input is 0. BSR result = (63 - CLZ) when src != 0.
+        let clz = out.emit(SemanticOp::Primitive(PrimitiveOp::CountLeadingZeros), U64, &[src])?;
+        let width_minus_one = const_u64(out, 63)?;
+        let bsr_result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[width_minus_one, clz])?;
+        out.write_operand(0, bsr_result)?;
+        write_zf_from_cond(out, src_is_zero)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x89, context))
+    }
+}
+
+/// POPCNT r64, r64: dest = number of set bits in src. ZF = (result == 0).
+#[derive(Clone, Copy, Debug)]
+pub struct PopcntR64R64;
+impl SemanticProvider for PopcntR64R64 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x8A) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::POPCNT_R64_R64 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, U64)?;
+        let count = out.emit(SemanticOp::Primitive(PrimitiveOp::Popcount), U64, &[src])?;
+        out.write_operand(0, count)?;
+        // ZF = (count == 0)
+        let zero = const_u64(out, 0)?;
+        let zf_cond = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[count, zero])?;
+        write_zf_from_cond(out, zf_cond)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x8A, context))
+    }
+}
+
+/// TZCNT r64, r64: dest = count of trailing zeros. Returns 64 if src=0.
+/// ZF = (src == 0). CF = (src == 0).
+#[derive(Clone, Copy, Debug)]
+pub struct TzcntR64R64;
+impl SemanticProvider for TzcntR64R64 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x8B) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::TZCNT_R64_R64 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, U64)?;
+        let zero = const_u64(out, 0)?;
+        let src_is_zero = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[src, zero])?;
+        let ctz = out.emit(SemanticOp::Primitive(PrimitiveOp::CountTrailingZeros), U64, &[src])?;
+        out.write_operand(0, ctz)?;
+        // ZF = (src == 0), CF = (src == 0)
+        write_zf_cf_from_cond(out, src_is_zero, src_is_zero)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x8B, context))
+    }
+}
+
+/// LZCNT r64, r64: dest = count of leading zeros. Returns 64 if src=0.
+/// ZF = (result == 0). CF = (src == 0).
+#[derive(Clone, Copy, Debug)]
+pub struct LzcntR64R64;
+impl SemanticProvider for LzcntR64R64 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x8C) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::LZCNT_R64_R64 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, U64)?;
+        let zero = const_u64(out, 0)?;
+        let src_is_zero = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[src, zero])?;
+        let clz = out.emit(SemanticOp::Primitive(PrimitiveOp::CountLeadingZeros), U64, &[src])?;
+        out.write_operand(0, clz)?;
+        // ZF = (result == 0), CF = (src == 0)
+        let result_is_zero = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[clz, zero])?;
+        write_zf_cf_from_cond(out, result_is_zero, src_is_zero)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x8C, context))
     }
 }
 

@@ -494,6 +494,60 @@ fn evaluate_primitive<R, M>(
             let start = u32::try_from(start).map_err(|_| ConcreteExecutionError::TypeMismatch)?;
             (as_u128(resolved[0]) >> start) & bit_mask(output_bits)
         }
+        IrPrimitive::RotL => {
+            require_arity(operation, &resolved, 2)?;
+            if resolved[0].ty != ty || !matches!(resolved[1].ty, IrType::Bits(_)) {
+                return Err(ConcreteExecutionError::TypeMismatch);
+            }
+            let input = as_u128(resolved[0]);
+            let shift = as_u128(resolved[1]);
+            if output_bits == 0 {
+                0
+            } else {
+                let shift = u32::try_from(shift % u128::from(output_bits))
+                    .map_err(|_| ConcreteExecutionError::TypeMismatch)?;
+                let mask = bit_mask(output_bits);
+                ((input << shift) | (input >> (u32::from(output_bits) - shift))) & mask
+            }
+        }
+        IrPrimitive::RotR => {
+            require_arity(operation, &resolved, 2)?;
+            if resolved[0].ty != ty || !matches!(resolved[1].ty, IrType::Bits(_)) {
+                return Err(ConcreteExecutionError::TypeMismatch);
+            }
+            let input = as_u128(resolved[0]);
+            let shift = as_u128(resolved[1]);
+            if output_bits == 0 {
+                0
+            } else {
+                let shift = u32::try_from(shift % u128::from(output_bits))
+                    .map_err(|_| ConcreteExecutionError::TypeMismatch)?;
+                let mask = bit_mask(output_bits);
+                ((input >> shift) | (input << (u32::from(output_bits) - shift))) & mask
+            }
+        }
+        IrPrimitive::Popcnt => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            as_u128(resolved[0]).count_ones() as u128
+        }
+        IrPrimitive::Clz => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = as_u128(resolved[0]) & bit_mask(output_bits);
+            // leading_zeros counts all 128 bits; subtract the unused upper bits
+            (input.leading_zeros() - (128 - u32::from(output_bits))) as u128
+        }
+        IrPrimitive::Ctz => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = as_u128(resolved[0]) & bit_mask(output_bits);
+            if input == 0 {
+                u128::from(output_bits)
+            } else {
+                input.trailing_zeros() as u128
+            }
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

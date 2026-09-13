@@ -2440,3 +2440,175 @@ fn cmova_r64_r64_taken_when_cf_and_zf_clear() -> Result<(), Box<dyn std::error::
     assert_eq!(read_reg(&executed, RAX)?, 99, "CMOVA should take src when CF=0 and ZF=0");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: bit-scan / popcount integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn popcnt_r64_r64_executes() -> Result<(), Box<dyn std::error::Error>> {
+    // 0xB = 0b1011 -> 3 set bits
+    let initial = with_reg(&make_state()?, RCX, 0xB)?;
+
+    let decoded = make_decoded(
+        forms::POPCNT_R64_R64,
+        vec![
+            reg_operand(0, RAX, AccessKind::Write),
+            reg_operand(1, RCX, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    assert_eq!(read_reg(&executed, RAX)?, 3, "POPCNT of 0xB should be 3");
+    let rflags = read_reg(&executed, RFLAGS)?;
+    assert_eq!(rflags & ZF_BIT, 0, "ZF should be clear when result is nonzero");
+    Ok(())
+}
+
+#[test]
+fn popcnt_r64_r64_sets_zf_when_zero() -> Result<(), Box<dyn std::error::Error>> {
+    let initial = with_reg(&make_state()?, RCX, 0)?;
+
+    let decoded = make_decoded(
+        forms::POPCNT_R64_R64,
+        vec![
+            reg_operand(0, RAX, AccessKind::Write),
+            reg_operand(1, RCX, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    assert_eq!(read_reg(&executed, RAX)?, 0, "POPCNT of 0 should be 0");
+    let rflags = read_reg(&executed, RFLAGS)?;
+    assert_eq!(rflags & ZF_BIT, ZF_BIT, "ZF should be set when result is zero");
+    Ok(())
+}
+
+#[test]
+fn bsf_r64_r64_executes() -> Result<(), Box<dyn std::error::Error>> {
+    // 0x10 = 0b10000 -> least significant set bit at index 4
+    let initial = with_reg(&make_state()?, RCX, 0x10)?;
+
+    let decoded = make_decoded(
+        forms::BSF_R64_R64,
+        vec![
+            reg_operand(0, RAX, AccessKind::Write),
+            reg_operand(1, RCX, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    assert_eq!(read_reg(&executed, RAX)?, 4, "BSF of 0x10 should be 4");
+    let rflags = read_reg(&executed, RFLAGS)?;
+    assert_eq!(rflags & ZF_BIT, 0, "ZF should be clear when source is nonzero");
+    Ok(())
+}
+
+#[test]
+fn bsr_r64_r64_executes() -> Result<(), Box<dyn std::error::Error>> {
+    // 0x10 = 0b10000 -> most significant set bit at index 4
+    let initial = with_reg(&make_state()?, RCX, 0x10)?;
+
+    let decoded = make_decoded(
+        forms::BSR_R64_R64,
+        vec![
+            reg_operand(0, RAX, AccessKind::Write),
+            reg_operand(1, RCX, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    assert_eq!(read_reg(&executed, RAX)?, 4, "BSR of 0x10 should be 4");
+    let rflags = read_reg(&executed, RFLAGS)?;
+    assert_eq!(rflags & ZF_BIT, 0, "ZF should be clear when source is nonzero");
+    Ok(())
+}
+
+#[test]
+fn tzcnt_r64_r64_executes() -> Result<(), Box<dyn std::error::Error>> {
+    // 0x10 = 0b10000 -> 4 trailing zeros
+    let initial = with_reg(&make_state()?, RCX, 0x10)?;
+
+    let decoded = make_decoded(
+        forms::TZCNT_R64_R64,
+        vec![
+            reg_operand(0, RAX, AccessKind::Write),
+            reg_operand(1, RCX, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    assert_eq!(read_reg(&executed, RAX)?, 4, "TZCNT of 0x10 should be 4");
+    let rflags = read_reg(&executed, RFLAGS)?;
+    assert_eq!(rflags & ZF_BIT, 0, "ZF should be clear when source is nonzero");
+    assert_eq!(rflags & CF_BIT, 0, "CF should be clear when source is nonzero");
+    Ok(())
+}
+
+#[test]
+fn tzcnt_r64_r64_when_source_zero() -> Result<(), Box<dyn std::error::Error>> {
+    let initial = with_reg(&make_state()?, RCX, 0)?;
+
+    let decoded = make_decoded(
+        forms::TZCNT_R64_R64,
+        vec![
+            reg_operand(0, RAX, AccessKind::Write),
+            reg_operand(1, RCX, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    assert_eq!(read_reg(&executed, RAX)?, 64, "TZCNT of 0 should be 64");
+    let rflags = read_reg(&executed, RFLAGS)?;
+    assert_eq!(rflags & ZF_BIT, ZF_BIT, "ZF should be set when source is zero");
+    assert_eq!(rflags & CF_BIT, CF_BIT, "CF should be set when source is zero");
+    Ok(())
+}
+
+#[test]
+fn lzcnt_r64_r64_executes() -> Result<(), Box<dyn std::error::Error>> {
+    // 0x10 = 0b10000 -> 59 leading zeros (64 - 5)
+    let initial = with_reg(&make_state()?, RCX, 0x10)?;
+
+    let decoded = make_decoded(
+        forms::LZCNT_R64_R64,
+        vec![
+            reg_operand(0, RAX, AccessKind::Write),
+            reg_operand(1, RCX, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    assert_eq!(read_reg(&executed, RAX)?, 59, "LZCNT of 0x10 should be 59");
+    let rflags = read_reg(&executed, RFLAGS)?;
+    assert_eq!(rflags & ZF_BIT, 0, "ZF should be clear when result is nonzero");
+    assert_eq!(rflags & CF_BIT, 0, "CF should be clear when source is nonzero");
+    Ok(())
+}
+
+#[test]
+fn lzcnt_r64_r64_when_source_zero() -> Result<(), Box<dyn std::error::Error>> {
+    let initial = with_reg(&make_state()?, RCX, 0)?;
+
+    let decoded = make_decoded(
+        forms::LZCNT_R64_R64,
+        vec![
+            reg_operand(0, RAX, AccessKind::Write),
+            reg_operand(1, RCX, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    assert_eq!(read_reg(&executed, RAX)?, 64, "LZCNT of 0 should be 64");
+    let rflags = read_reg(&executed, RFLAGS)?;
+    assert_eq!(rflags & CF_BIT, CF_BIT, "CF should be set when source is zero");
+    Ok(())
+}

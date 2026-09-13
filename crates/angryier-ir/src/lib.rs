@@ -48,6 +48,11 @@ pub enum IrPrimitive {
     Extract,
     ZExt,
     SExt,
+    RotL,
+    RotR,
+    Popcnt,
+    Clz,
+    Ctz,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
