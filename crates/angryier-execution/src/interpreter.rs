@@ -810,6 +810,32 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecShuffleBytes => {
+            require_arity(operation, &resolved, 2)?;
+            let width_bits = match ty {
+                IrType::Vector { width_bits, lane_bits: 8 } => u32::from(width_bits),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if width_bits == 0 || width_bits > 128 || width_bits % 8 != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let byte_count = width_bits / 8;
+            let data = as_u128(resolved[0]);
+            let control = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for i in 0..byte_count {
+                let shift = i * 8;
+                let ctrl_byte = ((control >> shift) & 0xFF) as u8;
+                let byte_result = if ctrl_byte & 0x80 != 0 {
+                    0u8
+                } else {
+                    let idx = (ctrl_byte & 0x0F) as u32;
+                    ((data >> (idx * 8)) & 0xFF) as u8
+                };
+                result |= (byte_result as u128) << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

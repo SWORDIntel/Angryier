@@ -2269,3 +2269,26 @@ impl SemanticProvider for PmulhuwXmmXmm {
         Ok(receipt(0xFB, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 packed shuffle bytes provider
+// ---------------------------------------------------------------------------
+
+/// PSHUFB xmm, xmm: parallel byte shuffle.
+/// For each byte i: if src[i] & 0x80, result[i] = 0; else result[i] = dst[src[i] & 0x0F].
+#[derive(Clone, Copy, Debug)]
+pub struct PshufbXmmXmm;
+
+impl SemanticProvider for PshufbXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0xFC) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSHUFB_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Shuffle), I8X16, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0xFC, context))
+    }
+}

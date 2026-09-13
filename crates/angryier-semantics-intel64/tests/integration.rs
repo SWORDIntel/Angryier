@@ -3770,3 +3770,64 @@ fn pmulhuw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 packed shuffle bytes integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pshufb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // Data: [0x00, 0x01, 0x02, ..., 0x0F]
+    // Control: [0x0F, 0x0E, 0x0D, ..., 0x00] — reverse
+    let data: [u8; 16] = core::array::from_fn(|i| i as u8);
+    let control: [u8; 16] = core::array::from_fn(|i| (15 - i) as u8);
+    let initial = with_bytes(&state, XMM0, &data)?;
+    let initial = with_bytes(&initial, XMM1, &control)?;
+
+    let decoded = make_decoded(
+        forms::PSHUFB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    // Result should be reversed: [0x0F, 0x0E, ..., 0x00]
+    for (i, &byte) in bytes.iter().enumerate() {
+        let expected = (15 - i) as u8;
+        assert_eq!(byte, expected, "lane {i}: got {:#x}, expected {expected:#x}", byte);
+    }
+    Ok(())
+}
+
+#[test]
+fn pshufb_xmm_xmm_zeroes_on_high_bit() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // Data: [0x00, 0x01, ..., 0x0F]
+    // Control: [0x00, 0x80, 0x01, 0x80, 0x02, 0x80, ...] — alternating select and zero
+    let data: [u8; 16] = core::array::from_fn(|i| i as u8);
+    let control: [u8; 16] = core::array::from_fn(|i| if i % 2 == 0 { i as u8 } else { 0x80 });
+    let initial = with_bytes(&state, XMM0, &data)?;
+    let initial = with_bytes(&initial, XMM1, &control)?;
+
+    let decoded = make_decoded(
+        forms::PSHUFB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    for (i, &byte) in bytes.iter().enumerate() {
+        let expected = if i % 2 == 0 { data[i] } else { 0 };
+        assert_eq!(byte, expected, "lane {i}: got {:#x}, expected {expected:#x}", byte);
+    }
+    Ok(())
+}

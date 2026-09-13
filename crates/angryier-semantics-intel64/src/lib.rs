@@ -389,6 +389,9 @@ pub mod forms {
     // SSE2 packed multiply high (xmm, xmm) — 8x16 lanes
     pub const PMULHW_XMM_XMM: u32 = 0x00FA;
     pub const PMULHUW_XMM_XMM: u32 = 0x00FB;
+
+    // SSSE3 packed shuffle bytes (xmm, xmm) — byte-level shuffle
+    pub const PSHUFB_XMM_XMM: u32 = 0x00FC;
 }
 
 /// RFLAGS bit positions used by the corpus.
