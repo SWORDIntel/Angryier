@@ -26,7 +26,7 @@ The repository has boundaries for shared identities, architecture/Intel 64, XED 
 | `angryier-ledger` | Atomic ledger contract, epoch model, rejection classes, concurrent commit validation | 503 |
 | `angryier-solver` | Solver-neutral query/result model, result classes, canonical identity, portfolio router, batch solver, cache | 679 |
 | `angryier-jit` | JIT validity contract, code-page versioning | 144 |
-| `angryier-semantics-intel64` | Handwritten Intel 64 semantic corpus (93 forms: MOV/ADD/SUB/XOR/AND/OR/SHL/SHR/SAR/CMP/JZ/JNZ/JMP + immediate/CL/unary/branch/memory/MUL/DIV/rotate/stack/LEA/XCHG/TEST/XADD + partial-write/MOVZX/MOVSX/CL-rotate/CMOVcc/BT/BTS/BTR/BTC + CLC/STC/CMC/SETcc/ADC/SBB + CBW/CWDE/CDQE/CWD/CDQ/CMPXCHG + PUSH imm/CALL/RET/JLE/JG/JA/JB/JBE/JAE variants) | 592+370+666 |
+| `angryier-semantics-intel64` | Handwritten Intel 64 semantic corpus (330 forms: 93 foundational integer/control-flow + 94 Phase 4a partial-write/bit-scan/32-bit forms + 143 Phase 4b SSE/SSE2/SSSE3/SSE4.1/SSE4.2 SIMD forms including scalar/packed float, packed integer, shifts, compares, min/max, shuffle, unpack, saturate, PMADDWD/PMADDUBSW, horizontal add/subtract, PABS/PSIGN, PMULHRSW, PCMPEQQ/PMULDQ/PBLENDVB, PMOV sign/zero extend, immediate blends, dot products, PEXTRB/PINSRB, scalar float compare with flags, packed/scalar rounding, PTEST, CRC32, dword/qword extract/insert, INSERTPS/EXTRACTPS) | 592+370+666 |
 | `angryier-replay` | Replay capsule store, validator, basic replay engine with monotonic sequence | ~250 |
 | `angryier-taint` | In-memory taint engine with labels, states, promotion threshold, transform/merge/sink | ~567 |
 | `angryier-provenance` | In-memory provenance store, adaptive trace governor, batching sink, tier-based eviction | ~570 |
@@ -70,7 +70,7 @@ Without the `ffi` features, the adapter crates build and test normally (returnin
 
 ## Intentionally not implemented
 
-- **partial**: a handwritten Intel 64 semantic corpus exists (93 forms) but does not cover the full ISA; the native XED decoder in `angryier-arch-xed-ffi` covers instruction decoding but not semantic lowering;
+- **partial**: a handwritten Intel 64 semantic corpus exists (330 forms) but does not cover the full ISA; the native XED decoder in `angryier-arch-xed-ffi` covers instruction decoding but not semantic lowering;
 - page-backed COW memory implementation (contract exists, internals are scaffolded);
 - expression arena/hash-consing implementation (contract exists, arena is scaffolded);
 - **partial**: in-memory work-stealing scheduler exists; NUMA-aware OS-level scheduling remains future work;
@@ -87,7 +87,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 
 ## Test coverage
 
-78 test suites pass (0 failures) across the workspace, 585 tests total:
+78 test suites pass (0 failures) across the workspace, 783 tests total:
 
 | Crate | Tests |
 |---|---|
@@ -99,18 +99,18 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-core | 1 |
 | angryier-decode-xed | 6 |
 | angryier-distribution | 15 |
-| angryier-execution | 7 |
-| angryier-expr | 27 |
+| angryier-execution | 17 |
+| angryier-expr | 30 |
 | angryier-fusion | 14 |
 | angryier-fuzz | 13 |
-| angryier-ir | 8 |
+| angryier-ir | 11 |
 | angryier-jit | 4 |
 | angryier-keystone | 13 |
 | angryier-knowledge | 23 |
 | angryier-ledger | 18 |
-| angryier-loader | 11 |
-| angryier-memory | 21 |
-| angryier-models | 16 |
+| angryier-loader | 24 |
+| angryier-memory | 41 |
+| angryier-models | 27 |
 | angryier-plugins | 9 |
 | angryier-provenance | 15 |
 | angryier-qihse | 14 |
@@ -119,11 +119,11 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-semantic-contracts | 15 |
 | angryier-semantics | 5 |
 | angryier-semantics-gen | 14 |
-| angryier-semantics-intel64 | 9 (unit) + 88 (integration) |
-| angryier-solver | 17 |
-| angryier-solver-bitwuzla | 1 |
+| angryier-semantics-intel64 | 9 (unit) + 229 (integration) |
+| angryier-solver | 20 |
+| angryier-solver-bitwuzla | 3 |
 | angryier-solver-bitwuzla-ffi | 4 |
-| angryier-solver-z3 | 1 |
+| angryier-solver-z3 | 3 |
 | angryier-solver-z3-ffi | 4 |
 | angryier-state | 25 |
 | angryier-storage | 14 |
