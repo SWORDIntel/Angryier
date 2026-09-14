@@ -4416,3 +4416,320 @@ fn pmaddubsw_xmm_xmm_saturates() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed shift with register count integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn psllw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSLLW: 8x16-bit logical left shift by count in low 64 bits of XMM1
+    // src = [0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008]
+    // count = 4
+    // expected = [0x0010, 0x0020, 0x0030, 0x0040, 0x0050, 0x0060, 0x0070, 0x0080]
+    let src: [u16; 8] = [0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&4u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSLLW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u16; 8] = [0x0010, 0x0020, 0x0030, 0x0040, 0x0050, 0x0060, 0x0070, 0x0080];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(u16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psllw_xmm_xmm_overflow_clears() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSLLW with count >= 16 should clear all lanes
+    let src: [u16; 8] = [0xFFFF; 8];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&20u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSLLW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    for i in 0..8 {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(u16::from_le_bytes(buf), 0, "lane {i} should be 0");
+    }
+    Ok(())
+}
+
+#[test]
+fn pslld_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSLLD: 4x32-bit logical left shift by count in low 64 bits of XMM1
+    let src: [u32; 4] = [0x00000001, 0x00000002, 0x00000003, 0x00000004];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&8u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSLLD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u32; 4] = [0x00000100, 0x00000200, 0x00000300, 0x00000400];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        assert_eq!(u32::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psllq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSLLQ: 2x64-bit logical left shift by count in low 64 bits of XMM1
+    let src: [u64; 2] = [0x0000000000000001, 0x0000000000000002];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&16u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSLLQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u64; 2] = [0x0000000000010000, 0x0000000000020000];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        assert_eq!(u64::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psrlw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSRLW: 8x16-bit logical right shift by count in low 64 bits of XMM1
+    let src: [u16; 8] = [0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000, 0x7000, 0x8000];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&4u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSRLW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u16; 8] = [0x0100, 0x0200, 0x0300, 0x0400, 0x0500, 0x0600, 0x0700, 0x0800];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(u16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psrld_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSRLD: 4x32-bit logical right shift by count in low 64 bits of XMM1
+    let src: [u32; 4] = [0x00000100, 0x00000200, 0x00000300, 0x00000400];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&8u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSRLD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u32; 4] = [0x00000001, 0x00000002, 0x00000003, 0x00000004];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        assert_eq!(u32::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psrlq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSRLQ: 2x64-bit logical right shift by count in low 64 bits of XMM1
+    let src: [u64; 2] = [0x0000000000010000, 0x0000000000020000];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&16u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSRLQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u64; 2] = [0x0000000000000001, 0x0000000000000002];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        assert_eq!(u64::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psraw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSRAW: 8x16-bit arithmetic right shift by count in low 64 bits of XMM1
+    // Sign bit is preserved.
+    let src: [i16; 8] = [-16, -32, -48, -64, 16, 32, 48, 64];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&2u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSRAW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [-4, -8, -12, -16, 4, 8, 12, 16];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psrad_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSRAD: 4x32-bit arithmetic right shift by count in low 64 bits of XMM1
+    let src: [i32; 4] = [-256, -512, 256, 512];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&4u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSRAD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i32; 4] = [-16, -32, 16, 32];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        assert_eq!(i32::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psraw_xmm_xmm_saturates_to_sign() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSRAW with count >= 16 should sign-extend (negative → -1, positive → 0)
+    let src: [i16; 8] = [-1, -100, 1, 100, -32768, 32767, 0, -1];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut count_bytes = [0u8; 16];
+    count_bytes[0..4].copy_from_slice(&20u32.to_le_bytes());
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &count_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSRAW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [-1, -1, 0, 0, -1, 0, 0, -1];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}

@@ -163,6 +163,9 @@ pub enum VectorOp {
     Shuffle32,
     Shuffle16,
     Maddubs,
+    ShiftRegL,
+    ShiftRegR,
+    ShiftRegRA,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

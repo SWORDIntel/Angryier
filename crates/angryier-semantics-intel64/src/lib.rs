@@ -430,6 +430,16 @@ pub mod forms {
 
     // SSSE3 packed multiply and add unsigned/signed bytes (xmm, xmm) — 16x8→8x16
     pub const PMADDUBSW_XMM_XMM: u32 = 0x010E;
+
+    // SSE2 packed shift with register count (xmm, xmm)
+    pub const PSLLW_XMM_XMM: u32 = 0x010F;
+    pub const PSLLD_XMM_XMM: u32 = 0x0110;
+    pub const PSLLQ_XMM_XMM: u32 = 0x0111;
+    pub const PSRLW_XMM_XMM: u32 = 0x0112;
+    pub const PSRLD_XMM_XMM: u32 = 0x0113;
+    pub const PSRLQ_XMM_XMM: u32 = 0x0114;
+    pub const PSRAW_XMM_XMM: u32 = 0x0115;
+    pub const PSRAD_XMM_XMM: u32 = 0x0116;
 }
 
 /// RFLAGS bit positions used by the corpus.

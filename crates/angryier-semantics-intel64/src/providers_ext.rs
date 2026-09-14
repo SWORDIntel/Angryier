@@ -2575,3 +2575,38 @@ impl SemanticProvider for PmaddubswXmmXmm {
         Ok(receipt(0x10E, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed shift with register count (xmm, xmm)
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_shift_reg {
+    ($name:ident, $form:expr, $vop:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, $ty)?;
+                // The shift count is taken from the low 64 bits of the second XMM operand.
+                let count_src = out.read_operand(1, $ty)?;
+                let result = out.emit(SemanticOp::Vector($vop), $ty, &[dst, count_src])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_shift_reg!(PsllwXmmXmm, forms::PSLLW_XMM_XMM, VectorOp::ShiftRegL, I16X8, 0x10F);
+packed_shift_reg!(PslldXmmXmm, forms::PSLLD_XMM_XMM, VectorOp::ShiftRegL, I32X4, 0x110);
+packed_shift_reg!(PsllqXmmXmm, forms::PSLLQ_XMM_XMM, VectorOp::ShiftRegL, I64X2, 0x111);
+packed_shift_reg!(PsrlwXmmXmm, forms::PSRLW_XMM_XMM, VectorOp::ShiftRegR, I16X8, 0x112);
+packed_shift_reg!(PsrldXmmXmm, forms::PSRLD_XMM_XMM, VectorOp::ShiftRegR, I32X4, 0x113);
+packed_shift_reg!(PsrlqXmmXmm, forms::PSRLQ_XMM_XMM, VectorOp::ShiftRegR, I64X2, 0x114);
+packed_shift_reg!(PsrawXmmXmm, forms::PSRAW_XMM_XMM, VectorOp::ShiftRegRA, I16X8, 0x115);
+packed_shift_reg!(PsradXmmXmm, forms::PSRAD_XMM_XMM, VectorOp::ShiftRegRA, I32X4, 0x116);

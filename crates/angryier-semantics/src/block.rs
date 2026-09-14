@@ -479,6 +479,9 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::Shuffle32 => out.byte(14),
                 VectorOp::Shuffle16 => out.byte(15),
                 VectorOp::Maddubs => out.byte(16),
+                VectorOp::ShiftRegL => out.byte(17),
+                VectorOp::ShiftRegR => out.byte(18),
+                VectorOp::ShiftRegRA => out.byte(19),
             }
         }
         SemanticOp::Tile(op) => {
