@@ -2640,3 +2640,60 @@ packed_hbinop!(PhaddwXmmXmm, forms::PHADDW_XMM_XMM, VectorOp::HAdd, I16X8, 0x117
 packed_hbinop!(PhadddXmmXmm, forms::PHADDD_XMM_XMM, VectorOp::HAdd, I32X4, 0x118);
 packed_hbinop!(PhsubwXmmXmm, forms::PHSUBW_XMM_XMM, VectorOp::HSub, I16X8, 0x119);
 packed_hbinop!(PhsubdXmmXmm, forms::PHSUBD_XMM_XMM, VectorOp::HSub, I32X4, 0x11A);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 packed absolute value providers
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_unary_lane {
+    ($name:ident, $form:expr, $op:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let src = out.read_operand(1, $ty)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $ty, &[src])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_unary_lane!(PabsbXmmXmm, forms::PABSB_XMM_XMM, PrimitiveOp::Abs, I8X16, 0x11B);
+packed_unary_lane!(PabswXmmXmm, forms::PABSW_XMM_XMM, PrimitiveOp::Abs, I16X8, 0x11C);
+packed_unary_lane!(PabsdXmmXmm, forms::PABSD_XMM_XMM, PrimitiveOp::Abs, I32X4, 0x11D);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 packed sign providers
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_binary_lane {
+    ($name:ident, $form:expr, $op:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, $ty)?;
+                let src = out.read_operand(1, $ty)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $ty, &[dst, src])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_binary_lane!(PsignbXmmXmm, forms::PSIGNB_XMM_XMM, PrimitiveOp::Sign, I8X16, 0x11E);
+packed_binary_lane!(PsignwXmmXmm, forms::PSIGNW_XMM_XMM, PrimitiveOp::Sign, I16X8, 0x11F);
+packed_binary_lane!(PsigndXmmXmm, forms::PSIGND_XMM_XMM, PrimitiveOp::Sign, I32X4, 0x120);

@@ -254,6 +254,12 @@ impl Intel64CorpusRegistry {
             Arc::new(PhadddXmmXmm),
             Arc::new(PhsubwXmmXmm),
             Arc::new(PhsubdXmmXmm),
+            Arc::new(PabsbXmmXmm),
+            Arc::new(PabswXmmXmm),
+            Arc::new(PabsdXmmXmm),
+            Arc::new(PsignbXmmXmm),
+            Arc::new(PsignwXmmXmm),
+            Arc::new(PsigndXmmXmm),
             Arc::new(ShlR32Imm8),
             Arc::new(ShrR32Imm8),
             Arc::new(SarR32Imm8),
@@ -355,7 +361,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 282] = [
+const ALL_FORMS: [u32; 288] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -588,6 +594,12 @@ const ALL_FORMS: [u32; 282] = [
     crate::forms::PHADDD_XMM_XMM,
     crate::forms::PHSUBW_XMM_XMM,
     crate::forms::PHSUBD_XMM_XMM,
+    crate::forms::PABSB_XMM_XMM,
+    crate::forms::PABSW_XMM_XMM,
+    crate::forms::PABSD_XMM_XMM,
+    crate::forms::PSIGNB_XMM_XMM,
+    crate::forms::PSIGNW_XMM_XMM,
+    crate::forms::PSIGND_XMM_XMM,
     crate::forms::SHL_R32_IMM8,
     crate::forms::SHR_R32_IMM8,
     crate::forms::SAR_R32_IMM8,

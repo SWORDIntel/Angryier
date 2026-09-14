@@ -810,6 +810,61 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecLaneAbs => {
+            require_arity(operation, &resolved, 1)?;
+            // PABSB/W/D: per-lane signed absolute value.
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let mask = bit_mask(lane_bits as u16);
+            let sign_bit = 1u128 << (lane_bits - 1);
+            let src = as_u128(resolved[0]);
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let lane = (src >> shift) & mask;
+                let signed = if lane & sign_bit != 0 { (lane | (!mask)) as i128 } else { lane as i128 };
+                let abs = signed.wrapping_abs() as u128 & mask;
+                result |= abs << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecLaneSign => {
+            require_arity(operation, &resolved, 2)?;
+            // PSIGNB/W/D: per-lane sign application.
+            // result[i] = src1[i] * sign(src2[i])
+            // where sign(x) = -1 if x<0, 0 if x==0, +1 if x>0 (signed interpretation)
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let mask = bit_mask(lane_bits as u16);
+            let sign_bit = 1u128 << (lane_bits - 1);
+            let src1 = as_u128(resolved[0]);
+            let src2 = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let a = (src1 >> shift) & mask;
+                let b = (src2 >> shift) & mask;
+                let b_signed = if b & sign_bit != 0 { (b | (!mask)) as i128 } else { b as i128 };
+                let a_signed = if a & sign_bit != 0 { (a | (!mask)) as i128 } else { a as i128 };
+                let sign = if b_signed < 0 { -1i128 } else if b_signed > 0 { 1i128 } else { 0i128 };
+                let product = a_signed.wrapping_mul(sign);
+                let lane_result = (product as u128) & mask;
+                result |= lane_result << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
         IrPrimitive::VecShuffleBytes => {
             require_arity(operation, &resolved, 2)?;
             let width_bits = match ty {

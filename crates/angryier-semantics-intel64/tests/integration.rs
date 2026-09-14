@@ -4881,3 +4881,190 @@ fn phsubd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 packed absolute value integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pabsb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PABSB: per-lane signed absolute value (8-bit)
+    let src: [i8; 16] = [-1, 2, -3, 4, -5, 6, -127, 127, 0, -1, 100, -100, 0, 0, 0, 0];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PABSB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u8; 16] = [1, 2, 3, 4, 5, 6, 127, 127, 0, 1, 100, 100, 0, 0, 0, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        assert_eq!(bytes[i], exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pabsw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PABSW: per-lane signed absolute value (16-bit)
+    let src: [i16; 8] = [-1, 2, -3, 4, -32768, 32767, 0, -100];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PABSW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    // Note: i16::MIN.abs() overflows to i16::MIN (0x8000), but wrapping_abs gives 0x8000
+    // Intel PABSW: -32768 → 0x8000 (32768, which is -32768 as i16 but 0x8000 as u16)
+    let expected: [u16; 8] = [1, 2, 3, 4, 0x8000, 32767, 0, 100];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(u16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pabsd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PABSD: per-lane signed absolute value (32-bit)
+    let src: [i32; 4] = [-1, 2, -3, 4];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PABSD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u32; 4] = [1, 2, 3, 4];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        assert_eq!(u32::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 packed sign integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn psignb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSIGNB: per-lane sign application (8-bit)
+    // result[i] = src1[i] * sign(src2[i])
+    let src1: [i8; 16] = [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5];
+    let src2: [i8; 16] = [1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PSIGNB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i8; 16] = [5, -5, 0, 5, -5, 0, 5, -5, 0, 5, -5, 0, 5, -5, 0, 5];
+    for (i, &exp) in expected.iter().enumerate() {
+        assert_eq!(bytes[i] as i8, exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psignw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSIGNW: per-lane sign application (16-bit)
+    let src1: [i16; 8] = [100, 100, 100, 100, 100, 100, 100, 100];
+    let src2: [i16; 8] = [1, -1, 0, 1, -1, 0, 1, -1];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PSIGNW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [100, -100, 0, 100, -100, 0, 100, -100];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn psignd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PSIGND: per-lane sign application (32-bit)
+    let src1: [i32; 4] = [1000, 1000, 1000, 1000];
+    let src2: [i32; 4] = [1, -1, 0, 1];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PSIGND_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i32; 4] = [1000, -1000, 0, 1000];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        assert_eq!(i32::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}

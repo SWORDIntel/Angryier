@@ -446,6 +446,16 @@ pub mod forms {
     pub const PHADDD_XMM_XMM: u32 = 0x0118;
     pub const PHSUBW_XMM_XMM: u32 = 0x0119;
     pub const PHSUBD_XMM_XMM: u32 = 0x011A;
+
+    // SSSE3 packed absolute value (xmm, xmm)
+    pub const PABSB_XMM_XMM: u32 = 0x011B;
+    pub const PABSW_XMM_XMM: u32 = 0x011C;
+    pub const PABSD_XMM_XMM: u32 = 0x011D;
+
+    // SSSE3 packed sign (xmm, xmm)
+    pub const PSIGNB_XMM_XMM: u32 = 0x011E;
+    pub const PSIGNW_XMM_XMM: u32 = 0x011F;
+    pub const PSIGND_XMM_XMM: u32 = 0x0120;
 }
 
 /// RFLAGS bit positions used by the corpus.

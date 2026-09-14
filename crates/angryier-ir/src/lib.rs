@@ -80,6 +80,8 @@ pub enum IrPrimitive {
     VecLaneMinS,
     VecLaneMulHiS,
     VecLaneMulHiU,
+    VecLaneAbs,
+    VecLaneSign,
     VecShuffleBytes,
     VecInterleaveLow,
     VecInterleaveHigh,
