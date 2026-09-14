@@ -183,6 +183,10 @@ pub enum VectorOp {
     DotF,
     FRound,
     Test,
+    CmpF,
+    FMin,
+    FMax,
+    MovMask,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

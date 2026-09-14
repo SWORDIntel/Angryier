@@ -1685,6 +1685,115 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecCmpF => {
+            require_arity(operation, &resolved, 3)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 32 && lane_bits != 64 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            if width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let src1 = as_u128(resolved[0]);
+            let src2 = as_u128(resolved[1]);
+            let pred = as_u128(resolved[2]) as u8 & 0x7;
+            let lane_mask = bit_mask(lane_bits as u16);
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let l = (src1 >> shift) & lane_mask;
+                let r = (src2 >> shift) & lane_mask;
+                let lf = decode_float_lane(lane_bits as u16, l)?;
+                let rf = decode_float_lane(lane_bits as u16, r)?;
+                let unordered = lf.is_nan() || rf.is_nan();
+                let cmp = match pred {
+                    0 => lf == rf,
+                    1 => !unordered && lf < rf,
+                    2 => !unordered && lf <= rf,
+                    3 => unordered,
+                    4 => lf != rf,
+                    5 => !unordered && lf >= rf,
+                    6 => !unordered && lf > rf,
+                    7 => !unordered,
+                    _ => unreachable!(),
+                };
+                let lane_result = if cmp { lane_mask } else { 0 };
+                result |= lane_result << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecFMin | IrPrimitive::VecFMax => {
+            require_arity(operation, &resolved, 2)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 32 && lane_bits != 64 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            if width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let src1 = as_u128(resolved[0]);
+            let src2 = as_u128(resolved[1]);
+            let lane_mask = bit_mask(lane_bits as u16);
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let l = (src1 >> shift) & lane_mask;
+                let r = (src2 >> shift) & lane_mask;
+                let lf = decode_float_lane(lane_bits as u16, l)?;
+                let rf = decode_float_lane(lane_bits as u16, r)?;
+                let lane_result = if lf.is_nan() || rf.is_nan() {
+                    r
+                } else {
+                    let is_min = operation == IrPrimitive::VecFMin;
+                    if is_min {
+                        if lf == rf && lf == 0.0 && rf == 0.0 {
+                            r
+                        } else if lf <= rf {
+                            l
+                        } else {
+                            r
+                        }
+                    } else {
+                        if lf == rf && lf == 0.0 && rf == 0.0 {
+                            r
+                        } else if lf >= rf {
+                            l
+                        } else {
+                            r
+                        }
+                    }
+                };
+                result |= lane_result << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecMovMask => {
+            require_arity(operation, &resolved, 1)?;
+            let (width_bits, lane_bits) = match resolved[0].ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let src = as_u128(resolved[0]);
+            let mut result: u64 = 0;
+            for lane_idx in 0..lanes {
+                let sign_shift = lane_idx * lane_bits + (lane_bits - 1);
+                let sign_bit = (src >> sign_shift) & 1;
+                result |= (sign_bit as u64) << lane_idx;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result as u128, 64));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

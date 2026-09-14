@@ -528,6 +528,25 @@ pub mod forms {
     // SSE4.1 INSERTPS/EXTRACTPS (xmm/xmm, r32/xmm, imm8)
     pub const INSERTPS_XMM_XMM_IMM8: u32 = 0x0149;
     pub const EXTRACTPS_R32_XMM_IMM8: u32 = 0x014A;
+
+    // 32-bit rotates with CL
+    pub const ROL_R32_CL: u32 = 0x014B;
+    pub const ROR_R32_CL: u32 = 0x014C;
+
+    // Packed float compare with imm8
+    pub const CMPPS_XMM_XMM_IMM8: u32 = 0x014D;
+    pub const CMPPD_XMM_XMM_IMM8: u32 = 0x014E;
+
+    // Packed float min/max
+    pub const MINPS_XMM_XMM: u32 = 0x014F;
+    pub const MAXPS_XMM_XMM: u32 = 0x0150;
+
+    // Move mask to r32
+    pub const MOVMSKPS_R32_XMM: u32 = 0x0151;
+    pub const MOVMSKPD_R32_XMM: u32 = 0x0152;
+
+    // PMOVMSKB
+    pub const PMOVMSKB_R32_XMM: u32 = 0x0153;
 }
 
 /// RFLAGS bit positions used by the corpus.

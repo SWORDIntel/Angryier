@@ -35,6 +35,7 @@ const I16X8: SemanticType = SemanticType::Vector { lanes: 8, lane: ScalarType::B
 const I32X4: SemanticType = SemanticType::Vector { lanes: 4, lane: ScalarType::BitVec(32) };
 const I64X2: SemanticType = SemanticType::Vector { lanes: 2, lane: ScalarType::BitVec(64) };
 const U128: SemanticType = SemanticType::Scalar(ScalarType::BitVec(128));
+const U96: SemanticType = SemanticType::Scalar(ScalarType::BitVec(96));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -46,6 +47,56 @@ fn const_u64(out: &mut dyn SemanticBuilder, value: u64) -> Result<ValueId, Seman
 
 fn const_u32(out: &mut dyn SemanticBuilder, value: u32) -> Result<ValueId, SemanticError> {
     out.constant(U32, &value.to_le_bytes())
+}
+
+/// Scalar single-precision float op on lane 0, preserving upper 96 bits from src1.
+fn scalar_ss_preserve(
+    out: &mut dyn SemanticBuilder,
+    insn: &dyn DecodedInstructionView,
+    fop: FloatingOp,
+    unary: bool,
+) -> Result<(), SemanticError> {
+    let src1 = out.read_operand(0, F32X4)?;
+    let src2 = out.read_operand(1, F32X4)?;
+    let zero = const_u64(out, 0)?;
+    let thirty_two = const_u64(out, 32)?;
+    let lo1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32, &[src1, zero])?;
+    let lo2 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32, &[src2, zero])?;
+    let result = if unary {
+        out.emit(SemanticOp::Float(fop), F32, &[lo2])?
+    } else {
+        out.emit(SemanticOp::Float(fop), F32, &[lo1, lo2])?
+    };
+    let upper = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U96, &[src1, thirty_two])?;
+    let combined = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), F32X4, &[result, upper])?;
+    out.write_operand(0, combined)?;
+    fall_through(out, insn)?;
+    Ok(())
+}
+
+/// Scalar double-precision float op on lane 0, preserving upper 64 bits from src1.
+fn scalar_sd_preserve(
+    out: &mut dyn SemanticBuilder,
+    insn: &dyn DecodedInstructionView,
+    fop: FloatingOp,
+    unary: bool,
+) -> Result<(), SemanticError> {
+    let src1 = out.read_operand(0, F64X2)?;
+    let src2 = out.read_operand(1, F64X2)?;
+    let zero = const_u64(out, 0)?;
+    let sixty_four = const_u64(out, 64)?;
+    let lo1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64, &[src1, zero])?;
+    let lo2 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64, &[src2, zero])?;
+    let result = if unary {
+        out.emit(SemanticOp::Float(fop), F64, &[lo2])?
+    } else {
+        out.emit(SemanticOp::Float(fop), F64, &[lo1, lo2])?
+    };
+    let upper = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src1, sixty_four])?;
+    let combined = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), F64X2, &[result, upper])?;
+    out.write_operand(0, combined)?;
+    fall_through(out, insn)?;
+    Ok(())
 }
 
 /// Creates a vector constant with a uniform lane value.
@@ -851,6 +902,48 @@ macro_rules! rotate_r32_imm8 {
 rotate_r32_imm8!(RolR32Imm8, forms::ROL_R32_IMM8, 0x94, true);
 rotate_r32_imm8!(RorR32Imm8, forms::ROR_R32_IMM8, 0x95, false);
 
+macro_rules! rotate_r32_cl {
+    ($name:ident, $form:expr, $rule:expr, $is_left:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let src = out.read_operand(0, U64)?;
+                let cl = out.read_register(RegisterId(register_id::GPR_BASE + 1), U64)?;
+                let zero = const_u64(out, 0)?;
+                let mask = const_u64(out, 0x1F)?;
+                let thirty_two = const_u32(out, 32)?;
+                let val = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src, zero])?;
+                let count_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[cl, mask])?;
+                let effective = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[count_64, zero])?;
+                let shifted = if $is_left {
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U32, &[val, effective])?
+                } else {
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight), U32, &[val, effective])?
+                };
+                let complement = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U32, &[thirty_two, effective])?;
+                let other = if $is_left {
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight), U32, &[val, complement])?
+                } else {
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U32, &[val, complement])?
+                };
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U32, &[shifted, other])?;
+                let result_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[result])?;
+                out.write_operand(0, result_64)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+rotate_r32_cl!(RolR32Cl, forms::ROL_R32_CL, 0x96, true);
+rotate_r32_cl!(RorR32Cl, forms::ROR_R32_CL, 0x97, false);
+
 // ---------------------------------------------------------------------------
 // 32-bit memory operations
 // ---------------------------------------------------------------------------
@@ -1425,8 +1518,7 @@ impl SemanticProvider for ImulR32R32Imm32 {
 // Phase 4b: SSE scalar float providers
 // ---------------------------------------------------------------------------
 
-/// ADDSS xmm, xmm: scalar single-precision add on lane 0.
-/// Simplified: treats the XMM as a single f32 (upper lanes not modeled).
+/// ADDSS xmm, xmm: scalar single-precision add on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct AddssXmmXmm;
 
@@ -1442,16 +1534,12 @@ impl SemanticProvider for AddssXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, F32)?;
-        let src = out.read_operand(1, F32)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Add), F32, &[dst, src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_ss_preserve(out, insn, FloatingOp::Add, false)?;
         Ok(receipt(0xC1, context))
     }
 }
 
-/// SUBSS xmm, xmm: scalar single-precision subtract on lane 0.
+/// SUBSS xmm, xmm: scalar single-precision subtract on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct SubssXmmXmm;
 
@@ -1467,16 +1555,12 @@ impl SemanticProvider for SubssXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, F32)?;
-        let src = out.read_operand(1, F32)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Sub), F32, &[dst, src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_ss_preserve(out, insn, FloatingOp::Sub, false)?;
         Ok(receipt(0xC2, context))
     }
 }
 
-/// MULSS xmm, xmm: scalar single-precision multiply on lane 0.
+/// MULSS xmm, xmm: scalar single-precision multiply on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct MulssXmmXmm;
 
@@ -1492,16 +1576,12 @@ impl SemanticProvider for MulssXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, F32)?;
-        let src = out.read_operand(1, F32)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Mul), F32, &[dst, src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_ss_preserve(out, insn, FloatingOp::Mul, false)?;
         Ok(receipt(0xC3, context))
     }
 }
 
-/// DIVSS xmm, xmm: scalar single-precision divide on lane 0.
+/// DIVSS xmm, xmm: scalar single-precision divide on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct DivssXmmXmm;
 
@@ -1517,16 +1597,12 @@ impl SemanticProvider for DivssXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, F32)?;
-        let src = out.read_operand(1, F32)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Div), F32, &[dst, src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_ss_preserve(out, insn, FloatingOp::Div, false)?;
         Ok(receipt(0xC4, context))
     }
 }
 
-/// SQRTSS xmm, xmm: scalar single-precision square root on lane 0.
+/// SQRTSS xmm, xmm: scalar single-precision square root on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct SqrtssXmmXmm;
 
@@ -1542,15 +1618,12 @@ impl SemanticProvider for SqrtssXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let src = out.read_operand(1, F32)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Sqrt), F32, &[src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_ss_preserve(out, insn, FloatingOp::Sqrt, true)?;
         Ok(receipt(0xC5, context))
     }
 }
 
-/// ADDSD xmm, xmm: scalar double-precision add on lane 0.
+/// ADDSD xmm, xmm: scalar double-precision add on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct AddsdXmmXmm;
 
@@ -1566,16 +1639,12 @@ impl SemanticProvider for AddsdXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, F64)?;
-        let src = out.read_operand(1, F64)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Add), F64, &[dst, src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_sd_preserve(out, insn, FloatingOp::Add, false)?;
         Ok(receipt(0xC6, context))
     }
 }
 
-/// SUBSD xmm, xmm: scalar double-precision subtract on lane 0.
+/// SUBSD xmm, xmm: scalar double-precision subtract on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct SubsdXmmXmm;
 
@@ -1591,16 +1660,12 @@ impl SemanticProvider for SubsdXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, F64)?;
-        let src = out.read_operand(1, F64)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Sub), F64, &[dst, src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_sd_preserve(out, insn, FloatingOp::Sub, false)?;
         Ok(receipt(0xC7, context))
     }
 }
 
-/// MULSD xmm, xmm: scalar double-precision multiply on lane 0.
+/// MULSD xmm, xmm: scalar double-precision multiply on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct MulsdXmmXmm;
 
@@ -1616,16 +1681,12 @@ impl SemanticProvider for MulsdXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, F64)?;
-        let src = out.read_operand(1, F64)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Mul), F64, &[dst, src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_sd_preserve(out, insn, FloatingOp::Mul, false)?;
         Ok(receipt(0xC8, context))
     }
 }
 
-/// DIVSD xmm, xmm: scalar double-precision divide on lane 0.
+/// DIVSD xmm, xmm: scalar double-precision divide on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct DivsdXmmXmm;
 
@@ -1641,16 +1702,12 @@ impl SemanticProvider for DivsdXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, F64)?;
-        let src = out.read_operand(1, F64)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Div), F64, &[dst, src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_sd_preserve(out, insn, FloatingOp::Div, false)?;
         Ok(receipt(0xC9, context))
     }
 }
 
-/// SQRTSD xmm, xmm: scalar double-precision square root on lane 0.
+/// SQRTSD xmm, xmm: scalar double-precision square root on lane 0, preserving upper lanes.
 #[derive(Clone, Copy, Debug)]
 pub struct SqrtsdXmmXmm;
 
@@ -1666,10 +1723,7 @@ impl SemanticProvider for SqrtsdXmmXmm {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let src = out.read_operand(1, F64)?;
-        let result = out.emit(SemanticOp::Float(FloatingOp::Sqrt), F64, &[src])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
+        scalar_sd_preserve(out, insn, FloatingOp::Sqrt, true)?;
         Ok(receipt(0xCA, context))
     }
 }
@@ -3320,3 +3374,94 @@ impl SemanticProvider for InsertpsXmmXmmImm8 {
         Ok(receipt(0x149, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// CMPPS/CMPPD: packed float compare with imm8 predicate
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_cmpf {
+    ($name:ident, $form:expr, $vec_ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(0, $vec_ty)?;
+                let src2 = out.read_operand(1, $vec_ty)?;
+                let imm = insn.operand(2)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                let imm_val = const_u64(out, imm)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::CmpF), $vec_ty, &[src1, src2, imm_val])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_cmpf!(CmppsXmmXmmImm8, forms::CMPPS_XMM_XMM_IMM8, F32X4, 0x14D);
+packed_cmpf!(CmppdXmmXmmImm8, forms::CMPPD_XMM_XMM_IMM8, F64X2, 0x14E);
+
+// ---------------------------------------------------------------------------
+// MINPS/MAXPS: packed float min/max with NaN and signed-zero semantics
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_fminmax {
+    ($name:ident, $form:expr, $vec_ty:expr, $op:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(0, $vec_ty)?;
+                let src2 = out.read_operand(1, $vec_ty)?;
+                let result = out.emit(SemanticOp::Vector($op), $vec_ty, &[src1, src2])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_fminmax!(MinpsXmmXmm, forms::MINPS_XMM_XMM, F32X4, VectorOp::FMin, 0x14F);
+packed_fminmax!(MaxpsXmmXmm, forms::MAXPS_XMM_XMM, F32X4, VectorOp::FMax, 0x150);
+
+// ---------------------------------------------------------------------------
+// MOVMSKPS/MOVMSKPD/PMOVMSKB: extract sign bits to r32
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_movmask {
+    ($name:ident, $form:expr, $vec_ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let src = out.read_operand(1, $vec_ty)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::MovMask), U64, &[src])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_movmask!(MovmskpsR32Xmm, forms::MOVMSKPS_R32_XMM, F32X4, 0x151);
+packed_movmask!(MovmskpdR32Xmm, forms::MOVMSKPD_R32_XMM, F64X2, 0x152);
+packed_movmask!(PmovmskbR32Xmm, forms::PMOVMSKB_R32_XMM, I8X16, 0x153);

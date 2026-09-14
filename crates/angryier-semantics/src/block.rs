@@ -494,6 +494,10 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::DotF => out.byte(29),
                 VectorOp::FRound => out.byte(30),
                 VectorOp::Test => out.byte(31),
+                VectorOp::CmpF => out.byte(32),
+                VectorOp::FMin => out.byte(33),
+                VectorOp::FMax => out.byte(34),
+                VectorOp::MovMask => out.byte(35),
             }
         }
         SemanticOp::Tile(op) => {

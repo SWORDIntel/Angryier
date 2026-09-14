@@ -310,6 +310,8 @@ impl Intel64CorpusRegistry {
             Arc::new(SarR32Cl),
             Arc::new(RolR32Imm8),
             Arc::new(RorR32Imm8),
+            Arc::new(RolR32Cl),
+            Arc::new(RorR32Cl),
             Arc::new(MovR32Mem32),
             Arc::new(MovMem32R32),
             Arc::new(AddR32Mem32),
@@ -353,6 +355,13 @@ impl Intel64CorpusRegistry {
             Arc::new(Nop9),
             Arc::new(Hlt),
             Arc::new(Ud2),
+            Arc::new(CmppsXmmXmmImm8),
+            Arc::new(CmppdXmmXmmImm8),
+            Arc::new(MinpsXmmXmm),
+            Arc::new(MaxpsXmmXmm),
+            Arc::new(MovmskpsR32Xmm),
+            Arc::new(MovmskpdR32Xmm),
+            Arc::new(PmovmskbR32Xmm),
         ];
 
         // Build form index from known form IDs. Each provider corresponds to
@@ -403,7 +412,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 330] = [
+const ALL_FORMS: [u32; 339] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -692,6 +701,8 @@ const ALL_FORMS: [u32; 330] = [
     crate::forms::SAR_R32_CL,
     crate::forms::ROL_R32_IMM8,
     crate::forms::ROR_R32_IMM8,
+    crate::forms::ROL_R32_CL,
+    crate::forms::ROR_R32_CL,
     crate::forms::MOV_R32_MEM32,
     crate::forms::MOV_MEM32_R32,
     crate::forms::ADD_R32_MEM32,
@@ -735,6 +746,13 @@ const ALL_FORMS: [u32; 330] = [
     crate::forms::NOP9,
     crate::forms::HLT,
     crate::forms::UD2,
+    crate::forms::CMPPS_XMM_XMM_IMM8,
+    crate::forms::CMPPD_XMM_XMM_IMM8,
+    crate::forms::MINPS_XMM_XMM,
+    crate::forms::MAXPS_XMM_XMM,
+    crate::forms::MOVMSKPS_R32_XMM,
+    crate::forms::MOVMSKPD_R32_XMM,
+    crate::forms::PMOVMSKB_R32_XMM,
 ];
 
 #[cfg(test)]
