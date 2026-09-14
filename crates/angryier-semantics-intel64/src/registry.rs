@@ -241,6 +241,7 @@ impl Intel64CorpusRegistry {
             Arc::new(PshufdXmmImm8),
             Arc::new(PshufhwXmmImm8),
             Arc::new(PshuflwXmmImm8),
+            Arc::new(PmaddubswXmmXmm),
             Arc::new(ShlR32Imm8),
             Arc::new(ShrR32Imm8),
             Arc::new(SarR32Imm8),
@@ -342,7 +343,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 269] = [
+const ALL_FORMS: [u32; 270] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -562,6 +563,7 @@ const ALL_FORMS: [u32; 269] = [
     crate::forms::PSHUFD_XMM_IMM8,
     crate::forms::PSHUFHW_XMM_IMM8,
     crate::forms::PSHUFLW_XMM_IMM8,
+    crate::forms::PMADDUBSW_XMM_XMM,
     crate::forms::SHL_R32_IMM8,
     crate::forms::SHR_R32_IMM8,
     crate::forms::SAR_R32_IMM8,

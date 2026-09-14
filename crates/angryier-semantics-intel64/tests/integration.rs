@@ -4339,3 +4339,80 @@ fn pshuflw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 packed multiply and add unsigned/signed bytes integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pmaddubsw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMADDUBSW: 16x8-bit → 8x16-bit signed with saturation
+    //   result[i] = sat((int8)left[2i] * (uint8)right[2i]
+    //             + (int8)left[2i+1] * (uint8)right[2i+1])
+    // left  (signed)   = [1, 2, 3, 4, -1, -2, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0]
+    // right (unsigned) = [10, 20, 30, 40, 10, 20, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+    // result[0] = 1*10 + 2*20 = 10 + 40 = 50
+    // result[1] = 3*30 + 4*40 = 90 + 160 = 250
+    // result[2] = -1*10 + -2*20 = -10 + -40 = -50
+    // result[3] = 100*1 + 100*1 = 200
+    // result[4..7] = 0
+    let left: [i8; 16] = [1, 2, 3, 4, -1, -2, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0];
+    let right: [u8; 16] = [10, 20, 30, 40, 10, 20, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+    let initial = with_bytes(&state, XMM0, &cast_i8_bytes(&left))?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PMADDUBSW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [50, 250, -50, 200, 0, 0, 0, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = i16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result}, expected {exp}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmaddubsw_xmm_xmm_saturates() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // Saturation test: large products should saturate to [-32768, 32767]
+    // left  (signed)   = [-128, -128, 127, 127, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    // right (unsigned) = [255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    // result[0] = sat(-128*255 + -128*255) = sat(-65280) = -32768
+    // result[1] = sat(127*255 + 127*255) = sat(64770) = 32767
+    let left: [i8; 16] = [-128, -128, 127, 127, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let right: [u8; 16] = [255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let initial = with_bytes(&state, XMM0, &cast_i8_bytes(&left))?;
+    let initial = with_bytes(&initial, XMM1, &right)?;
+
+    let decoded = make_decoded(
+        forms::PMADDUBSW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [-32768, 32767, 0, 0, 0, 0, 0, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = i16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result}, expected {exp}");
+    }
+    Ok(())
+}

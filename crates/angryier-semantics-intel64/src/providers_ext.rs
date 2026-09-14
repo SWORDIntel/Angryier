@@ -2549,3 +2549,29 @@ impl SemanticProvider for PshuflwXmmImm8 {
         Ok(receipt(0x10D, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 packed multiply and add unsigned/signed bytes provider
+// ---------------------------------------------------------------------------
+
+/// PMADDUBSW xmm, xmm: packed multiply and add with saturation.
+/// Multiplies adjacent 8-bit lanes (left signed, right unsigned),
+/// then adds adjacent products with signed 16-bit saturation:
+///   result[i] = sat((int8)left[2i] * (uint8)right[2i]
+///             + (int8)left[2i+1] * (uint8)right[2i+1])
+#[derive(Clone, Copy, Debug)]
+pub struct PmaddubswXmmXmm;
+
+impl SemanticProvider for PmaddubswXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x10E) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PMADDUBSW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Maddubs), I16X8, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x10E, context))
+    }
+}

@@ -1083,6 +1083,42 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecMaddubs => {
+            require_arity(operation, &resolved, 2)?;
+            // PMADDUBSW: 16x8-bit → 8x16-bit signed with saturation
+            // For each pair of adjacent bytes:
+            //   temp[2i]   = (int8)left[2i]   * (uint8)right[2i]    (signed * unsigned)
+            //   temp[2i+1] = (int8)left[2i+1] * (uint8)right[2i+1]  (signed * unsigned)
+            //   result[i]  = saturate(temp[2i] + temp[2i+1], [-32768, 32767])
+            // Note: left operand is treated as SIGNED, right operand is UNSIGNED.
+            let (width_bits, out_lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if out_lane_bits != 16 || width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let out_lanes = width_bits / out_lane_bits;
+            let out_mask = bit_mask(out_lane_bits as u16);
+            let left = as_u128(resolved[0]);
+            let right = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for i in 0..out_lanes {
+                let l0_raw = ((left >> ((2 * i) * 8)) & 0xFF) as u8;
+                let l1_raw = ((left >> ((2 * i + 1) * 8)) & 0xFF) as u8;
+                let r0 = ((right >> ((2 * i) * 8)) & 0xFF) as u8;
+                let r1 = ((right >> ((2 * i + 1) * 8)) & 0xFF) as u8;
+                // Left is signed, right is unsigned
+                let l0s = l0_raw as i8 as i32;
+                let l1s = l1_raw as i8 as i32;
+                let prod0 = l0s.wrapping_mul(r0 as i32);
+                let prod1 = l1s.wrapping_mul(r1 as i32);
+                let sum = prod0.wrapping_add(prod1);
+                let saturated = sum.clamp(-32768, 32767) as i16 as u128 & out_mask;
+                result |= saturated << (i * out_lane_bits);
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))
