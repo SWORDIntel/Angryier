@@ -1049,6 +1049,40 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecShuffle16 => {
+            require_arity(operation, &resolved, 2)?;
+            // PSHUFHW/PSHUFLW: shuffle 4x16-bit lanes within a 64-bit half.
+            // Second operand encodes:
+            //   bits [7:0]  = 4 2-bit selectors (one per output lane)
+            //   bit  8      = 0 for low half (PSHUFLW), 1 for high half (PSHUFHW)
+            // The other 64-bit half is copied unchanged.
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 16 || width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let src = as_u128(resolved[0]);
+            let imm_raw = as_u128(resolved[1]);
+            let imm8 = (imm_raw & 0xFF) as u8;
+            let high_half = (imm_raw >> 8) & 1 == 1;
+            let lane_mask = bit_mask(lane_bits as u16);
+            let mut result: u128 = src;
+            let base: u32 = if high_half { 4 } else { 0 };
+            for i in 0..4 {
+                let sel = ((imm8 >> (i * 2)) & 0x3) as u32;
+                let src_lane = base + sel;
+                let dst_lane = base + i;
+                // Clear destination lane then set it
+                let lane_shift = dst_lane * lane_bits;
+                let lane_mask_shifted = lane_mask << lane_shift;
+                result &= !lane_mask_shifted;
+                let lane = (src >> (src_lane * lane_bits)) & lane_mask;
+                result |= lane << lane_shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

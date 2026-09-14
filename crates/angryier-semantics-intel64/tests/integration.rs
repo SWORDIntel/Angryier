@@ -4269,3 +4269,73 @@ fn pshufd_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed shuffle high/low words integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pshufhw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // PSHUFHW: shuffle high 4x16-bit lanes, low 64 bits unchanged
+    // src = [0x0001, 0x0002, 0x0003, 0x0004, 0x1001, 0x2002, 0x3003, 0x4004]
+    // imm8 = 0x1B = 00 01 10 11 → dst[4]=src[7], dst[5]=src[6], dst[6]=src[5], dst[7]=src[4]
+    // Expected: [0x0001, 0x0002, 0x0003, 0x0004, 0x4004, 0x3003, 0x2002, 0x1001]
+    let src: [u16; 8] = [0x0001, 0x0002, 0x0003, 0x0004, 0x1001, 0x2002, 0x3003, 0x4004];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSHUFHW_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 0x1B),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u16; 8] = [0x0001, 0x0002, 0x0003, 0x0004, 0x4004, 0x3003, 0x2002, 0x1001];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pshuflw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // PSHUFLW: shuffle low 4x16-bit lanes, high 64 bits unchanged
+    // src = [0x0001, 0x0002, 0x0003, 0x0004, 0x1001, 0x2002, 0x3003, 0x4004]
+    // imm8 = 0x1B = 00 01 10 11 → dst[0]=src[3], dst[1]=src[2], dst[2]=src[1], dst[3]=src[0]
+    // Expected: [0x0004, 0x0003, 0x0002, 0x0001, 0x1001, 0x2002, 0x3003, 0x4004]
+    let src: [u16; 8] = [0x0001, 0x0002, 0x0003, 0x0004, 0x1001, 0x2002, 0x3003, 0x4004];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PSHUFLW_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 0x1B),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u16; 8] = [0x0004, 0x0003, 0x0002, 0x0001, 0x1001, 0x2002, 0x3003, 0x4004];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}

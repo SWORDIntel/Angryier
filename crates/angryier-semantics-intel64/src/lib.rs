@@ -421,6 +421,12 @@ pub mod forms {
 
     // SSE2 packed shuffle doublewords (xmm, imm8) — 4x32→4x32
     pub const PSHUFD_XMM_IMM8: u32 = 0x010B;
+
+    // SSE2 packed shuffle high words (xmm, imm8) — shuffle high 4x16, low 64 unchanged
+    pub const PSHUFHW_XMM_IMM8: u32 = 0x010C;
+
+    // SSE2 packed shuffle low words (xmm, imm8) — shuffle low 4x16, high 64 unchanged
+    pub const PSHUFLW_XMM_IMM8: u32 = 0x010D;
 }
 
 /// RFLAGS bit positions used by the corpus.

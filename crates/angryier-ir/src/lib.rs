@@ -88,6 +88,7 @@ pub enum IrPrimitive {
     VecMadd16,
     VecSad8,
     VecShuffle32,
+    VecShuffle16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

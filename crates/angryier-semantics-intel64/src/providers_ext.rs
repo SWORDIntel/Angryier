@@ -2493,3 +2493,59 @@ impl SemanticProvider for PshufdXmmImm8 {
         Ok(receipt(0x10B, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 packed shuffle high/low words providers
+// ---------------------------------------------------------------------------
+
+/// PSHUFHW xmm, xmm/m128, imm8: shuffle high 4x16-bit words.
+/// Low 64 bits copied unchanged; high 4x16-bit lanes shuffled by imm8.
+#[derive(Clone, Copy, Debug)]
+pub struct PshufhwXmmImm8;
+
+impl SemanticProvider for PshufhwXmmImm8 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x10C) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSHUFHW_XMM_IMM8 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let imm = insn.operand(1)
+            .and_then(|op| match op.kind {
+                OperandKind::Immediate(imm) => Some(imm.value),
+                _ => None,
+            })
+            .unwrap_or(0);
+        // Encode high-half flag in bit 8 of the constant.
+        let imm_const = const_u64(out, imm | (1 << 8))?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Shuffle16), I16X8, &[dst, imm_const])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x10C, context))
+    }
+}
+
+/// PSHUFLW xmm, xmm/m128, imm8: shuffle low 4x16-bit words.
+/// High 64 bits copied unchanged; low 4x16-bit lanes shuffled by imm8.
+#[derive(Clone, Copy, Debug)]
+pub struct PshuflwXmmImm8;
+
+impl SemanticProvider for PshuflwXmmImm8 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x10D) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSHUFLW_XMM_IMM8 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I16X8)?;
+        let imm = insn.operand(1)
+            .and_then(|op| match op.kind {
+                OperandKind::Immediate(imm) => Some(imm.value),
+                _ => None,
+            })
+            .unwrap_or(0);
+        // Low half: bit 8 = 0.
+        let imm_const = const_u64(out, imm)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Shuffle16), I16X8, &[dst, imm_const])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x10D, context))
+    }
+}
