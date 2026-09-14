@@ -425,9 +425,9 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                     "mul-high is only valid in lane-wise vector context",
                 ));
             }
-            PrimitiveOp::Abs | PrimitiveOp::Sign => {
+            PrimitiveOp::Abs | PrimitiveOp::Sign | PrimitiveOp::MulHighRS => {
                 return Err(IrLoweringError::UnsupportedValue(
-                    "abs/sign is only valid in lane-wise vector context",
+                    "abs/sign/mul-high-rs is only valid in lane-wise vector context",
                 ));
             }
         }),
@@ -465,6 +465,7 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                 PrimitiveOp::MulHighU => IrPrimitive::VecLaneMulHiU,
                 PrimitiveOp::Abs => IrPrimitive::VecLaneAbs,
                 PrimitiveOp::Sign => IrPrimitive::VecLaneSign,
+                PrimitiveOp::MulHighRS => IrPrimitive::VecLaneMulHiRS,
                 _ => {
                     return Err(IrLoweringError::UnsupportedValue(
                         "unsupported lane-wise primitive",
@@ -497,6 +498,8 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::ShiftRegRA => Ok(IrPrimitive::VecShiftRegRA),
             VectorOp::HAdd => Ok(IrPrimitive::VecHAdd),
             VectorOp::HSub => Ok(IrPrimitive::VecHSub),
+            VectorOp::HAddS => Ok(IrPrimitive::VecHAddS),
+            VectorOp::HSubS => Ok(IrPrimitive::VecHSubS),
             _ => Err(IrLoweringError::UnsupportedValue(
                 "non-lane-wise vector operation",
             )),

@@ -456,6 +456,13 @@ pub mod forms {
     pub const PSIGNB_XMM_XMM: u32 = 0x011E;
     pub const PSIGNW_XMM_XMM: u32 = 0x011F;
     pub const PSIGND_XMM_XMM: u32 = 0x0120;
+
+    // SSSE3 packed multiply high with round and scale (xmm, xmm)
+    pub const PMULHRSW_XMM_XMM: u32 = 0x0121;
+
+    // SSSE3 horizontal add/subtract with saturation (xmm, xmm)
+    pub const PHADDSW_XMM_XMM: u32 = 0x0122;
+    pub const PHSUBSW_XMM_XMM: u32 = 0x0123;
 }
 
 /// RFLAGS bit positions used by the corpus.

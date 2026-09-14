@@ -133,6 +133,7 @@ pub enum PrimitiveOp {
     MulHighU,
     Abs,
     Sign,
+    MulHighRS,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -170,6 +171,8 @@ pub enum VectorOp {
     ShiftRegRA,
     HAdd,
     HSub,
+    HAddS,
+    HSubS,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

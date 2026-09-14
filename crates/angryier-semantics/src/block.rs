@@ -484,6 +484,8 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::ShiftRegRA => out.byte(19),
                 VectorOp::HAdd => out.byte(20),
                 VectorOp::HSub => out.byte(21),
+                VectorOp::HAddS => out.byte(22),
+                VectorOp::HSubS => out.byte(23),
             }
         }
         SemanticOp::Tile(op) => {
@@ -538,6 +540,7 @@ fn primitive_tag(op: PrimitiveOp) -> u8 {
         PrimitiveOp::MulHighU => 34,
         PrimitiveOp::Abs => 35,
         PrimitiveOp::Sign => 36,
+        PrimitiveOp::MulHighRS => 37,
     }
 }
 

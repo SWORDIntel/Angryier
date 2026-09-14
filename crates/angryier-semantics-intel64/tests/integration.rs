@@ -5068,3 +5068,184 @@ fn psignd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 PMULHRSW integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pmulhrsw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMULHRSW: packed multiply high with round and scale
+    //   result[i] = ((int16)src1[i] * (int16)src2[i] + 0x4000) >> 15
+    // Test: 2 * 3 = 6, (6 + 16384) >> 15 = 0 (6 is too small to round up)
+    // Test: 100 * 200 = 20000, (20000 + 16384) >> 15 = 1
+    // Test: 1000 * 1000 = 1000000, (1000000 + 16384) >> 15 = 30
+    // Test: -100 * 200 = -20000, (-20000 + 16384) >> 15 = -1
+    let src1: [i16; 8] = [2, 100, 1000, -100, 0, 0, 0, 0];
+    let src2: [i16; 8] = [3, 200, 1000, 200, 0, 0, 0, 0];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PMULHRSW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [0, 1, 31, -1, 0, 0, 0, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 PHADDSW/PHSUBSW integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phaddsw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PHADDSW: horizontally add adjacent pairs of lanes with saturation
+    // src1 = [1, 2, 3, 4, 5, 6, 7, 8]
+    // src2 = [10, 20, 30, 40, 50, 60, 70, 80]
+    // result[0..3] = [1+2, 3+4, 5+6, 7+8] = [3, 7, 11, 15]
+    // result[4..7] = [10+20, 30+40, 50+60, 70+80] = [30, 70, 110, 150]
+    let src1: [i16; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let src2: [i16; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PHADDSW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [3, 7, 11, 15, 30, 70, 110, 150];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn phaddsw_xmm_xmm_saturates() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PHADDSW saturation: 30000 + 30000 = 60000 → saturate to 32767
+    let src1: [i16; 8] = [30000, 30000, -30000, -30000, 0, 0, 0, 0];
+    let src2: [i16; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PHADDSW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [32767, -32768, 0, 0, 0, 0, 0, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn phsubsw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PHSUBSW: horizontally subtract adjacent pairs of lanes with saturation
+    // src1 = [10, 1, 30, 3, 50, 5, 70, 7]
+    // src2 = [100, 10, 200, 20, 300, 30, 400, 40]
+    // result[0..3] = [10-1, 30-3, 50-5, 70-7] = [9, 27, 45, 63]
+    // result[4..7] = [100-10, 200-20, 300-30, 400-40] = [90, 180, 270, 360]
+    let src1: [i16; 8] = [10, 1, 30, 3, 50, 5, 70, 7];
+    let src2: [i16; 8] = [100, 10, 200, 20, 300, 30, 400, 40];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PHSUBSW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [9, 27, 45, 63, 90, 180, 270, 360];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn phsubsw_xmm_xmm_saturates() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PHSUBSW saturation: -30000 - 30000 = -60000 → saturate to -32768
+    let src1: [i16; 8] = [-30000, 30000, 0, 0, 0, 0, 0, 0];
+    let src2: [i16; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PHSUBSW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [-32768, 0, 0, 0, 0, 0, 0, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}

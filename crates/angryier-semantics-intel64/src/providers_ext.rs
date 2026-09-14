@@ -2697,3 +2697,16 @@ macro_rules! packed_binary_lane {
 packed_binary_lane!(PsignbXmmXmm, forms::PSIGNB_XMM_XMM, PrimitiveOp::Sign, I8X16, 0x11E);
 packed_binary_lane!(PsignwXmmXmm, forms::PSIGNW_XMM_XMM, PrimitiveOp::Sign, I16X8, 0x11F);
 packed_binary_lane!(PsigndXmmXmm, forms::PSIGND_XMM_XMM, PrimitiveOp::Sign, I32X4, 0x120);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 PMULHRSW provider
+// ---------------------------------------------------------------------------
+
+packed_binary_lane!(PmulhrswXmmXmm, forms::PMULHRSW_XMM_XMM, PrimitiveOp::MulHighRS, I16X8, 0x121);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 PHADDSW/PHSUBSW providers
+// ---------------------------------------------------------------------------
+
+packed_hbinop!(PhaddswXmmXmm, forms::PHADDSW_XMM_XMM, VectorOp::HAddS, I16X8, 0x122);
+packed_hbinop!(PhsubswXmmXmm, forms::PHSUBSW_XMM_XMM, VectorOp::HSubS, I16X8, 0x123);
