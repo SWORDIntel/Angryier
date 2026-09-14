@@ -2619,6 +2619,7 @@ fn lzcnt_r64_r64_when_source_zero() -> Result<(), Box<dyn std::error::Error>> {
 
 const XMM0: u32 = register_id::ZMM_BASE;
 const XMM1: u32 = register_id::ZMM_BASE + 1;
+const XMM2: u32 = register_id::ZMM_BASE + 2;
 
 fn make_float_state(reg_widths: &[(u32, usize)]) -> Result<ExecutionState<PersistentRegisters, PersistentMemory>, Box<dyn std::error::Error>> {
     let memory = PersistentMemory::new(vec![
@@ -5246,6 +5247,121 @@ fn phsubsw_xmm_xmm_saturates() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = [0u8; 2];
         buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
         assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 PCMPEQQ integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pcmpeqq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PCMPEQQ: per-lane 64-bit equality mask
+    let src1: [u64; 2] = [0x123456789ABCDEF0, 0xFFFFFFFFFFFFFFFF];
+    let src2: [u64; 2] = [0x123456789ABCDEF0, 0x0000000000000000];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PCMPEQQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u64; 2] = [0xFFFFFFFFFFFFFFFF, 0x0000000000000000];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        assert_eq!(u64::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 PMULDQ integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pmuldq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMULDQ: per 64-bit lane, take low 32 bits as signed, multiply to 64-bit
+    // src1 = [0x0000000A_FFFFFFFF, 0x00000064_00000005]
+    //   lane0: low32 = 0xFFFFFFFF = -1 (signed), lane1: low32 = 0x00000005 = 5
+    // src2 = [0x00000003_00000002, 0x00000064_00000006]
+    //   lane0: low32 = 0x00000002 = 2, lane1: low32 = 0x00000006 = 6
+    // result[0] = -1 * 2 = -2 (0xFFFFFFFFFFFFFFFE)
+    // result[1] = 5 * 6 = 30 (0x000000000000001E)
+    let src1: [u64; 2] = [0x0000000AFFFFFFFF, 0x0000006400000005];
+    let src2: [u64; 2] = [0x0000000300000002, 0x0000006400000006];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PMULDQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u64; 2] = [0xFFFFFFFFFFFFFFFE, 0x000000000000001E];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        assert_eq!(u64::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 PBLENDVB integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pblendvb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16), (XMM2, 16)])?;
+    // PBLENDVB: per-byte variable blend
+    //   result[i] = if mask[i] & 0x80 != 0 { src[i] } else { dst[i] }
+    let dst: [u8; 16] = [0xAA; 16];
+    let src: [u8; 16] = [0xBB; 16];
+    // mask: alternating bytes with bit 7 set/clear
+    let mask: [u8; 16] = [0x80, 0x00, 0xFF, 0x00, 0x80, 0x00, 0xFF, 0x00,
+                          0x80, 0x00, 0xFF, 0x00, 0x80, 0x00, 0xFF, 0x00];
+    let initial = with_bytes(&state, XMM0, &dst)?;
+    let initial = with_bytes(&initial, XMM1, &src)?;
+    let initial = with_bytes(&initial, XMM2, &mask)?;
+
+    let decoded = make_decoded(
+        forms::PBLENDVB_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+            xmm_operand(2, XMM2, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u8; 16] = [0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA,
+                             0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA];
+    for (i, &exp) in expected.iter().enumerate() {
+        assert_eq!(bytes[i], exp, "byte {i}");
     }
     Ok(())
 }

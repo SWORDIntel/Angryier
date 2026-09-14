@@ -173,6 +173,8 @@ pub enum VectorOp {
     HSub,
     HAddS,
     HSubS,
+    MulDq,
+    BlendV,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

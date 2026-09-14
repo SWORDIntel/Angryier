@@ -2710,3 +2710,53 @@ packed_binary_lane!(PmulhrswXmmXmm, forms::PMULHRSW_XMM_XMM, PrimitiveOp::MulHig
 
 packed_hbinop!(PhaddswXmmXmm, forms::PHADDSW_XMM_XMM, VectorOp::HAddS, I16X8, 0x122);
 packed_hbinop!(PhsubswXmmXmm, forms::PHSUBSW_XMM_XMM, VectorOp::HSubS, I16X8, 0x123);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 PCMPEQQ provider
+// ---------------------------------------------------------------------------
+
+packed_cmp!(PcmpeqqXmmXmm, forms::PCMPEQQ_XMM_XMM, PrimitiveOp::MaskEq, I64X2, 0x124);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 PMULDQ provider
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct PmuldqXmmXmm;
+
+impl SemanticProvider for PmuldqXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x125) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PMULDQ_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I64X2)?;
+        let src = out.read_operand(1, I64X2)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::MulDq), I64X2, &[dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x125, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 PBLENDVB provider (variable blend with mask)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct PblendvbXmmXmm;
+
+impl SemanticProvider for PblendvbXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x126) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PBLENDVB_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        // PBLENDVB uses XMM0 as implicit mask operand (operand index 2)
+        let mask = out.read_operand(2, I8X16)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::BlendV), I8X16, &[dst, src, mask])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x126, context))
+    }
+}

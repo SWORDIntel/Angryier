@@ -969,6 +969,60 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecLaneMulDq => {
+            require_arity(operation, &resolved, 2)?;
+            // PMULDQ: per 64-bit lane, take low 32 bits of each operand as signed,
+            // multiply to 64-bit signed result.
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 64 || width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let lane_mask = bit_mask(lane_bits as u16);
+            let low32_mask: u128 = (1u128 << 32) - 1;
+            let low32_sign: u128 = 1u128 << 31;
+            let left = as_u128(resolved[0]);
+            let right = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let l_low = (left >> shift) & low32_mask;
+                let r_low = (right >> shift) & low32_mask;
+                let l_signed = if l_low & low32_sign != 0 { (l_low | (!low32_mask)) as i128 } else { l_low as i128 };
+                let r_signed = if r_low & low32_sign != 0 { (r_low | (!low32_mask)) as i128 } else { r_low as i128 };
+                let product = l_signed.wrapping_mul(r_signed) as u128 & lane_mask;
+                result |= product << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecBlendV => {
+            require_arity(operation, &resolved, 3)?;
+            // PBLENDVB: per-byte variable blend.
+            //   result[i] = if mask[i] & 0x80 != 0 { src[i] } else { dst[i] }
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 8 || width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let dst = as_u128(resolved[0]);
+            let src = as_u128(resolved[1]);
+            let mask = as_u128(resolved[2]);
+            let mut result: u128 = 0;
+            for byte_idx in 0..(width_bits / 8) {
+                let shift = byte_idx * 8;
+                let d = (dst >> shift) & 0xFF;
+                let s = (src >> shift) & 0xFF;
+                let m = (mask >> shift) & 0xFF;
+                let byte_result = if m & 0x80 != 0 { s } else { d };
+                result |= byte_result << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
         IrPrimitive::VecShuffleBytes => {
             require_arity(operation, &resolved, 2)?;
             let width_bits = match ty {

@@ -463,6 +463,15 @@ pub mod forms {
     // SSSE3 horizontal add/subtract with saturation (xmm, xmm)
     pub const PHADDSW_XMM_XMM: u32 = 0x0122;
     pub const PHSUBSW_XMM_XMM: u32 = 0x0123;
+
+    // SSE4.1 packed compare qword equal (xmm, xmm)
+    pub const PCMPEQQ_XMM_XMM: u32 = 0x0124;
+
+    // SSE4.1 packed multiply doublewords (xmm, xmm)
+    pub const PMULDQ_XMM_XMM: u32 = 0x0125;
+
+    // SSE4.1 variable blend bytes (xmm, xmm, xmm0)
+    pub const PBLENDVB_XMM_XMM: u32 = 0x0126;
 }
 
 /// RFLAGS bit positions used by the corpus.
