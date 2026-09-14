@@ -500,6 +500,10 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::MovMask => out.byte(35),
                 VectorOp::HFAdd => out.byte(36),
                 VectorOp::HFSub => out.byte(37),
+                VectorOp::Mpsadbw => out.byte(38),
+                VectorOp::HMinUW => out.byte(39),
+                VectorOp::ShiftLeftBytes => out.byte(40),
+                VectorOp::ShiftRightBytes => out.byte(41),
             }
         }
         SemanticOp::Tile(op) => {

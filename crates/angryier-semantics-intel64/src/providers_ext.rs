@@ -3535,3 +3535,136 @@ impl SemanticProvider for MovsdXmmXmm {
         Ok(receipt(0x15F, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 MPSADBW provider
+// ---------------------------------------------------------------------------
+
+/// MPSADBW xmm, xmm, imm8: multiple packed sums of absolute differences.
+/// Computes 8 SAD words; imm8[1:0] selects src1 offset, imm8[3:2] selects src2 offset.
+#[derive(Clone, Copy, Debug)]
+pub struct MpsadbwXmmXmmImm8;
+
+impl SemanticProvider for MpsadbwXmmXmmImm8 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x160) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::MPSADBW_XMM_XMM_IMM8 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let src = out.read_operand(1, I8X16)?;
+        let imm = insn.operand(2)
+            .and_then(|op| match op.kind {
+                OperandKind::Immediate(imm) => Some(imm.value),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let imm_const = const_u64(out, imm)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::Mpsadbw), I16X8, &[dst, src, imm_const])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x160, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 PHMINPOSUW provider
+// ---------------------------------------------------------------------------
+
+/// PHMINPOSUW xmm, xmm: horizontal minimum of 8 unsigned 16-bit words.
+/// result[0:16] = min value, result[16:32] = min index, result[32:128] = 0.
+#[derive(Clone, Copy, Debug)]
+pub struct PhminposuwXmmXmm;
+
+impl SemanticProvider for PhminposuwXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x161) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PHMINPOSUW_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, I16X8)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::HMinUW), I16X8, &[src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x161, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.2 PCMPGTQ provider
+// ---------------------------------------------------------------------------
+
+packed_cmp!(PcmpgtqXmmXmm, forms::PCMPGTQ_XMM_XMM, PrimitiveOp::MaskSgt, I64X2, 0x162);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 PSLLDQ/PSRLDQ providers
+// ---------------------------------------------------------------------------
+
+/// PSLLDQ xmm, imm8: shift left double quadword by imm8 bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct PslldqXmmImm8;
+
+impl SemanticProvider for PslldqXmmImm8 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x163) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSLLDQ_XMM_IMM8 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let imm = insn.operand(1)
+            .and_then(|op| match op.kind {
+                OperandKind::Immediate(imm) => Some(imm.value),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let imm_const = const_u64(out, imm)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::ShiftLeftBytes), I8X16, &[dst, imm_const])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x163, context))
+    }
+}
+
+/// PSRLDQ xmm, imm8: shift right double quadword by imm8 bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct PsrldqXmmImm8;
+
+impl SemanticProvider for PsrldqXmmImm8 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x164) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PSRLDQ_XMM_IMM8 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, I8X16)?;
+        let imm = insn.operand(1)
+            .and_then(|op| match op.kind {
+                OperandKind::Immediate(imm) => Some(imm.value),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let imm_const = const_u64(out, imm)?;
+        let result = out.emit(SemanticOp::Vector(VectorOp::ShiftRightBytes), I8X16, &[dst, imm_const])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x164, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 PANDN provider
+// ---------------------------------------------------------------------------
+
+/// PANDN xmm, xmm: packed AND NOT — dst = (~dst) & src.
+#[derive(Clone, Copy, Debug)]
+pub struct PandnXmmXmm;
+
+impl SemanticProvider for PandnXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x165) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PANDN_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, U128)?;
+        let src = out.read_operand(1, U128)?;
+        let not_dst = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U128, &[dst])?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U128, &[not_dst, src])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x165, context))
+    }
+}

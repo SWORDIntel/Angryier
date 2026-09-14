@@ -117,6 +117,10 @@ pub enum IrPrimitive {
     VecMovMask,
     VecHFAdd,
     VecHFSub,
+    VecMpsadbw,
+    VecHMinUW,
+    VecShiftLeftBytes,
+    VecShiftRightBytes,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

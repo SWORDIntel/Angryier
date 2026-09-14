@@ -1840,6 +1840,89 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result as u128, 64));
         }
+        IrPrimitive::VecMpsadbw => {
+            require_arity(operation, &resolved, 3)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 16 || width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let src1 = as_u128(resolved[0]);
+            let src2 = as_u128(resolved[1]);
+            let imm = as_u128(resolved[2]) as u8;
+            let offset1 = (imm & 0x3) as u32 * 4;
+            let offset2 = ((imm >> 2) & 0x3) as u32 * 4;
+            let lane_mask = bit_mask(lane_bits as u16);
+            let mut result: u128 = 0;
+            for i in 0..8u32 {
+                let mut sad: u16 = 0;
+                for j in 0..4u32 {
+                    let idx1 = offset1 + i + j;
+                    let idx2 = offset2 + j;
+                    let b1 = if idx1 < 16 { ((src1 >> (idx1 * 8)) & 0xFF) as u8 } else { 0 };
+                    let b2 = if idx2 < 16 { ((src2 >> (idx2 * 8)) & 0xFF) as u8 } else { 0 };
+                    sad = sad.wrapping_add((b1 as i16 - b2 as i16).unsigned_abs());
+                }
+                result |= (sad as u128 & lane_mask) << (i * lane_bits);
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecHMinUW => {
+            require_arity(operation, &resolved, 1)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 16 || width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let lane_mask = bit_mask(lane_bits as u16);
+            let src = as_u128(resolved[0]);
+            let mut min_val: u16 = u16::MAX;
+            let mut min_idx: u16 = 0;
+            for i in 0..lanes {
+                let lane = ((src >> (i * lane_bits)) & lane_mask) as u16;
+                if lane < min_val {
+                    min_val = lane;
+                    min_idx = i as u16;
+                }
+            }
+            let result = (min_val as u128) | ((min_idx as u128) << 16);
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecShiftLeftBytes => {
+            require_arity(operation, &resolved, 2)?;
+            let width_bits = match ty {
+                IrType::Vector { width_bits, lane_bits: 8 } => u32::from(width_bits),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let src = as_u128(resolved[0]);
+            let count = (as_u128(resolved[1]) & 0xF) as u32;
+            let mask = bit_mask(width_bits as u16);
+            let result = if count >= 16 { 0 } else { (src << (count * 8)) & mask };
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecShiftRightBytes => {
+            require_arity(operation, &resolved, 2)?;
+            let width_bits = match ty {
+                IrType::Vector { width_bits, lane_bits: 8 } => u32::from(width_bits),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let src = as_u128(resolved[0]);
+            let count = (as_u128(resolved[1]) & 0xF) as u32;
+            let mask = bit_mask(width_bits as u16);
+            let result = if count >= 16 { 0 } else { (src & mask) >> (count * 8) };
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

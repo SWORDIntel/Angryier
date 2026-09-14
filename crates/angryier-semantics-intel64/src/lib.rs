@@ -567,6 +567,24 @@ pub mod forms {
     // SSE/SSE2 scalar moves (xmm, xmm) — register-to-register
     pub const MOVSS_XMM_XMM: u32 = 0x015E;
     pub const MOVSD_XMM_XMM: u32 = 0x015F;
+
+    // SSE4.1 MPSADBW (xmm, xmm, imm8)
+    pub const MPSADBW_XMM_XMM_IMM8: u32 = 0x0160;
+
+    // SSE4.1 PHMINPOSUW (xmm, xmm)
+    pub const PHMINPOSUW_XMM_XMM: u32 = 0x0161;
+
+    // SSE4.2 PCMPGTQ (xmm, xmm)
+    pub const PCMPGTQ_XMM_XMM: u32 = 0x0162;
+
+    // SSE2 PSLLDQ (xmm, imm8)
+    pub const PSLLDQ_XMM_IMM8: u32 = 0x0163;
+
+    // SSE2 PSRLDQ (xmm, imm8)
+    pub const PSRLDQ_XMM_IMM8: u32 = 0x0164;
+
+    // SSE2 PANDN (xmm, xmm)
+    pub const PANDN_XMM_XMM: u32 = 0x0165;
 }
 
 /// RFLAGS bit positions used by the corpus.

@@ -7314,3 +7314,212 @@ fn movq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(&bytes[8..16], &[0u8; 8], "MOVQ should zero upper 64 bits");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 MPSADBW integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mpsadbw_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // MPSADBW with imm8=0: offset1=0, offset2=0
+    // For each i in 0..8: result[i] = sum_{j=0..3} |src1[i+j] - src2[j]|
+    // src1 = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    // src2 = [1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0]
+    // result[0] = |1-1|+|2-1|+|3-1|+|4-1| = 0+1+2+3 = 6
+    // result[1] = |2-1|+|3-1|+|4-1|+|5-1| = 1+2+3+4 = 10
+    // result[2] = |3-1|+|4-1|+|5-1|+|6-1| = 2+3+4+5 = 14
+    // result[3] = |4-1|+|5-1|+|6-1|+|7-1| = 3+4+5+6 = 18
+    // result[4] = |5-1|+|6-1|+|7-1|+|8-1| = 4+5+6+7 = 22
+    // result[5] = |6-1|+|7-1|+|8-1|+|9-1| = 5+6+7+8 = 26
+    // result[6] = |7-1|+|8-1|+|9-1|+|10-1| = 6+7+8+9 = 30
+    // result[7] = |8-1|+|9-1|+|10-1|+|11-1| = 7+8+9+10 = 34
+    let src1: [u8; 16] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];
+    let src2: [u8; 16] = [1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0];
+    let initial = with_bytes(&state, XMM0, &src1)?;
+    let initial = with_bytes(&initial, XMM1, &src2)?;
+
+    let decoded = make_decoded(
+        forms::MPSADBW_XMM_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+            imm8_operand(2, 0),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u16; 8] = [6, 10, 14, 18, 22, 26, 30, 34];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(u16::from_le_bytes(buf), exp, "MPSADBW lane {i}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 PHMINPOSUW integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phminposuw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PHMINPOSUW: find horizontal minimum of 8 unsigned 16-bit words
+    // src = [100, 50, 200, 30, 150, 80, 10, 250]
+    // min = 10 at index 6
+    // result[0:16] = 10, result[16:32] = 6, result[32:128] = 0
+    let src: [u16; 8] = [100, 50, 200, 30, 150, 80, 10, 250];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PHMINPOSUW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let mut buf = [0u8; 2];
+    buf.copy_from_slice(&bytes[0..2]);
+    assert_eq!(u16::from_le_bytes(buf), 10, "PHMINPOSUW min value");
+    buf.copy_from_slice(&bytes[2..4]);
+    assert_eq!(u16::from_le_bytes(buf), 6, "PHMINPOSUW min index");
+    assert_eq!(&bytes[4..16], &[0u8; 12], "PHMINPOSUW upper bits should be zero");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.2 PCMPGTQ integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pcmpgtq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PCMPGTQ: per-lane 64-bit signed greater-than mask
+    // src1 = [10, -5]
+    // src2 = [5, 5]
+    // lane0: 10 > 5 → all 1s
+    // lane1: -5 > 5 → all 0s
+    let src1: [u64; 2] = [10, (-5i64 as u64)];
+    let src2: [u64; 2] = [5, 5];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PCMPGTQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u64; 2] = [0xFFFFFFFFFFFFFFFF, 0x0000000000000000];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        assert_eq!(u64::from_le_bytes(buf), exp, "PCMPGTQ lane {i}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 PSLLDQ integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pslldq_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // PSLLDQ: shift left by 2 bytes
+    // src = [0x01,0x02,0x03,...,0x0F,0x10]
+    // After shifting left 2 bytes: [0x00,0x00,0x01,0x02,...,0x0E]
+    let src: [u8; 16] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];
+    let initial = with_bytes(&state, XMM0, &src)?;
+
+    let decoded = make_decoded(
+        forms::PSLLDQ_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 2),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let mut expected = [0u8; 16];
+    expected[2..].copy_from_slice(&src[..14]);
+    assert_eq!(bytes, expected, "PSLLDQ should shift left 2 bytes, zero-filling");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 PSRLDQ integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn psrldq_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16)])?;
+    // PSRLDQ: shift right by 2 bytes
+    // src = [0x01,0x02,0x03,...,0x0F,0x10]
+    // After shifting right 2 bytes: [0x03,0x04,...,0x10,0x00,0x00]
+    let src: [u8; 16] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];
+    let initial = with_bytes(&state, XMM0, &src)?;
+
+    let decoded = make_decoded(
+        forms::PSRLDQ_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            imm8_operand(1, 2),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let mut expected = [0u8; 16];
+    expected[..14].copy_from_slice(&src[2..]);
+    assert_eq!(bytes, expected, "PSRLDQ should shift right 2 bytes, zero-filling");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE2 PANDN integration test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pandn_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PANDN: dst = (~dst) & src
+    // dst = 0xFF00FF00FF00FF00FF00FF00FF00FF00
+    // src = 0x0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F
+    // ~dst  = 0x00FF00FF00FF00FF00FF00FF00FF00FF
+    // result = 0x000F000F000F000F000F000F000F000F
+    let dst: [u8; 16] = [0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00];
+    let src: [u8; 16] = [0x0F; 16];
+    let initial = with_bytes(&state, XMM0, &dst)?;
+    let initial = with_bytes(&initial, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::PANDN_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u8; 16] = [0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F];
+    assert_eq!(bytes, expected, "PANDN should compute (~dst) & src");
+    Ok(())
+}

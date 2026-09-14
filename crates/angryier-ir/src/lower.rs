@@ -512,6 +512,10 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::MovMask => Ok(IrPrimitive::VecMovMask),
             VectorOp::HFAdd => Ok(IrPrimitive::VecHFAdd),
             VectorOp::HFSub => Ok(IrPrimitive::VecHFSub),
+            VectorOp::Mpsadbw => Ok(IrPrimitive::VecMpsadbw),
+            VectorOp::HMinUW => Ok(IrPrimitive::VecHMinUW),
+            VectorOp::ShiftLeftBytes => Ok(IrPrimitive::VecShiftLeftBytes),
+            VectorOp::ShiftRightBytes => Ok(IrPrimitive::VecShiftRightBytes),
             _ => Err(IrLoweringError::UnsupportedValue(
                 "non-lane-wise vector operation",
             )),
