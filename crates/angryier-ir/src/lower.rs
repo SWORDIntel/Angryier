@@ -430,6 +430,7 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                     "abs/sign/mul-high-rs is only valid in lane-wise vector context",
                 ));
             }
+            PrimitiveOp::Crc32 => IrPrimitive::Crc32,
         }),
         SemanticOp::Float(op) => Ok(match op {
             FloatingOp::Add => IrPrimitive::FAdd,
@@ -438,11 +439,8 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             FloatingOp::Div => IrPrimitive::FDiv,
             FloatingOp::Sqrt => IrPrimitive::FSqrt,
             FloatingOp::Convert => IrPrimitive::FConvert,
-            FloatingOp::Compare => {
-                return Err(IrLoweringError::UnsupportedValue(
-                    "float compare not yet supported",
-                ));
-            }
+            FloatingOp::Compare => IrPrimitive::FCompareFlags,
+            FloatingOp::Round => IrPrimitive::FRound,
         }),
         SemanticOp::Vector(op) => match op {
             VectorOp::LaneWise(scalar) => Ok(match scalar {
@@ -506,6 +504,8 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::ZeroExtend => Ok(IrPrimitive::VecLaneZeroExtend),
             VectorOp::BlendImm => Ok(IrPrimitive::VecBlendImm),
             VectorOp::DotF => Ok(IrPrimitive::VecDotF),
+            VectorOp::FRound => Ok(IrPrimitive::VecFRound),
+            VectorOp::Test => Ok(IrPrimitive::VecTest),
             _ => Err(IrLoweringError::UnsupportedValue(
                 "non-lane-wise vector operation",
             )),

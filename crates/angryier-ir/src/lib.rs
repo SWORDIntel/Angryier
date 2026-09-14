@@ -106,6 +106,11 @@ pub enum IrPrimitive {
     VecLaneZeroExtend,
     VecBlendImm,
     VecDotF,
+    FCompareFlags,
+    FRound,
+    VecFRound,
+    VecTest,
+    Crc32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

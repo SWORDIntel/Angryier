@@ -1554,6 +1554,99 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::FCompareFlags => {
+            require_arity(operation, &resolved, 2)?;
+            let left = read_float(resolved[0])?;
+            let right = read_float(resolved[1])?;
+            // RFLAGS bit positions: CF=0, PF=2, ZF=6
+            let mut flags: u64 = 0;
+            if left.is_nan() || right.is_nan() {
+                flags |= 1u64 << 6; // ZF
+                flags |= 1u64 << 0; // CF
+                flags |= 1u64 << 2; // PF
+            } else if left > right {
+                // ZF=0, CF=0, PF=0
+            } else if left < right {
+                flags |= 1u64 << 0; // CF
+            } else {
+                flags |= 1u64 << 6; // ZF
+            }
+            return Ok(ConcreteValue::from_u128(ty, flags as u128, 64));
+        }
+        IrPrimitive::FRound => {
+            require_arity(operation, &resolved, 2)?;
+            let input = read_float(resolved[0])?;
+            let mode = as_u128(resolved[1]) as u8 & 0x3;
+            let rounded = round_float(input, mode);
+            return Ok(write_float(ty, rounded));
+        }
+        IrPrimitive::VecFRound => {
+            require_arity(operation, &resolved, 2)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 32 && lane_bits != 64 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            if width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let src = as_u128(resolved[0]);
+            let mode = as_u128(resolved[1]) as u8 & 0x3;
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let lane_val = (src >> shift) & bit_mask(lane_bits as u16);
+                let f = decode_float_lane(lane_bits as u16, lane_val)?;
+                let rounded = round_float(f, mode);
+                result |= encode_float_lane(lane_bits as u16, rounded) << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecTest => {
+            require_arity(operation, &resolved, 2)?;
+            let width_bits = match ty {
+                IrType::Bits(64) => 128u32,
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            let mask = bit_mask(width_bits as u16);
+            let dst = as_u128(resolved[0]) & mask;
+            let src = as_u128(resolved[1]) & mask;
+            let and_result = dst & src;
+            let not_dst = (!dst) & mask;
+            let not_dst_and_src = not_dst & src;
+            // RFLAGS: ZF=6, CF=0
+            let mut flags: u64 = 0;
+            if and_result == 0 {
+                flags |= 1u64 << 6; // ZF
+            }
+            if not_dst_and_src == 0 {
+                flags |= 1u64 << 0; // CF
+            }
+            return Ok(ConcreteValue::from_u128(ty, flags as u128, 64));
+        }
+        IrPrimitive::Crc32 => {
+            require_arity(operation, &resolved, 1)?;
+            let input_bits = scalar_bits(resolved[0].ty)?;
+            let byte_count = usize::from(input_bits) / 8;
+            let data = as_u128(resolved[0]);
+            let mut crc: u32 = 0;
+            for byte_idx in 0..byte_count {
+                let byte = ((data >> (byte_idx * 8)) & 0xFF) as u8;
+                crc ^= byte as u32;
+                for _ in 0..8 {
+                    if crc & 1 != 0 {
+                        crc = (crc >> 1) ^ 0x82F63B78;
+                    } else {
+                        crc >>= 1;
+                    }
+                }
+            }
+            let output_bits = scalar_bits(ty)?;
+            return Ok(ConcreteValue::from_u128(ty, crc as u128, output_bits));
+        }
         IrPrimitive::VecDotF => {
             require_arity(operation, &resolved, 3)?;
             let (width_bits, lane_bits) = match ty {
@@ -1666,6 +1759,16 @@ fn encode_float_lane(lane_bits: u16, value: f64) -> u128 {
         32 => (value as f32).to_bits() as u128,
         64 => value.to_bits() as u128,
         _ => 0,
+    }
+}
+
+/// Rounds a float according to imm8 bits[1:0]: 0=nearest, 1=down, 2=up, 3=truncate.
+fn round_float(value: f64, mode: u8) -> f64 {
+    match mode {
+        0 => value.round(),
+        1 => value.floor(),
+        2 => value.ceil(),
+        _ => value.trunc(),
     }
 }
 

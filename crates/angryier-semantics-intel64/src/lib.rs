@@ -499,6 +499,35 @@ pub mod forms {
     // SSE4.1 byte extract/insert (r32/xmm, xmm/r32, imm8)
     pub const PEXTRB_R32_XMM_IMM8: u32 = 0x0138;
     pub const PINSRB_XMM_R32_IMM8: u32 = 0x0139;
+
+    // SSE/SSE2 scalar float compare with flags (xmm, xmm)
+    pub const UCOMISS_XMM_XMM: u32 = 0x013A;
+    pub const UCOMISD_XMM_XMM: u32 = 0x013B;
+    pub const COMISS_XMM_XMM: u32 = 0x013C;
+    pub const COMISD_XMM_XMM: u32 = 0x013D;
+
+    // SSE4.1 packed/scalar round with imm8 (xmm, xmm, imm8)
+    pub const ROUNDPS_XMM_XMM_IMM8: u32 = 0x013E;
+    pub const ROUNDPD_XMM_XMM_IMM8: u32 = 0x013F;
+    pub const ROUNDSS_XMM_XMM_IMM8: u32 = 0x0140;
+    pub const ROUNDSD_XMM_XMM_IMM8: u32 = 0x0141;
+
+    // SSE4.1 PTEST (xmm, xmm)
+    pub const PTEST_XMM_XMM: u32 = 0x0142;
+
+    // SSE4.2 CRC32 (r32/r64, r32/r64)
+    pub const CRC32_R32_R32: u32 = 0x0143;
+    pub const CRC32_R64_R64: u32 = 0x0144;
+
+    // SSE4.1 dword/qword extract/insert (r32/r64, xmm, imm8)
+    pub const PEXTRD_R32_XMM_IMM8: u32 = 0x0145;
+    pub const PEXTRQ_R64_XMM_IMM8: u32 = 0x0146;
+    pub const PINSRD_XMM_R32_IMM8: u32 = 0x0147;
+    pub const PINSRQ_XMM_R64_IMM8: u32 = 0x0148;
+
+    // SSE4.1 INSERTPS/EXTRACTPS (xmm/xmm, r32/xmm, imm8)
+    pub const INSERTPS_XMM_XMM_IMM8: u32 = 0x0149;
+    pub const EXTRACTPS_R32_XMM_IMM8: u32 = 0x014A;
 }
 
 /// RFLAGS bit positions used by the corpus.

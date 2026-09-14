@@ -492,6 +492,8 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::ZeroExtend => out.byte(27),
                 VectorOp::BlendImm => out.byte(28),
                 VectorOp::DotF => out.byte(29),
+                VectorOp::FRound => out.byte(30),
+                VectorOp::Test => out.byte(31),
             }
         }
         SemanticOp::Tile(op) => {
@@ -547,6 +549,7 @@ fn primitive_tag(op: PrimitiveOp) -> u8 {
         PrimitiveOp::Abs => 35,
         PrimitiveOp::Sign => 36,
         PrimitiveOp::MulHighRS => 37,
+        PrimitiveOp::Crc32 => 38,
     }
 }
 
@@ -559,6 +562,7 @@ fn float_tag(op: FloatingOp) -> u8 {
         FloatingOp::Sqrt => 4,
         FloatingOp::Compare => 5,
         FloatingOp::Convert => 6,
+        FloatingOp::Round => 7,
     }
 }
 

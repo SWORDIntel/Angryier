@@ -134,6 +134,7 @@ pub enum PrimitiveOp {
     Abs,
     Sign,
     MulHighRS,
+    Crc32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -145,6 +146,7 @@ pub enum FloatingOp {
     Sqrt,
     Compare,
     Convert,
+    Round,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -179,6 +181,8 @@ pub enum VectorOp {
     ZeroExtend,
     BlendImm,
     DotF,
+    FRound,
+    Test,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
