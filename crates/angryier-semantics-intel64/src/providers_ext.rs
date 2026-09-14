@@ -2610,3 +2610,33 @@ packed_shift_reg!(PsrldXmmXmm, forms::PSRLD_XMM_XMM, VectorOp::ShiftRegR, I32X4,
 packed_shift_reg!(PsrlqXmmXmm, forms::PSRLQ_XMM_XMM, VectorOp::ShiftRegR, I64X2, 0x114);
 packed_shift_reg!(PsrawXmmXmm, forms::PSRAW_XMM_XMM, VectorOp::ShiftRegRA, I16X8, 0x115);
 packed_shift_reg!(PsradXmmXmm, forms::PSRAD_XMM_XMM, VectorOp::ShiftRegRA, I32X4, 0x116);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 horizontal add/subtract providers
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_hbinop {
+    ($name:ident, $form:expr, $vop:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, $ty)?;
+                let src = out.read_operand(1, $ty)?;
+                let result = out.emit(SemanticOp::Vector($vop), $ty, &[dst, src])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_hbinop!(PhaddwXmmXmm, forms::PHADDW_XMM_XMM, VectorOp::HAdd, I16X8, 0x117);
+packed_hbinop!(PhadddXmmXmm, forms::PHADDD_XMM_XMM, VectorOp::HAdd, I32X4, 0x118);
+packed_hbinop!(PhsubwXmmXmm, forms::PHSUBW_XMM_XMM, VectorOp::HSub, I16X8, 0x119);
+packed_hbinop!(PhsubdXmmXmm, forms::PHSUBD_XMM_XMM, VectorOp::HSub, I32X4, 0x11A);

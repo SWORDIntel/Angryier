@@ -166,6 +166,8 @@ pub enum VectorOp {
     ShiftRegL,
     ShiftRegR,
     ShiftRegRA,
+    HAdd,
+    HSub,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

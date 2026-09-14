@@ -1197,6 +1197,86 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecHAdd => {
+            require_arity(operation, &resolved, 2)?;
+            // PHADDW/D: horizontally add adjacent pairs of lanes from two sources.
+            //   result[i]           = src1[2i] + src1[2i+1]   for i in 0..lanes/2
+            //   result[lanes/2 + i] = src2[2i] + src2[2i+1]   for i in 0..lanes/2
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 16 && lane_bits != 32 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            if width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let out_lanes = lanes / 2; // output lanes per source
+            let lane_mask = bit_mask(lane_bits as u16);
+            let sign_bit = 1u128 << (lane_bits - 1);
+            let src1 = as_u128(resolved[0]);
+            let src2 = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for i in 0..out_lanes {
+                let a = (src1 >> ((2 * i) * lane_bits)) & lane_mask;
+                let b = (src1 >> ((2 * i + 1) * lane_bits)) & lane_mask;
+                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i128 } else { a as i128 };
+                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i128 } else { b as i128 };
+                let sum = (sa.wrapping_add(sb) as u128) & lane_mask;
+                result |= sum << (i * lane_bits);
+            }
+            for i in 0..out_lanes {
+                let a = (src2 >> ((2 * i) * lane_bits)) & lane_mask;
+                let b = (src2 >> ((2 * i + 1) * lane_bits)) & lane_mask;
+                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i128 } else { a as i128 };
+                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i128 } else { b as i128 };
+                let sum = (sa.wrapping_add(sb) as u128) & lane_mask;
+                result |= sum << ((out_lanes + i) * lane_bits);
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecHSub => {
+            require_arity(operation, &resolved, 2)?;
+            // PHSUBW/D: horizontally subtract adjacent pairs of lanes from two sources.
+            //   result[i]           = src1[2i] - src1[2i+1]   for i in 0..lanes/2
+            //   result[lanes/2 + i] = src2[2i] - src2[2i+1]   for i in 0..lanes/2
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 16 && lane_bits != 32 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            if width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let out_lanes = lanes / 2;
+            let lane_mask = bit_mask(lane_bits as u16);
+            let sign_bit = 1u128 << (lane_bits - 1);
+            let src1 = as_u128(resolved[0]);
+            let src2 = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for i in 0..out_lanes {
+                let a = (src1 >> ((2 * i) * lane_bits)) & lane_mask;
+                let b = (src1 >> ((2 * i + 1) * lane_bits)) & lane_mask;
+                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i128 } else { a as i128 };
+                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i128 } else { b as i128 };
+                let diff = (sa.wrapping_sub(sb) as u128) & lane_mask;
+                result |= diff << (i * lane_bits);
+            }
+            for i in 0..out_lanes {
+                let a = (src2 >> ((2 * i) * lane_bits)) & lane_mask;
+                let b = (src2 >> ((2 * i + 1) * lane_bits)) & lane_mask;
+                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i128 } else { a as i128 };
+                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i128 } else { b as i128 };
+                let diff = (sa.wrapping_sub(sb) as u128) & lane_mask;
+                result |= diff << ((out_lanes + i) * lane_bits);
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

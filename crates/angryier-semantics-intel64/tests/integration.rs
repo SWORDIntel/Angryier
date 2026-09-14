@@ -4733,3 +4733,151 @@ fn psraw_xmm_xmm_saturates_to_sign() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSSE3 horizontal add/subtract integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phaddw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PHADDW: horizontally add adjacent 16-bit lanes from two sources
+    // src1 = [1, 2, 3, 4, 5, 6, 7, 8]
+    // src2 = [10, 20, 30, 40, 50, 60, 70, 80]
+    // result[0..3] = [1+2, 3+4, 5+6, 7+8] = [3, 7, 11, 15]
+    // result[4..7] = [10+20, 30+40, 50+60, 70+80] = [30, 70, 110, 150]
+    let src1: [i16; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let src2: [i16; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PHADDW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [3, 7, 11, 15, 30, 70, 110, 150];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn phaddd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PHADDD: horizontally add adjacent 32-bit lanes from two sources
+    // src1 = [1, 2, 3, 4]
+    // src2 = [10, 20, 30, 40]
+    // result[0..1] = [1+2, 3+4] = [3, 7]
+    // result[2..3] = [10+20, 30+40] = [30, 70]
+    let src1: [i32; 4] = [1, 2, 3, 4];
+    let src2: [i32; 4] = [10, 20, 30, 40];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PHADDD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i32; 4] = [3, 7, 30, 70];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        assert_eq!(i32::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn phsubw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PHSUBW: horizontally subtract adjacent 16-bit lanes from two sources
+    // src1 = [10, 1, 30, 3, 50, 5, 70, 7]
+    // src2 = [100, 10, 200, 20, 300, 30, 400, 40]
+    // result[0..3] = [10-1, 30-3, 50-5, 70-7] = [9, 27, 45, 63]
+    // result[4..7] = [100-10, 200-20, 300-30, 400-40] = [90, 180, 270, 360]
+    let src1: [i16; 8] = [10, 1, 30, 3, 50, 5, 70, 7];
+    let src2: [i16; 8] = [100, 10, 200, 20, 300, 30, 400, 40];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PHSUBW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [9, 27, 45, 63, 90, 180, 270, 360];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        assert_eq!(i16::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn phsubd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PHSUBD: horizontally subtract adjacent 32-bit lanes from two sources
+    // src1 = [100, 1, 300, 3]
+    // src2 = [1000, 10, 2000, 20]
+    // result[0..1] = [100-1, 300-3] = [99, 297]
+    // result[2..3] = [1000-10, 2000-20] = [990, 1980]
+    let src1: [i32; 4] = [100, 1, 300, 3];
+    let src2: [i32; 4] = [1000, 10, 2000, 20];
+    let mut bytes1 = Vec::new();
+    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PHSUBD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i32; 4] = [99, 297, 990, 1980];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        assert_eq!(i32::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}

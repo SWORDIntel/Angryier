@@ -482,6 +482,8 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::ShiftRegL => out.byte(17),
                 VectorOp::ShiftRegR => out.byte(18),
                 VectorOp::ShiftRegRA => out.byte(19),
+                VectorOp::HAdd => out.byte(20),
+                VectorOp::HSub => out.byte(21),
             }
         }
         SemanticOp::Tile(op) => {

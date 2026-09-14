@@ -440,6 +440,12 @@ pub mod forms {
     pub const PSRLQ_XMM_XMM: u32 = 0x0114;
     pub const PSRAW_XMM_XMM: u32 = 0x0115;
     pub const PSRAD_XMM_XMM: u32 = 0x0116;
+
+    // SSSE3 horizontal add/subtract (xmm, xmm)
+    pub const PHADDW_XMM_XMM: u32 = 0x0117;
+    pub const PHADDD_XMM_XMM: u32 = 0x0118;
+    pub const PHSUBW_XMM_XMM: u32 = 0x0119;
+    pub const PHSUBD_XMM_XMM: u32 = 0x011A;
 }
 
 /// RFLAGS bit positions used by the corpus.

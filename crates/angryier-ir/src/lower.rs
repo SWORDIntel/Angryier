@@ -488,6 +488,8 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::ShiftRegL => Ok(IrPrimitive::VecShiftRegL),
             VectorOp::ShiftRegR => Ok(IrPrimitive::VecShiftRegR),
             VectorOp::ShiftRegRA => Ok(IrPrimitive::VecShiftRegRA),
+            VectorOp::HAdd => Ok(IrPrimitive::VecHAdd),
+            VectorOp::HSub => Ok(IrPrimitive::VecHSub),
             _ => Err(IrLoweringError::UnsupportedValue(
                 "non-lane-wise vector operation",
             )),
