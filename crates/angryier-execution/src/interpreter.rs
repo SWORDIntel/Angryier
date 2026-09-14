@@ -1490,6 +1490,52 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecHFAdd | IrPrimitive::VecHFSub => {
+            require_arity(operation, &resolved, 2)?;
+            // HADDPS/PD, HSUBPS/PD: horizontal pairwise add/sub across two sources.
+            //   result[i]           = src1[2i] ± src1[2i+1]   for i in 0..lanes/2
+            //   result[lanes/2 + i] = src2[2i] ± src2[2i+1]   for i in 0..lanes/2
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if (lane_bits != 32 && lane_bits != 64) || width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let out_lanes = lanes / 2;
+            let lane_mask = bit_mask(lane_bits as u16);
+            let src1 = as_u128(resolved[0]);
+            let src2 = as_u128(resolved[1]);
+            let mut result: u128 = 0;
+            for i in 0..out_lanes {
+                let a = (src1 >> ((2 * i) * lane_bits)) & lane_mask;
+                let b = (src1 >> ((2 * i + 1) * lane_bits)) & lane_mask;
+                let af = decode_float_lane(lane_bits as u16, a)?;
+                let bf = decode_float_lane(lane_bits as u16, b)?;
+                let val = match operation {
+                    IrPrimitive::VecHFAdd => af + bf,
+                    IrPrimitive::VecHFSub => af - bf,
+                    _ => unreachable!(),
+                };
+                let encoded = encode_float_lane(lane_bits as u16, val);
+                result |= encoded << (i * lane_bits);
+            }
+            for i in 0..out_lanes {
+                let a = (src2 >> ((2 * i) * lane_bits)) & lane_mask;
+                let b = (src2 >> ((2 * i + 1) * lane_bits)) & lane_mask;
+                let af = decode_float_lane(lane_bits as u16, a)?;
+                let bf = decode_float_lane(lane_bits as u16, b)?;
+                let val = match operation {
+                    IrPrimitive::VecHFAdd => af + bf,
+                    IrPrimitive::VecHFSub => af - bf,
+                    _ => unreachable!(),
+                };
+                let encoded = encode_float_lane(lane_bits as u16, val);
+                result |= encoded << ((out_lanes + i) * lane_bits);
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
         IrPrimitive::VecLaneSignExtend | IrPrimitive::VecLaneZeroExtend => {
             require_arity(operation, &resolved, 1)?;
             let (width_bits, wide_lane_bits) = match ty {

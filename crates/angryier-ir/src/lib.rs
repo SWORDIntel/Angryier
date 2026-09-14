@@ -115,6 +115,8 @@ pub enum IrPrimitive {
     VecFMin,
     VecFMax,
     VecMovMask,
+    VecHFAdd,
+    VecHFSub,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

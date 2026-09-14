@@ -547,6 +547,26 @@ pub mod forms {
 
     // PMOVMSKB
     pub const PMOVMSKB_R32_XMM: u32 = 0x0153;
+
+    // SSE3/SSE4 packed float horizontal add/sub (xmm, xmm)
+    pub const HADDPS_XMM_XMM: u32 = 0x0154;
+    pub const HADDPD_XMM_XMM: u32 = 0x0155;
+    pub const HSUBPS_XMM_XMM: u32 = 0x0156;
+    pub const HSUBPD_XMM_XMM: u32 = 0x0157;
+
+    // SSE4.1 packed min/max 64-bit (xmm, xmm)
+    pub const PMAXSQ_XMM_XMM: u32 = 0x0158;
+    pub const PMINSQ_XMM_XMM: u32 = 0x0159;
+
+    // SSE/SSE2 packed aligned/unaligned moves (xmm, xmm) — register-to-register
+    pub const MOVAPS_XMM_XMM: u32 = 0x015A;
+    pub const MOVAPD_XMM_XMM: u32 = 0x015B;
+    pub const MOVUPS_XMM_XMM: u32 = 0x015C;
+    pub const MOVUPD_XMM_XMM: u32 = 0x015D;
+
+    // SSE/SSE2 scalar moves (xmm, xmm) — register-to-register
+    pub const MOVSS_XMM_XMM: u32 = 0x015E;
+    pub const MOVSD_XMM_XMM: u32 = 0x015F;
 }
 
 /// RFLAGS bit positions used by the corpus.

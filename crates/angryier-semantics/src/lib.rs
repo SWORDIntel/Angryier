@@ -187,6 +187,8 @@ pub enum VectorOp {
     FMin,
     FMax,
     MovMask,
+    HFAdd,
+    HFSub,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

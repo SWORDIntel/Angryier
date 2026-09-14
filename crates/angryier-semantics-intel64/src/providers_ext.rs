@@ -1322,8 +1322,11 @@ impl SemanticProvider for MovqXmmXmm {
     fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
     fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::MOVQ_XMM_XMM }
     fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
-        let src = out.read_operand(1, U64)?;
-        out.write_operand(0, src)?;
+        let src = out.read_operand(1, I64X2)?;
+        let zero = const_u64(out, 0)?;
+        let lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src, zero])?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U128, &[lo])?;
+        out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(0xB7, context))
     }
@@ -3465,3 +3468,70 @@ macro_rules! packed_movmask {
 packed_movmask!(MovmskpsR32Xmm, forms::MOVMSKPS_R32_XMM, F32X4, 0x151);
 packed_movmask!(MovmskpdR32Xmm, forms::MOVMSKPD_R32_XMM, F64X2, 0x152);
 packed_movmask!(PmovmskbR32Xmm, forms::PMOVMSKB_R32_XMM, I8X16, 0x153);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE3/SSE4 packed float horizontal add/sub providers
+// ---------------------------------------------------------------------------
+
+packed_hbinop!(HaddpsXmmXmm, forms::HADDPS_XMM_XMM, VectorOp::HFAdd, F32X4, 0x154);
+packed_hbinop!(HaddpdXmmXmm, forms::HADDPD_XMM_XMM, VectorOp::HFAdd, F64X2, 0x155);
+packed_hbinop!(HsubpsXmmXmm, forms::HSUBPS_XMM_XMM, VectorOp::HFSub, F32X4, 0x156);
+packed_hbinop!(HsubpdXmmXmm, forms::HSUBPD_XMM_XMM, VectorOp::HFSub, F64X2, 0x157);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 packed min/max 64-bit providers
+// ---------------------------------------------------------------------------
+
+packed_minmax!(PmaxsqXmmXmm, forms::PMAXSQ_XMM_XMM, PrimitiveOp::MaxS, I64X2, 0x158);
+packed_minmax!(PminsqXmmXmm, forms::PMINSQ_XMM_XMM, PrimitiveOp::MinS, I64X2, 0x159);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE/SSE2 packed aligned/unaligned moves (register-to-register)
+// ---------------------------------------------------------------------------
+
+mov_reg_reg!(MovapsXmmXmm, forms::MOVAPS_XMM_XMM, U128, 0x15A);
+mov_reg_reg!(MovapdXmmXmm, forms::MOVAPD_XMM_XMM, U128, 0x15B);
+mov_reg_reg!(MovupsXmmXmm, forms::MOVUPS_XMM_XMM, U128, 0x15C);
+mov_reg_reg!(MovupdXmmXmm, forms::MOVUPD_XMM_XMM, U128, 0x15D);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE/SSE2 scalar moves (register-to-register)
+// ---------------------------------------------------------------------------
+
+/// MOVSS xmm, xmm: copy low 32 bits from src, zero upper 96 bits.
+#[derive(Clone, Copy, Debug)]
+pub struct MovssXmmXmm;
+
+impl SemanticProvider for MovssXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x15E) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::MOVSS_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, F32X4)?;
+        let zero = const_u64(out, 0)?;
+        let lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32, &[src, zero])?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U128, &[lo])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x15E, context))
+    }
+}
+
+/// MOVSD xmm, xmm: copy low 64 bits from src, zero upper 64 bits.
+#[derive(Clone, Copy, Debug)]
+pub struct MovsdXmmXmm;
+
+impl SemanticProvider for MovsdXmmXmm {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x15F) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::MOVSD_XMM_XMM }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let src = out.read_operand(1, F64X2)?;
+        let zero = const_u64(out, 0)?;
+        let lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64, &[src, zero])?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U128, &[lo])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x15F, context))
+    }
+}

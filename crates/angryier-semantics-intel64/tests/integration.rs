@@ -6933,3 +6933,384 @@ fn pmovmskb_r32_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(read_reg(&executed, RAX)?, expected, "sign bits should be 0x5555");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE3/SSE4 packed float horizontal add/sub tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn haddps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // HADDPS: horizontally add adjacent 32-bit float lanes from two sources
+    // src1 = [1.0, 2.0, 3.0, 4.0]
+    // src2 = [10.0, 20.0, 30.0, 40.0]
+    // result[0..1] = [1+2, 3+4] = [3.0, 7.0]
+    // result[2..3] = [10+20, 30+40] = [30.0, 70.0]
+    let mut bytes1 = Vec::new();
+    for v in [1.0f32, 2.0, 3.0, 4.0] { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in [10.0f32, 20.0, 30.0, 40.0] { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::HADDPS_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [f32; 4] = [3.0, 7.0, 30.0, 70.0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = f32::from_le_bytes(buf);
+        assert!((result - exp).abs() < f32::EPSILON, "lane {i}: expected {exp}, got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn haddpd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // HADDPD: horizontally add adjacent 64-bit float lanes from two sources
+    // src1 = [1.5, 2.5]
+    // src2 = [10.0, 20.0]
+    // result[0] = 1.5 + 2.5 = 4.0
+    // result[1] = 10.0 + 20.0 = 30.0
+    let mut bytes1 = Vec::new();
+    for v in [1.5f64, 2.5] { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in [10.0f64, 20.0] { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::HADDPD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [f64; 2] = [4.0, 30.0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = f64::from_le_bytes(buf);
+        assert!((result - exp).abs() < f64::EPSILON, "lane {i}: expected {exp}, got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn hsubps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // HSUBPS: horizontally subtract adjacent 32-bit float lanes from two sources
+    // src1 = [10.0, 1.0, 30.0, 3.0]
+    // src2 = [100.0, 10.0, 200.0, 20.0]
+    // result[0..1] = [10-1, 30-3] = [9.0, 27.0]
+    // result[2..3] = [100-10, 200-20] = [90.0, 180.0]
+    let mut bytes1 = Vec::new();
+    for v in [10.0f32, 1.0, 30.0, 3.0] { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in [100.0f32, 10.0, 200.0, 20.0] { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::HSUBPS_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [f32; 4] = [9.0, 27.0, 90.0, 180.0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = f32::from_le_bytes(buf);
+        assert!((result - exp).abs() < f32::EPSILON, "lane {i}: expected {exp}, got {result}");
+    }
+    Ok(())
+}
+
+#[test]
+fn hsubpd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // HSUBPD: horizontally subtract adjacent 64-bit float lanes from two sources
+    // src1 = [10.0, 1.0]
+    // src2 = [100.0, 10.0]
+    // result[0] = 10.0 - 1.0 = 9.0
+    // result[1] = 100.0 - 10.0 = 90.0
+    let mut bytes1 = Vec::new();
+    for v in [10.0f64, 1.0] { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in [100.0f64, 10.0] { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::HSUBPD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [f64; 2] = [9.0, 90.0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = f64::from_le_bytes(buf);
+        assert!((result - exp).abs() < f64::EPSILON, "lane {i}: expected {exp}, got {result}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 packed min/max 64-bit tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pmaxsq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 2x64-bit signed: max([100, -100], [50, 0]) = [100, 0]
+    let left: [i64; 2] = [100, -100];
+    let right: [i64; 2] = [50, 0];
+    let mut bytes1 = Vec::new();
+    for v in left { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in right { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PMAXSQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i64; 2] = [100, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        assert_eq!(i64::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pminsq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // 2x64-bit signed: min([100, -100], [50, 0]) = [50, -100]
+    let left: [i64; 2] = [100, -100];
+    let right: [i64; 2] = [50, 0];
+    let mut bytes1 = Vec::new();
+    for v in left { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    let mut bytes2 = Vec::new();
+    for v in right { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &bytes1)?;
+    let initial = with_bytes(&initial, XMM1, &bytes2)?;
+
+    let decoded = make_decoded(
+        forms::PMINSQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i64; 2] = [50, -100];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        assert_eq!(i64::from_le_bytes(buf), exp, "lane {i}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE/SSE2 packed aligned/unaligned move tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn movaps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let src: [u8; 16] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01];
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::MOVAPS_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    assert_eq!(bytes, src.to_vec(), "MOVAPS should copy all 128 bits");
+    Ok(())
+}
+
+#[test]
+fn movapd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let src: [u8; 16] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10];
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::MOVAPD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    assert_eq!(bytes, src.to_vec(), "MOVAPD should copy all 128 bits");
+    Ok(())
+}
+
+#[test]
+fn movups_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let src: [u8; 16] = [0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00];
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::MOVUPS_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    assert_eq!(bytes, src.to_vec(), "MOVUPS should copy all 128 bits");
+    Ok(())
+}
+
+#[test]
+fn movupd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let src: [u8; 16] = [0x10, 0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::MOVUPD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    assert_eq!(bytes, src.to_vec(), "MOVUPD should copy all 128 bits");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE/SSE2 scalar move tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn movss_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let mut src = [0u8; 16];
+    src[..4].copy_from_slice(&42.5f32.to_le_bytes());
+    src[4..].copy_from_slice(&[0xAA; 12]);
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::MOVSS_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&bytes[..4]);
+    let result = f32::from_le_bytes(buf);
+    assert!((result - 42.5).abs() < f32::EPSILON, "MOVSS should copy low 32 bits, got {result}");
+    assert_eq!(&bytes[4..16], &[0u8; 12], "MOVSS should zero upper 96 bits");
+    Ok(())
+}
+
+#[test]
+fn movsd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let mut src = [0u8; 16];
+    src[..8].copy_from_slice(&99.5f64.to_le_bytes());
+    src[8..].copy_from_slice(&[0xBB; 8]);
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::MOVSD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&bytes[..8]);
+    let result = f64::from_le_bytes(buf);
+    assert!((result - 99.5).abs() < f64::EPSILON, "MOVSD should copy low 64 bits, got {result}");
+    assert_eq!(&bytes[8..16], &[0u8; 8], "MOVSD should zero upper 64 bits");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: MOVQ xmm, xmm — low 64-bit copy with zero-extended upper 64 bits
+// ---------------------------------------------------------------------------
+
+#[test]
+fn movq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let mut src = [0u8; 16];
+    src[..8].copy_from_slice(&0x0123456789ABCDEFu64.to_le_bytes());
+    src[8..].copy_from_slice(&[0xCC; 8]);
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::MOVQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&bytes[..8]);
+    assert_eq!(u64::from_le_bytes(buf), 0x0123456789ABCDEF, "MOVQ should copy low 64 bits");
+    assert_eq!(&bytes[8..16], &[0u8; 8], "MOVQ should zero upper 64 bits");
+    Ok(())
+}
