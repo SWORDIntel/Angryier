@@ -1490,6 +1490,108 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecLaneSignExtend | IrPrimitive::VecLaneZeroExtend => {
+            require_arity(operation, &resolved, 1)?;
+            let (width_bits, wide_lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            let narrow_lane_bits = match resolved[0].ty {
+                IrType::Vector { lane_bits, .. } => u32::from(lane_bits),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if wide_lane_bits == 0 || narrow_lane_bits == 0 || wide_lane_bits <= narrow_lane_bits
+                || width_bits == 0 || width_bits % wide_lane_bits != 0
+            {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let out_lanes = width_bits / wide_lane_bits;
+            let narrow_mask = bit_mask(narrow_lane_bits as u16);
+            let wide_mask = bit_mask(wide_lane_bits as u16);
+            let sign_bit = 1u128 << (narrow_lane_bits - 1);
+            let src = as_u128(resolved[0]);
+            let mut result: u128 = 0;
+            for lane_idx in 0..out_lanes {
+                let narrow_shift = lane_idx * narrow_lane_bits;
+                let wide_shift = lane_idx * wide_lane_bits;
+                let narrow_val = (src >> narrow_shift) & narrow_mask;
+                let wide_val = match operation {
+                    IrPrimitive::VecLaneZeroExtend => narrow_val,
+                    IrPrimitive::VecLaneSignExtend => {
+                        if narrow_val & sign_bit != 0 {
+                            let sign_ext = bit_mask(wide_lane_bits as u16) ^ bit_mask(narrow_lane_bits as u16);
+                            sign_ext | narrow_val
+                        } else {
+                            narrow_val
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                result |= (wide_val & wide_mask) << wide_shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecBlendImm => {
+            require_arity(operation, &resolved, 3)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let mask = bit_mask(lane_bits as u16);
+            let dst = as_u128(resolved[0]);
+            let src = as_u128(resolved[1]);
+            let imm = as_u128(resolved[2]) as u8;
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let selected = if imm & (1 << lane_idx) != 0 { src } else { dst };
+                let lane_val = (selected >> shift) & mask;
+                result |= lane_val << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecDotF => {
+            require_arity(operation, &resolved, 3)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 32 && lane_bits != 64 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            if width_bits != 128 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let src1 = as_u128(resolved[0]);
+            let src2 = as_u128(resolved[1]);
+            let imm = as_u128(resolved[2]) as u8;
+            let mut dot: f64 = 0.0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let s1_sel = (imm >> (4 + lane_idx)) & 1 != 0;
+                let s2_sel = (imm >> lane_idx) & 1 != 0;
+                if s1_sel && s2_sel {
+                    let l = (src1 >> shift) & bit_mask(lane_bits as u16);
+                    let r = (src2 >> shift) & bit_mask(lane_bits as u16);
+                    let lf = decode_float_lane(lane_bits as u16, l)?;
+                    let rf = decode_float_lane(lane_bits as u16, r)?;
+                    dot += lf * rf;
+                }
+            }
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                if (imm >> (4 + lane_idx)) & 1 != 0 {
+                    result |= encode_float_lane(lane_bits as u16, dot) << shift;
+                }
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))

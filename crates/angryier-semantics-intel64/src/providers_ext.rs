@@ -34,6 +34,7 @@ const I8X16: SemanticType = SemanticType::Vector { lanes: 16, lane: ScalarType::
 const I16X8: SemanticType = SemanticType::Vector { lanes: 8, lane: ScalarType::BitVec(16) };
 const I32X4: SemanticType = SemanticType::Vector { lanes: 4, lane: ScalarType::BitVec(32) };
 const I64X2: SemanticType = SemanticType::Vector { lanes: 2, lane: ScalarType::BitVec(64) };
+const U128: SemanticType = SemanticType::Scalar(ScalarType::BitVec(128));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2758,5 +2759,175 @@ impl SemanticProvider for PblendvbXmmXmm {
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(0x126, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 packed move with sign/zero extend providers
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_extend {
+    ($name:ident, $form:expr, $vop:expr, $src_ty:expr, $dst_ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let src = out.read_operand(1, $src_ty)?;
+                let result = out.emit(SemanticOp::Vector($vop), $dst_ty, &[src])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_extend!(PmovsxbwXmmXmm, forms::PMOVSXBW_XMM_XMM, VectorOp::SignExtend, I8X16, I16X8, 0x127);
+packed_extend!(PmovzxbwXmmXmm, forms::PMOVZXBW_XMM_XMM, VectorOp::ZeroExtend, I8X16, I16X8, 0x128);
+packed_extend!(PmovsxbdXmmXmm, forms::PMOVSXBD_XMM_XMM, VectorOp::SignExtend, I8X16, I32X4, 0x129);
+packed_extend!(PmovzxbdXmmXmm, forms::PMOVZXBD_XMM_XMM, VectorOp::ZeroExtend, I8X16, I32X4, 0x12A);
+packed_extend!(PmovsxwdXmmXmm, forms::PMOVSXWD_XMM_XMM, VectorOp::SignExtend, I16X8, I32X4, 0x12B);
+packed_extend!(PmovzxwdXmmXmm, forms::PMOVZXWD_XMM_XMM, VectorOp::ZeroExtend, I16X8, I32X4, 0x12C);
+packed_extend!(PmovsxdqXmmXmm, forms::PMOVSXDQ_XMM_XMM, VectorOp::SignExtend, I32X4, I64X2, 0x12D);
+packed_extend!(PmovzxdqXmmXmm, forms::PMOVZXDQ_XMM_XMM, VectorOp::ZeroExtend, I32X4, I64X2, 0x12E);
+packed_extend!(PmovsxwqXmmXmm, forms::PMOVSXWQ_XMM_XMM, VectorOp::SignExtend, I16X8, I64X2, 0x12F);
+packed_extend!(PmovzxwqXmmXmm, forms::PMOVZXWQ_XMM_XMM, VectorOp::ZeroExtend, I16X8, I64X2, 0x130);
+packed_extend!(PmovsxbqXmmXmm, forms::PMOVSXBQ_XMM_XMM, VectorOp::SignExtend, I8X16, I64X2, 0x131);
+packed_extend!(PmovzxbqXmmXmm, forms::PMOVZXBQ_XMM_XMM, VectorOp::ZeroExtend, I8X16, I64X2, 0x132);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 immediate blend providers
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_blend_imm {
+    ($name:ident, $form:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, $ty)?;
+                let src = out.read_operand(1, $ty)?;
+                let imm = insn.operand(2)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                let imm_const = const_u64(out, imm)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::BlendImm), $ty, &[dst, src, imm_const])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_blend_imm!(PblendwXmmXmmImm8, forms::PBLENDW_XMM_XMM_IMM8, I16X8, 0x133);
+packed_blend_imm!(BlendpsXmmXmmImm8, forms::BLENDPS_XMM_XMM_IMM8, F32X4, 0x134);
+packed_blend_imm!(BlendpdXmmXmmImm8, forms::BLENDPD_XMM_XMM_IMM8, F64X2, 0x135);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 packed dot product providers
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_dot {
+    ($name:ident, $form:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId { rule_id($rule) }
+            fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == $form }
+            fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(0, $ty)?;
+                let src2 = out.read_operand(1, $ty)?;
+                let imm = insn.operand(2)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                let imm_const = const_u64(out, imm)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::DotF), $ty, &[src1, src2, imm_const])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_dot!(DppsXmmXmmImm8, forms::DPPS_XMM_XMM_IMM8, F32X4, 0x136);
+packed_dot!(DppdXmmXmmImm8, forms::DPPD_XMM_XMM_IMM8, F64X2, 0x137);
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 byte extract/insert providers
+// ---------------------------------------------------------------------------
+
+/// PEXTRB r32, xmm, imm8: extract byte at imm8[3:0] from xmm, zero-extend to r32.
+#[derive(Clone, Copy, Debug)]
+pub struct PextrbR32XmmImm8;
+
+impl SemanticProvider for PextrbR32XmmImm8 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x138) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PEXTRB_R32_XMM_IMM8 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let xmm = out.read_operand(1, I8X16)?;
+        let imm = insn.operand(2)
+            .and_then(|op| match op.kind {
+                OperandKind::Immediate(imm) => Some(imm.value),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let bit_pos = const_u64(out, (imm & 0x0F) * 8)?;
+        let byte = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U8, &[xmm, bit_pos])?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U32, &[byte])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x138, context))
+    }
+}
+
+/// PINSRB xmm, r32, imm8: insert low byte of r32 into xmm at byte imm8[3:0].
+#[derive(Clone, Copy, Debug)]
+pub struct PinsrbXmmR32Imm8;
+
+impl SemanticProvider for PinsrbXmmR32Imm8 {
+    fn rule_id(&self) -> SemanticRuleId { rule_id(0x139) }
+    fn origin(&self) -> SemanticOrigin { SemanticOrigin::HandwrittenOverride }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool { insn.form_id() == forms::PINSRB_XMM_R32_IMM8 }
+    fn emit(&self, context: &SemanticContext, insn: &dyn DecodedInstructionView, out: &mut dyn SemanticBuilder) -> Result<SemanticReceipt, SemanticError> {
+        let xmm = out.read_operand(0, U128)?;
+        let gpr = out.read_operand(1, U64)?;
+        let imm = insn.operand(2)
+            .and_then(|op| match op.kind {
+                OperandKind::Immediate(imm) => Some(imm.value),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let byte_idx = imm & 0x0F;
+        let zero = const_u64(out, 0)?;
+        let byte = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U8, &[gpr, zero])?;
+        let byte128 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U128, &[byte])?;
+        let shift = const_u64(out, byte_idx * 8)?;
+        let shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U128, &[byte128, shift])?;
+        let mask_val: u128 = !(0xFFu128 << (byte_idx * 8));
+        let mask = out.constant(U128, &mask_val.to_le_bytes())?;
+        let masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U128, &[xmm, mask])?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U128, &[masked, shifted])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x139, context))
     }
 }

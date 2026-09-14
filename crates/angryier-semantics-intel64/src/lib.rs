@@ -472,6 +472,33 @@ pub mod forms {
 
     // SSE4.1 variable blend bytes (xmm, xmm, xmm0)
     pub const PBLENDVB_XMM_XMM: u32 = 0x0126;
+
+    // SSE4.1 packed move with sign/zero extend (xmm, xmm/m128)
+    pub const PMOVSXBW_XMM_XMM: u32 = 0x0127;
+    pub const PMOVZXBW_XMM_XMM: u32 = 0x0128;
+    pub const PMOVSXBD_XMM_XMM: u32 = 0x0129;
+    pub const PMOVZXBD_XMM_XMM: u32 = 0x012A;
+    pub const PMOVSXWD_XMM_XMM: u32 = 0x012B;
+    pub const PMOVZXWD_XMM_XMM: u32 = 0x012C;
+    pub const PMOVSXDQ_XMM_XMM: u32 = 0x012D;
+    pub const PMOVZXDQ_XMM_XMM: u32 = 0x012E;
+    pub const PMOVSXWQ_XMM_XMM: u32 = 0x012F;
+    pub const PMOVZXWQ_XMM_XMM: u32 = 0x0130;
+    pub const PMOVSXBQ_XMM_XMM: u32 = 0x0131;
+    pub const PMOVZXBQ_XMM_XMM: u32 = 0x0132;
+
+    // SSE4.1 immediate blends (xmm, xmm, imm8)
+    pub const PBLENDW_XMM_XMM_IMM8: u32 = 0x0133;
+    pub const BLENDPS_XMM_XMM_IMM8: u32 = 0x0134;
+    pub const BLENDPD_XMM_XMM_IMM8: u32 = 0x0135;
+
+    // SSE4.1 packed dot product (xmm, xmm, imm8)
+    pub const DPPS_XMM_XMM_IMM8: u32 = 0x0136;
+    pub const DPPD_XMM_XMM_IMM8: u32 = 0x0137;
+
+    // SSE4.1 byte extract/insert (r32/xmm, xmm/r32, imm8)
+    pub const PEXTRB_R32_XMM_IMM8: u32 = 0x0138;
+    pub const PINSRB_XMM_R32_IMM8: u32 = 0x0139;
 }
 
 /// RFLAGS bit positions used by the corpus.

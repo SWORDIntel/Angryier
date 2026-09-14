@@ -102,6 +102,10 @@ pub enum IrPrimitive {
     VecShiftRegRA,
     VecHAdd,
     VecHSub,
+    VecLaneSignExtend,
+    VecLaneZeroExtend,
+    VecBlendImm,
+    VecDotF,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

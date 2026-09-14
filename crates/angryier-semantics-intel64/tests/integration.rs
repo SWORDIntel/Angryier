@@ -5365,3 +5365,591 @@ fn pblendvb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 packed move with sign/zero extend integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pmovsxbw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMOVSXBW: sign-extend low 8 bytes to 8 words
+    // src = [0x7F, 0x80, 0xFF, 0x00, 0x01, 0x02, 0x7E, 0xFE, ...]
+    let src: [i8; 16] = [0x7F, -0x80, -1, 0, 1, 2, 0x7E, -2, 0, 0, 0, 0, 0, 0, 0, 0];
+    let src_bytes: Vec<u8> = src.iter().map(|&v| v as u8).collect();
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMOVSXBW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i16; 8] = [0x7F, -0x80, -1, 0, 1, 2, 0x7E, -2];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = i16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovzxbw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMOVZXBW: zero-extend low 8 bytes to 8 words
+    let src: [u8; 16] = [0x7F, 0x80, 0xFF, 0x00, 0x01, 0x02, 0x7E, 0xFE, 0, 0, 0, 0, 0, 0, 0, 0];
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::PMOVZXBW_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u16; 8] = [0x007F, 0x0080, 0x00FF, 0x0000, 0x0001, 0x0002, 0x007E, 0x00FE];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovsxbd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMOVSXBD: sign-extend low 4 bytes to 4 dwords
+    let src: [i8; 16] = [0x7F, -0x80, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let src_bytes: Vec<u8> = src.iter().map(|&v| v as u8).collect();
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMOVSXBD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i32; 4] = [0x7F, -0x80, -1, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = i32::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovzxbd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let src: [u8; 16] = [0x7F, 0x80, 0xFF, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::PMOVZXBD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u32; 4] = [0x0000007F, 0x00000080, 0x000000FF, 0x00000000];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = u32::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovsxwd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMOVSXWD: sign-extend low 4 words to 4 dwords
+    let src: [i16; 8] = [0x7FFF, -0x8000, -1, 0, 0, 0, 0, 0];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMOVSXWD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i32; 4] = [0x7FFF, -0x8000, -1, 0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = i32::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovzxwd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let src: [u16; 8] = [0x7FFF, 0x8000, 0xFFFF, 0x0000, 0, 0, 0, 0];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMOVZXWD_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u32; 4] = [0x00007FFF, 0x00008000, 0x0000FFFF, 0x00000000];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = u32::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovsxdq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMOVSXDQ: sign-extend low 2 dwords to 2 qwords
+    let src: [i32; 4] = [0x7FFFFFFF, -0x80000000, 0, 0];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMOVSXDQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i64; 2] = [0x7FFFFFFF, -0x80000000_i64];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = i64::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovzxdq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let src: [u32; 4] = [0x7FFFFFFF, 0x80000000, 0, 0];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMOVZXDQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u64; 2] = [0x000000007FFFFFFF, 0x0000000080000000];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = u64::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovsxwq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMOVSXWQ: sign-extend low 2 words to 2 qwords
+    let src: [i16; 8] = [0x7FFF, -0x8000, 0, 0, 0, 0, 0, 0];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMOVSXWQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i64; 2] = [0x7FFF, -0x8000_i64];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = i64::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovzxwq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let src: [u16; 8] = [0x7FFF, 0x8000, 0, 0, 0, 0, 0, 0];
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMOVZXWQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u64; 2] = [0x0000000000007FFF, 0x0000000000008000];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = u64::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovsxbq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PMOVSXBQ: sign-extend low 2 bytes to 2 qwords
+    let src: [i8; 16] = [0x7F, -0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let src_bytes: Vec<u8> = src.iter().map(|&v| v as u8).collect();
+    let initial = with_bytes(&state, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PMOVSXBQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [i64; 2] = [0x7F, -0x80_i64];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = i64::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn pmovzxbq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    let src: [u8; 16] = [0x7F, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let initial = with_bytes(&state, XMM1, &src)?;
+
+    let decoded = make_decoded(
+        forms::PMOVZXBQ_XMM_XMM,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u64; 2] = [0x000000000000007F, 0x0000000000000080];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = u64::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 immediate blend integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pblendw_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // PBLENDW: blend 8x16-bit lanes by imm8 (bit set → src, clear → dst)
+    // imm8 = 0xAA = 10101010 → lanes 1,3,5,7 from src, lanes 0,2,4,6 from dst
+    let dst: [u16; 8] = [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888];
+    let src: [u16; 8] = [0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD, 0xEEEE, 0xFFFF, 0x0000, 0x1111];
+    let mut dst_bytes = Vec::new();
+    for v in dst { dst_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &dst_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::PBLENDW_XMM_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+            imm8_operand(2, 0xAA),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [u16; 8] = [0x1111, 0xBBBB, 0x3333, 0xDDDD, 0x5555, 0xFFFF, 0x7777, 0x1111];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 2];
+        buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
+        let result = u16::from_le_bytes(buf);
+        assert_eq!(result, exp, "lane {i}: got {result:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}
+
+#[test]
+fn blendps_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // BLENDPS: blend 4x32-bit float lanes by imm8 (bit set → src, clear → dst)
+    // imm8 = 0x5 = 0101 → lanes 0,2 from src, lanes 1,3 from dst
+    let dst: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+    let src: [f32; 4] = [10.0, 20.0, 30.0, 40.0];
+    let mut dst_bytes = Vec::new();
+    for v in dst { dst_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &dst_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::BLENDPS_XMM_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+            imm8_operand(2, 0x5),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [f32; 4] = [10.0, 2.0, 30.0, 4.0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = f32::from_le_bytes(buf);
+        assert!((result - exp).abs() < 1e-6, "lane {i}: got {result}, expected {exp}");
+    }
+    Ok(())
+}
+
+#[test]
+fn blendpd_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // BLENDPD: blend 2x64-bit float lanes by imm8 (bit set → src, clear → dst)
+    // imm8 = 0x2 = 10 → lane 0 from dst, lane 1 from src
+    let dst: [f64; 2] = [1.0, 2.0];
+    let src: [f64; 2] = [10.0, 20.0];
+    let mut dst_bytes = Vec::new();
+    for v in dst { dst_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut src_bytes = Vec::new();
+    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &dst_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &src_bytes)?;
+
+    let decoded = make_decoded(
+        forms::BLENDPD_XMM_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+            imm8_operand(2, 0x2),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let expected: [f64; 2] = [1.0, 20.0];
+    for (i, &exp) in expected.iter().enumerate() {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = f64::from_le_bytes(buf);
+        assert!((result - exp).abs() < 1e-12, "lane {i}: got {result}, expected {exp}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 packed dot product integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dpps_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // DPPS: dot product of 4x32-bit floats with selection/broadcast by imm8
+    // imm8 = 0xFF: multiply all 4 lanes, sum, broadcast to all 4 output lanes
+    // src1 = [1.0, 2.0, 3.0, 4.0], src2 = [5.0, 6.0, 7.0, 8.0]
+    // dot = 1*5 + 2*6 + 3*7 + 4*8 = 5+12+21+32 = 70.0
+    let src1: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+    let src2: [f32; 4] = [5.0, 6.0, 7.0, 8.0];
+    let mut s1_bytes = Vec::new();
+    for v in src1 { s1_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut s2_bytes = Vec::new();
+    for v in src2 { s2_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &s1_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &s2_bytes)?;
+
+    let decoded = make_decoded(
+        forms::DPPS_XMM_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+            imm8_operand(2, 0xFF),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let dot: f32 = 70.0;
+    for i in 0..4 {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
+        let result = f32::from_le_bytes(buf);
+        assert!((result - dot).abs() < 1e-4, "lane {i}: got {result}, expected {dot}");
+    }
+    Ok(())
+}
+
+#[test]
+fn dppd_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
+    // DPPD: dot product of 2x64-bit floats with selection/broadcast by imm8
+    // imm8 = 0xFF: multiply both lanes, sum, broadcast to both output lanes
+    // src1 = [1.0, 2.0], src2 = [3.0, 4.0]
+    // dot = 1*3 + 2*4 = 3+8 = 11.0
+    let src1: [f64; 2] = [1.0, 2.0];
+    let src2: [f64; 2] = [3.0, 4.0];
+    let mut s1_bytes = Vec::new();
+    for v in src1 { s1_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let mut s2_bytes = Vec::new();
+    for v in src2 { s2_bytes.extend_from_slice(&v.to_le_bytes()); }
+    let initial = with_bytes(&state, XMM0, &s1_bytes)?;
+    let initial = with_bytes(&initial, XMM1, &s2_bytes)?;
+
+    let decoded = make_decoded(
+        forms::DPPD_XMM_XMM_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            xmm_operand(1, XMM1, 128, AccessKind::Read),
+            imm8_operand(2, 0xFF),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let dot: f64 = 11.0;
+    for i in 0..2 {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
+        let result = f64::from_le_bytes(buf);
+        assert!((result - dot).abs() < 1e-10, "lane {i}: got {result}, expected {dot}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: SSE4.1 byte extract/insert integration tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pinsrb_xmm_r32_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (RAX, 8)])?;
+    // PINSRB: insert low byte of RAX into XMM0 at byte index 2
+    // XMM0 initial = all zeros, RAX = 0xAB
+    // Expected: XMM0[2] = 0xAB, rest = 0
+    let xmm_init = [0u8; 16];
+    let initial = with_bytes(&state, XMM0, &xmm_init)?;
+    let initial = with_bytes(&initial, RAX, &0xAB_u64.to_le_bytes())?;
+
+    let decoded = make_decoded(
+        forms::PINSRB_XMM_R32_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            reg_operand(1, RAX, AccessKind::Read),
+            imm8_operand(2, 2),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    assert_eq!(bytes[2], 0xAB, "byte 2: got {:#x}, expected 0xAB", bytes[2]);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i != 2 {
+            assert_eq!(b, 0, "byte {i}: got {b:#x}, expected 0");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pinsrb_preserves_other_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let state = make_float_state(&[(XMM0, 16), (RAX, 8)])?;
+    // PINSRB: insert byte at index 5, verify other bytes preserved
+    let xmm_init: [u8; 16] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                              0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F];
+    let initial = with_bytes(&state, XMM0, &xmm_init)?;
+    let initial = with_bytes(&initial, RAX, &0xFF_u64.to_le_bytes())?;
+
+    let decoded = make_decoded(
+        forms::PINSRB_XMM_R32_IMM8,
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
+            reg_operand(1, RAX, AccessKind::Read),
+            imm8_operand(2, 5),
+        ],
+    );
+
+    let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
+    let bytes = read_bytes(&executed, XMM0)?;
+    let mut expected = xmm_init;
+    expected[5] = 0xFF;
+    for (i, (&got, &exp)) in bytes.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(got, exp, "byte {i}: got {got:#x}, expected {exp:#x}");
+    }
+    Ok(())
+}

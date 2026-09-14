@@ -488,6 +488,10 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::HSubS => out.byte(23),
                 VectorOp::MulDq => out.byte(24),
                 VectorOp::BlendV => out.byte(25),
+                VectorOp::SignExtend => out.byte(26),
+                VectorOp::ZeroExtend => out.byte(27),
+                VectorOp::BlendImm => out.byte(28),
+                VectorOp::DotF => out.byte(29),
             }
         }
         SemanticOp::Tile(op) => {
