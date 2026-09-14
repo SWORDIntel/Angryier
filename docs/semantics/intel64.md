@@ -78,7 +78,7 @@ The semantics generator is a locked goal, but it is deliberately not the first i
 
 ### Stage A — representative handwritten corpus
 
-> **Status: Partially implemented. 330 forms verified end-to-end (93 foundational integer/control-flow + 94 Phase 4a partial-write/bit-scan/32-bit forms + 143 Phase 4b SSE/SSE2/SSSE3/SSE4.1/SSE4.2 SIMD forms).**
+> **Status: Partially implemented. 339 forms verified end-to-end (93 foundational integer/control-flow + 94 Phase 4a partial-write/bit-scan/32-bit forms + 152 Phase 4b SSE/SSE2/SSSE3/SSE4.1/SSE4.2 SIMD forms).**
 
 Implemented forms (in `angryier-semantics-intel64`):
 
@@ -109,7 +109,7 @@ Implemented forms (in `angryier-semantics-intel64`):
 
 Flag coverage: ZF, SF, CF computed and written to RFLAGS (PF/AF/OF cleared, full computation pending). INC/DEC preserve CF. NEG sets CF = (operand != 0). NOT modifies no flags. TEST clears CF (logical operation). BT/BTS/BTR/BTC set CF from the tested bit. CLC/STC/CMC directly manipulate CF. ADC/SBB incorporate CF into the arithmetic and update ZF/SF/CF. CMPXCHG sets ZF from equality.
 
-Each form is exercised by integration tests covering the full pipeline: decode → provider emit → seal → lower → concrete execute (9 unit tests + 229 integration tests).
+Each form is exercised by integration tests covering the full pipeline: decode → provider emit → seal → lower → concrete execute (9 unit tests + 239 integration tests).
 
 Remaining Stage A families:
 
