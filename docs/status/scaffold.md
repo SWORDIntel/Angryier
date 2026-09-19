@@ -18,7 +18,7 @@ The repository has boundaries for shared identities, architecture/Intel 64, XED 
 | `angryier-arch-intel64` | Intel 64 registers, features, CPU profiles, parent register map, segment IDs | 447 |
 | `angryier-decode-xed` | XED normalization boundary, metadata, error types (no native FFI) | 453+205+72 |
 | `angryier-semantics` | Semantic types, ops, provider/builder traits, sealed block builder | 403+561 |
-| `angryier-ir` | AngryIR types, lowering, verification | 126+545+233 |
+| `angryier-ir` | AngryIR types, lowering (memory operands, indirect jumps, register write kinds), verification | 126+545+233 |
 | `angryier-expr` | Expression DAG, hash-consing, arena, constant folding | 701 |
 | `angryier-memory` | Layered COW memory, byte values, symbolic overlay contracts | 539 |
 | `angryier-state` | Persistent state, register state, fork, fidelity ledger, ownership | 495 |
@@ -26,7 +26,7 @@ The repository has boundaries for shared identities, architecture/Intel 64, XED 
 | `angryier-ledger` | Atomic ledger contract, epoch model, rejection classes, concurrent commit validation | 503 |
 | `angryier-solver` | Solver-neutral query/result model, result classes, canonical identity, portfolio router, batch solver, cache | 679 |
 | `angryier-jit` | JIT validity contract, code-page versioning | 144 |
-| `angryier-semantics-intel64` | Handwritten Intel 64 semantic corpus (357 forms: 93 foundational integer/control-flow + 94 Phase 4a partial-write/bit-scan/32-bit forms + 170 Phase 4b SSE/SSE2/SSSE3/SSE4.1/SSE4.2 SIMD forms including scalar/packed float with upper-lane preservation, packed integer, shifts, compares, min/max, shuffle, unpack, saturate, PMADDWD/PMADDUBSW, horizontal add/subtract, PABS/PSIGN, PMULHRSW, PCMPEQQ/PMULDQ/PBLENDVB, PMOV sign/zero extend, immediate blends, dot products, PEXTRB/PINSRB, scalar float compare with flags, packed/scalar rounding, PTEST, CRC32, dword/qword extract/insert, INSERTPS/EXTRACTPS, ROL/ROR r32 CL, CMPPS/CMPPD, MINPS/MAXPS, MOVMSKPS/PD, PMOVMSKB, HADDPS/PD/HSUBPS/PD, PMAXSQ/PMINSQ, MOVAPS/PD/UPS/UPD, MOVSS/SD, MPSADBW, PHMINPOSUW, PCMPGTQ, PSLLDQ/PSRLDQ, PANDN) | 592+370+666 |
+| `angryier-semantics-intel64` | Handwritten Intel 64 semantic corpus (363 forms: 93 foundational integer/control-flow + 94 Phase 4a partial-write/bit-scan/32-bit forms + 170 Phase 4b SSE/SSE2/SSSE3/SSE4.1/SSE4.2 SIMD forms including scalar/packed float with upper-lane preservation, packed integer, shifts, compares, min/max, shuffle, unpack, saturate, PMADDWD/PMADDUBSW, horizontal add/subtract, PABS/PSIGN, PMULHRSW, PCMPEQQ/PMULDQ/PBLENDVB, PMOV sign/zero extend, immediate blends, dot products, PEXTRB/PINSRB, scalar float compare with flags, packed/scalar rounding, PTEST, CRC32, dword/qword extract/insert, INSERTPS/EXTRACTPS, ROL/ROR r32 CL, CMPPS/CMPPD, MINPS/MAXPS, MOVMSKPS/PD, PMOVMSKB, HADDPS/PD/HSUBPS/PD, PMAXSQ/PMINSQ, MOVAPS/PD/UPS/UPD, MOVSS/SD, MPSADBW, PHMINPOSUW, PCMPGTQ, PSLLDQ/PSRLDQ, PANDN) | 592+370+666 |
 | `angryier-replay` | Replay capsule store, validator, basic replay engine with monotonic sequence | ~250 |
 | `angryier-taint` | In-memory taint engine with labels, states, promotion threshold, transform/merge/sink | ~567 |
 | `angryier-provenance` | In-memory provenance store, adaptive trace governor, batching sink, tier-based eviction | ~570 |
@@ -71,7 +71,7 @@ Without the `ffi` features, the adapter crates build and test normally (returnin
 
 ## Intentionally not implemented
 
-- **partial**: a handwritten Intel 64 semantic corpus exists (357 forms) but does not cover the full ISA; the native XED decoder in `angryier-arch-xed-ffi` covers instruction decoding but not semantic lowering;
+- **partial**: a handwritten Intel 64 semantic corpus exists (363 forms) but does not cover the full ISA; the native XED decoder in `angryier-arch-xed-ffi` covers instruction decoding but not semantic lowering;
 - page-backed COW memory implementation (contract exists, internals are scaffolded);
 - expression arena/hash-consing implementation (contract exists, arena is scaffolded);
 - **partial**: in-memory work-stealing scheduler exists; NUMA-aware OS-level scheduling remains future work;
@@ -88,7 +88,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 
 ## Test coverage
 
-43 test binaries pass (0 failures) across the workspace, 826 tests total:
+43 test binaries pass (0 failures) across the workspace, 828 tests total:
 
 | Crate | Tests |
 |---|---|
@@ -121,7 +121,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-semantic-contracts | 15 |
 | angryier-semantics | 5 |
 | angryier-semantics-gen | 14 |
-| angryier-semantics-intel64 | 9 (unit) + 258 (integration) |
+| angryier-semantics-intel64 | 11 (unit) + 258 (integration) |
 | angryier-solver | 21 (unit) + 9 (portfolio integration) |
 | angryier-solver-bitwuzla | 3 |
 | angryier-solver-bitwuzla-ffi | 4 |
@@ -133,7 +133,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-telemetry | 17 |
 | angryier-types | 3 |
 
-Feature-gated native-pipeline tests are not part of the default workspace run. `cargo test -p angryier-runtime --features xed,z3` adds 16 tests (3 test binaries) covering native XED decoding through the runtime, the XED instruction-class form mapping, real-binary end-to-end execution with SimProcedure dispatch, explicit failure for unmapped instructions and unmodeled syscalls, modeled `write`/`exit` syscalls whose captured output matches a native run of the same binary, Z3-backed branch solving that generates a new input and replays it, portfolio-routed solving through `BatchSolver`, concrete replay validation that runs the solver-generated input on the binary natively and confirms it reaches the target state, and a gcc-compiled C program (static, no libc) whose engine result matches a native run.
+Feature-gated native-pipeline tests are not part of the default workspace run. `cargo test -p angryier-runtime --features xed,z3` adds 17 tests (3 test binaries) covering native XED decoding through the runtime, the XED instruction-class form mapping, real-binary end-to-end execution with SimProcedure dispatch, explicit failure for unmapped instructions and unmodeled syscalls, modeled `write`/`exit` syscalls whose captured output matches a native run of the same binary, Z3-backed branch solving that generates a new input and replays it, portfolio-routed solving through `BatchSolver`, concrete replay validation that runs the solver-generated input on the binary natively and confirms it reaches the target state, and gcc-compiled C programs (static, no libc) built at both `-O2` and `-O0` whose engine results match native runs (the `-O0` build exercises stack frames, `call`/`ret`, and memory-immediate forms).
 
 ## Validation contract
 

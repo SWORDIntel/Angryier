@@ -105,6 +105,7 @@ fn verify_inputs(instruction: &IrInstruction, values: &[IrType]) -> Result<(), I
             require(*value)
         }
         IrOp::Branch { condition, .. } => require(*condition),
+        IrOp::JumpIndirect { target } => require(*target),
         IrOp::Constant { .. }
         | IrOp::ExprRef { .. }
         | IrOp::ReadRegister { .. }
@@ -152,7 +153,12 @@ fn expected_bytes(ty: IrType) -> Option<usize> {
 fn is_terminator(op: &IrOp) -> bool {
     matches!(
         op,
-        IrOp::Branch { .. } | IrOp::Jump { .. } | IrOp::Call { .. } | IrOp::Return | IrOp::Trap { .. }
+        IrOp::Branch { .. }
+            | IrOp::Jump { .. }
+            | IrOp::JumpIndirect { .. }
+            | IrOp::Call { .. }
+            | IrOp::Return
+            | IrOp::Trap { .. }
     )
 }
 

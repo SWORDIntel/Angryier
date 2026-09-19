@@ -1873,7 +1873,9 @@ impl SemanticProvider for PushR64 {
         let value = out.read_operand(0, U64)?;
         let eight = const_u64(out, 8)?;
         let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
-        out.side_effect(SideEffect::MemoryWrite, &[new_rsp, value])?;
+        // The decoded stack operand is reported relative to the pre-instruction
+        // RSP, so the store lands at the post-decrement stack pointer.
+        out.write_operand(1, value)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         fall_through(out, insn)?;
         Ok(receipt(43, context))
@@ -1903,14 +1905,11 @@ impl SemanticProvider for PopR64 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
+        let value = out.read_operand(1, U64)?;
         let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
-        // Emit a memory read side effect at [RSP].  The current semantic IR
-        // does not provide a value-producing load from a computed address, so
-        // the loaded value cannot be written to the destination register yet.
-        // RSP is incremented to model the stack pop.
-        out.side_effect(SideEffect::MemoryRead, &[rsp])?;
         let eight = const_u64(out, 8)?;
         let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsp, eight])?;
+        out.write_operand(0, value)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         fall_through(out, insn)?;
         Ok(receipt(44, context))
@@ -3466,7 +3465,7 @@ impl SemanticProvider for CallRel32 {
         let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
         // The return address is the instruction address + length.
         let return_addr = const_u64(out, insn.address().wrapping_add(u64::from(insn.length())))?;
-        out.side_effect(SideEffect::MemoryWrite, &[new_rsp, return_addr])?;
+        out.write_operand(2, return_addr)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         let target = out.read_operand(0, U64)?;
         out.jump(target)?;
@@ -3494,20 +3493,17 @@ impl SemanticProvider for Ret {
     fn emit(
         &self,
         context: &SemanticContext,
-        insn: &dyn DecodedInstructionView,
+        _insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        // Simplification: the corpus semantic IR does not provide a
-        // value-producing load from a computed address, so the actual
-        // return address cannot be read from [RSP]. We model only the
-        // RSP increment and fall through to the next instruction. A
-        // later pass with memory-load support will add the indirect jump.
+        // RIP = [RSP]; RSP += 8. The return address is a computed target, so
+        // the jump is indirect.
+        let target = out.read_operand(1, U64)?;
         let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
-        out.side_effect(SideEffect::MemoryRead, &[rsp])?;
         let eight = const_u64(out, 8)?;
         let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsp, eight])?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
-        fall_through(out, insn)?;
+        out.jump_indirect(target)?;
         Ok(receipt(86, context))
     }
 }
@@ -3709,5 +3705,198 @@ impl SemanticProvider for JaeRel32 {
         let next_pc = const_u64(out, insn.address().wrapping_add(u64::from(insn.length())))?;
         out.branch(cf_not_set, target, next_pc)?;
         Ok(receipt(92, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LEAVE — RSP = RBP; RBP = [RBP]
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct Leave;
+
+impl SemanticProvider for Leave {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x200)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::LEAVE
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let frame_pointer = out.read_operand(1, U64)?;
+        let saved = out.read_operand(0, U64)?;
+        out.write_operand(2, frame_pointer)?;
+        out.write_operand(1, saved)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x200, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MOV [m64], imm32
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct MovMem64Imm32;
+
+impl SemanticProvider for MovMem64Imm32 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x201)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::MOV_MEM64_IMM32
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let value = out.read_operand(1, U64)?;
+        out.write_operand(0, value)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x201, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CMP [m64], imm32 (flags only)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct CmpMem64Imm32;
+
+impl SemanticProvider for CmpMem64Imm32 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x202)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::CMP_MEM64_IMM32
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let left = out.read_operand(0, U64)?;
+        let right = out.read_operand(1, U64)?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, right])?;
+        write_sub_flags(out, result, left, right, 64)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x202, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADD [m64], r64
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct AddMem64R64;
+
+impl SemanticProvider for AddMem64R64 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x203)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::ADD_MEM64_R64
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let left = out.read_operand(0, U64)?;
+        let right = out.read_operand(1, U64)?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
+        write_add_flags(out, result, left, 64)?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x203, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADD [m64], imm32
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct AddMem64Imm32;
+
+impl SemanticProvider for AddMem64Imm32 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x204)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::ADD_MEM64_IMM32
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let left = out.read_operand(0, U64)?;
+        let right = out.read_operand(1, U64)?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
+        write_add_flags(out, result, left, 64)?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x204, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IMUL r64, [m64]
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct ImulR64Mem64;
+
+impl SemanticProvider for ImulR64Mem64 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x205)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::IMUL_R64_MEM64
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let left = out.read_operand(0, U64)?;
+        let right = out.read_operand(1, U64)?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[left, right])?;
+        write_logical_flags(out, result, 64)?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x205, context))
     }
 }

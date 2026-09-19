@@ -69,7 +69,7 @@ crates/
 | `angryier-semantics` | Implemented | Semantic types, ops, provider/builder traits, sealed block builder (561 lines) |
 | `angryier-semantic-contracts` | Implemented | In-memory sealed/derived blocks, identity transformation, fidelity acceptance policy (~400 lines) |
 | `angryier-semantics-gen` | Implemented | In-memory semantic compiler with origin parsing, coverage manifest, duplicate form rejection (~390 lines) |
-| `angryier-semantics-intel64` | Partial | Handwritten Intel 64 corpus: 357 forms (93 foundational integer/control-flow + 94 Phase 4a partial-write/bit-scan/32-bit forms + 170 Phase 4b SSE/SSE2/SSSE3/SSE4.1/SSE4.2 SIMD forms) with RFLAGS ZF/SF/CF/PF |
+| `angryier-semantics-intel64` | Partial | Handwritten Intel 64 corpus: 363 forms (93 foundational integer/control-flow + 94 Phase 4a partial-write/bit-scan/32-bit forms + 170 Phase 4b SSE/SSE2/SSSE3/SSE4.1/SSE4.2 SIMD forms) with RFLAGS ZF/SF/CF/PF |
 | `angryier-ir` | Implemented | AngryIR types, lowering (memory operand loads/stores, RIP-relative addressing, register write kinds, synthesized address temporaries), verification |
 | `angryier-expr` | Implemented | Expression DAG, hash-consing, arena, constant folding (701 lines) |
 | `angryier-memory` | Implemented | Layered COW memory, byte values, symbolic overlay contracts (539 lines) |

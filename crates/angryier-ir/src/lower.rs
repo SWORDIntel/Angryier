@@ -164,6 +164,10 @@ impl BasicSemanticLowerer {
                     let target = resolve_address_value(&value_index, decoded, target)?;
                     emitter.effect(IrOp::Jump { target });
                 }
+                SemanticEffectDefinition::JumpIndirect { target } => {
+                    let target = emitter.map(target)?;
+                    emitter.effect(IrOp::JumpIndirect { target });
+                }
                 SemanticEffectDefinition::Branch {
                     condition,
                     taken,

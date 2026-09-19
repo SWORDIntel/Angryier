@@ -883,7 +883,10 @@ fn read_concrete_bytes(process: &Process, address: Address, len: u64) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use angryier_arch::{DecodedInstruction, InstructionModifiers};
+    use angryier_arch::{
+        AccessKind, DecodedInstruction, InstructionModifiers, MemoryBase, MemoryOperand, Operand, OperandKind,
+        OperandVisibility, RegisterId, RegisterView,
+    };
 
     /// A synthetic decoder that maps byte patterns to known instructions.
     /// This lets us test the full pipeline without requiring native XED.
@@ -923,10 +926,45 @@ mod tests {
                 length,
                 form_id,
                 features: Vec::new(),
-                operands: Vec::new(),
+                operands: synthetic_operands(form_id),
                 modifiers: InstructionModifiers::default(),
             })
         }
+    }
+
+    /// Operands the synthetic decoder reports for the forms it emulates.
+    ///
+    /// `ret` reads its return address from the stack, so the decoded operand
+    /// list mirrors what a real decoder reports for `[rsp]`.
+    fn synthetic_operands(form_id: u32) -> Vec<Operand> {
+        if form_id != angryier_semantics_intel64::forms::RET {
+            return Vec::new();
+        }
+        vec![
+            Operand {
+                index: 0,
+                width_bits: 64,
+                access: AccessKind::Write,
+                visibility: OperandVisibility::Suppressed,
+                kind: OperandKind::Register(RegisterView::full(RegisterId(0x20), 64)),
+            },
+            Operand {
+                index: 1,
+                width_bits: 64,
+                access: AccessKind::Read,
+                visibility: OperandVisibility::Suppressed,
+                kind: OperandKind::Memory(MemoryOperand {
+                    memory_index: 0,
+                    address_width_bits: 64,
+                    segment: None,
+                    base: Some(MemoryBase::Register(RegisterView::full(RegisterId(4), 64))),
+                    index: None,
+                    scale: 1,
+                    displacement: 0,
+                    displacement_width_bits: 0,
+                }),
+            },
+        ]
     }
 
     /// Builds a minimal synthetic ELF64 image with given code bytes.
@@ -1036,13 +1074,24 @@ mod tests {
         assert!(matches!(outcome, StepOutcome::Stepped { pc, next_pc, .. } if pc == entry + 1 && next_pc == entry + 2));
         assert_eq!(process.pc()?, entry + 2);
 
-        // Step 3: RET at entry+2
-        // The RET semantic provider is simplified: it increments RSP and
-        // falls through to the next instruction (the actual indirect jump
-        // to the return address is deferred to a later memory-load pass).
+        // Push a return address so the indirect jump has a target (the stack
+        // pointer starts one past the end of the stack region).
+        let return_target = 0x400100_u64;
+        let stack_pointer = process.read_register(register_id::GPR_BASE + 4)? - 8;
+        process.write_register(register_id::GPR_BASE + 4, stack_pointer)?;
+        process.state.memory = process
+            .state
+            .memory
+            .write(stack_pointer, &return_target.to_le_bytes().map(ByteValue::Concrete))
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+
+        // Step 3: RET at entry+2 pops the return address and jumps to it.
         let outcome = runtime.step(&mut process)?;
-        assert!(matches!(outcome, StepOutcome::Stepped { pc, next_pc, .. } if pc == entry + 2 && next_pc == entry + 3));
-        assert_eq!(process.pc()?, entry + 3);
+        assert!(
+            matches!(outcome, StepOutcome::Stepped { pc, next_pc, .. } if pc == entry + 2 && next_pc == return_target)
+        );
+        assert_eq!(process.pc()?, return_target);
+        assert_eq!(process.read_register(register_id::GPR_BASE + 4)?, stack_pointer + 8);
 
         // Run summary.
         let summary = RunSummary {

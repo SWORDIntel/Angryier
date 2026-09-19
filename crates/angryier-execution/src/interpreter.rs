@@ -343,6 +343,13 @@ where
                 next_pc: *target,
             }));
         }
+        IrOp::JumpIndirect { target } => {
+            let target = value_address(get_value(values, *target)?)?;
+            return Ok(Some(ExecutionOutcome::Continue {
+                state: state.id,
+                next_pc: target,
+            }));
+        }
         IrOp::Return => {
             return Ok(Some(ExecutionOutcome::Terminated { state: state.id }));
         }

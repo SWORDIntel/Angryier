@@ -179,6 +179,11 @@ pub enum IrOp {
     Jump {
         target: Address,
     },
+    /// Jump to a computed address (for example `ret` popping its return
+    /// address from the stack).
+    JumpIndirect {
+        target: IrValueId,
+    },
     Call {
         target: Address,
     },

@@ -40,6 +40,11 @@ pub enum SemanticEffectDefinition {
     Jump {
         target: ValueId,
     },
+    /// Jump to a computed address (for example `ret` popping its return
+    /// address from the stack).
+    JumpIndirect {
+        target: ValueId,
+    },
     Branch {
         condition: ValueId,
         taken: ValueId,
@@ -196,6 +201,13 @@ impl SemanticBuilder for SemanticBlockBuilder {
             return Err(SemanticError::InvalidSemanticDefinition);
         }
         self.push_effect(SemanticEffectDefinition::Jump { target })
+    }
+
+    fn jump_indirect(&mut self, target: ValueId) -> Result<EffectId, SemanticError> {
+        if !self.value_exists(target) {
+            return Err(SemanticError::InvalidSemanticDefinition);
+        }
+        self.push_effect(SemanticEffectDefinition::JumpIndirect { target })
     }
 
     fn branch(&mut self, condition: ValueId, taken: ValueId, not_taken: ValueId) -> Result<EffectId, SemanticError> {
@@ -372,6 +384,10 @@ fn encode_block(
             }
             SemanticEffectDefinition::Jump { target } => {
                 out.byte(3);
+                out.u32(*target);
+            }
+            SemanticEffectDefinition::JumpIndirect { target } => {
+                out.byte(5);
                 out.u32(*target);
             }
             SemanticEffectDefinition::Branch {

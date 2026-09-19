@@ -200,8 +200,8 @@ unsafe fn operand_kind_for_name(
             Ok(map_register(reg).map(|mapped| XedOperandKind::Register(mapped.reference)))
         }
         XED_OPERAND_IMM0 | XED_OPERAND_IMM1 => Ok(Some(extract_immediate(xedd))),
-        XED_OPERAND_MEM0 => Ok(extract_memory(xedd, 0, false)),
-        XED_OPERAND_MEM1 => Ok(extract_memory(xedd, 1, false)),
+        XED_OPERAND_MEM0 => Ok(extract_memory(xedd, 0, false).map(|kind| adjust_stack_store(xedd, 0, kind))),
+        XED_OPERAND_MEM1 => Ok(extract_memory(xedd, 1, false).map(|kind| adjust_stack_store(xedd, 1, kind))),
         XED_OPERAND_AGEN => Ok(extract_memory(xedd, 0, true)),
         XED_OPERAND_RELBR => Ok(Some(extract_relative_branch(xedd))),
         XED_OPERAND_ABSBR => Ok(Some(extract_absolute_branch(xedd))),
@@ -210,6 +210,30 @@ unsafe fn operand_kind_for_name(
         // are addressing sub-operands folded into the MEM0/MEM1 entry.
         _ => Ok(None),
     }
+}
+
+/// Adjusts a stack-write memory operand so its effective address is expressed
+/// relative to the pre-instruction stack pointer.
+///
+/// XED models `push`/`call` stack slots at `[RSP]` *after* the stack pointer
+/// update, while the execution plane computes operand addresses from the
+/// pre-instruction register values. Reporting `[RSP - 8]` keeps both views
+/// consistent.
+unsafe fn adjust_stack_store(
+    xedd: *const xed_sys::xed_decoded_inst_t,
+    mem_idx: c_uint,
+    kind: XedOperandKind,
+) -> XedOperandKind {
+    let XedOperandKind::Memory(mut memory) = kind else {
+        return kind;
+    };
+    let iclass = xed_decoded_inst_get_iclass(xedd);
+    let is_stack_write = matches!(iclass, xed_sys::XED_ICLASS_PUSH | xed_sys::XED_ICLASS_CALL_NEAR);
+    let base_is_stack_pointer = xed_decoded_inst_get_base_reg(xedd, mem_idx) == xed_sys::XED_REG_RSP;
+    if is_stack_write && base_is_stack_pointer {
+        memory.displacement = memory.displacement.saturating_sub(8);
+    }
+    XedOperandKind::Memory(memory)
 }
 
 /// Extracts an immediate operand from a decoded instruction.

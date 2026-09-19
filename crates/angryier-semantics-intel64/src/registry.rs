@@ -380,6 +380,12 @@ impl Intel64CorpusRegistry {
             Arc::new(PslldqXmmImm8),
             Arc::new(PsrldqXmmImm8),
             Arc::new(PandnXmmXmm),
+            Arc::new(Leave),
+            Arc::new(MovMem64Imm32),
+            Arc::new(CmpMem64Imm32),
+            Arc::new(AddMem64R64),
+            Arc::new(AddMem64Imm32),
+            Arc::new(ImulR64Mem64),
         ];
 
         // Build form index from known form IDs. Each provider corresponds to
@@ -430,7 +436,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 357] = [
+const ALL_FORMS: [u32; 363] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -789,6 +795,12 @@ const ALL_FORMS: [u32; 357] = [
     crate::forms::PSLLDQ_XMM_IMM8,
     crate::forms::PSRLDQ_XMM_IMM8,
     crate::forms::PANDN_XMM_XMM,
+    crate::forms::LEAVE,
+    crate::forms::MOV_MEM64_IMM32,
+    crate::forms::CMP_MEM64_IMM32,
+    crate::forms::ADD_MEM64_R64,
+    crate::forms::ADD_MEM64_IMM32,
+    crate::forms::IMUL_R64_MEM64,
 ];
 
 #[cfg(test)]
@@ -814,6 +826,32 @@ mod tests {
             vector_representation: angryier_semantics::VectorRepresentation::HybridLazy,
             tile_representation: angryier_semantics::TileRepresentation::LazyChunked,
             floating_point_policy: angryier_semantics::FloatingPointPolicy::SmtFpPreferred,
+        }
+    }
+
+    #[test]
+    fn rule_ids_are_unique() {
+        // Resolution looks providers up by rule id, so a duplicate silently
+        // routes a form to the wrong provider.
+        let registry = Intel64CorpusRegistry::new(SemanticVersion(1));
+        let mut seen = std::collections::BTreeMap::new();
+        for provider in registry.providers() {
+            let id = provider.rule_id().0;
+            let previous = seen.insert(id, provider.origin());
+            assert!(previous.is_none(), "duplicate rule id {id:#x} across providers");
+        }
+    }
+
+    #[test]
+    fn every_registered_form_resolves_to_its_provider() {
+        let registry = Intel64CorpusRegistry::new(SemanticVersion(1));
+        assert_eq!(registry.providers().len(), ALL_FORMS.len());
+        for (index, form) in ALL_FORMS.iter().enumerate() {
+            let decoded = make_decoded(*form, Vec::new());
+            assert!(
+                registry.providers()[index].matches(&decoded),
+                "provider {index} does not match its registered form {form:#x}"
+            );
         }
     }
 

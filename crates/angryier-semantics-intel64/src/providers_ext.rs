@@ -1438,7 +1438,7 @@ macro_rules! mov_reg_mem_32 {
     };
 }
 
-mov_reg_mem_32!(MovR32Mem32, forms::MOV_R32_MEM32, 0x96);
+mov_reg_mem_32!(MovR32Mem32, forms::MOV_R32_MEM32, 0x206);
 mov_reg_mem_32!(MovR8Mem8, forms::MOV_R8_MEM8, 0x9B);
 
 macro_rules! mov_mem_reg_32 {
@@ -1471,7 +1471,7 @@ macro_rules! mov_mem_reg_32 {
     };
 }
 
-mov_mem_reg_32!(MovMem32R32, forms::MOV_MEM32_R32, 0x97, U32);
+mov_mem_reg_32!(MovMem32R32, forms::MOV_MEM32_R32, 0x207, U32);
 mov_mem_reg_32!(MovMem8R8, forms::MOV_MEM8_R8, 0x9C, U8);
 
 macro_rules! arith_r32_mem32 {

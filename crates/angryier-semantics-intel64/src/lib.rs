@@ -585,6 +585,24 @@ pub mod forms {
 
     // SSE2 PANDN (xmm, xmm)
     pub const PANDN_XMM_XMM: u32 = 0x0165;
+
+    // LEAVE
+    pub const LEAVE: u32 = 0x0166;
+
+    // MOV [m64], imm32
+    pub const MOV_MEM64_IMM32: u32 = 0x0167;
+
+    // CMP [m64], imm32 (flags only)
+    pub const CMP_MEM64_IMM32: u32 = 0x0168;
+
+    // ADD [m64], r64
+    pub const ADD_MEM64_R64: u32 = 0x0169;
+
+    // ADD [m64], imm32
+    pub const ADD_MEM64_IMM32: u32 = 0x016A;
+
+    // IMUL r64, [m64]
+    pub const IMUL_R64_MEM64: u32 = 0x016B;
 }
 
 /// RFLAGS bit positions used by the corpus.

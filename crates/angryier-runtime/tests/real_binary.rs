@@ -287,18 +287,19 @@ void run(void) {
 __asm__(".global _start\n_start:\n    call run\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall\n");
 "#;
 
-/// Compiles [`COMPILER_PROGRAM`] with `cc -O2` into a static ELF64 executable.
+/// Compiles [`COMPILER_PROGRAM`] with the given optimization flag into a
+/// static ELF64 executable.
 ///
 /// Returns `None` when the C toolchain is unavailable.
-fn build_compiler_binary() -> Option<(Vec<u8>, PathBuf)> {
-    let dir = temp_dir("angryier-compiler")?;
+fn build_compiler_binary_at(optimization: &str) -> Option<(Vec<u8>, PathBuf)> {
+    let dir = temp_dir(&format!("angryier-compiler-{optimization}"))?;
     let source = dir.join("program.c");
     let binary = dir.join("program.elf");
     std::fs::write(&source, COMPILER_PROGRAM).ok()?;
 
     let compiled = Command::new("cc")
+        .arg(optimization)
         .args([
-            "-O2",
             "-static",
             "-nostdlib",
             "-fno-stack-protector",
@@ -317,6 +318,50 @@ fn build_compiler_binary() -> Option<(Vec<u8>, PathBuf)> {
     }
     let bytes = std::fs::read(&binary).ok()?;
     Some((bytes, binary))
+}
+
+fn build_compiler_binary() -> Option<(Vec<u8>, PathBuf)> {
+    build_compiler_binary_at("-O2")
+}
+
+/// Runs the compiled program through the engine and requires the engine's
+/// observable result to match a native run.
+fn assert_engine_matches_native(optimization: &str, min_steps: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let Some((bytes, native_path)) = build_compiler_binary_at(optimization) else {
+        eprintln!("skipping: C toolchain unavailable");
+        return Ok(());
+    };
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_elf(&bytes)?;
+    runtime.run(&mut process, 4096)?;
+
+    assert!(process.terminated, "the exit syscall must terminate execution");
+    assert_eq!(
+        process.syscalls.exit_code(),
+        Some(0),
+        "compute(g_input) must equal 70 so the program exits 0"
+    );
+    assert!(
+        process.step_count >= min_steps,
+        "expected at least {min_steps} steps, got {}",
+        process.step_count
+    );
+
+    let native = Command::new(&native_path).output()?;
+    assert_eq!(
+        native.status.code(),
+        Some(0),
+        "native execution must agree with the engine result"
+    );
+    Ok(())
+}
+
+/// A `-O0` build exercises stack frames, `call`/`ret` with a real return
+/// address, and memory-immediate forms.
+#[test]
+fn compiler_generated_o0_binary_runs_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
+    assert_engine_matches_native("-O0", 30)
 }
 
 #[test]

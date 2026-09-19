@@ -167,7 +167,11 @@ impl<'a> SymbolicEvaluator<'a> {
                     terminated = true;
                     None
                 }
-                IrOp::Jump { .. } | IrOp::Call { .. } | IrOp::Return | IrOp::Trap { .. } => {
+                IrOp::Jump { .. }
+                | IrOp::JumpIndirect { .. }
+                | IrOp::Call { .. }
+                | IrOp::Return
+                | IrOp::Trap { .. } => {
                     terminated = true;
                     None
                 }
