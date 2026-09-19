@@ -22,7 +22,7 @@ The repository has boundaries for shared identities, architecture/Intel 64, XED 
 | `angryier-expr` | Expression DAG, hash-consing, arena, constant folding | 701 |
 | `angryier-memory` | Layered COW memory, byte values, symbolic overlay contracts | 539 |
 | `angryier-state` | Persistent state, register state, fork, fidelity ledger, ownership | 495 |
-| `angryier-execution` | Concrete interpreter with AngryIR execution | 846 |
+| `angryier-execution` | Concrete interpreter with AngryIR execution, plus single-block symbolic evaluation (`symbolic.rs`) for branch solving | 2820 + 644 |
 | `angryier-ledger` | Atomic ledger contract, epoch model, rejection classes, concurrent commit validation | 503 |
 | `angryier-solver` | Solver-neutral query/result model, result classes, canonical identity, portfolio router, batch solver, cache | 679 |
 | `angryier-jit` | JIT validity contract, code-page versioning | 144 |
@@ -35,7 +35,8 @@ The repository has boundaries for shared identities, architecture/Intel 64, XED 
 | `angryier-knowledge` | In-memory knowledge store with exact-match cache, dependency graph with transitive invalidation | ~320 |
 | `angryier-models` | In-memory environment model with operation table, fidelity enforcement, summary provider with exact lookup | ~440 |
 | `angryier-telemetry` | In-memory telemetry sink with metric aggregation, time-series recording, backpressure tracking | ~400 |
-| `angryier-loader` | In-memory image loader with sequential IDs, state importer (rejects live capture) | ~185 |
+| `angryier-loader` | ELF64 loader (headers, program headers, segments, entry point, static symbol table), in-memory image loader, state importer (rejects live capture) | 1147 |
+| `angryier-runtime` | Pipeline glue: ELF64 load → decode → semantics → AngryIR lowering → concrete interpreter → SimProcedure dispatch, with lowered-block cache, XED instruction-class form mapping (`form_map.rs`, feature-gated), symbolic trace evaluation, and Z3-backed branch solving | 1047 (+583 form map) |
 | `angryier-fuzz` | In-memory fuzz bridge with stage-gated seed/coverage/hint submission | ~290 |
 | `angryier-fusion` | In-memory fusion model with identity/constant encoders, element-wise averaging | ~430 |
 | `angryier-qihse` | In-memory QIHSE adapter with exact fetch, fingerprint vector query, duplicate rejection | ~280 |
@@ -51,7 +52,7 @@ The repository has boundaries for shared identities, architecture/Intel 64, XED 
 
 - `angryier-solver-z3-ffi` — real Z3 FFI bridge using `z3-sys` against the system `libz3`. Translates Angryier expression trees (bit-vector constants, symbols, arithmetic, comparisons, Boolean ops, ITE, concat, extract, zero/sign-extend) to Z3 ASTs, asserts path constraints and predicate, returns real `Sat`/`Unsat`/`Unknown` outcomes with model extraction. 4 tests pass.
 - `angryier-solver-bitwuzla-ffi` — real Bitwuzla FFI bridge using `bitwuzla-sys` (vendored CaDiCaL build). Translates Angryier expression trees to Bitwuzla terms, asserts path constraints and predicate, returns real `Sat`/`Unsat`/`Unknown` outcomes with binary-string model extraction. 4 tests pass.
-- `angryier-arch-xed-ffi` — real Intel XED decoder via `xed-sys` (builds Intel XED from source). Decodes Intel 64 byte sequences through `angryier-decode-xed`'s safe normalization boundary, mapping iclass/ISA-set/operands/registers to Angryier's architecture-neutral `DecodedInstruction`. 11 tests pass covering MOV/ADD/NOP/RET/PUSH/POP, memory operands, batch sweep, empty input, and invalid bytes.
+- `angryier-arch-xed-ffi` — real Intel XED decoder via `xed-sys` (builds Intel XED from source). Decodes Intel 64 byte sequences through `angryier-decode-xed`'s safe normalization boundary, mapping iclass/ISA-set/operands/registers to Angryier's architecture-neutral `DecodedInstruction`. 11 tests pass covering MOV/ADD/NOP/RET/PUSH/POP, memory operands, batch sweep, empty input, and invalid bytes. The crate also re-exports the XED instruction-class namespace (`iclass`) used by the runtime's form mapping.
 
 ## Safe adapter wiring
 
@@ -87,7 +88,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 
 ## Test coverage
 
-78 test suites pass (0 failures) across the workspace, 812 tests total:
+43 test binaries pass (0 failures) across the workspace, 819 tests total:
 
 | Crate | Tests |
 |---|---|
@@ -99,7 +100,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-core | 1 |
 | angryier-decode-xed | 6 |
 | angryier-distribution | 15 |
-| angryier-execution | 17 |
+| angryier-execution | 21 |
 | angryier-expr | 30 |
 | angryier-fusion | 14 |
 | angryier-fuzz | 13 |
@@ -108,7 +109,8 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-keystone | 13 |
 | angryier-knowledge | 23 |
 | angryier-ledger | 18 |
-| angryier-loader | 24 |
+| angryier-loader | 27 |
+| angryier-runtime | 4 |
 | angryier-memory | 41 |
 | angryier-models | 27 |
 | angryier-plugins | 9 |
@@ -120,7 +122,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-semantics | 5 |
 | angryier-semantics-gen | 14 |
 | angryier-semantics-intel64 | 9 (unit) + 258 (integration) |
-| angryier-solver | 20 |
+| angryier-solver | 20 (unit) + 9 (portfolio integration) |
 | angryier-solver-bitwuzla | 3 |
 | angryier-solver-bitwuzla-ffi | 4 |
 | angryier-solver-z3 | 3 |
@@ -130,6 +132,8 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-taint | 23 |
 | angryier-telemetry | 17 |
 | angryier-types | 3 |
+
+Feature-gated native-pipeline tests are not part of the default workspace run. `cargo test -p angryier-runtime --features xed,z3` adds 11 tests (3 test binaries) covering native XED decoding through the runtime, the XED instruction-class form mapping, real-binary end-to-end execution with SimProcedure dispatch, explicit failure for unmapped instructions, and Z3-backed branch solving that generates a new input and replays it.
 
 ## Validation contract
 

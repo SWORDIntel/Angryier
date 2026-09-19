@@ -22,12 +22,50 @@ pub struct Segment {
     pub executable: bool,
 }
 
+/// ELF symbol type: data object (`STT_OBJECT`).
+pub const STT_OBJECT: u8 = 1;
+/// ELF symbol type: function or code label (`STT_FUNC`).
+pub const STT_FUNC: u8 = 2;
+
+/// A named symbol from the image's static symbol table (`.symtab`).
+///
+/// Symbol addresses are virtual addresses as recorded in the image and can be
+/// used to hook SimProcedures or to identify function entry points.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    pub address: Address,
+    pub size: u64,
+    pub section_index: u16,
+    /// ELF symbol type (`STT_*`), e.g. [`STT_FUNC`] or [`STT_OBJECT`].
+    pub kind: u8,
+    /// ELF symbol binding (`STB_*`), e.g. 1 = global, 2 = weak.
+    pub binding: u8,
+}
+
+impl Symbol {
+    /// Returns `true` when the symbol is a function or code label.
+    pub fn is_function(&self) -> bool {
+        self.kind == STT_FUNC
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedImage {
     pub id: ImageId,
     pub entry: Address,
     pub target_profile: TargetProfileId,
     pub segments: Vec<Segment>,
+    /// Symbols parsed from the static symbol table; empty when the image has
+    /// no section headers or no `.symtab`.
+    pub symbols: Vec<Symbol>,
+}
+
+impl LoadedImage {
+    /// Looks up a symbol by exact name.
+    pub fn symbol(&self, name: &str) -> Option<&Symbol> {
+        self.symbols.iter().find(|symbol| symbol.name == name)
+    }
 }
 
 pub trait ImageLoader: Send + Sync {
@@ -97,6 +135,10 @@ const PT_LOAD: u32 = 1;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
+
+const SHT_SYMTAB: u32 = 2;
+const ELF64_SECTION_HEADER_SIZE: u64 = 64;
+const ELF64_SYMBOL_SIZE: u64 = 24;
 
 /// Reads a little-endian `u16` at `offset`.
 fn read_u16_le(src: &[u8], offset: usize) -> Result<u16, LoaderError> {
@@ -190,6 +232,7 @@ impl ImageLoader for InMemoryImageLoader {
                 writable: false,
                 executable: true,
             }],
+            symbols: Vec::new(),
         })
     }
 }
@@ -231,10 +274,132 @@ impl StateImporter for InMemoryStateImporter {
     }
 }
 
+/// Parses the static symbol table (`.symtab`) from an ELF64 image.
+///
+/// Returns an empty vector when the image has no section header table or no
+/// `SHT_SYMTAB` section. All section, symbol, and string-table offsets are
+/// validated against the input buffer; malformed tables are reported as
+/// [`LoaderError::TruncatedHeader`].
+fn parse_symbol_table(bytes: &[u8]) -> Result<Vec<Symbol>, LoaderError> {
+    // e_shoff (40..48), e_shentsize (58..60), e_shnum (60..62)
+    let shoff = read_u64_le_at(bytes, 40)?;
+    let shentsize = read_u16_le(bytes, 58)?;
+    let shnum = read_u16_le(bytes, 60)?;
+    if shoff == 0 || shnum == 0 || shentsize == 0 {
+        return Ok(Vec::new());
+    }
+    if u64::from(shentsize) < ELF64_SECTION_HEADER_SIZE {
+        return Err(LoaderError::TruncatedHeader);
+    }
+
+    let shoff_usize = usize::try_from(shoff).map_err(|_| LoaderError::TruncatedHeader)?;
+    let shentsize_usize = usize::from(shentsize);
+    let shnum_usize = usize::from(shnum);
+    let table_bytes = shnum_usize
+        .checked_mul(shentsize_usize)
+        .ok_or(LoaderError::TruncatedHeader)?;
+    let table_end = shoff_usize
+        .checked_add(table_bytes)
+        .ok_or(LoaderError::TruncatedHeader)?;
+    if table_end > bytes.len() {
+        return Err(LoaderError::TruncatedHeader);
+    }
+
+    // Locate the first SHT_SYMTAB section.
+    let mut symtab: Option<(usize, usize, u64, usize)> = None;
+    for index in 0..shnum_usize {
+        // Bounded by `table_end`: header + 64 <= table_end <= bytes.len().
+        let header = shoff_usize + index * shentsize_usize;
+        let sh_type = read_u32_le(bytes, header + 4)?;
+        if sh_type != SHT_SYMTAB {
+            continue;
+        }
+        let sh_offset = read_u64_le_at(bytes, header + 24)?;
+        let sh_size = read_u64_le_at(bytes, header + 32)?;
+        let sh_link = read_u32_le(bytes, header + 40)?;
+        let sh_entsize = read_u64_le_at(bytes, header + 56)?;
+        symtab = Some((
+            usize::try_from(sh_offset).map_err(|_| LoaderError::TruncatedHeader)?,
+            usize::try_from(sh_size).map_err(|_| LoaderError::TruncatedHeader)?,
+            sh_entsize,
+            usize::try_from(sh_link).map_err(|_| LoaderError::TruncatedHeader)?,
+        ));
+        break;
+    }
+    let Some((sym_offset, sym_size, sym_entsize, strtab_index)) = symtab else {
+        return Ok(Vec::new());
+    };
+
+    if strtab_index >= shnum_usize {
+        return Err(LoaderError::TruncatedHeader);
+    }
+    let strtab_header = shoff_usize + strtab_index * shentsize_usize;
+    let strtab_offset =
+        usize::try_from(read_u64_le_at(bytes, strtab_header + 24)?).map_err(|_| LoaderError::TruncatedHeader)?;
+    let strtab_size =
+        usize::try_from(read_u64_le_at(bytes, strtab_header + 32)?).map_err(|_| LoaderError::TruncatedHeader)?;
+    let strtab_end = strtab_offset
+        .checked_add(strtab_size)
+        .ok_or(LoaderError::TruncatedHeader)?;
+    if strtab_end > bytes.len() {
+        return Err(LoaderError::TruncatedHeader);
+    }
+    let strtab = bytes
+        .get(strtab_offset..strtab_end)
+        .ok_or(LoaderError::TruncatedHeader)?;
+
+    let entsize = if sym_entsize == 0 {
+        ELF64_SYMBOL_SIZE
+    } else {
+        sym_entsize
+    };
+    if entsize < ELF64_SYMBOL_SIZE {
+        return Err(LoaderError::TruncatedHeader);
+    }
+    let entsize_usize = usize::try_from(entsize).map_err(|_| LoaderError::TruncatedHeader)?;
+    let sym_end = sym_offset.checked_add(sym_size).ok_or(LoaderError::TruncatedHeader)?;
+    if sym_end > bytes.len() {
+        return Err(LoaderError::TruncatedHeader);
+    }
+
+    let entry_count = sym_size / entsize_usize;
+    let mut symbols = Vec::new();
+    for index in 0..entry_count {
+        // Bounded by `sym_end`: entry + 24 <= sym_end <= bytes.len().
+        let entry = sym_offset + index * entsize_usize;
+        let st_name = read_u32_le(bytes, entry)?;
+        let st_info = bytes.get(entry + 4).copied().ok_or(LoaderError::TruncatedHeader)?;
+        let st_shndx = read_u16_le(bytes, entry + 6)?;
+        let st_value = read_u64_le_at(bytes, entry + 8)?;
+        let st_size = read_u64_le_at(bytes, entry + 16)?;
+
+        let name_offset = usize::try_from(st_name).map_err(|_| LoaderError::TruncatedHeader)?;
+        let name_bytes = strtab.get(name_offset..).ok_or(LoaderError::TruncatedHeader)?;
+        let name_end = name_bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(name_bytes.len());
+        if name_end == 0 {
+            continue;
+        }
+
+        symbols.push(Symbol {
+            name: String::from_utf8_lossy(&name_bytes[..name_end]).into_owned(),
+            address: st_value,
+            size: st_size,
+            section_index: st_shndx,
+            kind: st_info & 0x0f,
+            binding: st_info >> 4,
+        });
+    }
+    Ok(symbols)
+}
+
 /// Real 64-bit ELF image loader for x86-64 binaries.
 ///
 /// Validates ELF headers and extracts all `PT_LOAD` segments, populating
-/// execution permissions and memory bounds directly from program headers.
+/// execution permissions and memory bounds directly from program headers,
+/// plus the static symbol table when present.
 pub struct Elf64Loader {
     next_id: Mutex<u64>,
 }
@@ -398,6 +563,7 @@ impl ImageLoader for Elf64Loader {
             entry: e_entry,
             target_profile: INTEL64_TARGET_PROFILE,
             segments,
+            symbols: parse_symbol_table(bytes)?,
         })
     }
 }
@@ -678,6 +844,133 @@ mod tests {
         assert!(seg.readable);
         assert!(!seg.writable);
         assert!(seg.executable);
+    }
+
+    /// Appends a `.strtab` + `.symtab` + section header table to a
+    /// program-header-only ELF and patches the ELF header to reference it.
+    fn append_symbol_table(binary: &mut Vec<u8>, symbols: &[(&str, u64, u64, u8)]) {
+        let mut strtab = vec![0u8];
+        let mut name_offsets = Vec::with_capacity(symbols.len());
+        for (name, _, _, _) in symbols {
+            name_offsets.push(strtab.len() as u32);
+            strtab.extend_from_slice(name.as_bytes());
+            strtab.push(0);
+        }
+
+        let mut symtab = vec![0u8; 24];
+        for (index, (_, address, size, info)) in symbols.iter().enumerate() {
+            symtab.extend_from_slice(&name_offsets[index].to_le_bytes());
+            symtab.push(*info);
+            symtab.push(0);
+            symtab.extend_from_slice(&1u16.to_le_bytes());
+            symtab.extend_from_slice(&address.to_le_bytes());
+            symtab.extend_from_slice(&size.to_le_bytes());
+        }
+
+        let strtab_offset = binary.len() as u64;
+        binary.extend_from_slice(&strtab);
+        let symtab_offset = binary.len() as u64;
+        binary.extend_from_slice(&symtab);
+        let shoff = binary.len() as u64;
+
+        // NULL section header.
+        binary.extend_from_slice(&[0u8; 64]);
+        // .strtab section header (SHT_STRTAB = 3).
+        let mut strtab_header = vec![0u8; 64];
+        strtab_header[4..8].copy_from_slice(&3u32.to_le_bytes());
+        strtab_header[24..32].copy_from_slice(&strtab_offset.to_le_bytes());
+        strtab_header[32..40].copy_from_slice(&(strtab.len() as u64).to_le_bytes());
+        strtab_header[48..56].copy_from_slice(&1u64.to_le_bytes());
+        binary.extend_from_slice(&strtab_header);
+        // .symtab section header (SHT_SYMTAB = 2, sh_link = 1 -> .strtab).
+        let mut symtab_header = vec![0u8; 64];
+        symtab_header[4..8].copy_from_slice(&2u32.to_le_bytes());
+        symtab_header[24..32].copy_from_slice(&symtab_offset.to_le_bytes());
+        symtab_header[32..40].copy_from_slice(&(symtab.len() as u64).to_le_bytes());
+        symtab_header[40..44].copy_from_slice(&1u32.to_le_bytes());
+        symtab_header[48..56].copy_from_slice(&1u64.to_le_bytes());
+        symtab_header[56..64].copy_from_slice(&24u64.to_le_bytes());
+        binary.extend_from_slice(&symtab_header);
+
+        // e_shoff, e_shentsize, e_shnum, e_shstrndx.
+        binary[40..48].copy_from_slice(&shoff.to_le_bytes());
+        binary[58..60].copy_from_slice(&64u16.to_le_bytes());
+        binary[60..62].copy_from_slice(&3u16.to_le_bytes());
+        binary[62..64].copy_from_slice(&0u16.to_le_bytes());
+    }
+
+    #[test]
+    fn elf64_parses_static_symbol_table() {
+        let loader = Elf64Loader::new();
+        let payload = [0x90, 0xC3];
+        let mut elf = make_elf64_binary(0x401000, false, &[(5, 0x401000, payload.len() as u64, &payload)]);
+        append_symbol_table(
+            &mut elf,
+            &[
+                ("_start", 0x401000, 2, 0x12),  // global function
+                ("counter", 0x600000, 8, 0x11), // global object
+                ("helper", 0x401002, 4, 0x02),  // local function
+            ],
+        );
+
+        let result = loader.load(&elf);
+        assert!(result.is_ok(), "ELF with symbol table should load");
+        let image = match result {
+            Ok(ref img) => img,
+            Err(_) => return,
+        };
+
+        assert_eq!(image.symbols.len(), 3);
+        let start = match image.symbol("_start") {
+            Some(symbol) => symbol,
+            None => return,
+        };
+        assert_eq!(start.address, 0x401000);
+        assert_eq!(start.size, 2);
+        assert!(start.is_function());
+        assert_eq!(start.binding, 1);
+
+        let counter = match image.symbol("counter") {
+            Some(symbol) => symbol,
+            None => return,
+        };
+        assert_eq!(counter.address, 0x600000);
+        assert_eq!(counter.size, 8);
+        assert_eq!(counter.kind, STT_OBJECT);
+
+        let helper = match image.symbol("helper") {
+            Some(symbol) => symbol,
+            None => return,
+        };
+        assert_eq!(helper.address, 0x401002);
+        assert_eq!(helper.binding, 0);
+    }
+
+    #[test]
+    fn elf64_without_sections_has_no_symbols() {
+        let loader = Elf64Loader::new();
+        let elf = make_elf64_binary(0x401000, false, &[(5, 0x401000, 1, &[0xC3])]);
+
+        let result = loader.load(&elf);
+        assert!(result.is_ok());
+        let image = match result {
+            Ok(ref img) => img,
+            Err(_) => return,
+        };
+        assert!(image.symbols.is_empty());
+    }
+
+    #[test]
+    fn elf64_rejects_out_of_range_section_table() {
+        let loader = Elf64Loader::new();
+        let mut elf = make_elf64_binary(0x401000, false, &[(5, 0x401000, 1, &[0xC3])]);
+        let bogus_shoff = (elf.len() as u64) + 0x1000;
+        elf[40..48].copy_from_slice(&bogus_shoff.to_le_bytes());
+        elf[58..60].copy_from_slice(&64u16.to_le_bytes());
+        elf[60..62].copy_from_slice(&1u16.to_le_bytes());
+
+        let result = loader.load(&elf);
+        assert_eq!(result.err(), Some(LoaderError::TruncatedHeader));
     }
 
     #[test]

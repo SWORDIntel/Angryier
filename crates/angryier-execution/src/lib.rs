@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 
 mod interpreter;
+mod symbolic;
 
 pub use interpreter::{ConcreteExecutionError, ConcreteInterpreter};
+pub use symbolic::{
+    SymbolBinding, SymbolicArena, SymbolicBlockSummary, SymbolicBranch, SymbolicEvalError, SymbolicEvaluator,
+};
 
 use angryier_ir::IrBlock;
 use angryier_types::{Address, StateId};

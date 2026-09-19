@@ -2,13 +2,13 @@
 
 > **Status:** Phases 0–3 and Phase 5 foundations are implemented. Phase 4 (handwritten semantic corpus) is partially implemented — 357 Intel 64 forms now registered covering integer arithmetic/control-flow, bit-scan/popcount, SSE/SSE2 scalar and packed float (with upper-lane preservation), SSE2 packed integer/shifts/compares, SSSE3 horizontal/absolute/sign/multiply, SSE4.1 packed extend/blend/dot-product/round/extract/insert, SSE4.1 packed float compare/min/max/movmask, SSE3 packed float horizontal add/sub, SSE4.1 64-bit min/max, packed/scalar moves, SSE4.1 MPSADBW/PHMINPOSUW, SSE4.2 PCMPGTQ, SSE2 byte shifts (PSLLDQ/PSRLDQ), SSE2 PANDN, SSE4.2 CRC32, and PTEST. All forms seal deterministically; 64-bit integer forms and the full SSE/SSE2/SSE4/SSSE3 SIMD corpus execute end-to-end through the concrete interpreter. Phase 6 foundations (replay, WAL, provenance), Phase 7 foundations (taint), Phase 9 foundations (knowledge store, QIHSE/KEYSTONE adapters, fusion model, semantic compiler), Phase 10 foundations (work-stealing scheduler, distribution codec), Phase 11 foundations (environment models, telemetry, benchmark sink, plugin registry, image loader, fuzz bridge), Phase 12 foundations (QIHSE/KEYSTONE in-memory adapters), Phase 13 foundations (fuzz bridge), Phase 14 foundations (fusion model), and Phase 16 foundations (work codec) are partially implemented in-memory.
 >
-> **Native integrations landed:** Z3 solver FFI (`angryier-solver-z3-ffi`, 4 tests, wired into safe `angryier-solver-z3` adapter behind `ffi` feature), Bitwuzla solver FFI (`angryier-solver-bitwuzla-ffi`, 4 tests, wired into safe `angryier-solver-bitwuzla` adapter behind `ffi` feature), and Intel XED decoder FFI (`angryier-arch-xed-ffi`, 11 tests, wired through `angryier-decode-xed` safe normalization boundary). All three return real SAT/UNSAT/decode outcomes and are validated end-to-end.
+> **Native integrations landed:** Z3 solver FFI (`angryier-solver-z3-ffi`, 4 tests, wired into safe `angryier-solver-z3` adapter behind `ffi` feature), Bitwuzla solver FFI (`angryier-solver-bitwuzla-ffi`, 4 tests, wired into safe `angryier-solver-bitwuzla` adapter behind `ffi` feature), and Intel XED decoder FFI (`angryier-arch-xed-ffi`, 11 tests, wired through `angryier-decode-xed` safe normalization boundary, with the XED instruction-class namespace re-exported for form mapping). All three return real SAT/UNSAT/decode outcomes; XED decode and Z3 solving are wired end-to-end through `angryier-runtime` behind the `xed` and `z3` features.
 >
-> **Validation baseline:** 812 tests, 0 failures. `cargo fmt` clean. Workspace Clippy clean with warnings denied. Workspace build clean. Default build has zero native dependencies; native backends are opt-in via Cargo features.
+> **Validation baseline:** 819 tests, 0 failures across 43 test binaries; 11 additional feature-gated tests with `cargo test -p angryier-runtime --features xed,z3`. `cargo fmt` clean. Workspace Clippy clean with warnings denied. Workspace build clean. Default build has zero native dependencies; native backends are opt-in via Cargo features.
 >
-> **Recent progress:** ELF64 parser landed (`angryier-loader`, 24 tests). SimProcedure library landed (`angryier-models`, 27 tests — strlen/strcmp/malloc/free/memcpy/memset/puts/exit stubs). Symbolic-address memory policy landed (`angryier-memory`, 41 tests — Concretize/FullArrays/RegionBased strategies, ConcretizationResolver, byte-granular COW coexistence). Solver portfolio router upgraded (`angryier-solver`, 29 tests — per-query dispatch via QueryShape classifier, CrossCheckPolicy, hard timeout enforcement, backend history tracking, 9 integration tests).
+> **Recent progress:** ELF64 parser landed (`angryier-loader`, 27 tests — segments, entry point, static symbol table). SimProcedure library landed (`angryier-models`, 27 tests — strlen/strcmp/malloc/free/memcpy/memset/puts/exit stubs). Symbolic-address memory policy landed (`angryier-memory`, 41 tests — Concretize/FullArrays/RegionBased strategies, ConcretizationResolver, byte-granular COW coexistence). Solver portfolio router upgraded (`angryier-solver`, 29 tests — per-query dispatch via QueryShape classifier, CrossCheckPolicy, hard timeout enforcement, backend history tracking, 9 integration tests). **Gate 0 landed:** native XED decode is wired into `angryier-runtime` behind the `xed` feature with an instruction-class form mapping, and a single-block symbolic evaluator (`angryier-execution::symbolic`) plus Z3-backed branch solving (`z3` feature) generate and replay new inputs on a real binary.
 >
-> **Reality check:** No real binary has ever been loaded, decoded, and executed end-to-end by this engine. The ELF64 parser, SimProcedures, symbolic-address memory, and solver router exist as components but are **not yet wired into the execution pipeline**. The 357 handwritten semantic forms are verified against the author's own expectations, not against hardware or an independent oracle. There is no CFG recovery, no state merging, no scripting layer, and no concolic fast path. The performance work done so far was measured on synthetic microbenchmarks, not on real execution traces. This roadmap has been reordered to make contact with reality — a real binary running end-to-end — before measuring multicore scaling or claiming performance wins.
+> **Reality check:** A real, statically-linked ELF64 binary now runs end-to-end through the engine. The fixture is assembled and linked by binutils at test time, loaded by the ELF64 loader (with symbol-table lookup), decoded by native Intel XED through an instruction-class form mapping, executed by the concrete interpreter, and dispatched into a SimProcedure; for the same trace the conditional branch is symbolically evaluated and solved with Z3 to generate a new input that replays into the opposite path (`cargo test -p angryier-runtime --features xed,z3`). What is still missing: dynamically-linked binaries (libc/syscall/TLS models), PE32+, broad ISA form mapping (the XED form map covers a scalar integer/control-flow subset; unmapped instructions fail explicitly as form id 0), the concolic fast path, CFG recovery, state merging, and the scripting layer. The 357 handwritten semantic forms remain verified against the author's own expectations, not against hardware or an independent oracle. Performance work is still measured on synthetic microbenchmarks, not on real execution traces. This roadmap remains ordered around contact with reality before performance claims.
 >
 > **Dual-mode architecture:** Angryier's competitive thesis is not "angr, but faster" and not "SymQEMU, but Rust." It is **both modes in one engine, sharing the same AngryIR semantics**: a concolic fast path for coverage and input generation (SymCC/QSYM-class speed), and a full symbolic exploration mode for analysis depth (angr-class capability). The two modes share XED decode, AngryIR lowering, solver portfolio, environment models, and ELF64 loading. They differ in execution engine and state representation. The engine switches per-state based on the PROVE/EXPLORE/HUNT exploration profile. This is the answer to Gate J: Angryier is the only engine that does both natively, in safe Rust, at multicore scale.
 >
@@ -47,12 +47,17 @@ A phase advances only when its exit criteria are satisfied.
 The native Z3/Bitwuzla/XED integrations are landed and wired. The next milestones on the critical path to Production 1.0, in recommended execution order:
 
 ```text
-1. Wire the pipeline  — connect Elf64Loader + SimProcedureRegistry +
-                       PersistentMemory + BatchSolver into the concrete
-                       interpreter. Load a real statically-linked x86-64
-                       binary, decode with XED, execute end-to-end, hit a
-                       SimProcedure, solve a branch, generate a new input.
-                       (Gate 0: first real binary runs end-to-end)
+1. Wire the pipeline  — DONE for the concrete path. Elf64Loader +
+                       SimProcedureRegistry + PersistentMemory + native XED
+                       decode + Z3 branch solving are wired through
+                       angryier-runtime and validated on a real
+                       statically-linked x86-64 binary that hits a
+                       SimProcedure, has its branch solved, and replays a
+                       generated input into the opposite path (Gate 0).
+                       Remaining: BatchSolver/portfolio-router integration in
+                       the execution loop, dynamically-linked binaries
+                       (libc/syscall/TLS models), and concrete replay
+                       validation against native execution.
 
 2. Phase 6 (revised)  — concolic fast path: compile AngryIR blocks into a
                        tight dispatch loop that runs a single concrete state
@@ -313,7 +318,7 @@ CUDA and OpenCL availability is detected at runtime against versioned capability
 
 # Phase 1 — Loader + Intel 64 Decode + Handwritten Semantic Corpus + Environment Modeling
 
-> **Status: partially implemented.** Architecture-neutral core trait, Intel 64 register/feature model, XED FFI adapter (`angryier-arch-xed-ffi`, 11 tests), safe normalized XED metadata boundary (`angryier-decode-xed`), normalized `DecodedInstruction`, 93-form handwritten semantic corpus, AngryIR lowering, concrete interpreter, and block cache are done. Real ELF64/PE32+ loaders, environment models (libc/syscall/SimProcedure equivalents), TLS/dynamic-linking/CRT-startup handling, and differential semantic testing harness remain future work. The current `angryier-loader` is in-memory only and rejects real binaries. The current `angryier-models` is an in-memory operation table, not a SimProcedure library.
+> **Status: partially implemented — Gate 0 landed for statically-linked binaries.** Architecture-neutral core trait, Intel 64 register/feature model, XED FFI adapter (`angryier-arch-xed-ffi`, 11 tests), safe normalized XED metadata boundary (`angryier-decode-xed`), normalized `DecodedInstruction`, 357-form handwritten semantic corpus, AngryIR lowering, concrete interpreter, block cache, ELF64 loader (`angryier-loader`, 27 tests — headers, program headers, segments, entry point, static symbol table), SimProcedure library (`angryier-models`, 27 tests — strlen/strcmp/malloc/free/memcpy/memset/puts/exit), and the end-to-end concrete pipeline (`angryier-runtime`) are done. A real statically-linked ELF64 binary runs end-to-end: loaded, decoded by native XED through an instruction-class form mapping (scalar integer/control-flow subset; unmapped instructions fail explicitly as form id 0), executed, dispatched into a SimProcedure, with a conditional branch symbolically evaluated and solved with Z3 to generate and replay a new input. PE32+ loading, dynamically-linked binaries (syscall stubs, TLS/dynamic-linking/CRT-startup handling), broad ISA form mapping, and the differential semantic testing harness remain future work.
 
 ## Build
 
@@ -354,7 +359,7 @@ The handwritten corpus must exercise:
 - unsupported forms fail explicitly;
 - XED decode support is never conflated with semantic support;
 - the semantic representation covers every semantic shape in the representative corpus;
-- **a real dynamically-linked binary loads, decodes, and executes end-to-end through the full pipeline** (Gate 0);
+- **a real dynamically-linked binary loads, decodes, and executes end-to-end through the full pipeline** (Gate 0 — statically-linked binaries now pass end-to-end with XED decode and branch solving; dynamically-linked binaries require the libc/syscall/TLS environment models);
 - **concrete replay validation passes** — generated inputs, when run on the real binary natively, reach the target state;
 - **differential semantic testing passes** — handwritten forms agree with the independent oracle (hardware or VEX/QEMU) on all register bits, not just the author's expectations;
 - **environment models handle at least**: `__libc_start_main` / CRT startup, `malloc`/`free`, `strlen`/`strcmp`/`memcpy`, `read`/`write`/`mmap`/`brk`/`exit` syscalls, TLS stack canary access (`fs:[0x28]`).
@@ -510,7 +515,7 @@ steal benefit =
 
 # Phase 6 — Concolic Fast Path + Symbolic Shadows + Dual-Mode Execution
 
-> **Status: foundations implemented.** In-memory taint engine with labels, states, promotion threshold, transform/merge/sink is done. The concolic fast path, symbolic shadow builder, QSYM-style path policy, Fuzzy-SAT solver tier, PROVE/EXPLORE/HUNT mode switches, and per-state fidelity ledger remain future work.
+> **Status: foundations implemented.** In-memory taint engine with labels, states, promotion threshold, transform/merge/sink is done. A single-block symbolic evaluator (`angryier-execution::symbolic`, scalar integer subset, explicit refusal of memory and vector/float operations) and Z3-backed branch solving over the executed trace (`angryier-runtime::solve_branch`) are the first narrow step toward the fast path: they produce branch-condition expressions over entry-state registers, solve them, and replay generated inputs. The concolic dispatch loop, symbolic shadow builder, QSYM-style path policy, Fuzzy-SAT solver tier, PROVE/EXPLORE/HUNT mode switches, and per-state fidelity ledger remain future work.
 >
 > **This is now the architectural centerpiece, not a Phase 6 afterthought.** The concolic fast path is what makes Angryier competitive with SymQEMU/QSYM for coverage and input generation. The full symbolic mode (current interpreter + COW + forking) is what makes Angryier competitive with angr for analysis depth. Both modes share the same AngryIR semantics. This phase builds the concolic fast path and the mode-switching infrastructure.
 >
@@ -916,7 +921,7 @@ Production 1.0 requires:
 14. **environment model library** (libc/syscall/SimProcedure equivalents, TLS, dynamic linking, CRT startup) — **partial** (SimProcedure stubs done, 27 tests; TLS/dynamic linking/CRT startup pending);
 15. **differential semantic testing** (cross-check against hardware or VEX/QEMU) — **pending** (357 forms verified against author expectations only);
 16. **scripting layer** (PyO3, embedded Lua, or Rust plugin ABI for user-authored hooks) — **pending** (CLI only);
-17. **a real binary running end-to-end** (Gate 0) — **partial** (the `angryier-runtime` crate wires the full concrete pipeline: Elf64Loader → PersistentMemory → Decoder → Intel64CorpusRegistry → SemanticBlockBuilder → SealedRichSemanticBlock → BasicSemanticLowerer → IrBlock → ConcreteInterpreter → SimProcedureRegistry; 4 end-to-end tests pass with a synthetic decoder and a real ELF64 image; real XED decode, BatchSolver integration, branch inversion, input generation, and concrete replay validation are still pending);
+17. **a real binary running end-to-end** (Gate 0) — **done for statically-linked binaries** (native XED decode through an instruction-class form mapping, the ELF64 loader with symbol lookup, SimProcedure dispatch, and Z3-backed branch solving that generates and replays a new input are all validated on a real binutils-linked ELF64 binary via `cargo test -p angryier-runtime --features xed,z3`; remaining: dynamically-linked binaries, portfolio-router/BatchSolver integration in the execution loop, and concrete replay validation against native execution);
 
 The following are **recommended but not mandatory for a minimal Production 1.0 engine**:
 
@@ -941,7 +946,7 @@ A recommended full-feature profile should enable QIHSE + KEYSTONE because cumula
 
 Proceed only if a real statically-linked x86-64 binary loads, decodes, and executes end-to-end through the full pipeline (Elf64Loader → XED decode → AngryIR → concrete interpreter → SimProcedure → BatchSolver → branch inversion → new input), with concrete replay validation. No performance claim is credible until this gate passes.
 
-**Current status: partial.** The `angryier-runtime` crate wires the concrete execution pipeline end-to-end (Elf64Loader → PersistentMemory → Decoder → Intel64CorpusRegistry → SemanticBlockBuilder → BasicSemanticLowerer → ConcreteInterpreter → SimProcedureRegistry). 4 tests pass with a synthetic decoder and a real ELF64 image. Still pending: real XED decode (requires native FFI feature), BatchSolver integration, branch inversion, new input generation, and concrete replay validation.
+**Current status: passed for statically-linked binaries; native replay validation pending.** `angryier-runtime` wires the full concrete pipeline with native XED decode (instruction-class form mapping) and Z3-backed branch solving behind the `xed`/`z3` features. `cargo test -p angryier-runtime --features xed,z3` validates, on a real binutils-linked ELF64 binary: load (with symbol-table lookup) → XED decode → AngryIR → concrete interpretation → SimProcedure dispatch → symbolic trace evaluation → branch solving → new input → replay into the opposite path. Still pending: dynamically-linked binaries (libc/syscall/TLS models), BatchSolver/portfolio-router integration in the execution loop, and concrete replay validation against native execution.
 
 ## Gate A — after Phase 6 (Concolic Fast Path)
 

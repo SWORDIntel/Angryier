@@ -194,7 +194,11 @@ fn lower_operand_read(
     // The semantic provider reads them as 64-bit addresses; the lowering computes
     // the target from the displacement. Skip the width check for this case.
     let is_relative_branch = matches!(operand.kind, OperandKind::RelativeBranch(_));
-    if !is_relative_branch && operand.width_bits != bit_width {
+    // x86 immediates are commonly encoded narrower than the operation width
+    // (imm8/imm32 sign- or zero-extended to 64 bits) and the decoded operand
+    // carries the extended value, so a narrower immediate is accepted.
+    let is_narrow_immediate = matches!(operand.kind, OperandKind::Immediate(_)) && operand.width_bits <= bit_width;
+    if !is_relative_branch && !is_narrow_immediate && operand.width_bits != bit_width {
         return Err(IrLoweringError::OperandTypeMismatch(index));
     }
 

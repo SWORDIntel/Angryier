@@ -16,12 +16,17 @@
 //! native XED (behind feature gates) and synthetic decoders for testing.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use angryier_arch::Decoder;
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
-use angryier_execution::{ConcreteInterpreter, ExecutionEngine, ExecutionMode, ExecutionOutcome};
+use angryier_execution::{
+    ConcreteInterpreter, ExecutionEngine, ExecutionMode, ExecutionOutcome, SymbolBinding, SymbolicArena,
+    SymbolicBranch, SymbolicEvaluator,
+};
+use angryier_expr::{ExprNode, ExprOp, ExprSort};
 use angryier_ir::{BasicSemanticLowerer, IrBlock};
-use angryier_loader::{Elf64Loader, ImageLoader, LoadedImage};
+use angryier_loader::{Elf64Loader, ImageLoader, LoadedImage, Symbol};
 use angryier_memory::{ByteValue, LayeredMemory, MemoryRegion, PersistentMemory};
 use angryier_models::{SimProcedureRegistry, SimResult, SimState};
 use angryier_semantics::{
@@ -29,13 +34,17 @@ use angryier_semantics::{
     VectorRepresentation,
 };
 use angryier_semantics_intel64::Intel64CorpusRegistry;
+use angryier_solver::{SolverBackend, SolverOutcomeKind, SolverQuery};
 use angryier_state::{
     ExecutionState, FidelityLedger, PersistentConstraintLineage, PersistentRegisters, RegisterState, StateOwnership,
 };
 use angryier_types::{
-    Address, BlockId, ContentIdentitySchemaVersion, FidelityProfile, ImageId, SemanticFingerprintSchemaVersion,
-    SemanticVersion, StateId, TargetProfileId,
+    Address, BlockId, ConstraintCanonicalizationVersion, ContentIdentitySchemaVersion, ExprId, FidelityProfile,
+    ImageId, SemanticFingerprintSchemaVersion, SemanticVersion, SolverQueryId, StateId, TargetProfileId,
 };
+
+#[cfg(feature = "xed")]
+pub mod form_map;
 
 /// Default stack size in bytes (64 KiB).
 const STACK_SIZE: u64 = 0x1_0000;
@@ -45,6 +54,9 @@ const STACK_BASE: Address = 0x7fff_0000_0000;
 
 /// Maximum x86-64 instruction length in bytes.
 const MAX_INSN_LEN: usize = 15;
+
+/// Maximum number of executed block addresses retained for branch solving.
+const MAX_TRACE: usize = 4096;
 
 /// Errors produced by the runtime pipeline.
 #[derive(Debug)]
@@ -67,12 +79,20 @@ pub enum RuntimeError {
     Register(String),
     /// SimProcedure dispatch failed.
     SimProcedure(String),
+    /// Symbolic evaluation failed.
+    Symbolic(String),
+    /// Solver query failed.
+    Solver(String),
     /// Execution exceeded the step budget.
     StepLimitExceeded,
     /// Forking is not supported in concrete mode.
     ForkInConcreteMode,
     /// No executable segment was found in the loaded image.
     NoExecutableSegment,
+    /// The execution trace references a block that was never cached.
+    NoCachedBlock(Address),
+    /// The execution trace contains no conditional branch.
+    NoBranchInTrace,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -87,9 +107,13 @@ impl std::fmt::Display for RuntimeError {
             Self::Memory(e) => write!(f, "memory error: {e}"),
             Self::Register(e) => write!(f, "register error: {e}"),
             Self::SimProcedure(e) => write!(f, "simproc error: {e}"),
+            Self::Symbolic(e) => write!(f, "symbolic error: {e}"),
+            Self::Solver(e) => write!(f, "solver error: {e}"),
             Self::StepLimitExceeded => write!(f, "step limit exceeded"),
             Self::ForkInConcreteMode => write!(f, "fork encountered in concrete mode"),
             Self::NoExecutableSegment => write!(f, "no executable segment in image"),
+            Self::NoCachedBlock(address) => write!(f, "no cached block for address {address:#x}"),
+            Self::NoBranchInTrace => write!(f, "execution trace contains no conditional branch"),
         }
     }
 }
@@ -123,14 +147,61 @@ pub struct RunSummary {
     pub terminated: bool,
 }
 
+/// Direction of a conditional branch to solve for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchDirection {
+    /// Ask for an input that takes the branch.
+    Taken,
+    /// Ask for an input that falls through.
+    NotTaken,
+}
+
+/// A solved input register value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegisterAssignment {
+    pub register: u32,
+    pub width: u16,
+    pub value: u64,
+}
+
+/// Result of solving a conditional branch over the executed trace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchSolution {
+    /// Solver outcome for the requested direction.
+    pub outcome: SolverOutcomeKind,
+    /// The branch that was solved.
+    pub branch: SymbolicBranch,
+    /// Input register values that satisfy the requested direction (empty for
+    /// `Unsat`/`Unknown`/`BackendError`).
+    pub assignments: Vec<RegisterAssignment>,
+    /// Entry-state symbols the branch condition depends on.
+    pub symbols: Vec<SymbolBinding>,
+    /// Solver wall time as reported by the backend.
+    pub solver_elapsed: Duration,
+}
+
+impl BranchSolution {
+    /// Returns `true` when a satisfying input was found.
+    pub fn is_sat(&self) -> bool {
+        self.outcome == SolverOutcomeKind::Sat
+    }
+}
+
 /// A loaded process with execution state.
 pub struct Process {
     pub image_id: ImageId,
     pub target_profile: TargetProfileId,
     pub entry: Address,
     pub state: ExecutionState<PersistentRegisters, PersistentMemory>,
+    /// Initial state captured at load time, used to restart with new inputs.
+    pub entry_state: ExecutionState<PersistentRegisters, PersistentMemory>,
     pub block_cache: BTreeMap<Address, IrBlock>,
     pub simproc_hooks: BTreeMap<Address, String>,
+    /// Static symbol table of the loaded image (empty when absent).
+    pub symbols: Vec<Symbol>,
+    /// Addresses of executed blocks, in execution order (bounded by
+    /// [`MAX_TRACE`]); used to build symbolic traces for branch solving.
+    pub trace: Vec<Address>,
     pub next_block_id: u64,
     pub step_count: u64,
     pub simproc_dispatches: u64,
@@ -141,6 +212,30 @@ impl Process {
     /// Registers a SimProcedure hook at a specific address.
     pub fn hook_simproc(&mut self, address: Address, name: &str) {
         self.simproc_hooks.insert(address, name.to_string());
+    }
+
+    /// Looks up a symbol by name in the loaded image.
+    pub fn symbol(&self, name: &str) -> Option<&Symbol> {
+        self.symbols.iter().find(|symbol| symbol.name == name)
+    }
+
+    /// Applies solved register assignments as a new input state.
+    pub fn apply_inputs(&mut self, assignments: &[RegisterAssignment]) -> Result<(), RuntimeError> {
+        for assignment in assignments {
+            self.write_register(assignment.register, assignment.value)?;
+        }
+        Ok(())
+    }
+
+    /// Restarts execution from the entry state captured at load time.
+    ///
+    /// The lowered-block cache and SimProcedure hooks are preserved.
+    pub fn reset_to_entry(&mut self) {
+        self.state = self.entry_state.clone();
+        self.trace.clear();
+        self.step_count = 0;
+        self.simproc_dispatches = 0;
+        self.terminated = false;
     }
 
     /// Reads the current program counter (RIP).
@@ -177,6 +272,16 @@ impl Process {
         let len = bytes.len().min(8);
         buf[..len].copy_from_slice(&bytes[..len]);
         Ok(u64::from_le_bytes(buf))
+    }
+
+    /// Writes a 64-bit value into an architectural register.
+    pub fn write_register(&mut self, register: u32, value: u64) -> Result<(), RuntimeError> {
+        self.state.registers = self
+            .state
+            .registers
+            .write(register, &value.to_le_bytes())
+            .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+        Ok(())
     }
 }
 
@@ -308,9 +413,12 @@ impl<D: Decoder> Runtime<D> {
             image_id: image.id,
             target_profile: image.target_profile,
             entry: image.entry,
+            entry_state: state.clone(),
             state,
             block_cache: BTreeMap::new(),
             simproc_hooks: BTreeMap::new(),
+            symbols: image.symbols,
+            trace: Vec::new(),
             next_block_id: 0,
             step_count: 0,
             simproc_dispatches: 0,
@@ -331,11 +439,22 @@ impl<D: Decoder> Runtime<D> {
             return self.dispatch_simproc(process, pc, &name);
         }
 
-        // Read instruction bytes from memory.
+        // Read instruction bytes from memory, bounded by the containing region
+        // so that instructions near the end of a segment do not fail the read.
+        let available = process
+            .state
+            .memory
+            .regions()
+            .iter()
+            .find(|region| pc >= region.base && pc < region.base.saturating_add(region.size))
+            .map_or(MAX_INSN_LEN, |region| {
+                usize::try_from(region.base.saturating_add(region.size).saturating_sub(pc)).unwrap_or(MAX_INSN_LEN)
+            });
+        let read_len = available.min(MAX_INSN_LEN);
         let bytes = process
             .state
             .memory
-            .read(pc, MAX_INSN_LEN)
+            .read(pc, read_len)
             .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
         let raw: Vec<u8> = bytes
             .iter()
@@ -422,6 +541,9 @@ impl<D: Decoder> Runtime<D> {
         match outcome {
             ExecutionOutcome::Continue { next_pc, .. } => {
                 process.write_pc(next_pc)?;
+                if process.trace.len() < MAX_TRACE {
+                    process.trace.push(pc);
+                }
                 Ok(StepOutcome::Stepped {
                     pc,
                     next_pc,
@@ -454,6 +576,113 @@ impl<D: Decoder> Runtime<D> {
             final_pc: process.pc()?,
             simproc_dispatches: process.simproc_dispatches,
             terminated: process.terminated,
+        })
+    }
+
+    /// Symbolically evaluates the executed trace and asks the solver for an
+    /// input that forces the last conditional branch in the requested
+    /// direction.
+    ///
+    /// The trace is interpreted as a straight-line path: blocks are evaluated
+    /// in execution order with a shared symbolic register file, so the branch
+    /// condition is expressed in terms of the entry-state registers. Blocks
+    /// containing memory accesses or operations outside the scalar integer
+    /// subset are refused explicitly rather than approximated.
+    pub fn solve_branch(
+        &self,
+        process: &Process,
+        direction: BranchDirection,
+        arena: &SymbolicArena,
+        backend: &mut dyn SolverBackend,
+        timeout: Duration,
+    ) -> Result<BranchSolution, RuntimeError> {
+        let mut evaluator = SymbolicEvaluator::new(arena);
+        let mut branch = None;
+        // Blocks that do not branch end in a fall-through jump, so evaluate
+        // every block in the trace and keep the last conditional branch: that
+        // is the branch that determined the current path.
+        for address in &process.trace {
+            let block = process
+                .block_cache
+                .get(address)
+                .ok_or(RuntimeError::NoCachedBlock(*address))?;
+            let summary = evaluator
+                .eval_block(block)
+                .map_err(|error| RuntimeError::Symbolic(error.to_string()))?;
+            if let Some(found) = summary.branch {
+                branch = Some(found);
+            }
+        }
+        let branch = branch.ok_or(RuntimeError::NoBranchInTrace)?;
+
+        // Predicate: condition == 1 for Taken, condition == 0 for NotTaken.
+        let target_bit = match direction {
+            BranchDirection::Taken => 1u8,
+            BranchDirection::NotTaken => 0u8,
+        };
+        let bit = arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(1),
+                op: ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: vec![target_bit],
+            })
+            .map_err(|error| RuntimeError::Symbolic(format!("{error:?}")))?;
+        let predicate = arena
+            .intern(ExprNode {
+                sort: ExprSort::Bool,
+                op: ExprOp::Eq,
+                operands: vec![branch.condition, bit],
+                immediate: Vec::new(),
+            })
+            .map_err(|error| RuntimeError::Symbolic(format!("{error:?}")))?;
+        let predicate_key = arena
+            .dependency_summary(predicate)
+            .map(|summary| summary.key)
+            .ok_or_else(|| RuntimeError::Symbolic("missing predicate dependency summary".into()))?;
+
+        let query = SolverQuery::canonical(
+            SolverQueryId(process.step_count),
+            &[],
+            predicate,
+            predicate_key,
+            process.target_profile,
+            ConstraintCanonicalizationVersion(1),
+            timeout,
+        )
+        .map_err(|error| RuntimeError::Solver(format!("{error:?}")))?;
+
+        let result = backend.solve(&query);
+
+        let mut assignments = Vec::new();
+        for (key, bytes) in &result.model {
+            let Ok(key) = u32::try_from(*key) else {
+                continue;
+            };
+            let expression = ExprId(key);
+            let Some(binding) = evaluator
+                .symbols()
+                .iter()
+                .find(|binding| binding.expression == expression)
+            else {
+                continue;
+            };
+            let mut buffer = [0u8; 8];
+            let len = bytes.len().min(8);
+            buffer[..len].copy_from_slice(&bytes[..len]);
+            assignments.push(RegisterAssignment {
+                register: binding.register,
+                width: binding.width,
+                value: u64::from_le_bytes(buffer),
+            });
+        }
+
+        Ok(BranchSolution {
+            outcome: result.outcome,
+            branch,
+            assignments,
+            symbols: evaluator.symbols().to_vec(),
+            solver_elapsed: result.elapsed,
         })
     }
 
@@ -520,6 +749,49 @@ impl<D: Decoder> Runtime<D> {
                 })
             }
         }
+    }
+}
+
+/// Decoder wrapper that translates raw XED instruction classes into
+/// engine-owned semantic form ids.
+///
+/// The native XED bridge reports XED instruction classes as `form_id`; the
+/// handwritten corpus matches on Angryier form ids. Instructions without exact
+/// corpus semantics are reported as [`form_map::UNMAPPED_FORM_ID`], which no
+/// registered form uses, so semantic resolution fails explicitly instead of
+/// matching an unrelated form.
+#[cfg(feature = "xed")]
+#[derive(Debug)]
+pub struct XedFormTranslator<D> {
+    inner: D,
+}
+
+#[cfg(feature = "xed")]
+impl<D> XedFormTranslator<D> {
+    /// Wraps a decoder that reports raw XED instruction classes as form ids.
+    pub fn new(inner: D) -> Self {
+        Self { inner }
+    }
+}
+
+#[cfg(feature = "xed")]
+impl<D: Decoder> Decoder for XedFormTranslator<D> {
+    type Error = D::Error;
+
+    fn decode(&self, address: Address, bytes: &[u8]) -> Result<angryier_arch::DecodedInstruction, Self::Error> {
+        let mut decoded = self.inner.decode(address, bytes)?;
+        decoded.form_id = form_map::map_form(&decoded).unwrap_or(form_map::UNMAPPED_FORM_ID);
+        Ok(decoded)
+    }
+}
+
+#[cfg(feature = "xed")]
+impl Runtime<XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>> {
+    /// Creates a runtime backed by the native Intel XED decoder, with XED
+    /// instruction classes translated into engine-owned semantic form ids.
+    pub fn with_native_xed(semantic_version: SemanticVersion, target_profile: TargetProfileId) -> Self {
+        let decoder = angryier_arch_xed_ffi::XedDecoder::with_profile_id(target_profile);
+        Runtime::new(XedFormTranslator::new(decoder), semantic_version, target_profile)
     }
 }
 

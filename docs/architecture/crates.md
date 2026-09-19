@@ -1,6 +1,6 @@
 # Crate Boundaries and Dependency Direction
 
-> **Implementation status:** All 35 crates exist with manifests and public contract boundaries. Foundation crates (types, arch, arch-intel64, decode-xed, semantics, ir, expr, memory, state, execution, solver, ledger) have real implementations. Adapter and future-phase crates (qihse, keystone, fusion, fuzz, loader, plugins, bench, semantics-gen, distribution) have in-memory foundation implementations. Native integration crates (solver-z3, solver-bitwuzla, jit, cli, semantic-contracts) remain scaffolded contracts only.
+> **Implementation status:** All 40 crates exist with manifests and public contract boundaries. Foundation crates (types, core, arch, arch-intel64, decode-xed, semantics, semantics-intel64, ir, expr, memory, state, execution, solver, ledger, loader, runtime) have real implementations. Adapter and future-phase crates (qihse, keystone, fusion, fuzz, plugins, bench, semantics-gen, semantic-contracts, storage, distribution, taint, provenance, telemetry, scheduler, knowledge, models, replay) have in-memory foundation implementations. Native integration crates (arch-xed-ffi, solver-z3-ffi, solver-bitwuzla-ffi) provide real FFI behind opt-in features, and the safe adapter crates (solver-z3, solver-bitwuzla) wire to them behind their `ffi` features. `angryier-jit` remains a validity/isolation contract only.
 
 ---
 
@@ -15,7 +15,9 @@ crates/
   angryier-arch/              ISA-neutral architecture traits
   angryier-arch-intel64/      Intel 64 registers, features, CPU profiles
   angryier-decode-xed/        Intel XED adapter; no semantic truth
+  angryier-arch-xed-ffi/      native Intel XED decoder FFI (opt-in feature)
   angryier-loader/            ELF64/PE32+ loading and image mappings
+  angryier-runtime/           pipeline glue: load -> decode -> semantics -> IR -> interpret
 
   angryier-semantics/         semantic provider/builder contracts
   angryier-semantic-contracts sealed identity + transformation/evidence contracts
@@ -32,12 +34,15 @@ crates/
   angryier-replay/            deterministic replay capsules and verifier
   angryier-solver/            solver-neutral queries, batching, portfolio policy
   angryier-solver-z3/         Z3 adapter
+  angryier-solver-z3-ffi/     native Z3 FFI bridge (opt-in feature)
   angryier-solver-bitwuzla/   Bitwuzla adapter
+  angryier-solver-bitwuzla-ffi/ native Bitwuzla FFI bridge (opt-in feature)
   angryier-scheduler/         worker pool, NUMA groups, work stealing, search
   angryier-models/            syscall/libc/environment summaries/models
 
   angryier-provenance/        fidelity ledger, Tier 0/1/2 event contracts
   angryier-telemetry/         bounded queues, WAL/spill, trace compaction
+  angryier-storage/           local WAL, checkpoint replay, retention lifecycle
   angryier-knowledge/         exact/advisory reuse + invalidation graph
   angryier-qihse/             QIHSE storage adapter
   angryier-keystone/          KEYSTONE ingestion/index adapter
@@ -59,7 +64,8 @@ crates/
 | `angryier-core` | Implemented | Engine-level context contracts |
 | `angryier-arch` | Implemented | ISA-neutral decoder traits, DecodedInstruction, operand model |
 | `angryier-arch-intel64` | Implemented | Intel 64 registers, features, CPU profiles, parent register map |
-| `angryier-decode-xed` | Implemented | XED normalization boundary, metadata, error types (no native FFI yet) |
+| `angryier-decode-xed` | Implemented | XED normalization boundary, metadata, error types (native decode lives in `angryier-arch-xed-ffi`) |
+| `angryier-arch-xed-ffi` | Implemented | Native Intel XED decoder via FFI; 11 tests; validates and normalizes all native decode output; re-exports the XED instruction-class namespace (`iclass`) for the runtime's form mapping |
 | `angryier-semantics` | Implemented | Semantic types, ops, provider/builder traits, sealed block builder (561 lines) |
 | `angryier-semantic-contracts` | Implemented | In-memory sealed/derived blocks, identity transformation, fidelity acceptance policy (~400 lines) |
 | `angryier-semantics-gen` | Implemented | In-memory semantic compiler with origin parsing, coverage manifest, duplicate form rejection (~390 lines) |
@@ -69,12 +75,14 @@ crates/
 | `angryier-memory` | Implemented | Layered COW memory, byte values, symbolic overlay contracts (539 lines) |
 | `angryier-state` | Implemented | Persistent state, register state, fork, fidelity ledger (495 lines) |
 | `angryier-taint` | Implemented | In-memory taint engine with labels, states, promotion threshold, transform/merge/sink (~567 lines) |
-| `angryier-execution` | Implemented | Concrete interpreter with AngryIR execution (803 lines) |
+| `angryier-execution` | Implemented | Concrete interpreter with AngryIR execution, plus single-block symbolic evaluation (`symbolic.rs`, 644 lines) producing branch-condition expressions |
 | `angryier-ledger` | Implemented | Atomic ledger with epoch model, rejection classes, concurrent commit validation (503 lines) |
 | `angryier-replay` | Implemented | In-memory replay capsule store, validator, basic replay engine (~250 lines) |
 | `angryier-solver` | Implemented | Solver-neutral query/result model, result classes, canonical identity, portfolio router, batch solver, cache (679 lines) |
-| `angryier-solver-z3` | Scaffolded | Fail-closed Z3 adapter stub |
-| `angryier-solver-bitwuzla` | Scaffolded | Fail-closed Bitwuzla adapter stub |
+| `angryier-solver-z3` | Implemented | Z3 adapter; real FFI behind the `ffi` feature (3 adapter + 4 FFI tests) |
+| `angryier-solver-bitwuzla` | Implemented | Bitwuzla adapter; real FFI behind the `ffi` feature (3 adapter + 4 FFI tests) |
+| `angryier-solver-z3-ffi` | Implemented | Native Z3 FFI bridge against system `libz3`; real SAT/UNSAT/UNKNOWN with model extraction |
+| `angryier-solver-bitwuzla-ffi` | Implemented | Native Bitwuzla FFI bridge (vendored CaDiCaL); real SAT/UNSAT/UNKNOWN with model extraction |
 | `angryier-scheduler` | Implemented | In-memory work-stealing scheduler with per-worker queues, NUMA distance model, greedy scoring (~834 lines) |
 | `angryier-models` | Implemented | In-memory environment model with operation table, fidelity enforcement, summary provider (~440 lines) |
 | `angryier-provenance` | Implemented | In-memory provenance store, adaptive trace governor, batching sink, tier-based eviction (~570 lines) |
@@ -88,7 +96,8 @@ crates/
 | `angryier-jit` | Scaffolded | JIT validity contract only |
 | `angryier-plugins` | Implemented | In-memory plugin registry with duplicate-name rejection, sorted lookup (~150 lines) |
 | `angryier-distribution` | Implemented | In-memory work codec with deterministic binary frame encode/decode round-trip (~560 lines) |
-| `angryier-loader` | Implemented | In-memory image loader with sequential IDs, state importer (rejects live capture) (~185 lines) |
+| `angryier-loader` | Implemented | ELF64 loader (headers, program headers, segments, entry point, static symbol table), in-memory image loader, state importer (1147 lines, 27 tests) |
+| `angryier-runtime` | Implemented | Pipeline glue: ELF64 load -> decode -> semantics -> AngryIR -> concrete interpreter -> SimProcedure dispatch, with lowered-block cache, XED form mapping (`xed` feature), symbolic trace evaluation, and Z3-backed branch solving (`z3` feature) (1047 lines, 4 default + 11 feature-gated tests) |
 | `angryier-bench` | Implemented | In-memory benchmark sink with validation, sorted records, aggregate summary (~435 lines) |
 | `angryier-cli` | Implemented | Basic CLI with version/status/crates/help subcommands (no external deps, ~430 lines) |
 

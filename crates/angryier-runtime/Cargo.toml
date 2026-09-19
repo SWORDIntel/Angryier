@@ -9,14 +9,25 @@ description = "Pipeline glue wiring loader, decoder, semantics, IR, interpreter,
 angryier-arch = { path = "../angryier-arch" }
 angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
 angryier-execution = { path = "../angryier-execution" }
+angryier-expr = { path = "../angryier-expr" }
 angryier-ir = { path = "../angryier-ir" }
 angryier-loader = { path = "../angryier-loader" }
 angryier-memory = { path = "../angryier-memory" }
 angryier-models = { path = "../angryier-models" }
 angryier-semantics = { path = "../angryier-semantics" }
 angryier-semantics-intel64 = { path = "../angryier-semantics-intel64" }
+angryier-solver = { path = "../angryier-solver" }
 angryier-state = { path = "../angryier-state" }
 angryier-types = { path = "../angryier-types" }
+angryier-arch-xed-ffi = { path = "../angryier-arch-xed-ffi", optional = true }
+angryier-solver-z3 = { path = "../angryier-solver-z3", optional = true }
+
+[features]
+default = []
+# Native Intel XED decoding plus the XED instruction-class form mapping.
+xed = ["dep:angryier-arch-xed-ffi"]
+# Native Z3 solver backend (links the system libz3) for branch solving.
+z3 = ["dep:angryier-solver-z3", "angryier-solver-z3/ffi"]
 
 [lints]
 workspace = true

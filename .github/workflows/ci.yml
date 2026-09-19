@@ -22,3 +22,5 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace --all-targets
+      - name: Test (native XED pipeline)
+        run: cargo test -p angryier-runtime --features xed
