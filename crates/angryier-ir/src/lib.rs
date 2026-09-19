@@ -11,6 +11,22 @@ use angryier_types::{Address, BlockId, CodeVersionGuard, ContentId, ExprId, Imag
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IrValueId(pub u32);
 
+/// How a register write relates to the register's parent width.
+///
+/// The decoder reports the architecture's write behavior; the execution plane
+/// applies it against whatever width the register file declares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RegisterWriteKind {
+    /// The value defines the full parent register.
+    ReplaceParent,
+    /// The value defines the low bits and the remaining bits are zeroed
+    /// (for example x86-64 32-bit writes).
+    ZeroExtendParent,
+    /// The value defines `width_bits` bits starting at `bit_offset` inside the
+    /// parent; all other bits are preserved (for example x86-64 `setcc`).
+    PreserveParent { bit_offset: u16, width_bits: u16 },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IrType {
     Bits(u16),
@@ -145,6 +161,7 @@ pub enum IrOp {
     WriteRegister {
         register: u32,
         value: IrValueId,
+        kind: RegisterWriteKind,
     },
     Load {
         address: IrValueId,

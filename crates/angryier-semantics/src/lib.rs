@@ -15,8 +15,8 @@ pub use block::{
 
 use angryier_arch::{AccessKind, DecodedInstruction};
 pub use angryier_arch::{
-    FarPointerOperand, FeatureId, ImmediateOperand, MemoryOperand, OperandKind, RegisterId, RegisterView,
-    RegisterWriteBehavior, RelativeBranchOperand,
+    FarPointerOperand, FeatureId, ImmediateOperand, MemoryBase, MemoryIndex, MemoryOperand, OperandKind, RegisterId,
+    RegisterView, RegisterWriteBehavior, RelativeBranchOperand,
 };
 use angryier_types::{
     Address, BlockId, CodeVersionGuard, FidelityProfile, ImageId, SemanticRuleId, SemanticVersion, TargetProfileId,

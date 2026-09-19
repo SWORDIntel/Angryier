@@ -1,12 +1,12 @@
 use crate::{
     BasicIrVerifier, IrBlock, IrBlockKey, IrInstruction, IrOp, IrPrimitive, IrType, IrValueId, IrVerificationError,
-    IrVerifier,
+    IrVerifier, RegisterWriteKind,
 };
 use angryier_semantic_contracts::SealedSemanticBlock;
 use angryier_semantics::{
-    BlockValidityKey, DecodedInstructionView, FloatFormat, FloatingOp, OperandKind, PrimitiveOp, RegisterWriteBehavior,
-    SealedRichSemanticBlock, SemanticEffectDefinition, SemanticLowerer, SemanticOp, SemanticType, SemanticValue,
-    SemanticValueDefinition, ValueId, VectorOp,
+    BlockValidityKey, DecodedInstructionView, FloatFormat, FloatingOp, MemoryBase, MemoryIndex, MemoryOperand,
+    OperandKind, PrimitiveOp, RegisterWriteBehavior, SealedRichSemanticBlock, SemanticEffectDefinition,
+    SemanticLowerer, SemanticOp, SemanticType, SemanticValue, SemanticValueDefinition, ValueId, VectorOp,
 };
 use angryier_types::{Address, ContentId};
 use std::collections::{BTreeMap, HashMap};
@@ -85,72 +85,103 @@ impl BasicSemanticLowerer {
             .iter()
             .map(|candidate| (candidate.id, candidate))
             .collect();
+
+        // IR value ids are allocated in production order, which lets the
+        // lowering synthesize temporaries (for example memory address
+        // arithmetic) while preserving the verifier's sequential-id invariant.
+        let mut emitter = IrEmitter::new(rich.values().len() + rich.effects().len());
+
         for value in rich.values() {
-            let op = match &value.definition {
-                SemanticValueDefinition::Constant(bytes) => IrOp::Constant {
-                    ty: lower_type(value.ty)?,
-                    bytes_le: bytes.clone(),
-                },
-                SemanticValueDefinition::ReadRegister(register) => IrOp::ReadRegister {
-                    register: register.0,
-                    ty: lower_type(value.ty)?,
-                },
-                SemanticValueDefinition::ReadOperand(index) => lower_operand_read(decoded, *index, value.ty)?,
-                SemanticValueDefinition::Operation { op, inputs } => IrOp::Primitive {
-                    op: lower_op(*op)?,
-                    ty: lower_type(value.ty)?,
-                    inputs: inputs.iter().copied().map(IrValueId).collect(),
-                },
-            };
-            instructions.push(IrInstruction {
-                result: Some(IrValueId(value.id)),
-                op,
-            });
+            match &value.definition {
+                SemanticValueDefinition::ReadOperand(index) => {
+                    match lower_operand_read(decoded, *index, value.ty, &mut emitter)? {
+                        OperandRead::Op(op) => {
+                            emitter.bind(value.id, op);
+                        }
+                        // Address-generation operands (for example `lea`) consume
+                        // the computed address itself, so the semantic value is an
+                        // alias for the address value.
+                        OperandRead::Alias(id) => emitter.alias(value.id, id),
+                    }
+                }
+                definition => {
+                    let op = match definition {
+                        SemanticValueDefinition::Constant(bytes) => IrOp::Constant {
+                            ty: lower_type(value.ty)?,
+                            bytes_le: bytes.clone(),
+                        },
+                        SemanticValueDefinition::ReadRegister(register) => IrOp::ReadRegister {
+                            register: register.0,
+                            ty: lower_type(value.ty)?,
+                        },
+                        SemanticValueDefinition::Operation { op, inputs } => IrOp::Primitive {
+                            op: lower_op(*op)?,
+                            ty: lower_type(value.ty)?,
+                            inputs: inputs
+                                .iter()
+                                .map(|input| emitter.map(*input))
+                                .collect::<Result<_, _>>()?,
+                        },
+                        SemanticValueDefinition::ReadOperand(_) => {
+                            return Err(IrLoweringError::UnsupportedValue("nested operand read"));
+                        }
+                    };
+                    emitter.bind(value.id, op);
+                }
+            }
         }
 
         for effect in rich.effects() {
-            let op = match effect.definition {
-                SemanticEffectDefinition::WriteRegister { register, value } => IrOp::WriteRegister {
-                    register: register.0,
-                    value: IrValueId(value),
-                },
+            match effect.definition {
+                SemanticEffectDefinition::WriteRegister { register, value } => {
+                    let value = emitter.map(value)?;
+                    emitter.effect(IrOp::WriteRegister {
+                        register: register.0,
+                        value,
+                        // Providers write full-width registers (for example RFLAGS).
+                        kind: RegisterWriteKind::ReplaceParent,
+                    });
+                }
                 SemanticEffectDefinition::WriteOperand { operand_index, value } => {
                     let value_type = value_index
                         .get(&value)
                         .map(|candidate| candidate.ty)
                         .ok_or(IrLoweringError::UnsupportedEffect("unknown semantic value"))?;
-                    lower_operand_write(decoded, operand_index, value, value_type)?
+                    let ir_value = emitter.map(value)?;
+                    let op = lower_operand_write(decoded, operand_index, ir_value, value_type, &mut emitter)?;
+                    emitter.effect(op);
                 }
                 SemanticEffectDefinition::SideEffect {
                     effect: angryier_semantics::SideEffect::RaiseException(vector),
                     ref inputs,
-                } if inputs.is_empty() => IrOp::Trap { vector },
+                } if inputs.is_empty() => emitter.effect(IrOp::Trap { vector }),
                 SemanticEffectDefinition::SideEffect { .. } => {
                     // Non-exception side effects (e.g. MemoryRead hints) are
                     // semantic annotations that do not affect concrete control
                     // or data flow. Skip them during IR lowering.
-                    continue;
                 }
                 SemanticEffectDefinition::Jump { target } => {
-                    let addr = resolve_address_value(&value_index, decoded, target)?;
-                    IrOp::Jump { target: addr }
+                    let target = resolve_address_value(&value_index, decoded, target)?;
+                    emitter.effect(IrOp::Jump { target });
                 }
                 SemanticEffectDefinition::Branch {
                     condition,
                     taken,
                     not_taken,
                 } => {
-                    let taken_addr = resolve_address_value(&value_index, decoded, taken)?;
-                    let not_taken_addr = resolve_address_value(&value_index, decoded, not_taken)?;
-                    IrOp::Branch {
-                        condition: IrValueId(condition),
-                        taken: taken_addr,
-                        not_taken: not_taken_addr,
-                    }
+                    let condition = emitter.map(condition)?;
+                    let taken = resolve_address_value(&value_index, decoded, taken)?;
+                    let not_taken = resolve_address_value(&value_index, decoded, not_taken)?;
+                    emitter.effect(IrOp::Branch {
+                        condition,
+                        taken,
+                        not_taken,
+                    });
                 }
-            };
-            instructions.push(IrInstruction { result: None, op });
+            }
         }
+
+        instructions.extend(emitter.finish());
 
         let block = IrBlock {
             key: IrBlockKey {
@@ -178,11 +209,156 @@ impl SemanticLowerer for BasicSemanticLowerer {
     }
 }
 
+/// Allocates IR value ids in production order and records the mapping from
+/// semantic value ids, so the lowering can synthesize temporaries (memory
+/// address arithmetic) without breaking the verifier's sequential-id rule.
+struct IrEmitter {
+    instructions: Vec<IrInstruction>,
+    value_ids: BTreeMap<ValueId, IrValueId>,
+    next: u32,
+}
+
+impl IrEmitter {
+    fn new(capacity: usize) -> Self {
+        Self {
+            instructions: Vec::with_capacity(capacity),
+            value_ids: BTreeMap::new(),
+            next: 0,
+        }
+    }
+
+    /// Produces a value and returns its IR id.
+    fn produce(&mut self, op: IrOp) -> IrValueId {
+        let id = IrValueId(self.next);
+        self.next = self.next.saturating_add(1);
+        self.instructions.push(IrInstruction { result: Some(id), op });
+        id
+    }
+
+    /// Produces the value for a semantic value id.
+    fn bind(&mut self, semantic: ValueId, op: IrOp) -> IrValueId {
+        let id = self.produce(op);
+        self.value_ids.insert(semantic, id);
+        id
+    }
+
+    /// Binds a semantic value to an already-produced IR value.
+    fn alias(&mut self, semantic: ValueId, id: IrValueId) {
+        self.value_ids.insert(semantic, id);
+    }
+
+    /// Appends an effect (an instruction without a result).
+    fn effect(&mut self, op: IrOp) {
+        self.instructions.push(IrInstruction { result: None, op });
+    }
+
+    /// Maps a semantic value id to its IR id.
+    fn map(&self, semantic: ValueId) -> Result<IrValueId, IrLoweringError> {
+        self.value_ids
+            .get(&semantic)
+            .copied()
+            .ok_or(IrLoweringError::UnsupportedValue("undefined semantic value"))
+    }
+
+    fn finish(self) -> Vec<IrInstruction> {
+        self.instructions
+    }
+}
+
+/// Emits the effective-address computation for a memory operand and returns
+/// the address value.
+///
+/// Address arithmetic uses 64-bit temporaries: base register (or the
+/// instruction pointer plus instruction length for RIP-relative addressing),
+/// plus scaled index, plus displacement.
+fn lower_memory_address(
+    decoded: &dyn DecodedInstructionView,
+    memory: &MemoryOperand,
+    emitter: &mut IrEmitter,
+) -> Result<IrValueId, IrLoweringError> {
+    let pointer_type = IrType::Bits(64);
+    let mut address: Option<IrValueId> = None;
+
+    match memory.base {
+        Some(MemoryBase::Register(view)) => {
+            let base = emitter.produce(IrOp::ReadRegister {
+                register: view.parent.0,
+                ty: pointer_type,
+            });
+            address = Some(base);
+        }
+        Some(MemoryBase::InstructionPointer { .. }) => {
+            // RIP-relative addressing is relative to the next instruction.
+            let next = decoded.address().wrapping_add(u64::from(decoded.length()));
+            let base = emitter.produce(IrOp::Constant {
+                ty: pointer_type,
+                bytes_le: next.to_le_bytes().to_vec(),
+            });
+            address = Some(base);
+        }
+        None => {}
+    }
+
+    if let Some(MemoryIndex::Register(view)) = memory.index {
+        let index = emitter.produce(IrOp::ReadRegister {
+            register: view.parent.0,
+            ty: pointer_type,
+        });
+        let scaled = if memory.scale > 1 {
+            let scale = emitter.produce(IrOp::Constant {
+                ty: pointer_type,
+                bytes_le: u64::from(memory.scale).to_le_bytes().to_vec(),
+            });
+            emitter.produce(IrOp::Primitive {
+                op: IrPrimitive::Mul,
+                ty: pointer_type,
+                inputs: vec![index, scale],
+            })
+        } else {
+            index
+        };
+        address = Some(match address {
+            Some(base) => emitter.produce(IrOp::Primitive {
+                op: IrPrimitive::Add,
+                ty: pointer_type,
+                inputs: vec![base, scaled],
+            }),
+            None => scaled,
+        });
+    }
+
+    if memory.displacement != 0 || address.is_none() {
+        let displacement = emitter.produce(IrOp::Constant {
+            ty: pointer_type,
+            bytes_le: memory.displacement.to_le_bytes().to_vec(),
+        });
+        address = Some(match address {
+            Some(base) => emitter.produce(IrOp::Primitive {
+                op: IrPrimitive::Add,
+                ty: pointer_type,
+                inputs: vec![base, displacement],
+            }),
+            None => displacement,
+        });
+    }
+
+    address.ok_or(IrLoweringError::UnsupportedValue("memory operand without an address"))
+}
+
+/// Result of lowering an operand read.
+enum OperandRead {
+    /// The final instruction producing the operand's value.
+    Op(IrOp),
+    /// The operand is an already-produced IR value (computed addresses).
+    Alias(IrValueId),
+}
+
 fn lower_operand_read(
     decoded: Option<&dyn DecodedInstructionView>,
     index: u8,
     ty: SemanticType,
-) -> Result<IrOp, IrLoweringError> {
+    emitter: &mut IrEmitter,
+) -> Result<OperandRead, IrLoweringError> {
     let decoded = decoded.ok_or(IrLoweringError::UnsupportedValue("decoded operand binding"))?;
     let operand = decoded.operand(index).ok_or(IrLoweringError::MissingOperand(index))?;
     if !operand.read {
@@ -198,33 +374,34 @@ fn lower_operand_read(
     // (imm8/imm32 sign- or zero-extended to 64 bits) and the decoded operand
     // carries the extended value, so a narrower immediate is accepted.
     let is_narrow_immediate = matches!(operand.kind, OperandKind::Immediate(_)) && operand.width_bits <= bit_width;
-    if !is_relative_branch && !is_narrow_immediate && operand.width_bits != bit_width {
+    // A memory operand's width is the width of the loaded value.
+    let is_memory = matches!(operand.kind, OperandKind::Memory(_));
+    if !is_relative_branch && !is_narrow_immediate && !is_memory && operand.width_bits != bit_width {
         return Err(IrLoweringError::OperandTypeMismatch(index));
     }
 
     match operand.kind {
-        OperandKind::Register(view)
-            if view.bit_offset == 0
-                && view.width_bits == bit_width
-                && view.write_behavior == RegisterWriteBehavior::ReplaceParent =>
-        {
-            Ok(IrOp::ReadRegister {
+        // Reads do not care about the operand's write behavior; a zero-offset
+        // view of the requested width is read from its parent register (narrow
+        // views read the parent's low bits).
+        OperandKind::Register(view) if view.bit_offset == 0 && view.width_bits == bit_width => {
+            Ok(OperandRead::Op(IrOp::ReadRegister {
                 register: view.parent.0,
                 ty: ir_type,
-            })
+            }))
         }
         OperandKind::Immediate(immediate)
             if bit_width <= 64 && matches!(ty, SemanticType::Scalar(angryier_semantics::ScalarType::BitVec(_))) =>
         {
-            Ok(IrOp::Constant {
+            Ok(OperandRead::Op(IrOp::Constant {
                 ty: ir_type,
                 bytes_le: integer_bytes(immediate.value, bit_width),
-            })
+            }))
         }
         OperandKind::RelativeBranch(branch)
             if bit_width == 64 && matches!(ty, SemanticType::Scalar(angryier_semantics::ScalarType::BitVec(64))) =>
         {
-            Ok(IrOp::Constant {
+            Ok(OperandRead::Op(IrOp::Constant {
                 ty: ir_type,
                 bytes_le: decoded
                     .address()
@@ -232,10 +409,19 @@ fn lower_operand_read(
                     .wrapping_add_signed(branch.displacement)
                     .to_le_bytes()
                     .to_vec(),
-            })
+            }))
+        }
+        OperandKind::Memory(memory) if bit_width <= 64 => {
+            let address = lower_memory_address(decoded, &memory, emitter)?;
+            Ok(OperandRead::Op(IrOp::Load { address, ty: ir_type }))
+        }
+        // `lea` reads the computed address, not the memory it points at.
+        OperandKind::AddressGeneration(memory) if bit_width == 64 => {
+            let address = lower_memory_address(decoded, &memory, emitter)?;
+            Ok(OperandRead::Alias(address))
         }
         OperandKind::Register(_) => Err(IrLoweringError::UnsupportedValue("partial register operand")),
-        OperandKind::Memory(_) => Err(IrLoweringError::UnsupportedValue("memory operand")),
+        OperandKind::Memory(_) => Err(IrLoweringError::UnsupportedValue("wide memory operand")),
         OperandKind::AddressGeneration(_) => Err(IrLoweringError::UnsupportedValue("address-generation operand")),
         OperandKind::Immediate(_) => Err(IrLoweringError::UnsupportedValue("wide immediate operand")),
         OperandKind::RelativeBranch(_) => Err(IrLoweringError::OperandTypeMismatch(index)),
@@ -246,8 +432,9 @@ fn lower_operand_read(
 fn lower_operand_write(
     decoded: Option<&dyn DecodedInstructionView>,
     index: u8,
-    value: u32,
+    value: IrValueId,
     value_type: SemanticType,
+    emitter: &mut IrEmitter,
 ) -> Result<IrOp, IrLoweringError> {
     let decoded = decoded.ok_or(IrLoweringError::UnsupportedEffect("decoded operand binding"))?;
     let operand = decoded.operand(index).ok_or(IrLoweringError::MissingOperand(index))?;
@@ -258,18 +445,39 @@ fn lower_operand_write(
         return Err(IrLoweringError::OperandTypeMismatch(index));
     }
     match operand.kind {
-        OperandKind::Register(view)
-            if view.bit_offset == 0
-                && view.width_bits == operand.width_bits
-                && view.write_behavior == RegisterWriteBehavior::ReplaceParent =>
-        {
+        OperandKind::Register(view) if view.bit_offset == 0 && view.width_bits == operand.width_bits => {
+            let kind = match view.write_behavior {
+                RegisterWriteBehavior::ReplaceParent => RegisterWriteKind::ReplaceParent,
+                RegisterWriteBehavior::ZeroExtendParent => RegisterWriteKind::ZeroExtendParent,
+                // Vector and other wide views rely on instruction semantics for
+                // the parent-register effect; they are full-width writes here.
+                RegisterWriteBehavior::SemanticDefined => RegisterWriteKind::ReplaceParent,
+                RegisterWriteBehavior::PreserveParent => RegisterWriteKind::PreserveParent {
+                    bit_offset: view.bit_offset,
+                    width_bits: view.width_bits,
+                },
+            };
             Ok(IrOp::WriteRegister {
                 register: view.parent.0,
-                value: IrValueId(value),
+                value,
+                kind,
             })
         }
+        OperandKind::Register(view) if view.write_behavior == RegisterWriteBehavior::PreserveParent => {
+            Ok(IrOp::WriteRegister {
+                register: view.parent.0,
+                value,
+                kind: RegisterWriteKind::PreserveParent {
+                    bit_offset: view.bit_offset,
+                    width_bits: view.width_bits,
+                },
+            })
+        }
+        OperandKind::Memory(memory) => {
+            let address = lower_memory_address(decoded, &memory, emitter)?;
+            Ok(IrOp::Store { address, value })
+        }
         OperandKind::Register(_) => Err(IrLoweringError::UnsupportedEffect("partial register operand")),
-        OperandKind::Memory(_) => Err(IrLoweringError::UnsupportedEffect("memory operand")),
         OperandKind::AddressGeneration(_)
         | OperandKind::Immediate(_)
         | OperandKind::RelativeBranch(_)
@@ -812,7 +1020,8 @@ mod tests {
             lowered.instructions[3].op,
             IrOp::WriteRegister {
                 register: 5,
-                value: IrValueId(2)
+                value: IrValueId(2),
+                kind: RegisterWriteKind::ReplaceParent
             }
         ));
         Ok(())

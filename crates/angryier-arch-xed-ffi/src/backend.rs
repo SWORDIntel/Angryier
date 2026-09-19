@@ -10,7 +10,7 @@ use crate::register::{map_register, map_segment, register_width};
 use angryier_decode_xed::metadata::{
     XedAccess, XedDecodedMetadata, XedEncoding, XedFarPointerOperand, XedImmediateOperand, XedInstructionModifiers,
     XedMachineMode, XedMemoryBase, XedMemoryIndex, XedMemoryOperand, XedOperand, XedOperandKind, XedOperandVisibility,
-    XedRelativeBranchOperand, XedRepetition,
+    XedRegisterRef, XedRelativeBranchOperand, XedRepetition,
 };
 use angryier_decode_xed::{XedAdapterError, XedDecodeBackend, XedDecodeConfig};
 use core::ffi::c_uint;
@@ -247,7 +247,18 @@ unsafe fn extract_memory(
     let segment = map_segment(seg_reg);
 
     let base = if base_reg != 0 {
-        map_register(base_reg).map(|mapped| XedMemoryBase::Register(mapped.reference))
+        match map_register(base_reg) {
+            // RIP-relative addressing is relative to the next instruction; the
+            // adapter models it as an instruction-pointer base rather than a
+            // general-purpose register.
+            Some(mapped) if matches!(mapped.reference, XedRegisterRef::InstructionPointer) => {
+                Some(XedMemoryBase::InstructionPointer {
+                    width_bits: address_width_bits,
+                })
+            }
+            Some(mapped) => Some(XedMemoryBase::Register(mapped.reference)),
+            None => None,
+        }
     } else {
         None
     };

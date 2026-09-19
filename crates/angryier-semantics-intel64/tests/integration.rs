@@ -8,7 +8,7 @@
 
 use angryier_arch::{
     AccessKind, DecodedInstruction, InstructionModifiers, Operand, OperandKind, OperandVisibility, RegisterId,
-    RegisterView, RelativeBranchOperand,
+    RegisterView, RegisterWriteBehavior, RelativeBranchOperand,
 };
 use angryier_arch_intel64::register_id;
 use angryier_execution::{ConcreteInterpreter, ExecutionEngine, ExecutionMode, ExecutionOutcome};
@@ -54,6 +54,23 @@ fn reg_operand(index: u8, reg: u32, access: AccessKind) -> Operand {
         access,
         visibility: OperandVisibility::Explicit,
         kind: OperandKind::Register(RegisterView::full(RegisterId(reg), 64)),
+    }
+}
+
+/// An 8-bit low-byte register operand (`al`, `dl`, ...). Real x86 `setcc`
+/// writes preserve the upper bits of the parent register.
+fn r8_operand(index: u8, reg: u32, access: AccessKind) -> Operand {
+    Operand {
+        index,
+        width_bits: 8,
+        access,
+        visibility: OperandVisibility::Explicit,
+        kind: OperandKind::Register(RegisterView::partial(
+            RegisterId(reg),
+            0,
+            8,
+            RegisterWriteBehavior::PreserveParent,
+        )),
     }
 }
 
@@ -1639,7 +1656,7 @@ fn cmc_complements_clear_carry_flag() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 fn setz_r8_sets_one_when_zf_set() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&make_state()?, RFLAGS, ZF_BIT)?;
-    let decoded = make_decoded(forms::SETZ_R8, vec![reg_operand(0, RAX, AccessKind::Write)]);
+    let decoded = make_decoded(forms::SETZ_R8, vec![r8_operand(0, RAX, AccessKind::Write)]);
 
     let (executed, outcome) = run_pipeline(&decoded, &initial)?;
 
@@ -1657,7 +1674,7 @@ fn setz_r8_sets_one_when_zf_set() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn setz_r8_sets_zero_when_zf_clear() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&make_state()?, RFLAGS, 0)?;
-    let decoded = make_decoded(forms::SETZ_R8, vec![reg_operand(0, RAX, AccessKind::Write)]);
+    let decoded = make_decoded(forms::SETZ_R8, vec![r8_operand(0, RAX, AccessKind::Write)]);
 
     let (executed, _) = run_pipeline(&decoded, &initial)?;
 
@@ -1668,7 +1685,7 @@ fn setz_r8_sets_zero_when_zf_clear() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn setnz_r8_sets_one_when_zf_clear() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&make_state()?, RFLAGS, 0)?;
-    let decoded = make_decoded(forms::SETNZ_R8, vec![reg_operand(0, RAX, AccessKind::Write)]);
+    let decoded = make_decoded(forms::SETNZ_R8, vec![r8_operand(0, RAX, AccessKind::Write)]);
 
     let (executed, outcome) = run_pipeline(&decoded, &initial)?;
 
@@ -1686,7 +1703,7 @@ fn setnz_r8_sets_one_when_zf_clear() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn setnz_r8_sets_zero_when_zf_set() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&make_state()?, RFLAGS, ZF_BIT)?;
-    let decoded = make_decoded(forms::SETNZ_R8, vec![reg_operand(0, RAX, AccessKind::Write)]);
+    let decoded = make_decoded(forms::SETNZ_R8, vec![r8_operand(0, RAX, AccessKind::Write)]);
 
     let (executed, _) = run_pipeline(&decoded, &initial)?;
 
@@ -1697,7 +1714,7 @@ fn setnz_r8_sets_zero_when_zf_set() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn setl_r8_sets_one_when_sf_set() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&make_state()?, RFLAGS, SF_BIT)?;
-    let decoded = make_decoded(forms::SETL_R8, vec![reg_operand(0, RAX, AccessKind::Write)]);
+    let decoded = make_decoded(forms::SETL_R8, vec![r8_operand(0, RAX, AccessKind::Write)]);
 
     let (executed, outcome) = run_pipeline(&decoded, &initial)?;
 
@@ -1715,7 +1732,7 @@ fn setl_r8_sets_one_when_sf_set() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn setl_r8_sets_zero_when_sf_clear() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&make_state()?, RFLAGS, 0)?;
-    let decoded = make_decoded(forms::SETL_R8, vec![reg_operand(0, RAX, AccessKind::Write)]);
+    let decoded = make_decoded(forms::SETL_R8, vec![r8_operand(0, RAX, AccessKind::Write)]);
 
     let (executed, _) = run_pipeline(&decoded, &initial)?;
 
@@ -1726,7 +1743,7 @@ fn setl_r8_sets_zero_when_sf_clear() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn setge_r8_sets_one_when_sf_clear() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&make_state()?, RFLAGS, 0)?;
-    let decoded = make_decoded(forms::SETGE_R8, vec![reg_operand(0, RAX, AccessKind::Write)]);
+    let decoded = make_decoded(forms::SETGE_R8, vec![r8_operand(0, RAX, AccessKind::Write)]);
 
     let (executed, outcome) = run_pipeline(&decoded, &initial)?;
 
@@ -1744,7 +1761,7 @@ fn setge_r8_sets_one_when_sf_clear() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn setge_r8_sets_zero_when_sf_set() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&make_state()?, RFLAGS, SF_BIT)?;
-    let decoded = make_decoded(forms::SETGE_R8, vec![reg_operand(0, RAX, AccessKind::Write)]);
+    let decoded = make_decoded(forms::SETGE_R8, vec![r8_operand(0, RAX, AccessKind::Write)]);
 
     let (executed, _) = run_pipeline(&decoded, &initial)?;
 

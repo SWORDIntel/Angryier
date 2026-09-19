@@ -11,6 +11,7 @@
 //! supported by the IR lowerer and concrete interpreter, so they work
 //! end-to-end through the full pipeline.
 
+use crate::providers::widen_to_u64;
 use crate::{forms, rflags, rule_id};
 use angryier_arch::OperandKind;
 use angryier_arch_intel64::register_id;
@@ -150,6 +151,7 @@ fn receipt(offset: u64, context: &SemanticContext) -> SemanticReceipt {
 
 /// Write ZF, SF for a 32-bit result, preserving CF.
 fn write_zf_sf_32_preserve_cf(out: &mut dyn SemanticBuilder, result: ValueId) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, 32)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
     let zero = const_u64(out, 0)?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
@@ -190,8 +192,10 @@ fn write_add_flags_32(
     left: ValueId,
     _right: ValueId,
 ) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, 32)?;
+    let left = widen_to_u64(out, left, 32)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
-    let zero = const_u32(out, 0)?;
+    let zero = const_u64(out, 0)?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
     let sf_bit = const_u64(out, u64::from(rflags::SF_BIT))?;
     let cf_bit = const_u64(out, u64::from(rflags::CF_BIT))?;
@@ -231,8 +235,11 @@ fn write_sub_flags_32(
     left: ValueId,
     right: ValueId,
 ) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, 32)?;
+    let left = widen_to_u64(out, left, 32)?;
+    let right = widen_to_u64(out, right, 32)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
-    let zero = const_u32(out, 0)?;
+    let zero = const_u64(out, 0)?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
     let sf_bit = const_u64(out, u64::from(rflags::SF_BIT))?;
     let cf_bit = const_u64(out, u64::from(rflags::CF_BIT))?;
@@ -267,8 +274,9 @@ fn write_sub_flags_32(
 
 /// Write ZF, SF for a 32-bit logical result, CF=0.
 fn write_logical_flags_32(out: &mut dyn SemanticBuilder, result: ValueId) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, 32)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
-    let zero = const_u32(out, 0)?;
+    let zero = const_u64(out, 0)?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
     let sf_bit = const_u64(out, u64::from(rflags::SF_BIT))?;
     let thirty_one = const_u64(out, 31)?;
@@ -664,7 +672,7 @@ impl SemanticProvider for NegR32 {
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
         let operand = out.read_operand(0, U32)?;
-        let zero = const_u32(out, 0)?;
+        let zero = const_u64(out, 0)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U32, &[zero, operand])?;
         // CF = (operand != 0)
         let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
@@ -859,8 +867,9 @@ macro_rules! setcc_r8 {
                 out: &mut dyn SemanticBuilder,
             ) -> Result<SemanticReceipt, SemanticError> {
                 let cond = $flag_fn(out)?;
-                let extended = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cond])?;
-                out.write_operand(0, extended)?;
+                // The condition is written as a byte: 1 when set, 0 otherwise.
+                let byte = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U8, &[cond])?;
+                out.write_operand(0, byte)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }

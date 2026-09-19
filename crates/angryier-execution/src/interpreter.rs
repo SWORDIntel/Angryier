@@ -1,6 +1,7 @@
 use crate::{ExecutionEngine, ExecutionMode, ExecutionOutcome};
 use angryier_ir::{
     BasicIrVerifier, IrBlock, IrInstruction, IrOp, IrPrimitive, IrType, IrValueId, IrVerificationError, IrVerifier,
+    RegisterWriteKind,
 };
 use angryier_memory::{ByteValue, LayeredMemory};
 use angryier_state::{ExecutionState, RegisterState};
@@ -30,6 +31,7 @@ pub enum ConcreteExecutionError<RegisterError, MemoryError> {
     },
     UnsupportedType(IrType),
     UnsupportedOperation(IrPrimitive),
+    UnsupportedRegisterWrite(u32),
     SymbolicExpression,
     SymbolicMemory(Address),
     InvalidAddress,
@@ -76,6 +78,12 @@ impl<R: core::fmt::Display, M: core::fmt::Display> core::fmt::Display for Concre
             Self::DivisionByZero => formatter.write_str("integer division by zero"),
             Self::Register(error) => write!(formatter, "register access failed: {error}"),
             Self::Memory(error) => write!(formatter, "memory access failed: {error}"),
+            Self::UnsupportedRegisterWrite(register) => {
+                write!(
+                    formatter,
+                    "partial register write to register {register} is not supported"
+                )
+            }
         }
     }
 }
@@ -210,13 +218,62 @@ where
                 .registers
                 .read(*register)
                 .map_err(ConcreteExecutionError::Register)?;
-            ensure_value_width(*ty, &bytes_le)?;
-            Some(ConcreteValue::from_bytes_le(*ty, &bytes_le))
+            // Reading a narrower view of a register takes its low bits
+            // (for example reading `edi` reads the low half of `rdi`).
+            let expected = type_bytes(*ty)?;
+            let narrowed = if bytes_le.len() > expected {
+                bytes_le.get(..expected).map(<[u8]>::to_vec)
+            } else {
+                Some(bytes_le)
+            }
+            .ok_or(ConcreteExecutionError::TypeMismatch)?;
+            ensure_value_width(*ty, &narrowed)?;
+            Some(ConcreteValue::from_bytes_le(*ty, &narrowed))
         }
-        IrOp::WriteRegister { register, value } => {
+        IrOp::WriteRegister { register, value, kind } => {
             let value = get_value(values, *value)?;
+            let bytes = value.bytes_le();
+            let written = match kind {
+                RegisterWriteKind::ReplaceParent => bytes.to_vec(),
+                RegisterWriteKind::ZeroExtendParent => {
+                    // The register file knows the parent width; zero-fill the
+                    // value up to it (x86-64 32-bit writes zero the upper half).
+                    let current = state
+                        .registers
+                        .read(*register)
+                        .map_err(ConcreteExecutionError::Register)?;
+                    if bytes.len() > current.len() {
+                        return Err(ConcreteExecutionError::TypeMismatch);
+                    }
+                    let mut widened = vec![0u8; current.len()];
+                    widened[..bytes.len()].copy_from_slice(bytes);
+                    widened
+                }
+                RegisterWriteKind::PreserveParent { bit_offset, width_bits } => {
+                    // Merge the written bits into the parent register and keep
+                    // everything else (for example x86-64 `setcc` writes `al`).
+                    let current = state
+                        .registers
+                        .read(*register)
+                        .map_err(ConcreteExecutionError::Register)?;
+                    if bit_offset % 8 != 0 {
+                        return Err(ConcreteExecutionError::UnsupportedRegisterWrite(*register));
+                    }
+                    let start = usize::from(*bit_offset / 8);
+                    let width_bytes = usize::from(*width_bits).div_ceil(8);
+                    let end = start
+                        .checked_add(width_bytes)
+                        .ok_or(ConcreteExecutionError::TypeMismatch)?;
+                    if bytes.len() != width_bytes || end > current.len() {
+                        return Err(ConcreteExecutionError::TypeMismatch);
+                    }
+                    let mut merged = current;
+                    merged[start..end].copy_from_slice(bytes);
+                    merged
+                }
+            };
             *state = state
-                .write_register(*register, value.bytes_le())
+                .write_register(*register, &written)
                 .map_err(ConcreteExecutionError::Register)?;
             None
         }
@@ -2320,6 +2377,7 @@ mod tests {
                     op: IrOp::WriteRegister {
                         register: 1,
                         value: IrValueId(2),
+                        kind: RegisterWriteKind::ReplaceParent,
                     },
                 },
                 IrInstruction {
@@ -2340,6 +2398,149 @@ mod tests {
                 next_pc: 0x2000
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn zero_extending_register_write_clears_upper_bits() -> Result<(), Box<dyn std::error::Error>> {
+        let initial = state()?;
+        // Seed the register with all ones so the zero-extension is observable.
+        let seeded = initial.write_register(1, &u64::MAX.to_le_bytes())?;
+        let candidate = block(
+            &seeded.memory,
+            vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: IrOp::Constant {
+                        ty: IrType::Bits(32),
+                        bytes_le: 0x1234_u32.to_le_bytes().to_vec(),
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::WriteRegister {
+                        register: 1,
+                        value: IrValueId(0),
+                        kind: RegisterWriteKind::ZeroExtendParent,
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Jump { target: 0x2000 },
+                },
+            ],
+        )?;
+
+        let (executed, _outcome) = interpreter().execute_block(&seeded, &candidate, ExecutionMode::Concrete)?;
+        assert_eq!(executed.registers.read(1)?, 0x1234_u64.to_le_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn narrow_register_read_takes_low_bits() -> Result<(), Box<dyn std::error::Error>> {
+        let initial = state()?;
+        let seeded = initial.write_register(1, &0xDEAD_BEEF_1234_5678_u64.to_le_bytes())?;
+        let candidate = block(
+            &seeded.memory,
+            vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: IrOp::ReadRegister {
+                        register: 1,
+                        ty: IrType::Bits(32),
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::WriteRegister {
+                        register: 1,
+                        value: IrValueId(0),
+                        kind: RegisterWriteKind::ZeroExtendParent,
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Jump { target: 0x2000 },
+                },
+            ],
+        )?;
+
+        let (executed, _outcome) = interpreter().execute_block(&seeded, &candidate, ExecutionMode::Concrete)?;
+        assert_eq!(executed.registers.read(1)?, 0x1234_5678_u64.to_le_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn partial_register_write_preserves_other_bits() -> Result<(), Box<dyn std::error::Error>> {
+        let initial = state()?;
+        let seeded = initial.write_register(1, &0xDEAD_BEEF_1234_5678_u64.to_le_bytes())?;
+        let candidate = block(
+            &seeded.memory,
+            vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: IrOp::Constant {
+                        ty: IrType::Bits(8),
+                        bytes_le: vec![0xFF],
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::WriteRegister {
+                        register: 1,
+                        value: IrValueId(0),
+                        kind: RegisterWriteKind::PreserveParent {
+                            bit_offset: 0,
+                            width_bits: 8,
+                        },
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Jump { target: 0x2000 },
+                },
+            ],
+        )?;
+
+        let (executed, _outcome) = interpreter().execute_block(&seeded, &candidate, ExecutionMode::Concrete)?;
+        assert_eq!(executed.registers.read(1)?, 0xDEAD_BEEF_1234_56FF_u64.to_le_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn high_byte_register_write_uses_bit_offset() -> Result<(), Box<dyn std::error::Error>> {
+        let initial = state()?;
+        let seeded = initial.write_register(1, &0xDEAD_BEEF_1234_5678_u64.to_le_bytes())?;
+        let candidate = block(
+            &seeded.memory,
+            vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: IrOp::Constant {
+                        ty: IrType::Bits(8),
+                        bytes_le: vec![0xAA],
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::WriteRegister {
+                        register: 1,
+                        value: IrValueId(0),
+                        kind: RegisterWriteKind::PreserveParent {
+                            bit_offset: 8,
+                            width_bits: 8,
+                        },
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Jump { target: 0x2000 },
+                },
+            ],
+        )?;
+
+        let (executed, _outcome) = interpreter().execute_block(&seeded, &candidate, ExecutionMode::Concrete)?;
+        assert_eq!(executed.registers.read(1)?, 0xDEAD_BEEF_1234_AA78_u64.to_le_bytes());
         Ok(())
     }
 
@@ -2405,6 +2606,7 @@ mod tests {
                     op: IrOp::WriteRegister {
                         register: 1,
                         value: IrValueId(2),
+                        kind: RegisterWriteKind::ReplaceParent,
                     },
                 },
                 IrInstruction {
@@ -2619,6 +2821,7 @@ mod tests {
                     op: IrOp::WriteRegister {
                         register: 1,
                         value: IrValueId(2),
+                        kind: RegisterWriteKind::ReplaceParent,
                     },
                 },
                 IrInstruction {
@@ -2667,6 +2870,7 @@ mod tests {
                     op: IrOp::WriteRegister {
                         register: 1,
                         value: IrValueId(1),
+                        kind: RegisterWriteKind::ReplaceParent,
                     },
                 },
                 IrInstruction {
@@ -2739,6 +2943,7 @@ mod tests {
                     op: IrOp::WriteRegister {
                         register: 1,
                         value: IrValueId(2),
+                        kind: RegisterWriteKind::ReplaceParent,
                     },
                 },
                 IrInstruction {

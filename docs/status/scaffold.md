@@ -22,7 +22,7 @@ The repository has boundaries for shared identities, architecture/Intel 64, XED 
 | `angryier-expr` | Expression DAG, hash-consing, arena, constant folding | 701 |
 | `angryier-memory` | Layered COW memory, byte values, symbolic overlay contracts | 539 |
 | `angryier-state` | Persistent state, register state, fork, fidelity ledger, ownership | 495 |
-| `angryier-execution` | Concrete interpreter with AngryIR execution, plus single-block symbolic evaluation (`symbolic.rs`) for branch solving | 2820 + 644 |
+| `angryier-execution` | Concrete interpreter with AngryIR execution (narrow register reads, zero-extending 32-bit writes, partial-byte writes), plus single-block symbolic evaluation (`symbolic.rs`) for branch solving | 2920 + 660 |
 | `angryier-ledger` | Atomic ledger contract, epoch model, rejection classes, concurrent commit validation | 503 |
 | `angryier-solver` | Solver-neutral query/result model, result classes, canonical identity, portfolio router, batch solver, cache | 679 |
 | `angryier-jit` | JIT validity contract, code-page versioning | 144 |
@@ -88,7 +88,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 
 ## Test coverage
 
-43 test binaries pass (0 failures) across the workspace, 822 tests total:
+43 test binaries pass (0 failures) across the workspace, 826 tests total:
 
 | Crate | Tests |
 |---|---|
@@ -100,7 +100,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-core | 1 |
 | angryier-decode-xed | 6 |
 | angryier-distribution | 15 |
-| angryier-execution | 21 |
+| angryier-execution | 25 |
 | angryier-expr | 30 |
 | angryier-fusion | 14 |
 | angryier-fuzz | 13 |
@@ -133,7 +133,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-telemetry | 17 |
 | angryier-types | 3 |
 
-Feature-gated native-pipeline tests are not part of the default workspace run. `cargo test -p angryier-runtime --features xed,z3` adds 15 tests (3 test binaries) covering native XED decoding through the runtime, the XED instruction-class form mapping, real-binary end-to-end execution with SimProcedure dispatch, explicit failure for unmapped instructions and unmodeled syscalls, modeled `write`/`exit` syscalls whose captured output matches a native run of the same binary, Z3-backed branch solving that generates a new input and replays it, portfolio-routed solving through `BatchSolver`, and concrete replay validation that runs the solver-generated input on the binary natively and confirms it reaches the target state.
+Feature-gated native-pipeline tests are not part of the default workspace run. `cargo test -p angryier-runtime --features xed,z3` adds 16 tests (3 test binaries) covering native XED decoding through the runtime, the XED instruction-class form mapping, real-binary end-to-end execution with SimProcedure dispatch, explicit failure for unmapped instructions and unmodeled syscalls, modeled `write`/`exit` syscalls whose captured output matches a native run of the same binary, Z3-backed branch solving that generates a new input and replays it, portfolio-routed solving through `BatchSolver`, concrete replay validation that runs the solver-generated input on the binary natively and confirms it reaches the target state, and a gcc-compiled C program (static, no libc) whose engine result matches a native run.
 
 ## Validation contract
 

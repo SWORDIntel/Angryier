@@ -37,6 +37,21 @@ fn const_u64(out: &mut dyn SemanticBuilder, value: u64) -> Result<ValueId, Seman
     out.constant(U64, &value.to_le_bytes())
 }
 
+/// Widens a value to 64 bits so flag computation can use 64-bit constants.
+/// x86 flag results for 32-bit operations are identical to the zero-extended
+/// 64-bit computation (ZF is "result == 0", SF is the top bit of the result).
+pub(crate) fn widen_to_u64(
+    out: &mut dyn SemanticBuilder,
+    value: ValueId,
+    width_bits: u16,
+) -> Result<ValueId, SemanticError> {
+    if width_bits >= 64 {
+        Ok(value)
+    } else {
+        out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[value])
+    }
+}
+
 /// Emits a fall-through jump to the next instruction (address + length).
 fn fall_through(out: &mut dyn SemanticBuilder, insn: &dyn DecodedInstructionView) -> Result<(), SemanticError> {
     let next_pc = const_u64(out, insn.address().wrapping_add(u64::from(insn.length())))?;
@@ -46,7 +61,14 @@ fn fall_through(out: &mut dyn SemanticBuilder, insn: &dyn DecodedInstructionView
 
 /// Computes ZF, SF, and CF for an addition and writes the new RFLAGS.
 /// `result = left + right` (wrapping). CF = carry out = `result < left` (unsigned).
-fn write_add_flags(out: &mut dyn SemanticBuilder, result: ValueId, left: ValueId) -> Result<(), SemanticError> {
+fn write_add_flags(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    width_bits: u16,
+) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, width_bits)?;
+    let left = widen_to_u64(out, left, width_bits)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
     let zero = out.constant(U64, &0u64.to_le_bytes())?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
@@ -86,7 +108,11 @@ fn write_sub_flags(
     result: ValueId,
     left: ValueId,
     right: ValueId,
+    width_bits: u16,
 ) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, width_bits)?;
+    let left = widen_to_u64(out, left, width_bits)?;
+    let right = widen_to_u64(out, right, width_bits)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
     let zero = out.constant(U64, &0u64.to_le_bytes())?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
@@ -120,7 +146,8 @@ fn write_sub_flags(
 }
 
 /// Computes ZF and SF for a logical operation (CF=0, OF=0) and writes RFLAGS.
-fn write_logical_flags(out: &mut dyn SemanticBuilder, result: ValueId) -> Result<(), SemanticError> {
+fn write_logical_flags(out: &mut dyn SemanticBuilder, result: ValueId, width_bits: u16) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, width_bits)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
     let zero = out.constant(U64, &0u64.to_le_bytes())?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
@@ -185,7 +212,12 @@ fn read_flag_not_set(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, 
 }
 
 /// Computes ZF and SF for an INC/DEC operation, preserving CF (and clearing OF).
-fn write_zf_sf_preserve_cf(out: &mut dyn SemanticBuilder, result: ValueId) -> Result<(), SemanticError> {
+fn write_zf_sf_preserve_cf(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    width_bits: u16,
+) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, width_bits)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
     let zero = out.constant(U64, &0u64.to_le_bytes())?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
@@ -225,7 +257,8 @@ fn receipt(offset: u64, context: &SemanticContext) -> SemanticReceipt {
 }
 
 /// Writes only the ZF flag from `result == 0`, preserving CF, SF, and OF.
-fn write_zf_only(out: &mut dyn SemanticBuilder, result: ValueId) -> Result<(), SemanticError> {
+fn write_zf_only(out: &mut dyn SemanticBuilder, result: ValueId, width_bits: u16) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, width_bits)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
     let zero = const_u64(out, 0)?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
@@ -310,7 +343,7 @@ impl SemanticProvider for AddR64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
-        write_add_flags(out, result, left)?;
+        write_add_flags(out, result, left, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(1, context))
@@ -343,7 +376,7 @@ impl SemanticProvider for SubR64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, right])?;
-        write_sub_flags(out, result, left, right)?;
+        write_sub_flags(out, result, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(2, context))
@@ -376,7 +409,7 @@ impl SemanticProvider for XorR64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[left, right])?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(3, context))
@@ -409,7 +442,7 @@ impl SemanticProvider for AndR64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[left, right])?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(4, context))
@@ -442,7 +475,7 @@ impl SemanticProvider for OrR64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[left, right])?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(5, context))
@@ -475,7 +508,7 @@ impl SemanticProvider for ShlR64Imm8 {
         let left = out.read_operand(0, U64)?;
         let count = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[left, count])?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(6, context))
@@ -512,7 +545,7 @@ impl SemanticProvider for ShrR64Imm8 {
             U64,
             &[left, count],
         )?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(7, context))
@@ -549,7 +582,7 @@ impl SemanticProvider for SarR64Imm8 {
             U64,
             &[left, count],
         )?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(8, context))
@@ -582,7 +615,7 @@ impl SemanticProvider for CmpR64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, right])?;
-        write_sub_flags(out, result, left, right)?;
+        write_sub_flags(out, result, left, right, 64)?;
         fall_through(out, insn)?;
         Ok(receipt(9, context))
     }
@@ -742,7 +775,7 @@ impl SemanticProvider for AddR64Imm32 {
         let imm32 = out.read_operand(1, U32)?;
         let right = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[imm32])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
-        write_add_flags(out, result, left)?;
+        write_add_flags(out, result, left, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(14, context))
@@ -776,7 +809,7 @@ impl SemanticProvider for SubR64Imm32 {
         let imm32 = out.read_operand(1, U32)?;
         let right = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[imm32])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, right])?;
-        write_sub_flags(out, result, left, right)?;
+        write_sub_flags(out, result, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(15, context))
@@ -810,7 +843,7 @@ impl SemanticProvider for CmpR64Imm32 {
         let imm32 = out.read_operand(1, U32)?;
         let right = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[imm32])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, right])?;
-        write_sub_flags(out, result, left, right)?;
+        write_sub_flags(out, result, left, right, 64)?;
         fall_through(out, insn)?;
         Ok(receipt(16, context))
     }
@@ -844,7 +877,7 @@ impl SemanticProvider for ShlR64Cl {
         let mask = const_u64(out, 0x3F)?;
         let count = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[cl, mask])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[left, count])?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(17, context))
@@ -883,7 +916,7 @@ impl SemanticProvider for ShrR64Cl {
             U64,
             &[left, count],
         )?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(18, context))
@@ -922,7 +955,7 @@ impl SemanticProvider for SarR64Cl {
             U64,
             &[left, count],
         )?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(19, context))
@@ -1147,7 +1180,7 @@ impl SemanticProvider for IncR64 {
         let left = out.read_operand(0, U64)?;
         let one = const_u64(out, 1)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, one])?;
-        write_zf_sf_preserve_cf(out, result)?;
+        write_zf_sf_preserve_cf(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(26, context))
@@ -1180,7 +1213,7 @@ impl SemanticProvider for DecR64 {
         let left = out.read_operand(0, U64)?;
         let one = const_u64(out, 1)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, one])?;
-        write_zf_sf_preserve_cf(out, result)?;
+        write_zf_sf_preserve_cf(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(27, context))
@@ -1215,7 +1248,7 @@ impl SemanticProvider for NegR64 {
         // result = 0 - operand
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[zero, operand])?;
         // write_sub_flags computes CF = left < right = 0 < operand = (operand != 0)
-        write_sub_flags(out, result, zero, operand)?;
+        write_sub_flags(out, result, zero, operand, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(28, context))
@@ -1371,7 +1404,7 @@ impl SemanticProvider for AddR64Mem64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
-        write_add_flags(out, result, left)?;
+        write_add_flags(out, result, left, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(33, context))
@@ -1404,7 +1437,7 @@ impl SemanticProvider for CmpR64Mem64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, right])?;
-        write_sub_flags(out, result, left, right)?;
+        write_sub_flags(out, result, left, right, 64)?;
         fall_through(out, insn)?;
         Ok(receipt(34, context))
     }
@@ -1437,7 +1470,7 @@ impl SemanticProvider for ImulR64R64 {
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[left, right])?;
         // Simplified: CF is cleared (no overflow detected in 64-bit IR).
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(35, context))
@@ -1471,7 +1504,7 @@ impl SemanticProvider for MulR64R64 {
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[left, right])?;
         // Simplified: CF is cleared (no overflow detected in 64-bit IR).
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(36, context))
@@ -1508,7 +1541,7 @@ impl SemanticProvider for DivR64R64 {
             U64,
             &[dividend, divisor],
         )?;
-        write_zf_only(out, quotient)?;
+        write_zf_only(out, quotient, 64)?;
         out.write_register(RegisterId(register_id::GPR_BASE), quotient)?;
         fall_through(out, insn)?;
         Ok(receipt(37, context))
@@ -1541,7 +1574,7 @@ impl SemanticProvider for IdivR64R64 {
         let dividend = out.read_register(RegisterId(register_id::GPR_BASE), U64)?;
         let divisor = out.read_operand(0, U64)?;
         let quotient = out.emit(SemanticOp::Primitive(PrimitiveOp::SignedDiv), U64, &[dividend, divisor])?;
-        write_zf_only(out, quotient)?;
+        write_zf_only(out, quotient, 64)?;
         out.write_register(RegisterId(register_id::GPR_BASE), quotient)?;
         fall_through(out, insn)?;
         Ok(receipt(38, context))
@@ -1972,7 +2005,7 @@ impl SemanticProvider for TestR64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[left, right])?;
-        write_logical_flags(out, result)?;
+        write_logical_flags(out, result, 64)?;
         fall_through(out, insn)?;
         Ok(receipt(47, context))
     }
@@ -2004,7 +2037,7 @@ impl SemanticProvider for XaddR64R64 {
         let dest = out.read_operand(0, U64)?;
         let src = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[dest, src])?;
-        write_add_flags(out, result, dest)?;
+        write_add_flags(out, result, dest, 64)?;
         out.write_operand(0, result)?;
         out.write_operand(1, dest)?;
         fall_through(out, insn)?;
@@ -2908,7 +2941,8 @@ impl SemanticProvider for SetzR8 {
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
         let cond = read_flag_set(out, rflags::ZF_BIT)?;
-        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cond])?;
+        // The condition is written as a byte: 1 when set, 0 otherwise.
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U8, &[cond])?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(70, context))
@@ -2939,7 +2973,8 @@ impl SemanticProvider for SetnzR8 {
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
         let cond = read_flag_not_set(out, rflags::ZF_BIT)?;
-        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cond])?;
+        // The condition is written as a byte: 1 when set, 0 otherwise.
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U8, &[cond])?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(71, context))
@@ -2970,7 +3005,8 @@ impl SemanticProvider for SetlR8 {
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
         let cond = read_flag_set(out, rflags::SF_BIT)?;
-        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cond])?;
+        // The condition is written as a byte: 1 when set, 0 otherwise.
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U8, &[cond])?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(72, context))
@@ -3001,7 +3037,8 @@ impl SemanticProvider for SetgeR8 {
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
         let cond = read_flag_not_set(out, rflags::SF_BIT)?;
-        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cond])?;
+        // The condition is written as a byte: 1 when set, 0 otherwise.
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U8, &[cond])?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(73, context))
@@ -3037,7 +3074,7 @@ impl SemanticProvider for AdcR64R64 {
         let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
         let sum = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[sum, cf_64])?;
-        write_add_flags(out, result, left)?;
+        write_add_flags(out, result, left, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(74, context))
@@ -3073,7 +3110,7 @@ impl SemanticProvider for SbbR64R64 {
         let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
         let diff = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, right])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[diff, cf_64])?;
-        write_sub_flags(out, result, left, right)?;
+        write_sub_flags(out, result, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(75, context))

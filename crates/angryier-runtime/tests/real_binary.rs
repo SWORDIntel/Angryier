@@ -258,9 +258,97 @@ fn syscall_output_matches_native_run() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Builds a fixture whose first instruction is `syscall` (0F 05).
-fn build_syscall_fixture() -> Option<Vec<u8>> {
-    build_fixture_from("_start:\n    syscall\n    hlt\n").ok()
+/// A compiler-generated binary: gcc compiles a small C program (static,
+/// no libc) at test time; the engine must execute it and agree with a native
+/// run on the observable result.
+const COMPILER_PROGRAM: &str = r#"
+volatile long g_input = 7;
+
+static long compute(long x) {
+    long acc = 0;
+    for (long i = 0; i < 4; i++) {
+        acc += x * (i + 1);
+    }
+    return acc;
+}
+
+void run(void) {
+    long result = compute(g_input);
+    long code = (result == 70) ? 0 : 1;
+    __asm__ volatile(
+        "mov $60, %%rax\n\t"
+        "mov %0, %%rdi\n\t"
+        "syscall\n\t"
+        :
+        : "r"(code)
+        : "rax", "rdi", "memory");
+}
+
+__asm__(".global _start\n_start:\n    call run\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall\n");
+"#;
+
+/// Compiles [`COMPILER_PROGRAM`] with `cc -O2` into a static ELF64 executable.
+///
+/// Returns `None` when the C toolchain is unavailable.
+fn build_compiler_binary() -> Option<(Vec<u8>, PathBuf)> {
+    let dir = temp_dir("angryier-compiler")?;
+    let source = dir.join("program.c");
+    let binary = dir.join("program.elf");
+    std::fs::write(&source, COMPILER_PROGRAM).ok()?;
+
+    let compiled = Command::new("cc")
+        .args([
+            "-O2",
+            "-static",
+            "-nostdlib",
+            "-fno-stack-protector",
+            "-fcf-protection=none",
+            "-fno-asynchronous-unwind-tables",
+            "-fno-pie",
+            "-no-pie",
+            "-o",
+        ])
+        .arg(&binary)
+        .arg(&source)
+        .output()
+        .ok()?;
+    if !compiled.status.success() {
+        return None;
+    }
+    let bytes = std::fs::read(&binary).ok()?;
+    Some((bytes, binary))
+}
+
+#[test]
+fn compiler_generated_binary_runs_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
+    let Some((bytes, native_path)) = build_compiler_binary() else {
+        eprintln!("skipping: C toolchain unavailable");
+        return Ok(());
+    };
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_elf(&bytes)?;
+    runtime.run(&mut process, 64)?;
+
+    assert!(process.terminated, "the exit syscall must terminate execution");
+    assert_eq!(
+        process.syscalls.exit_code(),
+        Some(0),
+        "compute(g_input) must equal 70 so the program exits 0"
+    );
+
+    // The native run of the same binary must agree on the exit code.
+    let native = Command::new(&native_path).output()?;
+    assert_eq!(
+        native.status.code(),
+        Some(0),
+        "native execution must agree with the engine result"
+    );
+
+    // The engine must have executed the volatile load and the loop arithmetic.
+    let steps = process.step_count;
+    assert!(steps >= 8, "expected the full program to execute, got {steps} steps");
+    Ok(())
 }
 
 /// Assembles and links a one-off fixture from `body` (placed after `_start`).

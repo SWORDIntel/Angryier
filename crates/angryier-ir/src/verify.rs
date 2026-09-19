@@ -159,7 +159,7 @@ fn is_terminator(op: &IrOp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{IrBlockKey, IrVerifier};
+    use crate::{IrBlockKey, IrVerifier, RegisterWriteKind};
     use angryier_types::{BlockId, CodePageVersion, CodeVersionGuard, ContentId, ImageId, TargetProfileId};
 
     fn block(instructions: Vec<IrInstruction>) -> IrBlock {
@@ -186,6 +186,7 @@ mod tests {
             op: IrOp::WriteRegister {
                 register: 1,
                 value: IrValueId(0),
+                kind: RegisterWriteKind::ReplaceParent,
             },
         }]);
 

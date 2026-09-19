@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use angryier_expr::{ExprArena, ExprArenaError, ExprNode, ExprOp, ExprSort};
-use angryier_ir::{IrBlock, IrOp, IrPrimitive, IrType, IrValueId};
+use angryier_ir::{IrBlock, IrOp, IrPrimitive, IrType, IrValueId, RegisterWriteKind};
 use angryier_types::{Address, ExprId};
 
 /// Expression arena type used by the evaluator.
@@ -121,8 +121,31 @@ impl<'a> SymbolicEvaluator<'a> {
                     let resolved = resolve_inputs(&values, inputs)?;
                     Some(self.primitive(*op, *ty, &resolved)?)
                 }
-                IrOp::WriteRegister { register, value } => {
+                IrOp::WriteRegister { register, value, kind } => {
                     let (expression, ty) = get_value(&values, *value)?;
+                    let (expression, ty) = match kind {
+                        RegisterWriteKind::ReplaceParent => (expression, ty),
+                        RegisterWriteKind::ZeroExtendParent => {
+                            // Zero-fill to the register's current symbolic width.
+                            let target_ty = self.registers.get(register).map(|(_, ty)| *ty).unwrap_or(ty);
+                            let target_width = bit_width(target_ty)?;
+                            let source_width = bit_width(ty)?;
+                            if source_width >= target_width {
+                                (expression, target_ty)
+                            } else {
+                                let widened = self.intern(
+                                    ExprSort::BitVec(target_width),
+                                    ExprOp::ZExt,
+                                    vec![expression],
+                                    Vec::new(),
+                                )?;
+                                (widened, target_ty)
+                            }
+                        }
+                        RegisterWriteKind::PreserveParent { .. } => {
+                            return Err(SymbolicEvalError::UnsupportedOperation("partial register write".into()));
+                        }
+                    };
                     self.registers.insert(*register, (expression, ty));
                     written_registers.push(*register);
                     None
@@ -556,6 +579,7 @@ mod tests {
                 op: IrOp::WriteRegister {
                     register: 0x21,
                     value: IrValueId(2),
+                    kind: RegisterWriteKind::ReplaceParent,
                 },
             },
         ]);
