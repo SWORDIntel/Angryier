@@ -130,7 +130,7 @@ fn run_to_simproc(
     let mut dispatches = Vec::new();
     loop {
         match runtime.step(process)? {
-            StepOutcome::Stepped { .. } => {}
+            StepOutcome::Stepped { .. } | StepOutcome::Syscall { .. } => {}
             StepOutcome::SimProcedure { address, name } => {
                 dispatches.push((address, name));
                 return Ok(dispatches);
@@ -185,9 +185,10 @@ fn real_binary_runs_end_to_end_with_native_xed() -> Result<(), Box<dyn std::erro
 #[test]
 fn unmapped_instructions_fail_explicitly() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
-    // `syscall` decodes under XED but has no exact corpus semantics; the
-    // runtime must report an unsupported form instead of guessing.
-    let mut process = runtime.load_elf(&build_syscall_fixture().ok_or("binutils unavailable")?)?;
+    // `addps` decodes under XED but has no exact corpus semantics (the SIMD
+    // forms are not yet mapped); the runtime must report an unsupported form
+    // instead of guessing.
+    let mut process = runtime.load_elf(&build_fixture_from("_start:\n    addps %xmm1, %xmm0\n    hlt\n")?)?;
     let error = runtime
         .step(&mut process)
         .err()
@@ -198,6 +199,98 @@ fn unmapped_instructions_fail_explicitly() -> Result<(), Box<dyn std::error::Err
         "unmapped instructions must report form id 0, got: {message}"
     );
     Ok(())
+}
+
+#[test]
+fn unmodeled_syscalls_fail_explicitly() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    // `syscall` with RAX = 0 is `read`, which the environment model does not
+    // implement yet; execution must fail explicitly rather than fabricate a
+    // result.
+    let mut process = runtime.load_elf(&build_fixture_from("_start:\n    syscall\n    hlt\n")?)?;
+    let error = runtime
+        .step(&mut process)
+        .err()
+        .ok_or("expected an unsupported-syscall error")?;
+    let message = error.to_string();
+    assert!(
+        message.contains("unsupported syscall number 0"),
+        "unmodeled syscalls must fail explicitly, got: {message}"
+    );
+    Ok(())
+}
+
+/// Modeled syscalls: the engine's captured `write` output and exit code must
+/// match a native run of the same binary.
+#[test]
+fn syscall_output_matches_native_run() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let source = concat!(
+        "_start:\n",
+        "    mov $1, %rax\n",   // write
+        "    mov $1, %rdi\n",   // stdout
+        "    mov $msg, %rsi\n", // buffer
+        "    mov $13, %rdx\n",  // length
+        "    syscall\n",
+        "    mov $60, %rax\n",  // exit
+        "    xor %rdi, %rdi\n", // code 0
+        "    syscall\n",
+        "    .data\n",
+        "msg:\n",
+        "    .ascii \"hello, world\\n\"\n",
+    );
+    let (bytes, binary) = build_fixture_from_path(source)?;
+
+    let mut process = runtime.load_elf(&bytes)?;
+    runtime.run(&mut process, 32)?;
+    assert!(process.terminated, "exit syscall must terminate execution");
+    assert_eq!(process.syscalls.output(), b"hello, world\n");
+    assert_eq!(process.syscalls.exit_code(), Some(0));
+    assert_eq!(process.syscalls.invocations(), 2, "one write, one exit");
+
+    // Native run of the same binary must produce the same output and status.
+    let native = Command::new(&binary).output()?;
+    assert_eq!(
+        native.stdout, b"hello, world\n",
+        "engine output must match the native run"
+    );
+    assert_eq!(native.status.code(), Some(0));
+    Ok(())
+}
+
+/// Builds a fixture whose first instruction is `syscall` (0F 05).
+fn build_syscall_fixture() -> Option<Vec<u8>> {
+    build_fixture_from("_start:\n    syscall\n    hlt\n").ok()
+}
+
+/// Assembles and links a one-off fixture from `body` (placed after `_start`).
+fn build_fixture_from(body: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    build_fixture_from_path(body).map(|(bytes, _path)| bytes)
+}
+
+/// Assembles and links a one-off fixture, returning bytes and the on-disk path.
+fn build_fixture_from_path(body: &str) -> Result<(Vec<u8>, PathBuf), Box<dyn std::error::Error>> {
+    let dir = temp_dir(&format!("angryier-oneoff-{}", unique_suffix())).ok_or("temp dir unavailable")?;
+    let source = dir.join("fixture.s");
+    let object = dir.join("fixture.o");
+    let binary = dir.join("fixture.elf");
+    let text = format!("    .global _start\n    .text\n{body}");
+    std::fs::write(&source, text)?;
+
+    if assemble(&source, &object).is_none() {
+        return Err("binutils unavailable".into());
+    }
+    if link(&binary, &[&object]).is_none() {
+        return Err("linker unavailable".into());
+    }
+    let bytes = std::fs::read(&binary)?;
+    Ok((bytes, binary))
+}
+
+/// Monotonic suffix so one-off fixtures never share a directory.
+fn unique_suffix() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Gate 0 branch solving: run the real binary, solve the branch symbolically
@@ -363,21 +456,4 @@ fn solved_input_reaches_target_state_natively() -> Result<(), Box<dyn std::error
     };
     assert_eq!(native_code, 0, "solved input RAX = {rax} must reach ok_path natively");
     Ok(())
-}
-
-/// Builds a fixture whose first instruction is `syscall` (0F 05).
-fn build_syscall_fixture() -> Option<Vec<u8>> {
-    let dir = temp_dir("angryier-fixture-syscall")?;
-    let source = dir.join("fixture.s");
-    let object = dir.join("fixture.o");
-    let binary = dir.join("fixture.elf");
-    std::fs::write(
-        &source,
-        "    .global _start\n    .text\n_start:\n    syscall\n    hlt\n",
-    )
-    .ok()?;
-
-    assemble(&source, &object)?;
-    link(&binary, &[&object])?;
-    std::fs::read(&binary).ok()
 }

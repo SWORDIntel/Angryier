@@ -33,10 +33,10 @@ The repository has boundaries for shared identities, architecture/Intel 64, XED 
 | `angryier-storage` | In-memory WAL with checkpoint replay, priority-aware eviction, retention policy | ~420 |
 | `angryier-scheduler` | In-memory work-stealing scheduler with per-worker queues, NUMA distance model, greedy scoring | ~834 |
 | `angryier-knowledge` | In-memory knowledge store with exact-match cache, dependency graph with transitive invalidation | ~320 |
-| `angryier-models` | In-memory environment model with operation table, fidelity enforcement, summary provider with exact lookup | ~440 |
+| `angryier-models` | In-memory environment model with operation table, fidelity enforcement, summary provider with exact lookup, plus a minimal Linux x86-64 syscall model (captured `write` output, recorded `exit` code, invocation counters) | ~440 + syscall |
 | `angryier-telemetry` | In-memory telemetry sink with metric aggregation, time-series recording, backpressure tracking | ~400 |
 | `angryier-loader` | ELF64 loader (headers, program headers, segments, entry point, static symbol table), in-memory image loader, state importer (rejects live capture) | 1147 |
-| `angryier-runtime` | Pipeline glue: ELF64 load → decode → semantics → AngryIR lowering → concrete interpreter → SimProcedure dispatch, with lowered-block cache, XED instruction-class form mapping (`form_map.rs`, feature-gated), symbolic trace evaluation, and Z3-backed branch solving | 1047 (+583 form map) |
+| `angryier-runtime` | Pipeline glue: ELF64 load → decode → semantics → AngryIR lowering → concrete interpreter → SimProcedure dispatch → modeled syscalls, with lowered-block cache, XED instruction-class form mapping (`form_map.rs`, feature-gated), symbolic trace evaluation, and Z3-backed branch solving | 1127 (+583 form map) |
 | `angryier-fuzz` | In-memory fuzz bridge with stage-gated seed/coverage/hint submission | ~290 |
 | `angryier-fusion` | In-memory fusion model with identity/constant encoders, element-wise averaging | ~430 |
 | `angryier-qihse` | In-memory QIHSE adapter with exact fetch, fingerprint vector query, duplicate rejection | ~280 |
@@ -88,7 +88,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 
 ## Test coverage
 
-43 test binaries pass (0 failures) across the workspace, 820 tests total:
+43 test binaries pass (0 failures) across the workspace, 822 tests total:
 
 | Crate | Tests |
 |---|---|
@@ -112,7 +112,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-loader | 27 |
 | angryier-runtime | 4 |
 | angryier-memory | 41 |
-| angryier-models | 27 |
+| angryier-models | 29 |
 | angryier-plugins | 9 |
 | angryier-provenance | 15 |
 | angryier-qihse | 14 |
@@ -133,7 +133,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-telemetry | 17 |
 | angryier-types | 3 |
 
-Feature-gated native-pipeline tests are not part of the default workspace run. `cargo test -p angryier-runtime --features xed,z3` adds 13 tests (3 test binaries) covering native XED decoding through the runtime, the XED instruction-class form mapping, real-binary end-to-end execution with SimProcedure dispatch, explicit failure for unmapped instructions, Z3-backed branch solving that generates a new input and replays it, portfolio-routed solving through `BatchSolver`, and concrete replay validation that runs the solver-generated input on the binary natively and confirms it reaches the target state.
+Feature-gated native-pipeline tests are not part of the default workspace run. `cargo test -p angryier-runtime --features xed,z3` adds 15 tests (3 test binaries) covering native XED decoding through the runtime, the XED instruction-class form mapping, real-binary end-to-end execution with SimProcedure dispatch, explicit failure for unmapped instructions and unmodeled syscalls, modeled `write`/`exit` syscalls whose captured output matches a native run of the same binary, Z3-backed branch solving that generates a new input and replays it, portfolio-routed solving through `BatchSolver`, and concrete replay validation that runs the solver-generated input on the binary natively and confirms it reaches the target state.
 
 ## Validation contract
 

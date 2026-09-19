@@ -84,7 +84,7 @@ crates/
 | `angryier-solver-z3-ffi` | Implemented | Native Z3 FFI bridge against system `libz3`; real SAT/UNSAT/UNKNOWN with model extraction |
 | `angryier-solver-bitwuzla-ffi` | Implemented | Native Bitwuzla FFI bridge (vendored CaDiCaL); real SAT/UNSAT/UNKNOWN with model extraction |
 | `angryier-scheduler` | Implemented | In-memory work-stealing scheduler with per-worker queues, NUMA distance model, greedy scoring (~834 lines) |
-| `angryier-models` | Implemented | In-memory environment model with operation table, fidelity enforcement, summary provider (~440 lines) |
+| `angryier-models` | Implemented | In-memory environment model with operation table, fidelity enforcement, summary provider (~440 lines), plus a minimal Linux x86-64 syscall model (`write` output capture, `exit` code, counters) |
 | `angryier-provenance` | Implemented | In-memory provenance store, adaptive trace governor, batching sink, tier-based eviction (~570 lines) |
 | `angryier-telemetry` | Implemented | In-memory telemetry sink with metric aggregation, time-series recording, backpressure tracking (~400 lines) |
 | `angryier-knowledge` | Implemented | In-memory knowledge store with exact-match cache, dependency graph with transitive invalidation (~320 lines) |
@@ -97,7 +97,7 @@ crates/
 | `angryier-plugins` | Implemented | In-memory plugin registry with duplicate-name rejection, sorted lookup (~150 lines) |
 | `angryier-distribution` | Implemented | In-memory work codec with deterministic binary frame encode/decode round-trip (~560 lines) |
 | `angryier-loader` | Implemented | ELF64 loader (headers, program headers, segments, entry point, static symbol table), in-memory image loader, state importer (1147 lines, 27 tests) |
-| `angryier-runtime` | Implemented | Pipeline glue: ELF64 load -> decode -> semantics -> AngryIR -> concrete interpreter -> SimProcedure dispatch, with lowered-block cache, XED form mapping (`xed` feature), symbolic trace evaluation, and Z3-backed branch solving (`z3` feature) (1047 lines, 4 default + 11 feature-gated tests) |
+| `angryier-runtime` | Implemented | Pipeline glue: ELF64 load -> decode -> semantics -> AngryIR -> concrete interpreter -> SimProcedure dispatch -> modeled syscalls, with lowered-block cache, XED form mapping (`xed` feature), symbolic trace evaluation, and Z3-backed branch solving (`z3` feature) (1127 lines, 4 default + 15 feature-gated tests) |
 | `angryier-bench` | Implemented | In-memory benchmark sink with validation, sorted records, aggregate summary (~435 lines) |
 | `angryier-cli` | Implemented | Basic CLI with version/status/crates/help subcommands (no external deps, ~430 lines) |
 

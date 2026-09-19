@@ -28,7 +28,10 @@ use angryier_expr::{ExprNode, ExprOp, ExprSort};
 use angryier_ir::{BasicSemanticLowerer, IrBlock};
 use angryier_loader::{Elf64Loader, ImageLoader, LoadedImage, Symbol};
 use angryier_memory::{ByteValue, LayeredMemory, MemoryRegion, PersistentMemory};
-use angryier_models::{SimProcedureRegistry, SimResult, SimState};
+use angryier_models::{
+    SimProcedureRegistry, SimResult, SimState,
+    syscall::{self, SyscallModel},
+};
 use angryier_semantics::{
     BlockValidityKey, FloatingPointPolicy, SemanticBlockBuilder, SemanticContext, SemanticRegistry, TileRepresentation,
     VectorRepresentation,
@@ -57,6 +60,10 @@ const MAX_INSN_LEN: usize = 15;
 
 /// Maximum number of executed block addresses retained for branch solving.
 const MAX_TRACE: usize = 4096;
+
+/// Form id reserved for instructions executed by the environment model rather
+/// than the semantic corpus (`syscall`). No corpus form uses this id.
+pub const SYSCALL_FORM_ID: u32 = 0xFFFF_0001;
 
 /// Errors produced by the runtime pipeline.
 #[derive(Debug)]
@@ -93,6 +100,8 @@ pub enum RuntimeError {
     NoCachedBlock(Address),
     /// The execution trace contains no conditional branch.
     NoBranchInTrace,
+    /// The environment model does not implement this syscall number.
+    UnsupportedSyscall(u64),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -114,6 +123,7 @@ impl std::fmt::Display for RuntimeError {
             Self::NoExecutableSegment => write!(f, "no executable segment in image"),
             Self::NoCachedBlock(address) => write!(f, "no cached block for address {address:#x}"),
             Self::NoBranchInTrace => write!(f, "execution trace contains no conditional branch"),
+            Self::UnsupportedSyscall(number) => write!(f, "unsupported syscall number {number}"),
         }
     }
 }
@@ -132,6 +142,8 @@ pub enum StepOutcome {
     },
     /// A SimProcedure was dispatched at this address.
     SimProcedure { address: Address, name: String },
+    /// A modeled syscall was executed.
+    Syscall { pc: Address, number: u64 },
     /// Execution terminated (return instruction or exit).
     Terminated { pc: Address },
     /// A trap was raised.
@@ -202,6 +214,8 @@ pub struct Process {
     /// Addresses of executed blocks, in execution order (bounded by
     /// [`MAX_TRACE`]); used to build symbolic traces for branch solving.
     pub trace: Vec<Address>,
+    /// Observable effects of modeled syscalls (captured output, exit code).
+    pub syscalls: SyscallModel,
     pub next_block_id: u64,
     pub step_count: u64,
     pub simproc_dispatches: u64,
@@ -229,10 +243,12 @@ impl Process {
 
     /// Restarts execution from the entry state captured at load time.
     ///
-    /// The lowered-block cache and SimProcedure hooks are preserved.
+    /// The lowered-block cache and SimProcedure hooks are preserved; captured
+    /// syscall effects are cleared.
     pub fn reset_to_entry(&mut self) {
         self.state = self.entry_state.clone();
         self.trace.clear();
+        self.syscalls.reset();
         self.step_count = 0;
         self.simproc_dispatches = 0;
         self.terminated = false;
@@ -419,6 +435,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_hooks: BTreeMap::new(),
             symbols: image.symbols,
             trace: Vec::new(),
+            syscalls: SyscallModel::new(),
             next_block_id: 0,
             step_count: 0,
             simproc_dispatches: 0,
@@ -472,6 +489,11 @@ impl<D: Decoder> Runtime<D> {
             .decoder
             .decode(pc, &raw)
             .map_err(|e| RuntimeError::Decode(format!("{e:?}")))?;
+
+        // Modeled syscalls are environment interactions, not corpus semantics.
+        if decoded.form_id == SYSCALL_FORM_ID {
+            return self.dispatch_syscall(process, pc, decoded.length);
+        }
 
         // Resolve semantic provider.
         let resolution = self
@@ -686,6 +708,38 @@ impl<D: Decoder> Runtime<D> {
         })
     }
 
+    /// Executes a modeled syscall.
+    ///
+    /// The environment model owns the observable effects (captured output,
+    /// exit code); the runtime performs the memory reads a syscall needs.
+    /// Unmodeled syscall numbers fail explicitly instead of fabricating a
+    /// result.
+    fn dispatch_syscall(&self, process: &mut Process, pc: Address, length: u8) -> Result<StepOutcome, RuntimeError> {
+        let number = process.read_register(register_id::GPR_BASE)?;
+        let arg0 = process.read_register(register_id::GPR_BASE + 7)?; // RDI
+        let arg1 = process.read_register(register_id::GPR_BASE + 6)?; // RSI
+        let arg2 = process.read_register(register_id::GPR_BASE + 2)?; // RDX
+        let next_pc = pc.wrapping_add(u64::from(length));
+
+        match number {
+            syscall::EXIT => {
+                process.syscalls.record_exit(arg0);
+                process.terminated = true;
+                process.step_count += 1;
+                Ok(StepOutcome::Terminated { pc })
+            }
+            syscall::WRITE => {
+                let bytes = read_concrete_bytes(process, arg1, arg2)?;
+                let written = process.syscalls.record_write(&bytes);
+                process.write_register(register_id::GPR_BASE, written)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            other => Err(RuntimeError::UnsupportedSyscall(other)),
+        }
+    }
+
     /// Dispatches a SimProcedure at the given address.
     fn dispatch_simproc(
         &self,
@@ -798,6 +852,32 @@ impl Runtime<XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>> {
 /// Loads an ELF64 file from disk.
 pub fn load_elf_file(path: &str) -> Result<Vec<u8>, RuntimeError> {
     std::fs::read(path).map_err(|_| RuntimeError::Loader(angryier_loader::LoaderError::InvalidFormat))
+}
+
+/// Reads `len` concrete bytes from process memory for a syscall buffer.
+fn read_concrete_bytes(process: &Process, address: Address, len: u64) -> Result<Vec<u8>, RuntimeError> {
+    let len = usize::try_from(len).map_err(|_| RuntimeError::Memory("syscall buffer too large".into()))?;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let bytes = process
+        .state
+        .memory
+        .read(address, len)
+        .map_err(|error| RuntimeError::Memory(format!("{error:?}")))?;
+    let mut out = Vec::with_capacity(len);
+    for (offset, byte) in bytes.into_iter().enumerate() {
+        match byte {
+            ByteValue::Concrete(value) => out.push(value),
+            ByteValue::Symbolic(_) => {
+                let at = address.wrapping_add(u64::try_from(offset).unwrap_or(0));
+                return Err(RuntimeError::Memory(format!(
+                    "symbolic byte at {at:#x} in syscall buffer"
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

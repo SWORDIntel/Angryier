@@ -494,6 +494,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [] => Some(forms::RET),
             _ => None,
         },
+        // `syscall` is executed by the environment model, not the semantic
+        // corpus; it maps to the runtime's reserved syscall form id.
+        iclass::XED_ICLASS_SYSCALL => Some(crate::SYSCALL_FORM_ID),
         iclass::XED_ICLASS_NOP => Some(forms::NOP),
         iclass::XED_ICLASS_HLT => Some(forms::HLT),
         iclass::XED_ICLASS_UD2 => Some(forms::UD2),
@@ -569,8 +572,10 @@ mod tests {
         assert_eq!(mapped(&[0x48, 0xF7, 0xE3])?, None);
         // SSE forms are not yet mapped.
         assert_eq!(mapped(&[0x0F, 0x58, 0xC1])?, None);
-        // syscall has no corpus semantics.
-        assert_eq!(mapped(&[0x0F, 0x05])?, None);
+        // cpuid has no corpus semantics.
+        assert_eq!(mapped(&[0x0F, 0xA2])?, None);
+        // syscall is executed by the environment model, not the corpus.
+        assert_eq!(mapped(&[0x0F, 0x05])?, Some(crate::SYSCALL_FORM_ID));
         Ok(())
     }
 
@@ -579,5 +584,6 @@ mod tests {
         assert_eq!(UNMAPPED_FORM_ID, 0);
         assert_ne!(forms::MOV_R64_R64, UNMAPPED_FORM_ID);
         assert_ne!(forms::HLT, UNMAPPED_FORM_ID);
+        assert_ne!(crate::SYSCALL_FORM_ID, UNMAPPED_FORM_ID);
     }
 }

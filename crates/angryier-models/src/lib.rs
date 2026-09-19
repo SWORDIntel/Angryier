@@ -645,6 +645,97 @@ impl SimProcedure for ExitProcedure {
 }
 
 // ---------------------------------------------------------------------------
+// Syscall environment model
+// ---------------------------------------------------------------------------
+
+/// Minimal Linux x86-64 syscall environment model.
+///
+/// The runtime owns process memory, so it performs the memory reads and writes
+/// a syscall needs; this model owns the observable effects: captured `write`
+/// output, the recorded exit code, and per-syscall counters. Syscall numbers
+/// the model does not implement are reported back to the caller so execution
+/// can fail explicitly instead of fabricating a result.
+pub mod syscall {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// `read` syscall number.
+    pub const READ: u64 = 0;
+    /// `write` syscall number.
+    pub const WRITE: u64 = 1;
+    /// `exit` syscall number.
+    pub const EXIT: u64 = 60;
+
+    /// Outcome of a modeled syscall.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SyscallOutcome {
+        /// Execution terminates with this exit code.
+        Exit { code: u64 },
+        /// Execution continues; the value is written to RAX.
+        Return { value: u64 },
+    }
+
+    /// Captures the observable effects of modeled syscalls.
+    #[derive(Debug, Default)]
+    pub struct SyscallModel {
+        output: Mutex<Vec<u8>>,
+        exit_code: Mutex<Option<u64>>,
+        invocations: AtomicU64,
+    }
+
+    impl SyscallModel {
+        /// Creates an empty model.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Records a `write` of `bytes` and returns the modeled byte count.
+        pub fn record_write(&self, bytes: &[u8]) -> u64 {
+            self.invocations.fetch_add(1, Ordering::Relaxed);
+            let mut output = self.output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            output.extend_from_slice(bytes);
+            u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+        }
+
+        /// Records `exit(code)`.
+        pub fn record_exit(&self, code: u64) -> SyscallOutcome {
+            self.invocations.fetch_add(1, Ordering::Relaxed);
+            let mut exit_code = self.exit_code.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *exit_code = Some(code);
+            SyscallOutcome::Exit { code }
+        }
+
+        /// Bytes captured from `write` syscalls.
+        pub fn output(&self) -> Vec<u8> {
+            self.output
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        /// Exit code recorded by `exit`, if any.
+        pub fn exit_code(&self) -> Option<u64> {
+            *self.exit_code.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        /// Number of modeled syscalls.
+        pub fn invocations(&self) -> u64 {
+            self.invocations.load(Ordering::Relaxed)
+        }
+
+        /// Clears captured state, used when a process restarts from entry.
+        pub fn reset(&self) {
+            self.output
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+            *self.exit_code.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            self.invocations.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1015,5 +1106,31 @@ mod tests {
         assert_eq!(format!("{}", SimResult::Exit), "Exit");
         assert_eq!(format!("{}", SimResult::Return(0x20)), "Return(0x20)");
         assert_eq!(format!("{}", SimResult::Continue(SimState::new())), "Continue");
+    }
+
+    #[test]
+    fn syscall_model_captures_writes_and_exit() {
+        let model = syscall::SyscallModel::new();
+        assert_eq!(model.record_write(b"hello"), 5);
+        assert_eq!(model.record_write(b", world\n"), 8);
+        assert_eq!(model.output(), b"hello, world\n");
+        assert_eq!(model.invocations(), 2);
+        assert_eq!(model.exit_code(), None);
+
+        assert_eq!(model.record_exit(3), syscall::SyscallOutcome::Exit { code: 3 });
+        assert_eq!(model.exit_code(), Some(3));
+        assert_eq!(model.invocations(), 3);
+
+        model.reset();
+        assert!(model.output().is_empty());
+        assert_eq!(model.exit_code(), None);
+        assert_eq!(model.invocations(), 0);
+    }
+
+    #[test]
+    fn syscall_numbers_match_linux_x86_64() {
+        assert_eq!(syscall::READ, 0);
+        assert_eq!(syscall::WRITE, 1);
+        assert_eq!(syscall::EXIT, 60);
     }
 }
