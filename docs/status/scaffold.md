@@ -88,7 +88,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 
 ## Test coverage
 
-43 test binaries pass (0 failures) across the workspace, 819 tests total:
+43 test binaries pass (0 failures) across the workspace, 820 tests total:
 
 | Crate | Tests |
 |---|---|
@@ -122,7 +122,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-semantics | 5 |
 | angryier-semantics-gen | 14 |
 | angryier-semantics-intel64 | 9 (unit) + 258 (integration) |
-| angryier-solver | 20 (unit) + 9 (portfolio integration) |
+| angryier-solver | 21 (unit) + 9 (portfolio integration) |
 | angryier-solver-bitwuzla | 3 |
 | angryier-solver-bitwuzla-ffi | 4 |
 | angryier-solver-z3 | 3 |
@@ -133,7 +133,7 @@ No placeholder backend is permitted to pretend these features exist. Missing nat
 | angryier-telemetry | 17 |
 | angryier-types | 3 |
 
-Feature-gated native-pipeline tests are not part of the default workspace run. `cargo test -p angryier-runtime --features xed,z3` adds 11 tests (3 test binaries) covering native XED decoding through the runtime, the XED instruction-class form mapping, real-binary end-to-end execution with SimProcedure dispatch, explicit failure for unmapped instructions, and Z3-backed branch solving that generates a new input and replays it.
+Feature-gated native-pipeline tests are not part of the default workspace run. `cargo test -p angryier-runtime --features xed,z3` adds 13 tests (3 test binaries) covering native XED decoding through the runtime, the XED instruction-class form mapping, real-binary end-to-end execution with SimProcedure dispatch, explicit failure for unmapped instructions, Z3-backed branch solving that generates a new input and replays it, portfolio-routed solving through `BatchSolver`, and concrete replay validation that runs the solver-generated input on the binary natively and confirms it reaches the target state.
 
 ## Validation contract
 

@@ -1020,6 +1020,23 @@ impl BatchSolver {
     }
 }
 
+/// `BatchSolver` is usable anywhere a `SolverBackend` is expected, so
+/// execution-plane callers (for example the runtime's branch solver) get
+/// portfolio routing and fallback without depending on the router directly.
+impl SolverBackend for BatchSolver {
+    fn name(&self) -> &'static str {
+        "batch"
+    }
+
+    fn solve(&mut self, query: &SolverQuery) -> SolverResult {
+        self.solve_with_fallback(query)
+    }
+
+    fn solve_batch(&mut self, _shared: &[ConstraintId], predicates: &[SolverQuery]) -> Vec<SolverResult> {
+        predicates.iter().map(|query| self.solve_with_fallback(query)).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1226,6 +1243,31 @@ mod tests {
         let mut solver = BatchSolver::new(backends, router);
         let result = solver.solve_with_fallback(&query);
         assert_eq!(result.outcome, SolverOutcomeKind::Unsat);
+        Ok(())
+    }
+
+    #[test]
+    fn batch_solver_is_usable_as_a_solver_backend() -> Result<(), SolverQueryError> {
+        let query = query(&[constraint(1, 10)])?;
+        let backends: Vec<Box<dyn SolverBackend>> = vec![
+            Box::new(MockSolverBackend::new("primary", SolverOutcomeKind::BackendError)),
+            Box::new(MockSolverBackend::new("secondary", SolverOutcomeKind::Sat)),
+        ];
+        let router = Box::new(InMemoryPortfolioRouter::new(
+            vec!["primary", "secondary"],
+            Duration::from_secs(30),
+        ));
+        let mut solver = BatchSolver::new(backends, router);
+
+        // The trait path must behave like `solve_with_fallback` so callers
+        // that only know `SolverBackend` get portfolio routing.
+        let backend: &mut dyn SolverBackend = &mut solver;
+        assert_eq!(backend.name(), "batch");
+        assert_eq!(backend.solve(&query).outcome, SolverOutcomeKind::Sat);
+
+        let results = backend.solve_batch(&[], &[query]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].outcome, SolverOutcomeKind::Sat);
         Ok(())
     }
 
