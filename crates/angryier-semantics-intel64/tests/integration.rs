@@ -2302,10 +2302,7 @@ fn nop2_falls_through() -> Result<(), Box<dyn std::error::Error>> {
 fn bswap_r64_executes() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&make_state()?, RAX, 0x0102030405060708)?;
 
-    let decoded = make_decoded(
-        forms::BSWAP_R64,
-        vec![reg_operand(0, RAX, AccessKind::ReadWrite)],
-    );
+    let decoded = make_decoded(forms::BSWAP_R64, vec![reg_operand(0, RAX, AccessKind::ReadWrite)]);
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
 
@@ -2319,10 +2316,7 @@ fn and_r64_imm32_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::AND_R64_IMM32,
-        vec![
-            reg_operand(0, RAX, AccessKind::ReadWrite),
-            imm_operand(1, 0x0F, 64),
-        ],
+        vec![reg_operand(0, RAX, AccessKind::ReadWrite), imm_operand(1, 0x0F, 64)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -2337,10 +2331,7 @@ fn xor_r64_imm32_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::XOR_R64_IMM32,
-        vec![
-            reg_operand(0, RAX, AccessKind::ReadWrite),
-            imm_operand(1, 0x0F, 64),
-        ],
+        vec![reg_operand(0, RAX, AccessKind::ReadWrite), imm_operand(1, 0x0F, 64)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -2355,10 +2346,7 @@ fn or_r64_imm32_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::OR_R64_IMM32,
-        vec![
-            reg_operand(0, RAX, AccessKind::ReadWrite),
-            imm_operand(1, 0x0F, 64),
-        ],
+        vec![reg_operand(0, RAX, AccessKind::ReadWrite), imm_operand(1, 0x0F, 64)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -2373,10 +2361,7 @@ fn test_r64_imm32_sets_zf_when_zero() -> Result<(), Box<dyn std::error::Error>> 
 
     let decoded = make_decoded(
         forms::TEST_R64_IMM32,
-        vec![
-            reg_operand(0, RAX, AccessKind::Read),
-            imm_operand(1, 0xFF, 64),
-        ],
+        vec![reg_operand(0, RAX, AccessKind::Read), imm_operand(1, 0xFF, 64)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -2437,7 +2422,11 @@ fn cmova_r64_r64_taken_when_cf_and_zf_clear() -> Result<(), Box<dyn std::error::
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
 
-    assert_eq!(read_reg(&executed, RAX)?, 99, "CMOVA should take src when CF=0 and ZF=0");
+    assert_eq!(
+        read_reg(&executed, RAX)?,
+        99,
+        "CMOVA should take src when CF=0 and ZF=0"
+    );
     Ok(())
 }
 
@@ -2621,17 +2610,17 @@ const XMM0: u32 = register_id::ZMM_BASE;
 const XMM1: u32 = register_id::ZMM_BASE + 1;
 const XMM2: u32 = register_id::ZMM_BASE + 2;
 
-fn make_float_state(reg_widths: &[(u32, usize)]) -> Result<ExecutionState<PersistentRegisters, PersistentMemory>, Box<dyn std::error::Error>> {
-    let memory = PersistentMemory::new(vec![
-        MemoryRegion {
-            object: ObjectId(1),
-            base: 0x1000,
-            size: 0x1000,
-            readable: true,
-            writable: true,
-            executable: true,
-        },
-    ])?;
+fn make_float_state(
+    reg_widths: &[(u32, usize)],
+) -> Result<ExecutionState<PersistentRegisters, PersistentMemory>, Box<dyn std::error::Error>> {
+    let memory = PersistentMemory::new(vec![MemoryRegion {
+        object: ObjectId(1),
+        base: 0x1000,
+        size: 0x1000,
+        readable: true,
+        writable: true,
+        executable: true,
+    }])?;
     let widths: Vec<(u32, usize)> = reg_widths.to_vec();
     Ok(ExecutionState {
         id: StateId(7),
@@ -2704,7 +2693,10 @@ fn addss_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&bytes[..4]);
     let result = f32::from_le_bytes(buf);
-    assert!((result - 4.0).abs() < f32::EPSILON, "1.5 + 2.5 should be 4.0, got {result}");
+    assert!(
+        (result - 4.0).abs() < f32::EPSILON,
+        "1.5 + 2.5 should be 4.0, got {result}"
+    );
     assert_eq!(&bytes[4..16], &[0xAA; 12], "upper lanes should be preserved from src1");
     Ok(())
 }
@@ -2734,7 +2726,10 @@ fn subss_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&bytes[..4]);
     let result = f32::from_le_bytes(buf);
-    assert!((result - 3.5).abs() < f32::EPSILON, "5.0 - 1.5 should be 3.5, got {result}");
+    assert!(
+        (result - 3.5).abs() < f32::EPSILON,
+        "5.0 - 1.5 should be 3.5, got {result}"
+    );
     assert_eq!(&bytes[4..16], &[0xBB; 12], "upper lanes should be preserved from src1");
     Ok(())
 }
@@ -2764,7 +2759,10 @@ fn mulss_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&bytes[..4]);
     let result = f32::from_le_bytes(buf);
-    assert!((result - 12.0).abs() < f32::EPSILON, "3.0 * 4.0 should be 12.0, got {result}");
+    assert!(
+        (result - 12.0).abs() < f32::EPSILON,
+        "3.0 * 4.0 should be 12.0, got {result}"
+    );
     assert_eq!(&bytes[4..16], &[0xCC; 12], "upper lanes should be preserved from src1");
     Ok(())
 }
@@ -2794,7 +2792,10 @@ fn divss_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&bytes[..4]);
     let result = f32::from_le_bytes(buf);
-    assert!((result - 2.5).abs() < f32::EPSILON, "10.0 / 4.0 should be 2.5, got {result}");
+    assert!(
+        (result - 2.5).abs() < f32::EPSILON,
+        "10.0 / 4.0 should be 2.5, got {result}"
+    );
     assert_eq!(&bytes[4..16], &[0xDD; 12], "upper lanes should be preserved from src1");
     Ok(())
 }
@@ -2823,7 +2824,10 @@ fn sqrtss_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&bytes[..4]);
     let result = f32::from_le_bytes(buf);
-    assert!((result - 4.0).abs() < f32::EPSILON, "sqrt(16.0) should be 4.0, got {result}");
+    assert!(
+        (result - 4.0).abs() < f32::EPSILON,
+        "sqrt(16.0) should be 4.0, got {result}"
+    );
     assert_eq!(&bytes[4..16], &[0xEE; 12], "upper lanes should be preserved from src1");
     Ok(())
 }
@@ -2853,7 +2857,10 @@ fn addsd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&bytes[..8]);
     let result = f64::from_le_bytes(buf);
-    assert!((result - 4.0).abs() < f64::EPSILON, "1.25 + 2.75 should be 4.0, got {result}");
+    assert!(
+        (result - 4.0).abs() < f64::EPSILON,
+        "1.25 + 2.75 should be 4.0, got {result}"
+    );
     assert_eq!(&bytes[8..16], &[0x55; 8], "upper lane should be preserved from src1");
     Ok(())
 }
@@ -2882,7 +2889,10 @@ fn sqrtsd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&bytes[..8]);
     let result = f64::from_le_bytes(buf);
-    assert!((result - 8.0).abs() < f64::EPSILON, "sqrt(64.0) should be 8.0, got {result}");
+    assert!(
+        (result - 8.0).abs() < f64::EPSILON,
+        "sqrt(64.0) should be 8.0, got {result}"
+    );
     assert_eq!(&bytes[8..16], &[0x77; 8], "upper lane should be preserved from src1");
     Ok(())
 }
@@ -2920,10 +2930,26 @@ fn addps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
             f32::from_le_bytes(buf)
         })
         .collect();
-    assert!((results[0] - 11.0).abs() < f32::EPSILON, "lane 0: 1+10=11, got {}", results[0]);
-    assert!((results[1] - 22.0).abs() < f32::EPSILON, "lane 1: 2+20=22, got {}", results[1]);
-    assert!((results[2] - 33.0).abs() < f32::EPSILON, "lane 2: 3+30=33, got {}", results[2]);
-    assert!((results[3] - 44.0).abs() < f32::EPSILON, "lane 3: 4+40=44, got {}", results[3]);
+    assert!(
+        (results[0] - 11.0).abs() < f32::EPSILON,
+        "lane 0: 1+10=11, got {}",
+        results[0]
+    );
+    assert!(
+        (results[1] - 22.0).abs() < f32::EPSILON,
+        "lane 1: 2+20=22, got {}",
+        results[1]
+    );
+    assert!(
+        (results[2] - 33.0).abs() < f32::EPSILON,
+        "lane 2: 3+30=33, got {}",
+        results[2]
+    );
+    assert!(
+        (results[3] - 44.0).abs() < f32::EPSILON,
+        "lane 3: 4+40=44, got {}",
+        results[3]
+    );
     Ok(())
 }
 
@@ -3016,7 +3042,15 @@ fn psubb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = read_bytes(&executed, XMM0)?;
     for (i, &byte) in bytes.iter().enumerate() {
         let expected = ((i + 20) - (i + 1)) as u8;
-        assert_eq!(byte, expected, "lane {i}: {} - {} = {}, got {}", i + 20, i + 1, expected, byte);
+        assert_eq!(
+            byte,
+            expected,
+            "lane {i}: {} - {} = {}, got {}",
+            i + 20,
+            i + 1,
+            expected,
+            byte
+        );
     }
     Ok(())
 }
@@ -3052,7 +3086,14 @@ fn paddw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
         buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
         let result = u16::from_le_bytes(buf);
         let expected = ((i as u16 + 1) * 100) + 1000;
-        assert_eq!(result, expected, "lane {i}: {} + 1000 = {}, got {}", (i + 1) * 100, expected, result);
+        assert_eq!(
+            result,
+            expected,
+            "lane {i}: {} + 1000 = {}, got {}",
+            (i + 1) * 100,
+            expected,
+            result
+        );
     }
     Ok(())
 }
@@ -3088,7 +3129,14 @@ fn pmullw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
         buf.copy_from_slice(&bytes[i * 2..(i + 1) * 2]);
         let result = u16::from_le_bytes(buf);
         let expected = (i as u16 + 1) * 2;
-        assert_eq!(result, expected, "lane {i}: {} * 2 = {}, got {}", i + 1, expected, result);
+        assert_eq!(
+            result,
+            expected,
+            "lane {i}: {} * 2 = {}, got {}",
+            i + 1,
+            expected,
+            result
+        );
     }
     Ok(())
 }
@@ -3317,10 +3365,7 @@ fn psllw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::PSLLW_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 2),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 2)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -3348,10 +3393,7 @@ fn psrlw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::PSRLW_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 2),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 2)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -3379,10 +3421,7 @@ fn psraw_xmm_imm8_preserves_sign() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::PSRAW_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 4),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 4)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -3418,10 +3457,7 @@ fn pslld_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::PSLLD_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 3),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 3)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -3449,10 +3485,7 @@ fn psrlq_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::PSRLQ_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 4),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 4)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -3625,7 +3658,13 @@ fn pmaxsb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
         let l = left[i];
         let r = right[i];
         let expected = l.max(r) as u8;
-        assert_eq!(byte, expected, "lane {i}: max({l}, {r}) = {}, got {:#x}", l.max(r), byte);
+        assert_eq!(
+            byte,
+            expected,
+            "lane {i}: max({l}, {r}) = {}, got {:#x}",
+            l.max(r),
+            byte
+        );
     }
     Ok(())
 }
@@ -3652,7 +3691,11 @@ fn pmaxub_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = read_bytes(&executed, XMM0)?;
     for (i, &byte) in bytes.iter().enumerate() {
         let expected = left[i].max(right[i]);
-        assert_eq!(byte, expected, "lane {i}: max({}, {}) = {}, got {:#x}", left[i], right[i], expected, byte);
+        assert_eq!(
+            byte, expected,
+            "lane {i}: max({}, {}) = {}, got {:#x}",
+            left[i], right[i], expected, byte
+        );
     }
     Ok(())
 }
@@ -3916,9 +3959,13 @@ fn punpcklwd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let left: [u16; 8] = [100, 200, 300, 400, 500, 600, 700, 800];
     let right: [u16; 8] = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000];
     let mut left_bytes = Vec::new();
-    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in left {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in right {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -3967,7 +4014,12 @@ fn punpckhbw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = read_bytes(&executed, XMM0)?;
     for i in 0..8 {
         assert_eq!(bytes[2 * i], left[8 + i], "lane {i} lo: got {:#x}", bytes[2 * i]);
-        assert_eq!(bytes[2 * i + 1], right[8 + i], "lane {i} hi: got {:#x}", bytes[2 * i + 1]);
+        assert_eq!(
+            bytes[2 * i + 1],
+            right[8 + i],
+            "lane {i} hi: got {:#x}",
+            bytes[2 * i + 1]
+        );
     }
     Ok(())
 }
@@ -3979,9 +4031,13 @@ fn punpckldq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let left: [u32; 4] = [0x11111111, 0x22222222, 0x33333333, 0x44444444];
     let right: [u32; 4] = [0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC, 0xDDDDDDDD];
     let mut left_bytes = Vec::new();
-    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in left {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in right {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -4013,9 +4069,13 @@ fn punpcklqdq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let left: [u64; 2] = [0x1111111111111111, 0x2222222222222222];
     let right: [u64; 2] = [0xAAAAAAAAAAAAAAAA, 0xBBBBBBBBBBBBBBBB];
     let mut left_bytes = Vec::new();
-    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in left {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in right {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -4054,9 +4114,13 @@ fn packsswb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let left: [i16; 8] = [100, 200, -100, -200, 50, -50, 0, 127];
     let right: [i16; 8] = [128, -129, 255, -256, 0, 1, -1, 100];
     let mut left_bytes = Vec::new();
-    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in left {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in right {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -4072,8 +4136,7 @@ fn packsswb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let bytes = read_bytes(&executed, XMM0)?;
     let expected: [i8; 16] = [
-        100, 127, -100, -128, 50, -50, 0, 127,
-        127, -128, 127, -128, 0, 1, -1, 100,
+        100, 127, -100, -128, 50, -50, 0, 127, 127, -128, 127, -128, 0, 1, -1, 100,
     ];
     for (i, &exp) in expected.iter().enumerate() {
         assert_eq!(bytes[i] as i8, exp, "lane {i}: got {:#x}, expected {exp}", bytes[i]);
@@ -4128,9 +4191,13 @@ fn packuswb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let left: [i16; 8] = [100, 200, -100, 300, 50, -50, 0, 255];
     let right: [i16; 8] = [256, -1, 128, -200, 0, 1, 100, 200];
     let mut left_bytes = Vec::new();
-    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in left {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in right {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -4145,10 +4212,7 @@ fn packuswb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
 
     let bytes = read_bytes(&executed, XMM0)?;
-    let expected: [u8; 16] = [
-        100, 200, 0, 255, 50, 0, 0, 255,
-        255, 0, 128, 0, 0, 1, 100, 200,
-    ];
+    let expected: [u8; 16] = [100, 200, 0, 255, 50, 0, 0, 255, 255, 0, 128, 0, 0, 1, 100, 200];
     for (i, &exp) in expected.iter().enumerate() {
         assert_eq!(bytes[i], exp, "lane {i}: got {:#x}, expected {exp:#x}", bytes[i]);
     }
@@ -4206,9 +4270,13 @@ fn pmaddwd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let left: [i16; 8] = [1, 2, 3, 4, -1, -2, 100, 200];
     let right: [i16; 8] = [10, 20, 30, 40, -10, -20, 1, 2];
     let mut left_bytes = Vec::new();
-    for v in left { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in left {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in right { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in right {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -4289,15 +4357,14 @@ fn pshufd_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // Expected: [0x44444444, 0x33333333, 0x22222222, 0x11111111]
     let src: [u32; 4] = [0x11111111, 0x22222222, 0x33333333, 0x44444444];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
 
     let decoded = make_decoded(
         forms::PSHUFD_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 0x1B),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 0x1B)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -4326,15 +4393,14 @@ fn pshufhw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // Expected: [0x0001, 0x0002, 0x0003, 0x0004, 0x4004, 0x3003, 0x2002, 0x1001]
     let src: [u16; 8] = [0x0001, 0x0002, 0x0003, 0x0004, 0x1001, 0x2002, 0x3003, 0x4004];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
 
     let decoded = make_decoded(
         forms::PSHUFHW_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 0x1B),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 0x1B)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -4359,15 +4425,14 @@ fn pshuflw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // Expected: [0x0004, 0x0003, 0x0002, 0x0001, 0x1001, 0x2002, 0x3003, 0x4004]
     let src: [u16; 8] = [0x0001, 0x0002, 0x0003, 0x0004, 0x1001, 0x2002, 0x3003, 0x4004];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
 
     let decoded = make_decoded(
         forms::PSHUFLW_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 0x1B),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 0x1B)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -4473,7 +4538,9 @@ fn psllw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // expected = [0x0010, 0x0020, 0x0030, 0x0040, 0x0050, 0x0060, 0x0070, 0x0080]
     let src: [u16; 8] = [0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&4u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4504,7 +4571,9 @@ fn psllw_xmm_xmm_overflow_clears() -> Result<(), Box<dyn std::error::Error>> {
     // PSLLW with count >= 16 should clear all lanes
     let src: [u16; 8] = [0xFFFF; 8];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&20u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4534,7 +4603,9 @@ fn pslld_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PSLLD: 4x32-bit logical left shift by count in low 64 bits of XMM1
     let src: [u32; 4] = [0x00000001, 0x00000002, 0x00000003, 0x00000004];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&8u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4565,7 +4636,9 @@ fn psllq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PSLLQ: 2x64-bit logical left shift by count in low 64 bits of XMM1
     let src: [u64; 2] = [0x0000000000000001, 0x0000000000000002];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&16u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4596,7 +4669,9 @@ fn psrlw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PSRLW: 8x16-bit logical right shift by count in low 64 bits of XMM1
     let src: [u16; 8] = [0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000, 0x7000, 0x8000];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&4u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4627,7 +4702,9 @@ fn psrld_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PSRLD: 4x32-bit logical right shift by count in low 64 bits of XMM1
     let src: [u32; 4] = [0x00000100, 0x00000200, 0x00000300, 0x00000400];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&8u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4658,7 +4735,9 @@ fn psrlq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PSRLQ: 2x64-bit logical right shift by count in low 64 bits of XMM1
     let src: [u64; 2] = [0x0000000000010000, 0x0000000000020000];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&16u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4690,7 +4769,9 @@ fn psraw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // Sign bit is preserved.
     let src: [i16; 8] = [-16, -32, -48, -64, 16, 32, 48, 64];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&2u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4721,7 +4802,9 @@ fn psrad_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PSRAD: 4x32-bit arithmetic right shift by count in low 64 bits of XMM1
     let src: [i32; 4] = [-256, -512, 256, 512];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&4u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4752,7 +4835,9 @@ fn psraw_xmm_xmm_saturates_to_sign() -> Result<(), Box<dyn std::error::Error>> {
     // PSRAW with count >= 16 should sign-extend (negative → -1, positive → 0)
     let src: [i16; 8] = [-1, -100, 1, 100, -32768, 32767, 0, -1];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut count_bytes = [0u8; 16];
     count_bytes[0..4].copy_from_slice(&20u32.to_le_bytes());
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
@@ -4792,9 +4877,13 @@ fn phaddw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i16; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     let src2: [i16; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -4828,9 +4917,13 @@ fn phaddd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i32; 4] = [1, 2, 3, 4];
     let src2: [i32; 4] = [10, 20, 30, 40];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -4864,9 +4957,13 @@ fn phsubw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i16; 8] = [10, 1, 30, 3, 50, 5, 70, 7];
     let src2: [i16; 8] = [100, 10, 200, 20, 300, 30, 400, 40];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -4900,9 +4997,13 @@ fn phsubd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i32; 4] = [100, 1, 300, 3];
     let src2: [i32; 4] = [1000, 10, 2000, 20];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -4935,7 +5036,9 @@ fn pabsb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PABSB: per-lane signed absolute value (8-bit)
     let src: [i8; 16] = [-1, 2, -3, 4, -5, 6, -127, 127, 0, -1, 100, -100, 0, 0, 0, 0];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -4961,7 +5064,9 @@ fn pabsw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PABSW: per-lane signed absolute value (16-bit)
     let src: [i16; 8] = [-1, 2, -3, 4, -32768, 32767, 0, -100];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -4991,7 +5096,9 @@ fn pabsd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PABSD: per-lane signed absolute value (32-bit)
     let src: [i32; 4] = [-1, 2, -3, 4];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -5025,9 +5132,13 @@ fn psignb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i8; 16] = [5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5];
     let src2: [i8; 16] = [1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1, -1, 0, 1];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5055,9 +5166,13 @@ fn psignw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i16; 8] = [100, 100, 100, 100, 100, 100, 100, 100];
     let src2: [i16; 8] = [1, -1, 0, 1, -1, 0, 1, -1];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5087,9 +5202,13 @@ fn psignd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i32; 4] = [1000, 1000, 1000, 1000];
     let src2: [i32; 4] = [1, -1, 0, 1];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5128,9 +5247,13 @@ fn pmulhrsw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i16; 8] = [2, 100, 1000, -100, 0, 0, 0, 0];
     let src2: [i16; 8] = [3, 200, 1000, 200, 0, 0, 0, 0];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5168,9 +5291,13 @@ fn phaddsw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i16; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     let src2: [i16; 8] = [10, 20, 30, 40, 50, 60, 70, 80];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5200,9 +5327,13 @@ fn phaddsw_xmm_xmm_saturates() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i16; 8] = [30000, 30000, -30000, -30000, 0, 0, 0, 0];
     let src2: [i16; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5236,9 +5367,13 @@ fn phsubsw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i16; 8] = [10, 1, 30, 3, 50, 5, 70, 7];
     let src2: [i16; 8] = [100, 10, 200, 20, 300, 30, 400, 40];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5268,9 +5403,13 @@ fn phsubsw_xmm_xmm_saturates() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [i16; 8] = [-30000, 30000, 0, 0, 0, 0, 0, 0];
     let src2: [i16; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5304,9 +5443,13 @@ fn pcmpeqq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [u64; 2] = [0x123456789ABCDEF0, 0xFFFFFFFFFFFFFFFF];
     let src2: [u64; 2] = [0x123456789ABCDEF0, 0x0000000000000000];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5346,9 +5489,13 @@ fn pmuldq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [u64; 2] = [0x0000000AFFFFFFFF, 0x0000006400000005];
     let src2: [u64; 2] = [0x0000000300000002, 0x0000006400000006];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -5383,8 +5530,9 @@ fn pblendvb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let dst: [u8; 16] = [0xAA; 16];
     let src: [u8; 16] = [0xBB; 16];
     // mask: alternating bytes with bit 7 set/clear
-    let mask: [u8; 16] = [0x80, 0x00, 0xFF, 0x00, 0x80, 0x00, 0xFF, 0x00,
-                          0x80, 0x00, 0xFF, 0x00, 0x80, 0x00, 0xFF, 0x00];
+    let mask: [u8; 16] = [
+        0x80, 0x00, 0xFF, 0x00, 0x80, 0x00, 0xFF, 0x00, 0x80, 0x00, 0xFF, 0x00, 0x80, 0x00, 0xFF, 0x00,
+    ];
     let initial = with_bytes(&state, XMM0, &dst)?;
     let initial = with_bytes(&initial, XMM1, &src)?;
     let initial = with_bytes(&initial, XMM2, &mask)?;
@@ -5400,8 +5548,9 @@ fn pblendvb_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
     let bytes = read_bytes(&executed, XMM0)?;
-    let expected: [u8; 16] = [0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA,
-                             0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA];
+    let expected: [u8; 16] = [
+        0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA, 0xBB, 0xAA,
+    ];
     for (i, &exp) in expected.iter().enumerate() {
         assert_eq!(bytes[i], exp, "byte {i}");
     }
@@ -5528,7 +5677,9 @@ fn pmovsxwd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PMOVSXWD: sign-extend low 4 words to 4 dwords
     let src: [i16; 8] = [0x7FFF, -0x8000, -1, 0, 0, 0, 0, 0];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -5556,7 +5707,9 @@ fn pmovzxwd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let src: [u16; 8] = [0x7FFF, 0x8000, 0xFFFF, 0x0000, 0, 0, 0, 0];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -5585,7 +5738,9 @@ fn pmovsxdq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PMOVSXDQ: sign-extend low 2 dwords to 2 qwords
     let src: [i32; 4] = [0x7FFFFFFF, -0x80000000, 0, 0];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -5613,7 +5768,9 @@ fn pmovzxdq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let src: [u32; 4] = [0x7FFFFFFF, 0x80000000, 0, 0];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -5642,7 +5799,9 @@ fn pmovsxwq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PMOVSXWQ: sign-extend low 2 words to 2 qwords
     let src: [i16; 8] = [0x7FFF, -0x8000, 0, 0, 0, 0, 0, 0];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -5670,7 +5829,9 @@ fn pmovzxwq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let src: [u16; 8] = [0x7FFF, 0x8000, 0, 0, 0, 0, 0, 0];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -5759,9 +5920,13 @@ fn pblendw_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     let dst: [u16; 8] = [0x1111, 0x2222, 0x3333, 0x4444, 0x5555, 0x6666, 0x7777, 0x8888];
     let src: [u16; 8] = [0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD, 0xEEEE, 0xFFFF, 0x0000, 0x1111];
     let mut dst_bytes = Vec::new();
-    for v in dst { dst_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in dst {
+        dst_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &dst_bytes)?;
     let initial = with_bytes(&initial, XMM1, &src_bytes)?;
 
@@ -5794,9 +5959,13 @@ fn blendps_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     let dst: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
     let src: [f32; 4] = [10.0, 20.0, 30.0, 40.0];
     let mut dst_bytes = Vec::new();
-    for v in dst { dst_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in dst {
+        dst_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &dst_bytes)?;
     let initial = with_bytes(&initial, XMM1, &src_bytes)?;
 
@@ -5829,9 +5998,13 @@ fn blendpd_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     let dst: [f64; 2] = [1.0, 2.0];
     let src: [f64; 2] = [10.0, 20.0];
     let mut dst_bytes = Vec::new();
-    for v in dst { dst_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in dst {
+        dst_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &dst_bytes)?;
     let initial = with_bytes(&initial, XMM1, &src_bytes)?;
 
@@ -5870,9 +6043,13 @@ fn dpps_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
     let src2: [f32; 4] = [5.0, 6.0, 7.0, 8.0];
     let mut s1_bytes = Vec::new();
-    for v in src1 { s1_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        s1_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut s2_bytes = Vec::new();
-    for v in src2 { s2_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        s2_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &s1_bytes)?;
     let initial = with_bytes(&initial, XMM1, &s2_bytes)?;
 
@@ -5907,9 +6084,13 @@ fn dppd_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [f64; 2] = [1.0, 2.0];
     let src2: [f64; 2] = [3.0, 4.0];
     let mut s1_bytes = Vec::new();
-    for v in src1 { s1_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        s1_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut s2_bytes = Vec::new();
-    for v in src2 { s2_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        s2_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &s1_bytes)?;
     let initial = with_bytes(&initial, XMM1, &s2_bytes)?;
 
@@ -5972,8 +6153,9 @@ fn pinsrb_xmm_r32_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
 fn pinsrb_preserves_other_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (RAX, 8)])?;
     // PINSRB: insert byte at index 5, verify other bytes preserved
-    let xmm_init: [u8; 16] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-                              0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F];
+    let xmm_init: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+    ];
     let initial = with_bytes(&state, XMM0, &xmm_init)?;
     let initial = with_bytes(&initial, RAX, &0xFF_u64.to_le_bytes())?;
 
@@ -6157,7 +6339,9 @@ fn roundps_xmm_xmm_imm8_round_nearest() -> Result<(), Box<dyn std::error::Error>
     // ROUNDPS: round 4x32-bit floats, imm8=0 (nearest)
     let src: [f32; 4] = [1.4, 2.5, 3.6, -0.5];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
     let initial = with_bytes(&initial, XMM1, &src_bytes)?;
 
@@ -6187,7 +6371,9 @@ fn roundps_xmm_xmm_imm8_round_truncate() -> Result<(), Box<dyn std::error::Error
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let src: [f32; 4] = [1.9, 2.1, -3.8, -4.2];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
     let initial = with_bytes(&initial, XMM1, &src_bytes)?;
 
@@ -6217,7 +6403,9 @@ fn roundpd_xmm_xmm_imm8_round_down() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let src: [f64; 2] = [1.9, -2.1];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &src_bytes)?;
     let initial = with_bytes(&initial, XMM1, &src_bytes)?;
 
@@ -6250,7 +6438,9 @@ fn roundss_xmm_xmm_imm8_preserves_upper() -> Result<(), Box<dyn std::error::Erro
     // imm8 = 0 (nearest) → low = 2.0, upper = [10.0, 20.0, 30.0]
     let src1: [f32; 4] = [1.7, 10.0, 20.0, 30.0];
     let mut s1_bytes = Vec::new();
-    for v in src1 { s1_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        s1_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &s1_bytes)?;
     let initial = with_bytes(&initial, XMM1, &2.3f32.to_le_bytes())?;
 
@@ -6283,7 +6473,9 @@ fn roundsd_xmm_xmm_imm8_preserves_upper() -> Result<(), Box<dyn std::error::Erro
     // imm8 = 0 (nearest) → low = 3.0, upper = 50.0
     let src1: [f64; 2] = [1.3, 50.0];
     let mut s1_bytes = Vec::new();
-    for v in src1 { s1_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        s1_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &s1_bytes)?;
     let initial = with_bytes(&initial, XMM1, &2.6f64.to_le_bytes())?;
 
@@ -6482,7 +6674,9 @@ fn pextrd_r32_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // XMM0 = [0x11112222, 0x33334444, 0x55556666, 0x77778888]
     let xmm_init: [u32; 4] = [0x11112222, 0x33334444, 0x55556666, 0x77778888];
     let mut xmm_bytes = Vec::new();
-    for v in xmm_init { xmm_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in xmm_init {
+        xmm_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &xmm_bytes)?;
     let initial = with_bytes(&initial, RAX, &0u64.to_le_bytes())?;
 
@@ -6508,7 +6702,9 @@ fn pextrq_r64_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // XMM0 = [0x1111222233334444, 0x5555666677778888]
     let xmm_init: [u64; 2] = [0x1111222233334444, 0x5555666677778888];
     let mut xmm_bytes = Vec::new();
-    for v in xmm_init { xmm_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in xmm_init {
+        xmm_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &xmm_bytes)?;
     let initial = with_bytes(&initial, RAX, &0u64.to_le_bytes())?;
 
@@ -6536,7 +6732,9 @@ fn pinsrd_xmm_r32_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // Expected: XMM0[2] = 0xDEADBEEF, rest unchanged
     let xmm_init: [u32; 4] = [0x11112222, 0x33334444, 0x55556666, 0x77778888];
     let mut xmm_bytes = Vec::new();
-    for v in xmm_init { xmm_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in xmm_init {
+        xmm_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &xmm_bytes)?;
     let initial = with_bytes(&initial, RAX, &0xDEADBEEF_u64.to_le_bytes())?;
 
@@ -6570,7 +6768,9 @@ fn pinsrq_xmm_r64_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // Expected: XMM0[0] = 0xDEADBEEFCAFEBABE, XMM0[1] = 0x5555666677778888
     let xmm_init: [u64; 2] = [0x1111222233334444, 0x5555666677778888];
     let mut xmm_bytes = Vec::new();
-    for v in xmm_init { xmm_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in xmm_init {
+        xmm_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &xmm_bytes)?;
     let initial = with_bytes(&initial, RAX, &0xDEADBEEFCAFEBABE_u64.to_le_bytes())?;
 
@@ -6606,7 +6806,9 @@ fn extractps_r32_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // XMM0 = [1.0, 2.0, 3.0, 4.0]
     let xmm_init: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
     let mut xmm_bytes = Vec::new();
-    for v in xmm_init { xmm_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in xmm_init {
+        xmm_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &xmm_bytes)?;
     let initial = with_bytes(&initial, RAX, &0u64.to_le_bytes())?;
 
@@ -6635,9 +6837,13 @@ fn insertps_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     let dst_init: [f32; 4] = [10.0, 20.0, 30.0, 40.0];
     let src_init: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
     let mut dst_bytes = Vec::new();
-    for v in dst_init { dst_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in dst_init {
+        dst_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut src_bytes = Vec::new();
-    for v in src_init { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src_init {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &dst_bytes)?;
     let initial = with_bytes(&initial, XMM1, &src_bytes)?;
 
@@ -6673,9 +6879,13 @@ fn insertps_zmask_zeroes_dwords() -> Result<(), Box<dyn std::error::Error>> {
     let dst_init: [f32; 4] = [10.0, 20.0, 30.0, 40.0];
     let src_init: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
     let mut dst_bytes = Vec::new();
-    for v in dst_init { dst_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in dst_init {
+        dst_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut src_bytes = Vec::new();
-    for v in src_init { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src_init {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &dst_bytes)?;
     let initial = with_bytes(&initial, XMM1, &src_bytes)?;
 
@@ -6707,7 +6917,11 @@ fn rol_r32_cl_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
 
-    assert_eq!(read_reg(&executed, RAX)?, 0x00000000_00000018, "ROL 0x80000001 by 4 should be 0x18");
+    assert_eq!(
+        read_reg(&executed, RAX)?,
+        0x00000000_00000018,
+        "ROL 0x80000001 by 4 should be 0x18"
+    );
     Ok(())
 }
 
@@ -6718,7 +6932,11 @@ fn ror_r32_cl_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
 
-    assert_eq!(read_reg(&executed, RAX)?, 0x00000000_30000000, "ROR 0x3 by 4 should be 0x30000000");
+    assert_eq!(
+        read_reg(&executed, RAX)?,
+        0x00000000_30000000,
+        "ROR 0x3 by 4 should be 0x30000000"
+    );
     Ok(())
 }
 
@@ -6726,9 +6944,13 @@ fn ror_r32_cl_executes() -> Result<(), Box<dyn std::error::Error>> {
 fn cmpps_xmm_xmm_imm8_eq_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let mut left_bytes = Vec::new();
-    for v in [1.0f32, 2.0, 3.0, 4.0] { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1.0f32, 2.0, 3.0, 4.0] {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in [1.0f32, 5.0, 3.0, 6.0] { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1.0f32, 5.0, 3.0, 6.0] {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -6755,9 +6977,13 @@ fn cmpps_xmm_xmm_imm8_eq_executes() -> Result<(), Box<dyn std::error::Error>> {
 fn cmpps_xmm_xmm_imm8_lt_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let mut left_bytes = Vec::new();
-    for v in [1.0f32, 5.0, 3.0, 6.0] { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1.0f32, 5.0, 3.0, 6.0] {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in [2.0f32, 4.0, 3.0, 5.0] { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [2.0f32, 4.0, 3.0, 5.0] {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -6784,9 +7010,13 @@ fn cmpps_xmm_xmm_imm8_lt_executes() -> Result<(), Box<dyn std::error::Error>> {
 fn cmppd_xmm_xmm_imm8_eq_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let mut left_bytes = Vec::new();
-    for v in [1.0f64, 2.0] { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1.0f64, 2.0] {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in [1.0f64, 3.0] { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1.0f64, 3.0] {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -6813,9 +7043,13 @@ fn cmppd_xmm_xmm_imm8_eq_executes() -> Result<(), Box<dyn std::error::Error>> {
 fn minps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let mut left_bytes = Vec::new();
-    for v in [1.0f32, 5.0, 3.0, 6.0] { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1.0f32, 5.0, 3.0, 6.0] {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in [2.0f32, 4.0, 3.0, 5.0] { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [2.0f32, 4.0, 3.0, 5.0] {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -6843,9 +7077,13 @@ fn minps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
 fn maxps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
     let mut left_bytes = Vec::new();
-    for v in [1.0f32, 5.0, 3.0, 6.0] { left_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1.0f32, 5.0, 3.0, 6.0] {
+        left_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let mut right_bytes = Vec::new();
-    for v in [2.0f32, 4.0, 3.0, 5.0] { right_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [2.0f32, 4.0, 3.0, 5.0] {
+        right_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &left_bytes)?;
     let initial = with_bytes(&initial, XMM1, &right_bytes)?;
 
@@ -6874,7 +7112,9 @@ fn movmskps_r32_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(RAX, 8), (XMM0, 16), (XMM1, 16)])?;
     // [negative, positive, negative, positive] -> sign bits = 0b0101 = 0x5
     let mut src_bytes = Vec::new();
-    for v in [-1.0f32, 2.0, -3.0, 4.0] { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [-1.0f32, 2.0, -3.0, 4.0] {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -6895,7 +7135,9 @@ fn movmskpd_r32_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(RAX, 8), (XMM0, 16), (XMM1, 16)])?;
     // [negative, positive] -> sign bits = 0b01 = 0x1
     let mut src_bytes = Vec::new();
-    for v in [-1.0f64, 2.0] { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in [-1.0f64, 2.0] {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -6947,9 +7189,13 @@ fn haddps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // result[0..1] = [1+2, 3+4] = [3.0, 7.0]
     // result[2..3] = [10+20, 30+40] = [30.0, 70.0]
     let mut bytes1 = Vec::new();
-    for v in [1.0f32, 2.0, 3.0, 4.0] { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1.0f32, 2.0, 3.0, 4.0] {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in [10.0f32, 20.0, 30.0, 40.0] { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in [10.0f32, 20.0, 30.0, 40.0] {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -6968,7 +7214,10 @@ fn haddps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = [0u8; 4];
         buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
         let result = f32::from_le_bytes(buf);
-        assert!((result - exp).abs() < f32::EPSILON, "lane {i}: expected {exp}, got {result}");
+        assert!(
+            (result - exp).abs() < f32::EPSILON,
+            "lane {i}: expected {exp}, got {result}"
+        );
     }
     Ok(())
 }
@@ -6982,9 +7231,13 @@ fn haddpd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // result[0] = 1.5 + 2.5 = 4.0
     // result[1] = 10.0 + 20.0 = 30.0
     let mut bytes1 = Vec::new();
-    for v in [1.5f64, 2.5] { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in [1.5f64, 2.5] {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in [10.0f64, 20.0] { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in [10.0f64, 20.0] {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -7003,7 +7256,10 @@ fn haddpd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
         let result = f64::from_le_bytes(buf);
-        assert!((result - exp).abs() < f64::EPSILON, "lane {i}: expected {exp}, got {result}");
+        assert!(
+            (result - exp).abs() < f64::EPSILON,
+            "lane {i}: expected {exp}, got {result}"
+        );
     }
     Ok(())
 }
@@ -7017,9 +7273,13 @@ fn hsubps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // result[0..1] = [10-1, 30-3] = [9.0, 27.0]
     // result[2..3] = [100-10, 200-20] = [90.0, 180.0]
     let mut bytes1 = Vec::new();
-    for v in [10.0f32, 1.0, 30.0, 3.0] { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in [10.0f32, 1.0, 30.0, 3.0] {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in [100.0f32, 10.0, 200.0, 20.0] { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in [100.0f32, 10.0, 200.0, 20.0] {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -7038,7 +7298,10 @@ fn hsubps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = [0u8; 4];
         buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);
         let result = f32::from_le_bytes(buf);
-        assert!((result - exp).abs() < f32::EPSILON, "lane {i}: expected {exp}, got {result}");
+        assert!(
+            (result - exp).abs() < f32::EPSILON,
+            "lane {i}: expected {exp}, got {result}"
+        );
     }
     Ok(())
 }
@@ -7052,9 +7315,13 @@ fn hsubpd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // result[0] = 10.0 - 1.0 = 9.0
     // result[1] = 100.0 - 10.0 = 90.0
     let mut bytes1 = Vec::new();
-    for v in [10.0f64, 1.0] { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in [10.0f64, 1.0] {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in [100.0f64, 10.0] { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in [100.0f64, 10.0] {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -7073,7 +7340,10 @@ fn hsubpd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
         let result = f64::from_le_bytes(buf);
-        assert!((result - exp).abs() < f64::EPSILON, "lane {i}: expected {exp}, got {result}");
+        assert!(
+            (result - exp).abs() < f64::EPSILON,
+            "lane {i}: expected {exp}, got {result}"
+        );
     }
     Ok(())
 }
@@ -7089,9 +7359,13 @@ fn pmaxsq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let left: [i64; 2] = [100, -100];
     let right: [i64; 2] = [50, 0];
     let mut bytes1 = Vec::new();
-    for v in left { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in left {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in right { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in right {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -7121,9 +7395,13 @@ fn pminsq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let left: [i64; 2] = [100, -100];
     let right: [i64; 2] = [50, 0];
     let mut bytes1 = Vec::new();
-    for v in left { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in left {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in right { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in right {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -7153,7 +7431,9 @@ fn pminsq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn movaps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
-    let src: [u8; 16] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01];
+    let src: [u8; 16] = [
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01,
+    ];
     let initial = with_bytes(&state, XMM1, &src)?;
 
     let decoded = make_decoded(
@@ -7173,7 +7453,9 @@ fn movaps_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn movapd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
-    let src: [u8; 16] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10];
+    let src: [u8; 16] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+    ];
     let initial = with_bytes(&state, XMM1, &src)?;
 
     let decoded = make_decoded(
@@ -7193,7 +7475,9 @@ fn movapd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn movups_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
-    let src: [u8; 16] = [0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00];
+    let src: [u8; 16] = [
+        0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
+    ];
     let initial = with_bytes(&state, XMM1, &src)?;
 
     let decoded = make_decoded(
@@ -7213,7 +7497,9 @@ fn movups_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn movupd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let state = make_float_state(&[(XMM0, 16), (XMM1, 16)])?;
-    let src: [u8; 16] = [0x10, 0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+    let src: [u8; 16] = [
+        0x10, 0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+    ];
     let initial = with_bytes(&state, XMM1, &src)?;
 
     let decoded = make_decoded(
@@ -7255,7 +7541,10 @@ fn movss_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&bytes[..4]);
     let result = f32::from_le_bytes(buf);
-    assert!((result - 42.5).abs() < f32::EPSILON, "MOVSS should copy low 32 bits, got {result}");
+    assert!(
+        (result - 42.5).abs() < f32::EPSILON,
+        "MOVSS should copy low 32 bits, got {result}"
+    );
     assert_eq!(&bytes[4..16], &[0u8; 12], "MOVSS should zero upper 96 bits");
     Ok(())
 }
@@ -7281,7 +7570,10 @@ fn movsd_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&bytes[..8]);
     let result = f64::from_le_bytes(buf);
-    assert!((result - 99.5).abs() < f64::EPSILON, "MOVSD should copy low 64 bits, got {result}");
+    assert!(
+        (result - 99.5).abs() < f64::EPSILON,
+        "MOVSD should copy low 64 bits, got {result}"
+    );
     assert_eq!(&bytes[8..16], &[0u8; 8], "MOVSD should zero upper 64 bits");
     Ok(())
 }
@@ -7310,7 +7602,11 @@ fn movq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = read_bytes(&executed, XMM0)?;
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&bytes[..8]);
-    assert_eq!(u64::from_le_bytes(buf), 0x0123456789ABCDEF, "MOVQ should copy low 64 bits");
+    assert_eq!(
+        u64::from_le_bytes(buf),
+        0x0123456789ABCDEF,
+        "MOVQ should copy low 64 bits"
+    );
     assert_eq!(&bytes[8..16], &[0u8; 8], "MOVQ should zero upper 64 bits");
     Ok(())
 }
@@ -7334,8 +7630,8 @@ fn mpsadbw_xmm_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // result[5] = |6-1|+|7-1|+|8-1|+|9-1| = 5+6+7+8 = 26
     // result[6] = |7-1|+|8-1|+|9-1|+|10-1| = 6+7+8+9 = 30
     // result[7] = |8-1|+|9-1|+|10-1|+|11-1| = 7+8+9+10 = 34
-    let src1: [u8; 16] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];
-    let src2: [u8; 16] = [1,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0];
+    let src1: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    let src2: [u8; 16] = [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let initial = with_bytes(&state, XMM0, &src1)?;
     let initial = with_bytes(&initial, XMM1, &src2)?;
 
@@ -7372,7 +7668,9 @@ fn phminposuw_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // result[0:16] = 10, result[16:32] = 6, result[32:128] = 0
     let src: [u16; 8] = [100, 50, 200, 30, 150, 80, 10, 250];
     let mut src_bytes = Vec::new();
-    for v in src { src_bytes.extend_from_slice(&v.to_le_bytes()); }
+    for v in src {
+        src_bytes.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM1, &src_bytes)?;
 
     let decoded = make_decoded(
@@ -7409,9 +7707,13 @@ fn pcmpgtq_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     let src1: [u64; 2] = [10, (-5i64 as u64)];
     let src2: [u64; 2] = [5, 5];
     let mut bytes1 = Vec::new();
-    for v in src1 { bytes1.extend_from_slice(&v.to_le_bytes()); }
+    for v in src1 {
+        bytes1.extend_from_slice(&v.to_le_bytes());
+    }
     let mut bytes2 = Vec::new();
-    for v in src2 { bytes2.extend_from_slice(&v.to_le_bytes()); }
+    for v in src2 {
+        bytes2.extend_from_slice(&v.to_le_bytes());
+    }
     let initial = with_bytes(&state, XMM0, &bytes1)?;
     let initial = with_bytes(&initial, XMM1, &bytes2)?;
 
@@ -7444,15 +7746,12 @@ fn pslldq_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PSLLDQ: shift left by 2 bytes
     // src = [0x01,0x02,0x03,...,0x0F,0x10]
     // After shifting left 2 bytes: [0x00,0x00,0x01,0x02,...,0x0E]
-    let src: [u8; 16] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];
+    let src: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let initial = with_bytes(&state, XMM0, &src)?;
 
     let decoded = make_decoded(
         forms::PSLLDQ_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 2),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 2)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -7473,15 +7772,12 @@ fn psrldq_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
     // PSRLDQ: shift right by 2 bytes
     // src = [0x01,0x02,0x03,...,0x0F,0x10]
     // After shifting right 2 bytes: [0x03,0x04,...,0x10,0x00,0x00]
-    let src: [u8; 16] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16];
+    let src: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let initial = with_bytes(&state, XMM0, &src)?;
 
     let decoded = make_decoded(
         forms::PSRLDQ_XMM_IMM8,
-        vec![
-            xmm_operand(0, XMM0, 128, AccessKind::ReadWrite),
-            imm8_operand(1, 2),
-        ],
+        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 2)],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -7504,7 +7800,9 @@ fn pandn_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
     // src = 0x0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F
     // ~dst  = 0x00FF00FF00FF00FF00FF00FF00FF00FF
     // result = 0x000F000F000F000F000F000F000F000F
-    let dst: [u8; 16] = [0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00,0xFF,0x00];
+    let dst: [u8; 16] = [
+        0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00,
+    ];
     let src: [u8; 16] = [0x0F; 16];
     let initial = with_bytes(&state, XMM0, &dst)?;
     let initial = with_bytes(&initial, XMM1, &src)?;
@@ -7519,7 +7817,9 @@ fn pandn_xmm_xmm_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
     let bytes = read_bytes(&executed, XMM0)?;
-    let expected: [u8; 16] = [0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F,0x00,0x0F];
+    let expected: [u8; 16] = [
+        0x00, 0x0F, 0x00, 0x0F, 0x00, 0x0F, 0x00, 0x0F, 0x00, 0x0F, 0x00, 0x0F, 0x00, 0x0F, 0x00, 0x0F,
+    ];
     assert_eq!(bytes, expected, "PANDN should compute (~dst) & src");
     Ok(())
 }

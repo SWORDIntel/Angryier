@@ -501,8 +501,8 @@ fn evaluate_primitive<R, M>(
             if output_bits == 0 {
                 0
             } else {
-                let shift = u32::try_from(shift % u128::from(output_bits))
-                    .map_err(|_| ConcreteExecutionError::TypeMismatch)?;
+                let shift =
+                    u32::try_from(shift % u128::from(output_bits)).map_err(|_| ConcreteExecutionError::TypeMismatch)?;
                 let mask = bit_mask(output_bits);
                 ((input << shift) | (input >> (u32::from(output_bits) - shift))) & mask
             }
@@ -517,8 +517,8 @@ fn evaluate_primitive<R, M>(
             if output_bits == 0 {
                 0
             } else {
-                let shift = u32::try_from(shift % u128::from(output_bits))
-                    .map_err(|_| ConcreteExecutionError::TypeMismatch)?;
+                let shift =
+                    u32::try_from(shift % u128::from(output_bits)).map_err(|_| ConcreteExecutionError::TypeMismatch)?;
                 let mask = bit_mask(output_bits);
                 ((input >> shift) | (input << (u32::from(output_bits) - shift))) & mask
             }
@@ -611,10 +611,7 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
-        IrPrimitive::VecLaneFAdd
-        | IrPrimitive::VecLaneFSub
-        | IrPrimitive::VecLaneFMul
-        | IrPrimitive::VecLaneFDiv => {
+        IrPrimitive::VecLaneFAdd | IrPrimitive::VecLaneFSub | IrPrimitive::VecLaneFMul | IrPrimitive::VecLaneFDiv => {
             require_arity(operation, &resolved, 2)?;
             let (width_bits, lane_bits) = match ty {
                 IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
@@ -650,9 +647,7 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
-        IrPrimitive::VecLaneShl
-        | IrPrimitive::VecLaneLShr
-        | IrPrimitive::VecLaneAShr => {
+        IrPrimitive::VecLaneShl | IrPrimitive::VecLaneLShr | IrPrimitive::VecLaneAShr => {
             require_arity(operation, &resolved, 2)?;
             let (width_bits, lane_bits) = match ty {
                 IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
@@ -711,7 +706,11 @@ fn evaluate_primitive<R, M>(
                 let r = (right >> shift) & mask;
                 let lane_result = match operation {
                     IrPrimitive::VecLaneMaskEq => {
-                        if l == r { mask } else { 0 }
+                        if l == r {
+                            mask
+                        } else {
+                            0
+                        }
                     }
                     IrPrimitive::VecLaneMaskSgt => {
                         // Signed comparison: sign bit at lane_bits-1
@@ -719,8 +718,16 @@ fn evaluate_primitive<R, M>(
                         let l_signed = l as i128;
                         let r_signed = r as i128;
                         // Sign-extend within lane
-                        let l_ext = if l & sign_bit != 0 { l_signed | (!mask as i128) } else { l_signed };
-                        let r_ext = if r & sign_bit != 0 { r_signed | (!mask as i128) } else { r_signed };
+                        let l_ext = if l & sign_bit != 0 {
+                            l_signed | (!mask as i128)
+                        } else {
+                            l_signed
+                        };
+                        let r_ext = if r & sign_bit != 0 {
+                            r_signed | (!mask as i128)
+                        } else {
+                            r_signed
+                        };
                         if l_ext > r_ext { mask } else { 0 }
                     }
                     _ => unreachable!(),
@@ -729,10 +736,7 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
-        IrPrimitive::VecLaneMaxU
-        | IrPrimitive::VecLaneMinU
-        | IrPrimitive::VecLaneMaxS
-        | IrPrimitive::VecLaneMinS => {
+        IrPrimitive::VecLaneMaxU | IrPrimitive::VecLaneMinU | IrPrimitive::VecLaneMaxS | IrPrimitive::VecLaneMinS => {
             require_arity(operation, &resolved, 2)?;
             let (width_bits, lane_bits) = match ty {
                 IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
@@ -757,8 +761,16 @@ fn evaluate_primitive<R, M>(
                         let sign_bit = 1u128 << (lane_bits - 1);
                         let l_signed = l as i128;
                         let r_signed = r as i128;
-                        let l_ext = if l & sign_bit != 0 { l_signed | (!mask as i128) } else { l_signed };
-                        let r_ext = if r & sign_bit != 0 { r_signed | (!mask as i128) } else { r_signed };
+                        let l_ext = if l & sign_bit != 0 {
+                            l_signed | (!mask as i128)
+                        } else {
+                            l_signed
+                        };
+                        let r_ext = if r & sign_bit != 0 {
+                            r_signed | (!mask as i128)
+                        } else {
+                            r_signed
+                        };
                         let val = match operation {
                             IrPrimitive::VecLaneMaxS => l_ext.max(r_ext),
                             IrPrimitive::VecLaneMinS => l_ext.min(r_ext),
@@ -799,8 +811,16 @@ fn evaluate_primitive<R, M>(
                     IrPrimitive::VecLaneMulHiS => {
                         // Signed: sign-extend l and r, multiply, take high bits
                         let sign_bit = 1u128 << (lane_bits - 1);
-                        let l_signed = if l & sign_bit != 0 { (l | (!mask)) as i128 } else { l as i128 };
-                        let r_signed = if r & sign_bit != 0 { (r | (!mask)) as i128 } else { r as i128 };
+                        let l_signed = if l & sign_bit != 0 {
+                            (l | (!mask)) as i128
+                        } else {
+                            l as i128
+                        };
+                        let r_signed = if r & sign_bit != 0 {
+                            (r | (!mask)) as i128
+                        } else {
+                            r as i128
+                        };
                         let product = l_signed.wrapping_mul(r_signed);
                         ((product >> lane_bits) as u128) & mask
                     }
@@ -828,7 +848,11 @@ fn evaluate_primitive<R, M>(
             for lane_idx in 0..lanes {
                 let shift = lane_idx * lane_bits;
                 let lane = (src >> shift) & mask;
-                let signed = if lane & sign_bit != 0 { (lane | (!mask)) as i128 } else { lane as i128 };
+                let signed = if lane & sign_bit != 0 {
+                    (lane | (!mask)) as i128
+                } else {
+                    lane as i128
+                };
                 let abs = signed.wrapping_abs() as u128 & mask;
                 result |= abs << shift;
             }
@@ -856,9 +880,23 @@ fn evaluate_primitive<R, M>(
                 let shift = lane_idx * lane_bits;
                 let a = (src1 >> shift) & mask;
                 let b = (src2 >> shift) & mask;
-                let b_signed = if b & sign_bit != 0 { (b | (!mask)) as i128 } else { b as i128 };
-                let a_signed = if a & sign_bit != 0 { (a | (!mask)) as i128 } else { a as i128 };
-                let sign = if b_signed < 0 { -1i128 } else if b_signed > 0 { 1i128 } else { 0i128 };
+                let b_signed = if b & sign_bit != 0 {
+                    (b | (!mask)) as i128
+                } else {
+                    b as i128
+                };
+                let a_signed = if a & sign_bit != 0 {
+                    (a | (!mask)) as i128
+                } else {
+                    a as i128
+                };
+                let sign = if b_signed < 0 {
+                    -1i128
+                } else if b_signed > 0 {
+                    1i128
+                } else {
+                    0i128
+                };
                 let product = a_signed.wrapping_mul(sign);
                 let lane_result = (product as u128) & mask;
                 result |= lane_result << shift;
@@ -887,8 +925,16 @@ fn evaluate_primitive<R, M>(
                 let shift = lane_idx * lane_bits;
                 let l = (left >> shift) & mask;
                 let r = (right >> shift) & mask;
-                let l_signed = if l & sign_bit != 0 { (l | (!mask)) as i128 } else { l as i128 };
-                let r_signed = if r & sign_bit != 0 { (r | (!mask)) as i128 } else { r as i128 };
+                let l_signed = if l & sign_bit != 0 {
+                    (l | (!mask)) as i128
+                } else {
+                    l as i128
+                };
+                let r_signed = if r & sign_bit != 0 {
+                    (r | (!mask)) as i128
+                } else {
+                    r as i128
+                };
                 let product = l_signed.wrapping_mul(r_signed);
                 let rounded = product + 0x4000;
                 let scaled = rounded >> 15;
@@ -918,16 +964,32 @@ fn evaluate_primitive<R, M>(
             for i in 0..out_lanes {
                 let a = (src1 >> ((2 * i) * lane_bits)) & lane_mask;
                 let b = (src1 >> ((2 * i + 1) * lane_bits)) & lane_mask;
-                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i32 } else { a as i32 };
-                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i32 } else { b as i32 };
+                let sa = if a & sign_bit != 0 {
+                    (a | (!lane_mask)) as i32
+                } else {
+                    a as i32
+                };
+                let sb = if b & sign_bit != 0 {
+                    (b | (!lane_mask)) as i32
+                } else {
+                    b as i32
+                };
                 let sum = sa.wrapping_add(sb).clamp(-32768, 32767) as i16 as u128 & lane_mask;
                 result |= sum << (i * lane_bits);
             }
             for i in 0..out_lanes {
                 let a = (src2 >> ((2 * i) * lane_bits)) & lane_mask;
                 let b = (src2 >> ((2 * i + 1) * lane_bits)) & lane_mask;
-                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i32 } else { a as i32 };
-                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i32 } else { b as i32 };
+                let sa = if a & sign_bit != 0 {
+                    (a | (!lane_mask)) as i32
+                } else {
+                    a as i32
+                };
+                let sb = if b & sign_bit != 0 {
+                    (b | (!lane_mask)) as i32
+                } else {
+                    b as i32
+                };
                 let sum = sa.wrapping_add(sb).clamp(-32768, 32767) as i16 as u128 & lane_mask;
                 result |= sum << ((out_lanes + i) * lane_bits);
             }
@@ -954,16 +1016,32 @@ fn evaluate_primitive<R, M>(
             for i in 0..out_lanes {
                 let a = (src1 >> ((2 * i) * lane_bits)) & lane_mask;
                 let b = (src1 >> ((2 * i + 1) * lane_bits)) & lane_mask;
-                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i32 } else { a as i32 };
-                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i32 } else { b as i32 };
+                let sa = if a & sign_bit != 0 {
+                    (a | (!lane_mask)) as i32
+                } else {
+                    a as i32
+                };
+                let sb = if b & sign_bit != 0 {
+                    (b | (!lane_mask)) as i32
+                } else {
+                    b as i32
+                };
                 let diff = sa.wrapping_sub(sb).clamp(-32768, 32767) as i16 as u128 & lane_mask;
                 result |= diff << (i * lane_bits);
             }
             for i in 0..out_lanes {
                 let a = (src2 >> ((2 * i) * lane_bits)) & lane_mask;
                 let b = (src2 >> ((2 * i + 1) * lane_bits)) & lane_mask;
-                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i32 } else { a as i32 };
-                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i32 } else { b as i32 };
+                let sa = if a & sign_bit != 0 {
+                    (a | (!lane_mask)) as i32
+                } else {
+                    a as i32
+                };
+                let sb = if b & sign_bit != 0 {
+                    (b | (!lane_mask)) as i32
+                } else {
+                    b as i32
+                };
                 let diff = sa.wrapping_sub(sb).clamp(-32768, 32767) as i16 as u128 & lane_mask;
                 result |= diff << ((out_lanes + i) * lane_bits);
             }
@@ -991,8 +1069,16 @@ fn evaluate_primitive<R, M>(
                 let shift = lane_idx * lane_bits;
                 let l_low = (left >> shift) & low32_mask;
                 let r_low = (right >> shift) & low32_mask;
-                let l_signed = if l_low & low32_sign != 0 { (l_low | (!low32_mask)) as i128 } else { l_low as i128 };
-                let r_signed = if r_low & low32_sign != 0 { (r_low | (!low32_mask)) as i128 } else { r_low as i128 };
+                let l_signed = if l_low & low32_sign != 0 {
+                    (l_low | (!low32_mask)) as i128
+                } else {
+                    l_low as i128
+                };
+                let r_signed = if r_low & low32_sign != 0 {
+                    (r_low | (!low32_mask)) as i128
+                } else {
+                    r_low as i128
+                };
                 let product = l_signed.wrapping_mul(r_signed) as u128 & lane_mask;
                 result |= product << shift;
             }
@@ -1026,7 +1112,10 @@ fn evaluate_primitive<R, M>(
         IrPrimitive::VecShuffleBytes => {
             require_arity(operation, &resolved, 2)?;
             let width_bits = match ty {
-                IrType::Vector { width_bits, lane_bits: 8 } => u32::from(width_bits),
+                IrType::Vector {
+                    width_bits,
+                    lane_bits: 8,
+                } => u32::from(width_bits),
                 _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
             };
             if width_bits == 0 || width_bits > 128 || width_bits % 8 != 0 {
@@ -1198,10 +1287,26 @@ fn evaluate_primitive<R, M>(
                 let r0 = (right >> ((2 * i) * src_lane_bits)) & src_mask;
                 let r1 = (right >> ((2 * i + 1) * src_lane_bits)) & src_mask;
                 let sign_bit = 1u128 << (src_lane_bits - 1);
-                let l0s = if l0 & sign_bit != 0 { (l0 | (!src_mask)) as i128 } else { l0 as i128 };
-                let l1s = if l1 & sign_bit != 0 { (l1 | (!src_mask)) as i128 } else { l1 as i128 };
-                let r0s = if r0 & sign_bit != 0 { (r0 | (!src_mask)) as i128 } else { r0 as i128 };
-                let r1s = if r1 & sign_bit != 0 { (r1 | (!src_mask)) as i128 } else { r1 as i128 };
+                let l0s = if l0 & sign_bit != 0 {
+                    (l0 | (!src_mask)) as i128
+                } else {
+                    l0 as i128
+                };
+                let l1s = if l1 & sign_bit != 0 {
+                    (l1 | (!src_mask)) as i128
+                } else {
+                    l1 as i128
+                };
+                let r0s = if r0 & sign_bit != 0 {
+                    (r0 | (!src_mask)) as i128
+                } else {
+                    r0 as i128
+                };
+                let r1s = if r1 & sign_bit != 0 {
+                    (r1 | (!src_mask)) as i128
+                } else {
+                    r1 as i128
+                };
                 let product = l0s.wrapping_mul(r0s).wrapping_add(l1s.wrapping_mul(r1s));
                 let lane = (product as u128) & out_mask;
                 result |= lane << (i * out_lane_bits);
@@ -1400,7 +1505,11 @@ fn evaluate_primitive<R, M>(
             let mut result: u128 = 0;
             for i in 0..lanes {
                 let lane = (data >> (i * lane_bits)) & lane_mask;
-                let signed = if lane & sign_bit != 0 { (lane | (!lane_mask)) as i128 } else { lane as i128 };
+                let signed = if lane & sign_bit != 0 {
+                    (lane | (!lane_mask)) as i128
+                } else {
+                    lane as i128
+                };
                 let shifted = if count >= lane_bits {
                     if signed < 0 { -1i128 } else { 0i128 }
                 } else {
@@ -1435,16 +1544,32 @@ fn evaluate_primitive<R, M>(
             for i in 0..out_lanes {
                 let a = (src1 >> ((2 * i) * lane_bits)) & lane_mask;
                 let b = (src1 >> ((2 * i + 1) * lane_bits)) & lane_mask;
-                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i128 } else { a as i128 };
-                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i128 } else { b as i128 };
+                let sa = if a & sign_bit != 0 {
+                    (a | (!lane_mask)) as i128
+                } else {
+                    a as i128
+                };
+                let sb = if b & sign_bit != 0 {
+                    (b | (!lane_mask)) as i128
+                } else {
+                    b as i128
+                };
                 let sum = (sa.wrapping_add(sb) as u128) & lane_mask;
                 result |= sum << (i * lane_bits);
             }
             for i in 0..out_lanes {
                 let a = (src2 >> ((2 * i) * lane_bits)) & lane_mask;
                 let b = (src2 >> ((2 * i + 1) * lane_bits)) & lane_mask;
-                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i128 } else { a as i128 };
-                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i128 } else { b as i128 };
+                let sa = if a & sign_bit != 0 {
+                    (a | (!lane_mask)) as i128
+                } else {
+                    a as i128
+                };
+                let sb = if b & sign_bit != 0 {
+                    (b | (!lane_mask)) as i128
+                } else {
+                    b as i128
+                };
                 let sum = (sa.wrapping_add(sb) as u128) & lane_mask;
                 result |= sum << ((out_lanes + i) * lane_bits);
             }
@@ -1475,16 +1600,32 @@ fn evaluate_primitive<R, M>(
             for i in 0..out_lanes {
                 let a = (src1 >> ((2 * i) * lane_bits)) & lane_mask;
                 let b = (src1 >> ((2 * i + 1) * lane_bits)) & lane_mask;
-                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i128 } else { a as i128 };
-                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i128 } else { b as i128 };
+                let sa = if a & sign_bit != 0 {
+                    (a | (!lane_mask)) as i128
+                } else {
+                    a as i128
+                };
+                let sb = if b & sign_bit != 0 {
+                    (b | (!lane_mask)) as i128
+                } else {
+                    b as i128
+                };
                 let diff = (sa.wrapping_sub(sb) as u128) & lane_mask;
                 result |= diff << (i * lane_bits);
             }
             for i in 0..out_lanes {
                 let a = (src2 >> ((2 * i) * lane_bits)) & lane_mask;
                 let b = (src2 >> ((2 * i + 1) * lane_bits)) & lane_mask;
-                let sa = if a & sign_bit != 0 { (a | (!lane_mask)) as i128 } else { a as i128 };
-                let sb = if b & sign_bit != 0 { (b | (!lane_mask)) as i128 } else { b as i128 };
+                let sa = if a & sign_bit != 0 {
+                    (a | (!lane_mask)) as i128
+                } else {
+                    a as i128
+                };
+                let sb = if b & sign_bit != 0 {
+                    (b | (!lane_mask)) as i128
+                } else {
+                    b as i128
+                };
                 let diff = (sa.wrapping_sub(sb) as u128) & lane_mask;
                 result |= diff << ((out_lanes + i) * lane_bits);
             }
@@ -1546,8 +1687,11 @@ fn evaluate_primitive<R, M>(
                 IrType::Vector { lane_bits, .. } => u32::from(lane_bits),
                 _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
             };
-            if wide_lane_bits == 0 || narrow_lane_bits == 0 || wide_lane_bits <= narrow_lane_bits
-                || width_bits == 0 || width_bits % wide_lane_bits != 0
+            if wide_lane_bits == 0
+                || narrow_lane_bits == 0
+                || wide_lane_bits <= narrow_lane_bits
+                || width_bits == 0
+                || width_bits % wide_lane_bits != 0
             {
                 return Err(ConcreteExecutionError::UnsupportedType(ty));
             }
@@ -1861,8 +2005,16 @@ fn evaluate_primitive<R, M>(
                 for j in 0..4u32 {
                     let idx1 = offset1 + i + j;
                     let idx2 = offset2 + j;
-                    let b1 = if idx1 < 16 { ((src1 >> (idx1 * 8)) & 0xFF) as u8 } else { 0 };
-                    let b2 = if idx2 < 16 { ((src2 >> (idx2 * 8)) & 0xFF) as u8 } else { 0 };
+                    let b1 = if idx1 < 16 {
+                        ((src1 >> (idx1 * 8)) & 0xFF) as u8
+                    } else {
+                        0
+                    };
+                    let b2 = if idx2 < 16 {
+                        ((src2 >> (idx2 * 8)) & 0xFF) as u8
+                    } else {
+                        0
+                    };
                     sad = sad.wrapping_add((b1 as i16 - b2 as i16).unsigned_abs());
                 }
                 result |= (sad as u128 & lane_mask) << (i * lane_bits);
@@ -1896,7 +2048,10 @@ fn evaluate_primitive<R, M>(
         IrPrimitive::VecShiftLeftBytes => {
             require_arity(operation, &resolved, 2)?;
             let width_bits = match ty {
-                IrType::Vector { width_bits, lane_bits: 8 } => u32::from(width_bits),
+                IrType::Vector {
+                    width_bits,
+                    lane_bits: 8,
+                } => u32::from(width_bits),
                 _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
             };
             if width_bits != 128 {
@@ -1911,7 +2066,10 @@ fn evaluate_primitive<R, M>(
         IrPrimitive::VecShiftRightBytes => {
             require_arity(operation, &resolved, 2)?;
             let width_bits = match ty {
-                IrType::Vector { width_bits, lane_bits: 8 } => u32::from(width_bits),
+                IrType::Vector {
+                    width_bits,
+                    lane_bits: 8,
+                } => u32::from(width_bits),
                 _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
             };
             if width_bits != 128 {
@@ -1946,15 +2104,17 @@ fn scalar_bits<R, M>(ty: IrType) -> Result<u16, ConcreteExecutionError<R, M>> {
 fn read_float<R, M>(value: &ConcreteValue) -> Result<f64, ConcreteExecutionError<R, M>> {
     match value.ty {
         IrType::Float32 => {
-            let bytes: [u8; 4] = value.bytes_le().try_into().map_err(|_| {
-                ConcreteExecutionError::UnsupportedType(IrType::Float32)
-            })?;
+            let bytes: [u8; 4] = value
+                .bytes_le()
+                .try_into()
+                .map_err(|_| ConcreteExecutionError::UnsupportedType(IrType::Float32))?;
             Ok(f64::from(f32::from_le_bytes(bytes)))
         }
         IrType::Float64 => {
-            let bytes: [u8; 8] = value.bytes_le().try_into().map_err(|_| {
-                ConcreteExecutionError::UnsupportedType(IrType::Float64)
-            })?;
+            let bytes: [u8; 8] = value
+                .bytes_le()
+                .try_into()
+                .map_err(|_| ConcreteExecutionError::UnsupportedType(IrType::Float64))?;
             Ok(f64::from_le_bytes(bytes))
         }
         _ => Err(ConcreteExecutionError::UnsupportedType(value.ty)),
@@ -1974,10 +2134,7 @@ fn write_float(ty: IrType, value: f64) -> ConcreteValue {
 }
 
 /// Decodes a raw lane value (already masked) as an f64 for lane-wise float ops.
-fn decode_float_lane<R, M>(
-    lane_bits: u16,
-    value: u128,
-) -> Result<f64, ConcreteExecutionError<R, M>> {
+fn decode_float_lane<R, M>(lane_bits: u16, value: u128) -> Result<f64, ConcreteExecutionError<R, M>> {
     match lane_bits {
         32 => {
             let bytes = (value as u32).to_le_bytes();
@@ -2477,7 +2634,10 @@ mod tests {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&bytes);
         let result = f64::from_le_bytes(buf);
-        assert!((result - 5.75).abs() < f64::EPSILON, "3.5 + 2.25 should be 5.75, got {result}");
+        assert!(
+            (result - 5.75).abs() < f64::EPSILON,
+            "3.5 + 2.25 should be 5.75, got {result}"
+        );
         Ok(())
     }
 
@@ -2522,22 +2682,23 @@ mod tests {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&bytes);
         let result = f64::from_le_bytes(buf);
-        assert!((result - 4.0).abs() < f64::EPSILON, "sqrt(16) should be 4.0, got {result}");
+        assert!(
+            (result - 4.0).abs() < f64::EPSILON,
+            "sqrt(16) should be 4.0, got {result}"
+        );
         Ok(())
     }
 
     #[test]
     fn float32_mul_executes() -> Result<(), Box<dyn std::error::Error>> {
-        let memory = PersistentMemory::new(vec![
-            MemoryRegion {
-                object: ObjectId(1),
-                base: 0x1000,
-                size: 0x1000,
-                readable: true,
-                writable: true,
-                executable: true,
-            },
-        ])?;
+        let memory = PersistentMemory::new(vec![MemoryRegion {
+            object: ObjectId(1),
+            base: 0x1000,
+            size: 0x1000,
+            readable: true,
+            writable: true,
+            executable: true,
+        }])?;
         let initial = ExecutionState {
             id: StateId(7),
             parent: None,
@@ -2593,7 +2754,10 @@ mod tests {
         let mut buf = [0u8; 4];
         buf.copy_from_slice(&bytes[..4]);
         let result = f32::from_le_bytes(buf);
-        assert!((result - 10.0).abs() < f32::EPSILON, "2.5 * 4.0 should be 10.0, got {result}");
+        assert!(
+            (result - 10.0).abs() < f32::EPSILON,
+            "2.5 * 4.0 should be 10.0, got {result}"
+        );
         Ok(())
     }
 
@@ -2625,7 +2789,10 @@ mod tests {
                     result: Some(IrValueId(2)),
                     op: IrOp::Primitive {
                         op: IrPrimitive::VecLaneAdd,
-                        ty: IrType::Vector { width_bits: 128, lane_bits: 32 },
+                        ty: IrType::Vector {
+                            width_bits: 128,
+                            lane_bits: 32,
+                        },
                         inputs: vec![IrValueId(0), IrValueId(1)],
                     },
                 },

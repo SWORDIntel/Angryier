@@ -4,9 +4,9 @@ use crate::{
 };
 use angryier_semantic_contracts::SealedSemanticBlock;
 use angryier_semantics::{
-    BlockValidityKey, DecodedInstructionView, FloatFormat, FloatingOp, OperandKind, PrimitiveOp,
-    RegisterWriteBehavior, SealedRichSemanticBlock, SemanticEffectDefinition, SemanticLowerer,
-    SemanticOp, SemanticType, SemanticValue, SemanticValueDefinition, ValueId, VectorOp,
+    BlockValidityKey, DecodedInstructionView, FloatFormat, FloatingOp, OperandKind, PrimitiveOp, RegisterWriteBehavior,
+    SealedRichSemanticBlock, SemanticEffectDefinition, SemanticLowerer, SemanticOp, SemanticType, SemanticValue,
+    SemanticValueDefinition, ValueId, VectorOp,
 };
 use angryier_types::{Address, ContentId};
 use std::collections::{BTreeMap, HashMap};
@@ -373,7 +373,10 @@ fn lower_type(ty: SemanticType) -> Result<IrType, IrLoweringError> {
                 .checked_mul(u32::from(lanes))
                 .and_then(|bits| u16::try_from(bits).ok())
                 .ok_or(IrLoweringError::UnsupportedValue("oversized vector type"))?;
-            IrType::Vector { width_bits: width, lane_bits: u16::try_from(lane_bits).unwrap_or(0) }
+            IrType::Vector {
+                width_bits: width,
+                lane_bits: u16::try_from(lane_bits).unwrap_or(0),
+            }
         }
         SemanticType::Opmask { lanes } => IrType::Opmask { width_bits: lanes },
         SemanticType::Tile { .. } => IrType::Tile,
@@ -465,9 +468,7 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                 PrimitiveOp::Sign => IrPrimitive::VecLaneSign,
                 PrimitiveOp::MulHighRS => IrPrimitive::VecLaneMulHiRS,
                 _ => {
-                    return Err(IrLoweringError::UnsupportedValue(
-                        "unsupported lane-wise primitive",
-                    ));
+                    return Err(IrLoweringError::UnsupportedValue("unsupported lane-wise primitive"));
                 }
             }),
             VectorOp::LaneWiseFloat(float) => Ok(match float {
@@ -516,13 +517,9 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::HMinUW => Ok(IrPrimitive::VecHMinUW),
             VectorOp::ShiftLeftBytes => Ok(IrPrimitive::VecShiftLeftBytes),
             VectorOp::ShiftRightBytes => Ok(IrPrimitive::VecShiftRightBytes),
-            _ => Err(IrLoweringError::UnsupportedValue(
-                "non-lane-wise vector operation",
-            )),
+            _ => Err(IrLoweringError::UnsupportedValue("non-lane-wise vector operation")),
         },
-        SemanticOp::Tile(_) => {
-            Err(IrLoweringError::UnsupportedValue("non-primitive operation"))
-        }
+        SemanticOp::Tile(_) => Err(IrLoweringError::UnsupportedValue("non-primitive operation")),
     }
 }
 
