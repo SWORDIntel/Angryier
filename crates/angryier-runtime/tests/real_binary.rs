@@ -1436,6 +1436,27 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         "imul %rbx",
         "imul %rbx\n    mov %rdx, %rax",
     ];
+    // Wider SIMD corpus — SSSE3/SSE4 lanes observed through movq.
+    let simd2_templates = [
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pshufb %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pcmpgtb %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pcmpgtd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pmullw %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pmaddwd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    packsswb %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pslld %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    psrld %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    psadbw %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    phaddw %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    pabsb %xmm0, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    pabsd %xmm0, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pandn %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    por %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pmovmskb %xmm0, %eax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    psignb %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    punpcklbw %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    punpcklqdq %xmm1, %xmm0\n    movq %xmm0, %rax",
+    ];
     // 32-bit forms (zero-extension semantics must match too).
     let w32_templates = [
         "add %ebx, %eax",
@@ -1538,6 +1559,13 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
     for insn in div_templates {
         for &a in &boundary[..4] {
             let ran = differential_case(insn, &[("rax", a), ("rbx", 7)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in simd2_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rbx", a), ("rcx", 0x0f0f_0f0f_0f0f_0f0f)], flag_mask_for(insn))?;
             skipped |= !ran;
             executed += usize::from(ran);
         }
