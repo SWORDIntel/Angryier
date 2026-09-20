@@ -1457,6 +1457,28 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    punpcklbw %xmm1, %xmm0\n    movq %xmm0, %rax",
         "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    punpcklqdq %xmm1, %xmm0\n    movq %xmm0, %rax",
     ];
+    // Bit-scan/popcount/lzcnt, bit-set/clear/complement, xadd/cmpxchg,
+    // cl-rotates.
+    let misc3_templates = [
+        "bsf %rbx, %rax",
+        "bsr %rbx, %rax",
+        "popcnt %rbx, %rax",
+        "xadd %rbx, %rax",
+        "mov %rbx, %rdx\n    mov $0x1234, %rbx\n    cmpxchg %rbx, %rax",
+        "mov %rbx, %rdx\n    mov $0x1234, %rbx\n    cmpxchg %rbx, %rcx",
+        "bt %rbx, %rax",
+        "bts %rbx, %rax",
+        "btr %rbx, %rax",
+        "btc %rbx, %rax",
+        "mov $9, %rcx\n    rol %cl, %rax",
+        "mov $9, %rcx\n    ror %cl, %rax",
+        "mov $1, %rcx\n    rol %cl, %rax",
+        "mov $1, %rcx\n    ror %cl, %rax",
+        "cmpxchg %rbx, %rax",
+        "xchg %rbx, %rcx",
+        "movabs $0x1122334455667788, %r8\n    mov %r8, %rax",
+        "mov %rbx, %rdx\n    mov $0x1234, %rbx\n    cmpxchg %rbx, %rdx",
+    ];
     // 32-bit forms (zero-extension semantics must match too).
     let w32_templates = [
         "add %ebx, %eax",
@@ -1566,6 +1588,33 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
     for insn in simd2_templates {
         for &a in &boundary[..4] {
             let ran = differential_case(insn, &[("rbx", a), ("rcx", 0x0f0f_0f0f_0f0f_0f0f)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    // LZCNT encodes as REP BSR: CPUs without ABM execute it as bsr, which
+    // produces a different result than the corpus's lzcnt semantics. Run it
+    // only when the CPU advertises the feature.
+    let has_lzcnt = std::fs::read_to_string("/proc/cpuinfo")
+        .map(|cpuinfo| cpuinfo.contains(" abm") || cpuinfo.contains(" lzcnt"))
+        .unwrap_or(false);
+    if has_lzcnt {
+        for &a in &boundary[..4] {
+            let ran = differential_case(
+                "lzcnt %rbx, %rax",
+                &[("rax", a), ("rbx", 9)],
+                flag_mask_for("lzcnt %rbx, %rax"),
+            )?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    } else {
+        eprintln!("lzcnt: skipped (CPU lacks ABM — rep bsr would execute as bsr)");
+        skipped = true;
+    }
+    for insn in misc3_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 9), ("rcx", 0x1234)], flag_mask_for(insn))?;
             skipped |= !ran;
             executed += usize::from(ran);
         }

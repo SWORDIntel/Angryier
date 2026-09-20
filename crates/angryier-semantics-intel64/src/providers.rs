@@ -2731,7 +2731,7 @@ impl SemanticProvider for RolR64Cl {
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
         let value = out.read_operand(0, U64)?;
-        let count = out.read_operand(1, U64)?;
+        let count = out.read_register(RegisterId(register_id::GPR_BASE + 1), U64)?;
         let mask = const_u64(out, 0x3F)?;
         let count_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[count, mask])?;
         let sixty_four = const_u64(out, 64)?;
@@ -2788,7 +2788,7 @@ impl SemanticProvider for RorR64Cl {
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
         let value = out.read_operand(0, U64)?;
-        let count = out.read_operand(1, U64)?;
+        let count = out.read_register(RegisterId(register_id::GPR_BASE + 1), U64)?;
         let mask = const_u64(out, 0x3F)?;
         let count_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[count, mask])?;
         let sixty_four = const_u64(out, 64)?;
@@ -3688,7 +3688,19 @@ impl SemanticProvider for CmpxchgR64R64 {
         let new_rax = out.emit(SemanticOp::Primitive(PrimitiveOp::Select), U64, &[eq, rax, dest])?;
 
         out.write_operand(0, new_dest)?;
-        out.write_register(RegisterId(register_id::GPR_BASE), new_rax)?;
+        // When the destination IS the accumulator (cmpxchg %rbx, %rax) the
+        // operand write already produced the correct value: on equal it holds
+        // source; on not-equal rax == dest so the accumulator write would be
+        // an identity — and on equal it would wrongly clobber the just-written
+        // source value. Skip it.
+        let dest_is_acc = matches!(
+            insn.operand(0).map(|op| op.kind),
+            Some(angryier_semantics::OperandKind::Register(view))
+                if view.parent.0 == register_id::GPR_BASE as u32 && view.bit_offset == 0 && view.width_bits == 64
+        );
+        if !dest_is_acc {
+            out.write_register(RegisterId(register_id::GPR_BASE), new_rax)?;
+        }
 
         // Set ZF from eq (1-bit): ZF=1 if equal, ZF=0 if not equal.
         let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
