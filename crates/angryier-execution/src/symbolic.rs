@@ -573,6 +573,24 @@ fn constant_value_resolved(
                     .unwrap_or(8);
                 Some((hi << lo_bits.min(63)) | lo)
             }
+            ExprOp::Not => Some(1 - eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?),
+            ExprOp::Eq => Some(u64::from(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?
+                    == eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr)?,
+            )),
+            ExprOp::Ite => {
+                // Fold the guard; if it doesn't reduce, both branches
+                // agreeing still yields a concrete value.
+                let guard = eval(arena, *node.operands.first()?, depth + 1, resolve_expr);
+                let lhs = eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr);
+                let rhs = eval(arena, *node.operands.get(2)?, depth + 1, resolve_expr);
+                match guard {
+                    Some(1) => lhs,
+                    Some(0) => rhs,
+                    _ if lhs.is_some() && lhs == rhs => lhs,
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

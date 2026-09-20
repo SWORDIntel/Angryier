@@ -2948,7 +2948,10 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 }
                 Ok(SymbolicStepOutcome::Stepped { .. }) => {}
                 Err(error) => {
-                    let _ = error;
+                    eprintln!(
+                        "state {index} @ {:#x}: {error:?}",
+                        self.states.get(index).and_then(|s| s.process.pc().ok()).unwrap_or(0)
+                    );
                     if index < self.states.len() {
                         let state = self.states.remove(index);
                         self.dead.push(state);
