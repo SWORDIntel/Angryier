@@ -7,7 +7,7 @@ pub use interpreter::{ConcreteExecutionError, ConcreteInterpreter};
 pub use symbolic::{
     ConcolicBinding, ConcolicEvaluator, ConcolicImage, ConcolicSource, PathConstraint, SymbolBinding, SymbolicArena,
     SymbolicBlockSummary, SymbolicBranch, SymbolicEvalError, SymbolicEvaluator, SymbolicSessionMemory,
-    SymbolicStateSnapshot, bit_to_bool, merge_snapshots,
+    SymbolicStateSnapshot, bit_to_bool, constant_value, merge_snapshots,
 };
 
 use angryier_ir::IrBlock;

@@ -477,7 +477,11 @@ fn coerce_width(arena: &SymbolicArena, expr: ExprId, width: u16) -> Result<ExprI
 /// Reads the value of a constant expression — recursively evaluating
 /// arithmetic over literal leaves so `Add(Const, Const)`-shaped addresses
 /// (from rip-relative or rsp-offset computations) resolve without a solver.
-fn constant_value(arena: &SymbolicArena, expression: ExprId) -> Result<u64, SymbolicEvalError> {
+/// Folds a fully-concrete expression to its u64 value — Add/Sub/And/Or/
+/// Xor/Shl/LShr/Concat/Extract/ZExt/SExt over Constants; `Not`/`Eq`/`Ite`
+/// fold as truth values. Returns `UnsupportedOperation` when a non-
+/// constant leaf remains.
+pub fn constant_value(arena: &SymbolicArena, expression: ExprId) -> Result<u64, SymbolicEvalError> {
     constant_value_resolved(arena, expression, &|_| None)
 }
 

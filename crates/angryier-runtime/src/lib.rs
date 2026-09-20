@@ -1078,6 +1078,14 @@ impl<D: Decoder> Runtime<D> {
                 process.step_count += 1;
                 Ok(StepOutcome::Terminated { pc })
             }
+            syscall::READ => {
+                // stdin: report EOF; other fds: -EBADF.
+                let ret = if arg0 == 0 { 0 } else { 0u64.wrapping_sub(9) };
+                process.write_register(register_id::GPR_BASE, ret)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
             syscall::WRITE => {
                 let bytes = read_concrete_bytes(process, arg1, arg2)?;
                 let written = process.syscalls.record_write(&bytes);
@@ -2485,6 +2493,69 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     let _ = state.process.write_register(reg, value);
                 }
             }
+            // Symbolic stdin: `read(0, buf, n)` materializes `n` fresh
+            // symbolic bytes into the state's memory — the bytes are the
+            // input the solver can shape.
+            let number = state.process.read_register(register_id::GPR_BASE).unwrap_or(0);
+            if number == angryier_models::syscall::READ {
+                // Resolve args through the symbolic register file first —
+                // `mov %rsp,%rsi` updates the symbolic slot, not the
+                // concrete register.
+                // Fully foldable exprs (Sub(rsp,16) etc.) resolve; a
+                // truly symbolic arg falls back to the concrete register.
+                let arg = |state: &SymbolicState, reg: u32| -> u64 {
+                    state
+                        .registers
+                        .get(&reg)
+                        .and_then(|(e, _)| angryier_execution::constant_value(self.arena, *e).ok())
+                        .unwrap_or_else(|| state.process.read_register(reg).unwrap_or(0))
+                };
+                let fd = arg(state, register_id::GPR_BASE + 7);
+                let buf = arg(state, register_id::GPR_BASE + 6);
+                let count = arg(state, register_id::GPR_BASE + 2);
+                if fd == 0 && count > 0 && count <= 4096 {
+                    let next_symbol = state
+                        .symbols
+                        .iter()
+                        .filter_map(|s| {
+                            self.arena.get(s.expression).and_then(|n| {
+                                n.immediate
+                                    .get(..8)
+                                    .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                            })
+                        })
+                        .max()
+                        .map(|m| m + 1)
+                        .unwrap_or(0);
+                    let mut bytes = Vec::with_capacity(count as usize);
+                    for i in 0..count {
+                        let expr = self
+                            .arena
+                            .intern(angryier_expr::ExprNode {
+                                sort: angryier_expr::ExprSort::BitVec(8),
+                                op: angryier_expr::ExprOp::Symbol,
+                                operands: Vec::new(),
+                                immediate: (next_symbol + i).to_le_bytes().to_vec(),
+                            })
+                            .map_err(|e| RuntimeError::Symbolic(format!("{e:?}")))?;
+                        bytes.push(ByteValue::Symbolic(expr));
+                        state.symbols.push(angryier_execution::SymbolBinding {
+                            register: register_id::GPR_BASE + 6, // provenance: buffer bytes
+                            expression: expr,
+                            width: 8,
+                        });
+                    }
+                    state
+                        .memory
+                        .write_bytes(buf, &bytes)
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                    state.process.write_register(register_id::GPR_BASE, count)?;
+                    let next_pc = pc.wrapping_add(u64::from(decoded.length));
+                    state.process.write_pc(next_pc)?;
+                    state.process.step_count += 1;
+                    return Ok(SymbolicStepOutcome::Stepped { next_pc });
+                }
+            }
             let outcome = self.runtime.step(&mut state.process)?;
             return Ok(match outcome {
                 StepOutcome::Terminated { .. } => SymbolicStepOutcome::Terminated,
@@ -2511,7 +2582,6 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         // Solver-assisted address concretization: when an address expr
         // can't fold concretely, ask the solver for a satisfying value
         // under this state's constraints, pin it, and re-run the block.
-        eprintln!("solver={} summary_err={}", solver.is_some(), summary.is_err());
         if let Some((backend, timeout)) = solver.as_mut().map(|(b, t)| (&mut **b, *t)) {
             let mut retries = 0;
             while let Err(angryier_execution::SymbolicEvalError::UnresolvedAddress(expr)) = summary {
@@ -2655,12 +2725,6 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 )
                 .map_err(|e| RuntimeError::Solver(format!("{e:?}")))?;
                 let result = backend.solve(&query);
-                eprintln!(
-                    "concretize expr {}: {:?} model={} entries",
-                    expr.0,
-                    result.outcome,
-                    result.model.len()
-                );
                 let value = result
                     .model
                     .iter()
@@ -3125,10 +3189,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 }
                 Ok(SymbolicStepOutcome::Stepped { .. }) => {}
                 Err(error) => {
-                    eprintln!(
-                        "state {index} @ {:#x}: {error:?}",
-                        self.states.get(index).and_then(|s| s.process.pc().ok()).unwrap_or(0)
-                    );
+                    let _ = error;
                     if index < self.states.len() {
                         let state = self.states.remove(index);
                         self.dead.push(state);
@@ -3268,6 +3329,63 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         state.process.write_pc(next_pc)?;
         state.process.step_count += 1;
         Ok(Some(SymbolicStepOutcome::Stepped { next_pc }))
+    }
+
+    /// Like [`SymbolicSession::solve_state`], but returns the raw model:
+    /// every symbol's `(ExprId, bytes)` — memory-materialized symbols
+    /// (stdin bytes) appear here while `solve_state` only reports
+    /// register bindings.
+    pub fn solve_state_symbols(
+        &self,
+        index: usize,
+        backend: &mut dyn SolverBackend,
+        timeout: Duration,
+    ) -> Result<Vec<(u64, Vec<u8>)>, RuntimeError> {
+        let state = self
+            .states
+            .get(index)
+            .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
+        let constraints: Vec<CanonicalConstraint> = state
+            .constraints
+            .iter()
+            .enumerate()
+            .filter_map(|(i, expr)| {
+                self.arena.dependency_summary(*expr).map(|s| CanonicalConstraint {
+                    id: ConstraintId(i as u64),
+                    key: s.key,
+                    expr: *expr,
+                })
+            })
+            .collect();
+        let true_expr = self
+            .arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::Bool,
+                op: angryier_expr::ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: vec![1],
+            })
+            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+        let key = self
+            .arena
+            .dependency_summary(true_expr)
+            .map(|s| s.key)
+            .ok_or_else(|| RuntimeError::Symbolic("missing predicate summary".into()))?;
+        let query = SolverQuery::canonical(
+            SolverQueryId(index as u64),
+            &constraints,
+            true_expr,
+            key,
+            state.process.target_profile,
+            ConstraintCanonicalizationVersion(1),
+            timeout,
+        )
+        .map_err(|e| RuntimeError::Solver(format!("{e:?}")))?;
+        let result = backend.solve(&query);
+        match result.outcome {
+            SolverOutcomeKind::Sat => Ok(result.model),
+            other => Err(RuntimeError::Symbolic(format!("state unsatisfiable: {other:?}"))),
+        }
     }
 
     /// Solves state `index`'s path constraints and returns a concrete value

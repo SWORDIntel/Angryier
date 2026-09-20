@@ -206,17 +206,21 @@ fn unmapped_instructions_fail_explicitly() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn unmodeled_syscalls_fail_explicitly() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
-    // `syscall` with RAX = 0 is `read`, which the environment model does not
-    // implement yet; execution must fail explicitly rather than fabricate a
+    // `syscall` with RAX = 107 is `geteuid`, which the environment model
+    // does not implement yet; execution must fail explicitly rather than
+    // fabricate a result.
     // result.
-    let mut process = runtime.load_elf(&build_fixture_from("_start:\n    syscall\n    hlt\n")?)?;
+    let mut process = runtime.load_elf(&build_fixture_from(
+        "_start:\n    mov $107, %rax\n    syscall\n    hlt\n",
+    )?)?;
+    runtime.step(&mut process)?; // mov $107, %rax
     let error = runtime
         .step(&mut process)
         .err()
         .ok_or("expected an unsupported-syscall error")?;
     let message = error.to_string();
     assert!(
-        message.contains("unsupported syscall number 0"),
+        message.contains("unsupported syscall number 107"),
         "unmodeled syscalls must fail explicitly, got: {message}"
     );
     Ok(())
@@ -2602,5 +2606,94 @@ helper:
     // helper owns exactly its own blocks; main owns _start's.
     let helper = functions.iter().find(|f| f.entry != process.entry).ok_or("helper")?;
     assert_eq!(helper.returns.len(), 1, "helper ends in ret");
+    Ok(())
+}
+
+/// Symbolic stdin: `read(0, buf, 8)` materializes symbolic bytes; a
+/// compare on buf[0] forks, and solving the found state yields the
+/// input byte that reaches `target`.
+#[cfg(all(feature = "xed", feature = "z3", target_arch = "x86_64"))]
+#[test]
+fn symbolic_stdin_solves_input_byte() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::ExprReader;
+    use angryier_runtime::{ExplorationPolicy, SymbolicSession};
+    use angryier_solver_z3::Z3Backend;
+    use std::sync::Arc;
+
+    // read(0, rsp-8, 8); cmpb $0x41, (rsp-8); je target; ... exit.
+    let source = r#"
+        .global _start
+        .text
+_start:
+    sub $16, %rsp
+    xor %rax, %rax
+    xor %rdi, %rdi
+    mov %rsp, %rsi
+    mov $8, %rdx
+    syscall
+    cmpb $0x41, (%rsp)
+    je target
+    xor %eax, %eax
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+target:
+    mov $1, %rax
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-stdin").ok_or("no tempdir")?;
+    let path_s = dir.join("stdin.s");
+    let path_o = dir.join("stdin.o");
+    let path_bin = dir.join("stdin");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = Arc::new(angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    ));
+    let mut session = SymbolicSession::new(&runtime, arena.as_ref(), process);
+    let mut backend = Z3Backend::native_ffi(arena.clone() as Arc<dyn ExprReader>)?;
+
+    // `target:` is at _start+0x2a (see disassembly of the fixture).
+    let entry = session.states[0].process.pc()?;
+    let target = entry + 0x2a;
+    let policy = ExplorationPolicy {
+        find: vec![target],
+        ..Default::default()
+    };
+    let report = session.run_with_policy(
+        128,
+        8,
+        Some(&mut backend),
+        std::time::Duration::from_secs(10),
+        false,
+        &policy,
+    )?;
+    assert!(report.forks >= 1, "cmpb on symbolic stdin must fork");
+    assert_eq!(report.found.len(), 1, "the 'A' path reaches target");
+
+    // Solve the found state — the model must assign 0x41 to stdin byte 0.
+    session
+        .states
+        .push(report.found.into_iter().next().unwrap_or_else(|| unreachable!()));
+    let solution = session
+        .solve_state_symbols(
+            session.states.len() - 1,
+            &mut backend,
+            std::time::Duration::from_secs(10),
+        )
+        .map_err(|e| format!("solve: {e:?}"))?;
+    assert!(
+        solution.iter().any(|(_, bytes)| bytes.first().copied() == Some(0x41)),
+        "model should produce 0x41 in stdin: {solution:?}"
+    );
     Ok(())
 }
