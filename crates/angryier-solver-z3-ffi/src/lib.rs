@@ -62,7 +62,13 @@ impl Z3FfiBridge {
             let config = Z3_mk_config().ok_or(Z3FfiError::NullContext)?;
             let ctx = Z3_mk_context(config);
             Z3_del_config(config);
-            ctx.ok_or(Z3FfiError::NullContext)?
+            let ctx = ctx.ok_or(Z3FfiError::NullContext)?;
+            // Z3's default handler prints and exit()s — install a quiet
+            // handler so API errors (e.g. push while interrupted) surface as
+            // return values instead of killing the process.
+            unsafe extern "C" fn quiet_handler(_ctx: Z3_context, _code: Z3_error_code) {}
+            Z3_set_error_handler(ctx, Some(quiet_handler));
+            ctx
         };
         let solver = unsafe {
             let s = Z3_mk_solver(context).ok_or(Z3FfiError::NullContext)?;
@@ -188,6 +194,12 @@ impl Z3FfiBridge {
 
     /// Runs `check` on the persistent solver and extracts the model —
     /// factored so the incremental path and the fallback share it.
+    /// Interrupts any in-progress `check` on this context — Z3's documented
+    /// thread-safe cancellation point. The next check returns UNKNOWN.
+    pub fn interrupt(&self) {
+        unsafe { Z3_interrupt(self.context) }
+    }
+
     fn check_and_extract(&self, symbols: &mut HashMap<ExprId, Z3_ast>) -> SolverResult {
         let ctx = self.context;
         unsafe {

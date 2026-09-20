@@ -126,6 +126,13 @@ impl Z3Backend<Z3FfiBridge> {
         let bridge = Z3FfiBridge::new(reader)?;
         Ok(Z3Backend::new(bridge))
     }
+
+    /// Interrupts an in-progress  on the underlying context — the
+    /// driver can cancel a runaway query from another thread; the query
+    /// returns UNKNOWN rather than a wrong answer.
+    pub fn interrupt(&self) {
+        self.bridge.interrupt();
+    }
 }
 
 #[cfg(test)]

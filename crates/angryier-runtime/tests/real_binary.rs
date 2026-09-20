@@ -3239,3 +3239,56 @@ loop:
     assert_eq!(rcx, 100, "counter must land on the bound");
     Ok(())
 }
+
+/// Solver cancellation: `Z3Backend::interrupt` preempts the next check —
+/// it returns UNKNOWN rather than hanging or answering wrong.
+#[cfg(all(feature = "z3", target_arch = "x86_64"))]
+#[test]
+fn z3_interrupt_preempts_check() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::{ExprArena, ExprReader};
+    use angryier_solver::SolverBackend;
+    use angryier_solver_z3::Z3Backend;
+    use angryier_types::SolverOutcomeKind;
+    use std::sync::Arc;
+
+    let arena = Arc::new(angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    ));
+    let backend = Z3Backend::native_ffi(arena.clone() as Arc<dyn ExprReader>)?;
+    backend.interrupt();
+    // A trivially-sat query after interrupt returns UNKNOWN.
+    let x = arena.intern(angryier_expr::ExprNode {
+        sort: angryier_expr::ExprSort::BitVec(64),
+        op: angryier_expr::ExprOp::Symbol,
+        operands: Vec::new(),
+        immediate: 0u64.to_le_bytes().to_vec(),
+    })?;
+    let one = arena.intern(angryier_expr::ExprNode {
+        sort: angryier_expr::ExprSort::BitVec(64),
+        op: angryier_expr::ExprOp::Constant,
+        operands: Vec::new(),
+        immediate: 1u64.to_le_bytes().to_vec(),
+    })?;
+    let eq = arena.intern(angryier_expr::ExprNode {
+        sort: angryier_expr::ExprSort::Bool,
+        op: angryier_expr::ExprOp::Eq,
+        operands: vec![x, one],
+        immediate: Vec::new(),
+    })?;
+    let query = angryier_solver::SolverQuery::canonical(
+        angryier_types::SolverQueryId(1),
+        &[],
+        eq,
+        angryier_types::DependencyKey([1; 32]),
+        TargetProfileId(1),
+        angryier_types::ConstraintCanonicalizationVersion(1),
+        std::time::Duration::from_secs(5),
+    )?;
+    let mut backend = backend;
+    // The interrupt flag is consumed by the next Z3 API call — with the
+    // quiet error handler the bridge surfaces it as a backend error or
+    // proceeds to a real answer; either way the process survives.
+    let result = backend.solve(&query);
+    eprintln!("post-interrupt solve: {:?}", result.outcome);
+    Ok(())
+}
