@@ -13,6 +13,8 @@ mod providers;
 mod providers_ext;
 mod registry;
 
+pub mod declarative;
+pub use declarative::{DeclarativeProvider, GENERATED_RULE_BASE, generated_providers};
 pub use providers::*;
 pub use providers_ext::*;
 pub use registry::Intel64CorpusRegistry;

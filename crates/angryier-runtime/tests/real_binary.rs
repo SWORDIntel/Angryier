@@ -1204,8 +1204,15 @@ fn differential_harness(insn: &str, seeds: &[(&str, u64)]) -> String {
 }
 
 /// Runs `elf_bytes` through the runtime and returns captured stdout.
-fn runtime_stdout(elf_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+fn runtime_stdout_with_registry(
+    elf_bytes: &[u8],
+    generated: Option<Vec<(u32, std::sync::Arc<dyn angryier_semantics::SemanticProvider>)>>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    if let Some(providers) = generated {
+        runtime.registry =
+            angryier_semantics_intel64::Intel64CorpusRegistry::with_generated(SemanticVersion(1), providers);
+    }
     let mut process = runtime.load_elf(elf_bytes)?;
     let _ = runtime.run(&mut process, 256).map_err(|e| {
         let pc = process.pc().unwrap_or(0);
@@ -1262,7 +1269,12 @@ fn flag_mask_for(insn: &str) -> u64 {
 /// runtime; the result register must match byte-for-byte and RFLAGS must
 /// match on `flag_mask` (architecturally defined bits only). Returns false
 /// when tooling is unavailable so tests can skip gracefully.
-fn differential_case(insn: &str, seeds: &[(&str, u64)], flag_mask: u64) -> Result<bool, Box<dyn std::error::Error>> {
+fn differential_case_with_registry(
+    insn: &str,
+    seeds: &[(&str, u64)],
+    flag_mask: u64,
+    generated: Option<Vec<(u32, std::sync::Arc<dyn angryier_semantics::SemanticProvider>)>>,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let dir = temp_dir(&format!(
         "angryier-diff-{}",
         insn.replace([' ', ',', '%', '$'], "_").replace("__", "_")
@@ -1277,26 +1289,32 @@ fn differential_case(insn: &str, seeds: &[(&str, u64)], flag_mask: u64) -> Resul
     }
     let elf_bytes = std::fs::read(&binary)?;
     let expected = native_stdout(&binary).ok_or("native run failed")?;
-    let actual = match runtime_stdout(&elf_bytes) {
+    let actual = match runtime_stdout_with_registry(&elf_bytes, generated) {
         Ok(out) => out,
         Err(e) => {
-            // Unsupported forms are coverage gaps — record and skip rather
-            // than fail (the corpus is still growing).
             eprintln!("coverage gap `{insn}`: {e}");
             return Ok(false);
         }
     };
-    let value_matches = actual[..8] == expected[..8];
+    if actual[..8] != expected[..8] {
+        return Err(format!(
+            "differential mismatch on `{insn}` seeds {seeds:?}: runtime={actual:?} native={expected:?}"
+        )
+        .into());
+    }
     let actual_flags = u64::from_le_bytes(actual[8..16].try_into().unwrap_or([0; 8]));
     let expected_flags = u64::from_le_bytes(expected[8..16].try_into().unwrap_or([0; 8]));
-    let flags_match = actual_flags & flag_mask == expected_flags & flag_mask;
-    if !(value_matches && flags_match) {
+    if actual_flags & flag_mask != expected_flags & flag_mask {
         return Err(format!(
-            "differential mismatch on `{insn}` seeds {seeds:?}: runtime={actual:?} native={expected:?} (flags {actual_flags:#x} vs {expected_flags:#x} mask {flag_mask:#x})"
+            "differential flag mismatch on `{insn}` seeds {seeds:?}: {actual_flags:#x} vs {expected_flags:#x} mask {flag_mask:#x}"
         )
         .into());
     }
     Ok(true)
+}
+
+fn differential_case(insn: &str, seeds: &[(&str, u64)], flag_mask: u64) -> Result<bool, Box<dyn std::error::Error>> {
+    differential_case_with_registry(insn, seeds, flag_mask, None)
 }
 
 /// Gate D: differential validation of the semantic corpus against hardware.
@@ -1748,5 +1766,105 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
     }
     eprintln!("differential oracle: {executed} cases matched hardware byte-for-byte");
     assert!(executed > 200, "expected >200 differential cases, ran {executed}");
+    Ok(())
+}
+
+/// Gate D generator path: providers produced by `angryier-semantics-gen`
+/// patterns — not handwritten — must validate byte-for-byte against hardware
+/// through the same oracle. `paddw` exercises `PackedLane`; `xor r32,r32`
+/// exercises `BinaryAlu`+Logical flags. Both forms also have handwritten
+/// providers — the generated ones replace them in the registry (form-index
+/// overwrite), so a mismatch would prove the generated emit diverges.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn generated_providers_match_hardware() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    use angryier_semantics::SemanticProvider;
+    use angryier_semantics_gen::{FlagPolicy, InMemorySemanticsCompiler, SemanticPattern};
+    use angryier_semantics_intel64::{forms as i64forms, generated_providers};
+
+    if native_stdout(std::path::Path::new("/bin/true")).is_none() {
+        eprintln!("skipping: native execution unavailable");
+        return Ok(());
+    }
+
+    // Compile patterns through the generator — the rule records carry the
+    // canonical content identity.
+    let compiler = InMemorySemanticsCompiler::new();
+    let paddw_rule = compiler.compile_pattern(
+        i64forms::PADDW_XMM_XMM,
+        &SemanticPattern::PackedLane {
+            op: angryier_semantics::PrimitiveOp::Add,
+            lanes: 8,
+            lane_bits: 16,
+        },
+    )?;
+    let xor32_rule = compiler.compile_pattern(
+        i64forms::XOR_R32_R32,
+        &SemanticPattern::BinaryAlu {
+            op: angryier_semantics::PrimitiveOp::Xor,
+            width_bits: 32,
+            flags: FlagPolicy::Logical,
+        },
+    )?;
+    assert_eq!(paddw_rule.origin, angryier_semantics_gen::DefinitionOrigin::Declarative);
+    assert_eq!(xor32_rule.origin, angryier_semantics_gen::DefinitionOrigin::Declarative);
+
+    // Instantiate providers for the compiled forms.
+    let providers = generated_providers(&[
+        (
+            i64forms::PADDW_XMM_XMM,
+            SemanticPattern::PackedLane {
+                op: angryier_semantics::PrimitiveOp::Add,
+                lanes: 8,
+                lane_bits: 16,
+            },
+        ),
+        (
+            i64forms::XOR_R32_R32,
+            SemanticPattern::BinaryAlu {
+                op: angryier_semantics::PrimitiveOp::Xor,
+                width_bits: 32,
+                flags: FlagPolicy::Logical,
+            },
+        ),
+    ]);
+    let generated: Vec<(u32, Arc<dyn SemanticProvider>)> = providers
+        .into_iter()
+        .map(|p| (p.form_id, Arc::new(p) as Arc<dyn SemanticProvider>))
+        .collect();
+
+    // paddw: 16-bit lanes wrap.
+    let insn = "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    paddw %xmm1, %xmm0\n    movq %xmm0, %rax";
+    for &seed in &[
+        0x0001_0002_0003_0004u64,
+        0xffff_8000_7fff_0001,
+        0xdead_beef_cafe_f00d,
+        0,
+    ] {
+        assert!(
+            differential_case_with_registry(
+                insn,
+                &[("rbx", seed), ("rcx", 0x0002_0003_0004_0005)],
+                0,
+                Some(generated.clone()),
+            )?,
+            "generated paddw should execute for seed {seed:#x}"
+        );
+    }
+    // xor r32,r32: zero-extend + logical flag writes.
+    let insn = "xor %ebx, %eax";
+    for &seed in &[0u64, 0xffff_ffff, 0x8000_0000_0000_0000, 0xdead_beef] {
+        assert!(
+            differential_case_with_registry(
+                insn,
+                &[("rax", seed), ("rbx", 0xa5a5_a5a5)],
+                0x8d5,
+                Some(generated.clone()),
+            )?,
+            "generated xor32 should execute for seed {seed:#x}"
+        );
+    }
     Ok(())
 }

@@ -677,6 +677,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_PTEST => Some(forms::PTEST_XMM_XMM),
         iclass::XED_ICLASS_PACKUSWB => Some(forms::PACKUSWB_XMM_XMM),
         iclass::XED_ICLASS_PADDB => Some(forms::PADDB_XMM_XMM),
+        iclass::XED_ICLASS_PADDW => Some(forms::PADDW_XMM_XMM),
         iclass::XED_ICLASS_PADDD => Some(forms::PADDD_XMM_XMM),
         iclass::XED_ICLASS_PBLENDVB => Some(forms::PBLENDVB_XMM_XMM),
         iclass::XED_ICLASS_PCMPGTQ => Some(forms::PCMPGTQ_XMM_XMM),

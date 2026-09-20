@@ -3,6 +3,10 @@
 use std::fmt;
 use std::sync::Mutex;
 
+pub mod pattern;
+
+pub use pattern::{FlagPolicy, SemanticPattern, ShiftPattern};
+
 use angryier_types::{ContentDomain, ContentId, ContentIdentitySchemaVersion, SemanticRuleId, SemanticVersion};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -96,6 +100,18 @@ impl InMemorySemanticsCompiler {
 impl Default for InMemorySemanticsCompiler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl InMemorySemanticsCompiler {
+    /// Compiles a declarative [`SemanticPattern`] for `form_id` into a rule
+    /// record. The canonical pattern encoding is the generated source: the
+    /// content identity covers exactly the semantic definition.
+    pub fn compile_pattern(&self, form_id: u32, pattern: &SemanticPattern) -> Result<GeneratedRule, SemanticsGenError> {
+        let mut definition = vec![0u8]; // Declarative origin tag
+        definition.extend_from_slice(&form_id.to_le_bytes());
+        definition.extend_from_slice(&pattern.canonical_bytes());
+        <Self as SemanticsCompiler>::compile(self, &definition)
     }
 }
 

@@ -636,6 +636,24 @@ impl Intel64CorpusRegistry {
         registry
     }
 
+    /// A registry with generated providers appended after the handwritten
+    /// corpus. Generated providers keep their own rule-id band
+    /// (`GENERATED_RULE_BASE`) and are indexed by the caller-supplied form
+    /// id, so positional handwritten dispatch is untouched.
+    pub fn with_generated(
+        semantic_version: SemanticVersion,
+        generated: Vec<(u32, Arc<dyn angryier_semantics::SemanticProvider>)>,
+    ) -> Self {
+        let mut registry = Self::new(semantic_version);
+        for (form_id, provider) in generated {
+            let index = registry.providers.len();
+            registry.providers.push(provider);
+            registry.form_index.insert(form_id, index);
+        }
+        registry.assert_unique_rule_ids();
+        registry
+    }
+
     pub fn providers(&self) -> &[Arc<dyn angryier_semantics::SemanticProvider>] {
         &self.providers
     }

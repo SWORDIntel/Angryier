@@ -33,7 +33,7 @@ const U1: SemanticType = SemanticType::Scalar(ScalarType::BitVec(1));
 // Flag computation helpers
 // ---------------------------------------------------------------------------
 
-fn const_u64(out: &mut dyn SemanticBuilder, value: u64) -> Result<ValueId, SemanticError> {
+pub(crate) fn const_u64(out: &mut dyn SemanticBuilder, value: u64) -> Result<ValueId, SemanticError> {
     out.constant(U64, &value.to_le_bytes())
 }
 
@@ -53,7 +53,10 @@ pub(crate) fn widen_to_u64(
 }
 
 /// Emits a fall-through jump to the next instruction (address + length).
-fn fall_through(out: &mut dyn SemanticBuilder, insn: &dyn DecodedInstructionView) -> Result<(), SemanticError> {
+pub(crate) fn fall_through(
+    out: &mut dyn SemanticBuilder,
+    insn: &dyn DecodedInstructionView,
+) -> Result<(), SemanticError> {
     let next_pc = const_u64(out, insn.address().wrapping_add(u64::from(insn.length())))?;
     out.jump(next_pc)?;
     Ok(())
@@ -378,7 +381,11 @@ pub(crate) fn write_shift_flags(
 
 /// CF and OF for rotate instructions (the only architecturally defined
 /// flags for rol/ror; count-one OF formula).
-fn write_rotate_flags(out: &mut dyn SemanticBuilder, result: ValueId, kind: ShiftKind) -> Result<(), SemanticError> {
+pub(crate) fn write_rotate_flags(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    kind: ShiftKind,
+) -> Result<(), SemanticError> {
     let result = widen_to_u64(out, result, 64)?;
     let one = const_u64(out, 1)?;
     let sixty_three = const_u64(out, 63)?;
@@ -588,7 +595,7 @@ fn write_zf_only(out: &mut dyn SemanticBuilder, result: ValueId, width_bits: u16
 }
 
 /// Writes only the CF flag from `cf_value` (a 64-bit value of 0 or 1), preserving ZF, SF, and OF.
-fn write_cf_only(out: &mut dyn SemanticBuilder, cf_value: ValueId) -> Result<(), SemanticError> {
+pub(crate) fn write_cf_only(out: &mut dyn SemanticBuilder, cf_value: ValueId) -> Result<(), SemanticError> {
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
     let cf_clear_mask = !(1u64 << rflags::CF_BIT);
     let mask = out.constant(U64, &cf_clear_mask.to_le_bytes())?;

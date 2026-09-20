@@ -10,6 +10,7 @@ angryier-arch = { path = "../angryier-arch" }
 angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
 angryier-semantic-contracts = { path = "../angryier-semantic-contracts" }
 angryier-semantics = { path = "../angryier-semantics" }
+angryier-semantics-gen = { path = "../angryier-semantics-gen" }
 angryier-types = { path = "../angryier-types" }
 
 [lib]

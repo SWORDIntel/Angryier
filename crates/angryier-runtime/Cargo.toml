@@ -17,6 +17,7 @@ angryier-models = { path = "../angryier-models" }
 angryier-semantics = { path = "../angryier-semantics" }
 angryier-scheduler = { path = "../angryier-scheduler" }
 angryier-semantics-intel64 = { path = "../angryier-semantics-intel64" }
+angryier-semantics-gen = { path = "../angryier-semantics-gen" }
 angryier-solver = { path = "../angryier-solver" }
 angryier-state = { path = "../angryier-state" }
 angryier-types = { path = "../angryier-types" }

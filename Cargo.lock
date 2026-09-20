@@ -197,6 +197,7 @@ dependencies = [
  "angryier-models",
  "angryier-scheduler",
  "angryier-semantics",
+ "angryier-semantics-gen",
  "angryier-semantics-intel64",
  "angryier-solver",
  "angryier-solver-fuzzy",
@@ -247,6 +248,7 @@ dependencies = [
  "angryier-memory",
  "angryier-semantic-contracts",
  "angryier-semantics",
+ "angryier-semantics-gen",
  "angryier-state",
  "angryier-types",
 ]
