@@ -1,0 +1,22 @@
+[package]
+name = "angryier-cfg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Intel 64 control-flow graph recovery over decoded instructions"
+
+[dependencies]
+angryier-arch = { path = "../angryier-arch" }
+angryier-semantics-intel64 = { path = "../angryier-semantics-intel64" }
+angryier-types = { path = "../angryier-types" }
+
+[dev-dependencies]
+angryier-loader = { path = "../angryier-loader" }
+angryier-arch-xed-ffi = { path = "../angryier-arch-xed-ffi" }
+angryier-runtime = { path = "../angryier-runtime", features = ["xed"] }
+
+[features]
+xed = []
+
+[lints]
+workspace = true

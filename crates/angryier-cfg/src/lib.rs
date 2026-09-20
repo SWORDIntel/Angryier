@@ -1,0 +1,470 @@
+//! Control-flow graph recovery for Intel 64 binaries.
+//!
+//! `recover` performs recursive-descent recovery over a decoded byte region:
+//! it follows fall-through, conditional-taken, unconditional-jump, and call
+//! edges, records each basic block's instruction span, and marks indirect or
+//! return terminators as graph exits. The result drives Phase 10's search
+//! intelligence (guided exploration, Veritesting merge points, and state
+//! economics) — recovery is decoder-driven, so the CFG shares the same XED
+//! decode and form mapping as the execution engines.
+
+#![forbid(unsafe_code)]
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use angryier_arch::{DecodedInstruction, Decoder, OperandKind};
+use angryier_semantics_intel64::forms;
+use angryier_types::Address;
+
+/// How control leaves a basic block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EdgeKind {
+    /// Sequential fall-through to the next instruction.
+    FallThrough,
+    /// Conditional branch taken to a static target.
+    ConditionalTaken,
+    /// Unconditional jump to a static target.
+    Unconditional,
+    /// Direct call to a static target (the callee may return to the
+    /// fall-through edge).
+    Call,
+    /// Indirect call — the callee is data-dependent, but control returns
+    /// to the fall-through edge after the call completes.
+    IndirectCall,
+    /// Indirect jump — the target is data-dependent at runtime; a graph exit.
+    IndirectJump,
+    /// `ret` — control returns to the caller's stack top; no static target.
+    Return,
+}
+
+/// A directed edge between two basic blocks, or an exit from the CFG.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CfgEdge {
+    /// Terminating instruction address (the block's last instruction).
+    pub from: Address,
+    /// Successor block start, when statically known.
+    pub to: Option<Address>,
+    /// Edge flavor.
+    pub kind: EdgeKind,
+}
+
+/// A maximal run of straight-line decoded instructions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BasicBlock {
+    /// Address of the first instruction.
+    pub start: Address,
+    /// Address one past the last instruction.
+    pub end: Address,
+    /// Decoded instructions in order.
+    pub instructions: Vec<DecodedInstruction>,
+    /// The terminator's edge kind; `Return`/`IndirectJump`/`Unconditional`
+    /// terminate without fall-through, `Call`/`ConditionalTaken`/
+    /// `IndirectCall` also have a fall-through successor.
+    pub terminator: EdgeKind,
+}
+
+impl BasicBlock {
+    /// Number of decoded instructions in the block.
+    pub fn len(&self) -> usize {
+        self.instructions.len()
+    }
+
+    /// True when the block has no instructions.
+    pub fn is_empty(&self) -> bool {
+        self.instructions.is_empty()
+    }
+}
+
+/// A recovered control-flow graph over one contiguous decoded region.
+#[derive(Clone, Debug)]
+pub struct Cfg {
+    /// Entry block address.
+    pub entry: Address,
+    /// Blocks keyed by start address.
+    pub blocks: BTreeMap<Address, BasicBlock>,
+    /// All recorded edges (a `to: None` marks an exit or indirect edge).
+    pub edges: Vec<CfgEdge>,
+}
+
+impl Cfg {
+    /// Returns the successors of `block` reachable via static edges.
+    pub fn successors(&self, block: &BasicBlock) -> Vec<Address> {
+        let last = match block.instructions.last() {
+            Some(insn) => insn.address,
+            None => return Vec::new(),
+        };
+        self.edges
+            .iter()
+            .filter_map(|edge| (edge.from == last).then_some(edge.to).flatten())
+            .collect()
+    }
+}
+
+/// Errors from CFG recovery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CfgError {
+    /// The entry address lies outside the decoded region.
+    EntryOutOfRange { entry: Address },
+    /// A decode failure interrupted block recovery.
+    Decode { address: Address },
+}
+
+/// The set of form ids that terminate a basic block, plus their edge kind.
+fn terminator_kind(form_id: u32) -> Option<EdgeKind> {
+    const CONDITIONAL: &[u32] = &[
+        forms::JO_REL32,
+        forms::JNO_REL32,
+        forms::JB_REL32,
+        forms::JAE_REL32,
+        forms::JZ_REL32,
+        forms::JNZ_REL32,
+        forms::JBE_REL32,
+        forms::JA_REL32,
+        forms::JS_REL32,
+        forms::JNS_REL32,
+        forms::JPE_REL32,
+        forms::JPO_REL32,
+        forms::JL_REL32,
+        forms::JGE_REL32,
+        forms::JLE_REL32,
+        forms::JG_REL32,
+        forms::JC_REL32,
+        forms::JNC_REL32,
+    ];
+    if CONDITIONAL.contains(&form_id) {
+        return Some(EdgeKind::ConditionalTaken);
+    }
+    match form_id {
+        forms::JMP_REL32 => Some(EdgeKind::Unconditional),
+        forms::CALL_REL32 => Some(EdgeKind::Call),
+        forms::RET => Some(EdgeKind::Return),
+        forms::CALL_INDIRECT_R64 | forms::CALL_INDIRECT_MEM64 => Some(EdgeKind::IndirectCall),
+        forms::JMP_INDIRECT_R64 | forms::JMP_INDIRECT_MEM64 => Some(EdgeKind::IndirectJump),
+        _ => None,
+    }
+}
+
+/// Static branch target for direct relative control transfers.
+fn static_target(insn: &DecodedInstruction) -> Option<Address> {
+    insn.operands.iter().find_map(|operand| match operand.kind {
+        OperandKind::RelativeBranch(branch) => Some(insn.relative_target(branch)),
+        _ => None,
+    })
+}
+
+/// Recovers a CFG by recursive descent from `entry` across `region`
+/// (the instruction bytes mapped at `base`).
+///
+/// Recovery stops at region bounds, previously visited block heads, and
+/// terminators without static successors. Calls record both the callee edge
+/// and the fall-through edge so interprocedural analyses can follow either.
+pub fn recover<D: Decoder>(
+    decoder: &D,
+    base: Address,
+    region: &[u8],
+    entry: Address,
+    map_form: impl Fn(&DecodedInstruction) -> u32,
+) -> Result<Cfg, CfgError> {
+    recover_multi(decoder, base, region, [entry], map_form)
+}
+
+/// Recursive-descent recovery seeded from multiple entry points — function
+/// starts from the symbol table, exception-landing pads, or known call
+/// targets. Entries outside the region are skipped rather than failing.
+pub fn recover_multi<D: Decoder>(
+    decoder: &D,
+    base: Address,
+    region: &[u8],
+    entries: impl IntoIterator<Item = Address>,
+    map_form: impl Fn(&DecodedInstruction) -> u32,
+) -> Result<Cfg, CfgError> {
+    let mut entries = entries.into_iter();
+    let Some(entry) = entries.next() else {
+        return Err(CfgError::EntryOutOfRange { entry: base });
+    };
+    if !(base..base.wrapping_add(region.len() as u64)).contains(&entry) {
+        return Err(CfgError::EntryOutOfRange { entry });
+    }
+
+    let mut blocks: BTreeMap<Address, BasicBlock> = BTreeMap::new();
+    let mut edges = Vec::new();
+    let mut worklist: Vec<Address> = vec![entry];
+    worklist.extend(entries.filter(|e| (base..base.wrapping_add(region.len() as u64)).contains(e)));
+    let mut visited = BTreeSet::new();
+
+    while let Some(head) = worklist.pop() {
+        if !visited.insert(head) {
+            continue;
+        }
+        let mut cursor = head;
+        let mut instructions = Vec::new();
+        let terminator;
+
+        loop {
+            let offset = match cursor.checked_sub(base) {
+                Some(offset) => usize::try_from(offset).ok(),
+                None => None,
+            };
+            let Some(offset) = offset else {
+                terminator = EdgeKind::IndirectJump;
+                break;
+            };
+            let Some(bytes) = region.get(offset..) else {
+                terminator = EdgeKind::IndirectJump;
+                break;
+            };
+            let mut decoded = decoder
+                .decode(cursor, bytes)
+                .map_err(|_| CfgError::Decode { address: cursor })?;
+            decoded.form_id = map_form(&decoded);
+            let next = cursor.wrapping_add(u64::from(decoded.length));
+            instructions.push(decoded.clone());
+            cursor = next;
+
+            match terminator_kind(decoded.form_id) {
+                Some(EdgeKind::ConditionalTaken) => {
+                    let target = static_target(&decoded);
+                    edges.push(CfgEdge {
+                        from: decoded.address,
+                        to: target,
+                        kind: EdgeKind::ConditionalTaken,
+                    });
+                    edges.push(CfgEdge {
+                        from: decoded.address,
+                        to: Some(next),
+                        kind: EdgeKind::FallThrough,
+                    });
+                    if let Some(target) = target {
+                        worklist.push(target);
+                    }
+                    worklist.push(next);
+                    terminator = EdgeKind::ConditionalTaken;
+                    break;
+                }
+                Some(EdgeKind::Unconditional) => {
+                    let target = static_target(&decoded);
+                    edges.push(CfgEdge {
+                        from: decoded.address,
+                        to: target,
+                        kind: EdgeKind::Unconditional,
+                    });
+                    if let Some(target) = target {
+                        worklist.push(target);
+                    }
+                    terminator = EdgeKind::Unconditional;
+                    break;
+                }
+                Some(EdgeKind::Call) => {
+                    let target = static_target(&decoded);
+                    edges.push(CfgEdge {
+                        from: decoded.address,
+                        to: target,
+                        kind: EdgeKind::Call,
+                    });
+                    edges.push(CfgEdge {
+                        from: decoded.address,
+                        to: Some(next),
+                        kind: EdgeKind::FallThrough,
+                    });
+                    if let Some(target) = target {
+                        worklist.push(target);
+                    }
+                    worklist.push(next);
+                    terminator = EdgeKind::Call;
+                    break;
+                }
+                Some(EdgeKind::IndirectCall) => {
+                    edges.push(CfgEdge {
+                        from: decoded.address,
+                        to: None,
+                        kind: EdgeKind::IndirectCall,
+                    });
+                    edges.push(CfgEdge {
+                        from: decoded.address,
+                        to: Some(next),
+                        kind: EdgeKind::FallThrough,
+                    });
+                    worklist.push(next);
+                    terminator = EdgeKind::IndirectCall;
+                    break;
+                }
+                Some(kind) => {
+                    edges.push(CfgEdge {
+                        from: decoded.address,
+                        to: None,
+                        kind,
+                    });
+                    terminator = kind;
+                    break;
+                }
+                None => {}
+            }
+        }
+
+        if !instructions.is_empty() {
+            blocks.insert(
+                head,
+                BasicBlock {
+                    start: head,
+                    end: cursor,
+                    instructions,
+                    terminator,
+                },
+            );
+        }
+    }
+
+    Ok(Cfg { entry, blocks, edges })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal decoder for x86-64 test snippets: only the opcodes used by
+    /// the recovery tests are implemented.
+    #[derive(Debug)]
+    struct TestDecoder;
+
+    impl Decoder for TestDecoder {
+        type Error = String;
+
+        fn decode(&self, address: Address, bytes: &[u8]) -> Result<DecodedInstruction, String> {
+            let (length, form_id, operands) = match bytes {
+                [0x90, ..] => (1, forms::NOP, vec![]),
+                [0xeb, disp, ..] => (
+                    2,
+                    forms::JMP_REL32,
+                    vec![angryier_arch::Operand {
+                        index: 0,
+                        width_bits: 32,
+                        access: angryier_arch::AccessKind::Read,
+                        visibility: angryier_arch::OperandVisibility::Explicit,
+                        kind: OperandKind::RelativeBranch(angryier_arch::RelativeBranchOperand {
+                            displacement: i64::from(*disp as i8),
+                            displacement_width_bits: 8,
+                        }),
+                    }],
+                ),
+                [0x75, disp, ..] => (
+                    2,
+                    forms::JNZ_REL32,
+                    vec![angryier_arch::Operand {
+                        index: 0,
+                        width_bits: 32,
+                        access: angryier_arch::AccessKind::Read,
+                        visibility: angryier_arch::OperandVisibility::Explicit,
+                        kind: OperandKind::RelativeBranch(angryier_arch::RelativeBranchOperand {
+                            displacement: i64::from(*disp as i8),
+                            displacement_width_bits: 8,
+                        }),
+                    }],
+                ),
+                [0xe8, a, b, c, d, ..] => (
+                    5,
+                    forms::CALL_REL32,
+                    vec![angryier_arch::Operand {
+                        index: 0,
+                        width_bits: 32,
+                        access: angryier_arch::AccessKind::Read,
+                        visibility: angryier_arch::OperandVisibility::Explicit,
+                        kind: OperandKind::RelativeBranch(angryier_arch::RelativeBranchOperand {
+                            displacement: i64::from(i32::from_le_bytes([*a, *b, *c, *d])),
+                            displacement_width_bits: 32,
+                        }),
+                    }],
+                ),
+                [0xc3, ..] => (1, forms::RET, vec![]),
+                _ => return Err(format!("unknown opcode at {address:#x}")),
+            };
+            Ok(DecodedInstruction {
+                address,
+                length,
+                form_id,
+                features: Vec::new(),
+                operands,
+                modifiers: angryier_arch::InstructionModifiers::default(),
+            })
+        }
+    }
+
+    fn identity_form(insn: &DecodedInstruction) -> u32 {
+        insn.form_id
+    }
+
+    #[test]
+    fn straight_line_block() -> Result<(), String> {
+        // nop; nop; ret — one block, one exit edge.
+        let code = [0x90, 0x90, 0xc3];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(cfg.blocks.len(), 1);
+        let block = cfg.blocks.get(&0x1000).ok_or("block")?;
+        assert_eq!(block.len(), 3);
+        assert_eq!(block.terminator, EdgeKind::Return);
+        assert_eq!(cfg.edges.len(), 1);
+        assert_eq!(cfg.edges[0].kind, EdgeKind::Return);
+        assert_eq!(cfg.edges[0].to, None);
+      Ok(())
+    }
+
+    #[test]
+    fn conditional_branch_splits_blocks() -> Result<(), String> {
+        // nop; jnz +2; nop; ret; (target) nop; ret
+        let code = [0x90, 0x75, 0x02, 0x90, 0xc3, 0x90, 0xc3];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
+        // Blocks: head (nop,jnz), fall-through (nop,ret), target (nop,ret).
+        assert_eq!(cfg.blocks.len(), 3);
+        let head = cfg.blocks.get(&0x1000).ok_or("head")?;
+        assert_eq!(head.terminator, EdgeKind::ConditionalTaken);
+        let mut successors = cfg.successors(head);
+        successors.sort();
+        assert_eq!(successors, vec![0x1003, 0x1005]);
+      Ok(())
+    }
+
+    #[test]
+    fn unconditional_jump() -> Result<(), String> {
+        // jmp +3; nop; ret; (target at +4) nop; ret
+        let code = [0xeb, 0x02, 0x90, 0xc3, 0x90, 0xc3];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(cfg.blocks.len(), 2);
+        let head = cfg.blocks.get(&0x1000).ok_or("head")?;
+        assert_eq!(head.terminator, EdgeKind::Unconditional);
+        assert_eq!(cfg.successors(head), vec![0x1004]);
+        // The dead nop/ret at 0x1002 is unreachable — not recovered.
+        assert!(!cfg.blocks.contains_key(&0x1002));
+      Ok(())
+    }
+
+    #[test]
+    fn call_records_both_edges() -> Result<(), String> {
+        // call +1; ret; (callee at +6) ret
+        let code = [0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xc3];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
+        let head = cfg.blocks.get(&0x1000).ok_or("head")?;
+        assert_eq!(head.terminator, EdgeKind::Call);
+        let mut successors = cfg.successors(head);
+        successors.sort();
+        assert_eq!(successors, vec![0x1005, 0x1006]);
+      Ok(())
+    }
+
+    #[test]
+    fn entry_out_of_range_fails() -> Result<(), String> {
+        let code = [0xc3];
+        let result = recover(&TestDecoder, 0x1000, &code, 0x2000, identity_form);
+        assert_eq!(result.err(), Some(CfgError::EntryOutOfRange { entry: 0x2000 }));
+      Ok(())
+    }
+
+    #[test]
+    fn backward_loop_recovers_once() -> Result<(), String> {
+        // nop; jmp -3 (back to head) — the loop must terminate.
+        let code = [0x90, 0xeb, 0xfd];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(cfg.blocks.len(), 1);
+        let head = cfg.blocks.get(&0x1000).ok_or("head")?;
+        assert_eq!(cfg.successors(head), vec![0x1000]);
+      Ok(())
+    }
+}

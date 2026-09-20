@@ -36,6 +36,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "angryier-cfg"
+version = "0.1.0"
+dependencies = [
+ "angryier-arch",
+ "angryier-arch-xed-ffi",
+ "angryier-loader",
+ "angryier-runtime",
+ "angryier-semantics-intel64",
+ "angryier-types",
+]
+
+[[package]]
 name = "angryier-cli"
 version = "0.1.0"
 
