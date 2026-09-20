@@ -2388,7 +2388,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     fn step_state_inner(
         &mut self,
         index: usize,
-        solver: Option<(&mut dyn SolverBackend, Duration)>,
+        mut solver: Option<(&mut dyn SolverBackend, Duration)>,
     ) -> Result<SymbolicStepOutcome, RuntimeError> {
         let state = self
             .states
@@ -2494,21 +2494,198 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             });
         }
 
-        let state = &mut self.states[index];
-        let (ir_block, _decoded) = self.runtime.lower_at(&mut state.process, pc, &decoded)?;
+        let (ir_block, _decoded) = self.runtime.lower_at(&mut self.states[index].process, pc, &decoded)?;
 
         let mut evaluator = SymbolicEvaluator::new(self.arena);
-        evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
-            registers: state.registers.clone(),
-            concrete_registers: state.concrete_registers.clone(),
-            constraints: state.constraints.clone(),
-            symbols: state.symbols.clone(),
-            expr_concrete: state.expr_concrete.clone(),
-        });
-        let summary = evaluator
-            .eval_block_with_memory(&ir_block, &mut state.memory)
-            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+        {
+            let state = &self.states[index];
+            evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
+                registers: state.registers.clone(),
+                concrete_registers: state.concrete_registers.clone(),
+                constraints: state.constraints.clone(),
+                symbols: state.symbols.clone(),
+                expr_concrete: state.expr_concrete.clone(),
+            });
+        }
+        let mut summary = evaluator.eval_block_with_memory(&ir_block, &mut self.states[index].memory);
+        // Solver-assisted address concretization: when an address expr
+        // can't fold concretely, ask the solver for a satisfying value
+        // under this state's constraints, pin it, and re-run the block.
+        eprintln!("solver={} summary_err={}", solver.is_some(), summary.is_err());
+        if let Some((backend, timeout)) = solver.as_mut().map(|(b, t)| (&mut **b, *t)) {
+            let mut retries = 0;
+            while let Err(angryier_execution::SymbolicEvalError::UnresolvedAddress(expr)) = summary {
+                retries += 1;
+                if retries > 4 {
+                    break;
+                }
+                // expr == a fresh free variable, under the state's path
+                // constraints — the model gives a concrete address.
+                let free = self
+                    .arena
+                    .intern(angryier_expr::ExprNode {
+                        sort: angryier_expr::ExprSort::BitVec(64),
+                        op: angryier_expr::ExprOp::Symbol,
+                        operands: Vec::new(),
+                        immediate: u64::MAX.to_le_bytes().to_vec(),
+                    })
+                    .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                // The concretized address must land inside a mapped region
+                // — disjoin `base <= free < base+size` over regions.
+                let eq = self
+                    .arena
+                    .intern(angryier_expr::ExprNode {
+                        sort: angryier_expr::ExprSort::Bool,
+                        op: angryier_expr::ExprOp::Eq,
+                        operands: vec![expr, free],
+                        immediate: Vec::new(),
+                    })
+                    .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                let mut region_pred = eq;
+                {
+                    let regions: Vec<(u64, u64)> = self.states[index]
+                        .process
+                        .state
+                        .memory
+                        .regions()
+                        .iter()
+                        .map(|r| (r.base, r.base.saturating_add(r.size)))
+                        .collect();
+                    let mut bounds = Vec::new();
+                    for (base, end) in regions {
+                        let lo = self
+                            .arena
+                            .intern(angryier_expr::ExprNode {
+                                sort: angryier_expr::ExprSort::BitVec(64),
+                                op: angryier_expr::ExprOp::Constant,
+                                operands: Vec::new(),
+                                immediate: base.to_le_bytes().to_vec(),
+                            })
+                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                        let hi = self
+                            .arena
+                            .intern(angryier_expr::ExprNode {
+                                sort: angryier_expr::ExprSort::BitVec(64),
+                                op: angryier_expr::ExprOp::Constant,
+                                operands: Vec::new(),
+                                immediate: end.to_le_bytes().to_vec(),
+                            })
+                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                        let ge = self
+                            .arena
+                            .intern(angryier_expr::ExprNode {
+                                sort: angryier_expr::ExprSort::Bool,
+                                op: angryier_expr::ExprOp::Ule,
+                                operands: vec![lo, free],
+                                immediate: Vec::new(),
+                            })
+                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                        let lt = self
+                            .arena
+                            .intern(angryier_expr::ExprNode {
+                                sort: angryier_expr::ExprSort::Bool,
+                                op: angryier_expr::ExprOp::Ult,
+                                operands: vec![free, hi],
+                                immediate: Vec::new(),
+                            })
+                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                        let band = self
+                            .arena
+                            .intern(angryier_expr::ExprNode {
+                                sort: angryier_expr::ExprSort::Bool,
+                                op: angryier_expr::ExprOp::And,
+                                operands: vec![ge, lt],
+                                immediate: Vec::new(),
+                            })
+                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                        bounds.push(band);
+                    }
+                    if !bounds.is_empty() {
+                        let mut disj = bounds[0];
+                        for b in &bounds[1..] {
+                            disj = self
+                                .arena
+                                .intern(angryier_expr::ExprNode {
+                                    sort: angryier_expr::ExprSort::Bool,
+                                    op: angryier_expr::ExprOp::Or,
+                                    operands: vec![disj, *b],
+                                    immediate: Vec::new(),
+                                })
+                                .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                        }
+                        region_pred = self
+                            .arena
+                            .intern(angryier_expr::ExprNode {
+                                sort: angryier_expr::ExprSort::Bool,
+                                op: angryier_expr::ExprOp::And,
+                                operands: vec![eq, disj],
+                                immediate: Vec::new(),
+                            })
+                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                    }
+                }
+                let eq = region_pred;
+                let state_ref = &self.states[index];
+                let constraints: Vec<CanonicalConstraint> = state_ref
+                    .constraints
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| {
+                        self.arena.dependency_summary(*c).map(|s| CanonicalConstraint {
+                            id: ConstraintId(i as u64),
+                            key: s.key,
+                            expr: *c,
+                        })
+                    })
+                    .collect();
+                let profile = state_ref.process.target_profile;
+                let key = self
+                    .arena
+                    .dependency_summary(eq)
+                    .map(|s| s.key)
+                    .ok_or_else(|| RuntimeError::Symbolic("missing key".into()))?;
+                let query = SolverQuery::canonical(
+                    SolverQueryId(index as u64),
+                    &constraints,
+                    eq,
+                    key,
+                    profile,
+                    ConstraintCanonicalizationVersion(1),
+                    timeout,
+                )
+                .map_err(|e| RuntimeError::Solver(format!("{e:?}")))?;
+                let result = backend.solve(&query);
+                eprintln!(
+                    "concretize expr {}: {:?} model={} entries",
+                    expr.0,
+                    result.outcome,
+                    result.model.len()
+                );
+                let value = result
+                    .model
+                    .iter()
+                    .find(|(k, _)| *k == u64::from(free.0))
+                    .and_then(|(_, b)| {
+                        let mut buf = [0u8; 8];
+                        let n = b.len().min(8);
+                        buf[..n].copy_from_slice(&b[..n]);
+                        Some(u64::from_le_bytes(buf))
+                    });
+                let Some(value) = value else { break };
+                self.states[index].expr_concrete.insert(expr, value);
+                evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
+                    registers: self.states[index].registers.clone(),
+                    concrete_registers: self.states[index].concrete_registers.clone(),
+                    constraints: self.states[index].constraints.clone(),
+                    symbols: self.states[index].symbols.clone(),
+                    expr_concrete: self.states[index].expr_concrete.clone(),
+                });
+                summary = evaluator.eval_block_with_memory(&ir_block, &mut self.states[index].memory);
+            }
+        }
+        let summary = summary.map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
         let post = evaluator.snapshot();
+        let state = &mut self.states[index];
         state.registers = post.registers;
         state.expr_concrete = post.expr_concrete;
         state.symbols = evaluator.symbols().to_vec();

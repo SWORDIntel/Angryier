@@ -156,7 +156,26 @@ impl Z3FfiBridge {
                 unsafe { Z3_solver_assert(ctx, self.solver, ast) };
                 false
             }
-            Err(_) => true,
+            Err(e) => {
+                let mut stack = vec![query.predicate()];
+                let mut seen = std::collections::HashSet::new();
+                while let Some(id) = stack.pop() {
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    if let Some(n) = self.reader.read(id) {
+                        if let Err(e2) = self.translate_node(id, &n, &mut HashMap::new(), &mut HashMap::new()) {
+                            eprintln!(
+                                "  fail node {:?} {:?} sort={:?} ops={:?} -> {e2:?}",
+                                id, n.op, n.sort, n.operands
+                            );
+                        }
+                        stack.extend_from_slice(&n.operands);
+                    }
+                }
+                eprintln!("predicate translate failed: {e:?}");
+                true
+            }
         };
         let result = if failed {
             backend_error()
@@ -389,15 +408,29 @@ impl Z3FfiBridge {
                 Ok(ast)
             }
             ExprOp::Extract => {
-                if node.operands.len() != 2 {
-                    return Err(Z3FfiError::MalformedExpression);
-                }
-                let operand = self.translate(node.operands[0], cache, symbols)?;
-                let start_node = self
-                    .reader
-                    .read(node.operands[1])
-                    .ok_or(Z3FfiError::UnresolvedExpression(node.operands[1]))?;
-                let start = bytes_to_u64(&start_node.immediate);
+                // Canonical encoding: 1 operand (the value) + immediate
+                // [start:u16, width:u16]. Legacy encoding: operands[1] is a
+                // Constant node holding the start.
+                let (operand_id, start) = match node.operands.len() {
+                    1 => {
+                        let start = node
+                            .immediate
+                            .get(..2)
+                            .map(|b| u16::from_le_bytes(b.try_into().unwrap_or([0; 2])))
+                            .map(u64::from)
+                            .unwrap_or(0);
+                        (node.operands[0], start)
+                    }
+                    2 => {
+                        let start_node = self
+                            .reader
+                            .read(node.operands[1])
+                            .ok_or(Z3FfiError::UnresolvedExpression(node.operands[1]))?;
+                        (node.operands[0], bytes_to_u64(&start_node.immediate))
+                    }
+                    _ => return Err(Z3FfiError::MalformedExpression),
+                };
+                let operand = self.translate(operand_id, cache, symbols)?;
                 let width = match node.sort {
                     ExprSort::BitVec(w) => w,
                     _ => return Err(Z3FfiError::UnsupportedSort),
@@ -424,7 +457,11 @@ impl Z3FfiBridge {
                     ExprSort::BitVec(w) => w,
                     _ => return Err(Z3FfiError::UnsupportedSort),
                 };
-                if output_bits <= input_bits {
+                if output_bits == input_bits {
+                    // No-op extension (width coercion emits these).
+                    return Ok(operand);
+                }
+                if output_bits < input_bits {
                     return Err(Z3FfiError::MalformedExpression);
                 }
                 let diff = (output_bits - input_bits) as u32;

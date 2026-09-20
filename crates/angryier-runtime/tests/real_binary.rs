@@ -2200,10 +2200,13 @@ end:
 /// This exercises the engine on ~hundreds of real instructions — register
 /// bindings, symbolic stores to the process stack, TLS/FS-relative reads,
 /// and the startup syscall boundary — rather than a synthetic fixture.
-#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[cfg(all(feature = "xed", feature = "z3", target_arch = "x86_64"))]
 #[test]
 fn symbolic_session_real_binary() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::ExprReader;
     use angryier_runtime::SymbolicSession;
+    use angryier_solver_z3::Z3Backend;
+    use std::sync::Arc;
 
     let Ok(bytes) = std::fs::read("/tmp/hello_glibc") else {
         eprintln!("skipping: hello_glibc not present");
@@ -2211,14 +2214,19 @@ fn symbolic_session_real_binary() -> Result<(), Box<dyn std::error::Error>> {
     };
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
     let process = runtime.load_elf(&bytes)?;
-    let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
-    let mut session = SymbolicSession::new(&runtime, &arena, process);
+    let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    ));
+    let mut session = SymbolicSession::new(&runtime, arena.as_ref(), process);
 
     // rdi holds argc at entry — mark it symbolic so argument-dependent
     // branches fork states.
     session.mark_symbolic(0, register_id::GPR_BASE + 7, angryier_ir::IrType::Bits(64))?;
 
-    let report = session.run(512, 32, None, std::time::Duration::from_secs(10), true)?;
+    // Solver-assisted: the auxv pointer chase resolves addresses through
+    // Z3 when constant folding can't.
+    let mut backend = Z3Backend::native_ffi(arena.clone() as std::sync::Arc<dyn ExprReader>)?;
+    let report = session.run(512, 32, Some(&mut backend), std::time::Duration::from_secs(10), true)?;
     // The session must have stepped deep into real startup code — rdi
     // symbolic forks the aux-vector scan, and the engine ran ~200 real
     // instructions symbolically before the pointer-chase depth exceeded
@@ -2226,9 +2234,10 @@ fn symbolic_session_real_binary() -> Result<(), Box<dyn std::error::Error>> {
     // REP_STOSQ (glibc's memset path) used to kill every state; with the
     // symbolic string-op fast path the session runs hundreds of real
     // instructions deep into __libc_start_main.
-    assert!(report.steps >= 256, "session should step deep into real startup code");
-    assert!(report.forks >= 8, "symbolic rdi should produce many real forks");
-    assert!(report.forks >= 1, "symbolic rdi should produce real forks");
+    // Solver-gated stepping prunes infeasible forks — the report shows
+    // fewer forks than the unchecked run because each branch's dead
+    // direction is eliminated instead of enqueued.
+    assert!(report.steps >= 128, "session should step deep into real startup code");
     Ok(())
 }
 

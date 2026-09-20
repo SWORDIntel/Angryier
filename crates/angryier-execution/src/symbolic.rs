@@ -23,6 +23,9 @@ pub type SymbolicArena = dyn ExprArena<Error = ExprArenaError>;
 /// Errors produced while symbolically evaluating an AngryIR block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SymbolicEvalError {
+    /// A memory address expression could not be concretized — the session
+    /// can solve it and retry (solver-assisted concretization).
+    UnresolvedAddress(ExprId),
     /// The block contains an operation the evaluator does not model.
     UnsupportedOperation(String),
     /// The block contains a type the evaluator does not model.
@@ -36,6 +39,7 @@ pub enum SymbolicEvalError {
 impl std::fmt::Display for SymbolicEvalError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnresolvedAddress(expr) => write!(formatter, "unresolved address expr {}", expr.0),
             Self::UnsupportedOperation(operation) => write!(formatter, "unsupported symbolic operation: {operation}"),
             Self::UnsupportedType(ty) => write!(formatter, "unsupported symbolic type: {ty}"),
             Self::UndefinedValue(value) => write!(formatter, "undefined IR value {}", value.0),
@@ -142,7 +146,7 @@ impl<'a> SymbolicEvaluator<'a> {
             self.expr_concrete
                 .get(&expression)
                 .copied()
-                .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("non-constant operand".into()))
+                .ok_or(SymbolicEvalError::UnresolvedAddress(expression))
         })
     }
 
