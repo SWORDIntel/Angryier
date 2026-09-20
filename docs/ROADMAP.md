@@ -907,18 +907,18 @@ Production 1.0 requires:
 1. ELF64 and PE32+ loading for the declared scope — **partial** (ELF64 parser done, 27 tests; PE32+ pending);
 2. Intel 64 XED decoding with explicit semantic-support manifest — **done** (`angryier-arch-xed-ffi`, 11 tests);
 3. production semantic coverage for declared Intel extension families — **partial** (363 handwritten forms; generator pending; differential oracle pending);
-4. **dual-mode execution** — concolic fast path + full symbolic exploration, sharing AngryIR — **pending** (concolic fast path is Phase 6 work; full symbolic interpreter exists);
+4. **dual-mode execution** — concolic fast path + full symbolic exploration, sharing AngryIR — **done** (`ConcolicSession` shadows concrete execution with path constraints; `SymbolicSession` runs full symbolic with fork/merge, solver-gated pruning, CFG-scheduled reconvergence, parallel workers, and solver-assisted address concretization);
 5. COW state and sparse symbolic memory — **partial** (sparse memory done; symbolic-address policy done, 41 tests; page-backed COW pending);
 6. Z3 + Bitwuzla solver support — **done** (FFI + safe adapter wiring, 8+4 tests; portfolio router upgraded with per-query dispatch, 29 tests);
-7. **Fuzzy-SAT solver tier** — **pending** (new crate `angryier-solver-fuzzy` needed);
+7. **Fuzzy-SAT solver tier** — **done** (`angryier-solver-fuzzy` mutation tier plugged into the portfolio router; `concolic_solves_simple_branch_with_fuzzy_sat` passes);
 8. canonical solver-query identities and exact reuse — **partial** (identity + cache done; reuse wiring pending; real-trace measurement pending);
 9. native multicore exploration with worker/state ownership and useful physical-core scaling — **pending** (in-memory scheduler only; Gate B must be measured on real binaries in BOTH modes);
 10. NUMA-aware work placement where applicable — **partial** (distance model exists; OS-thread pool pending);
-11. solver affinity, timeout and preemption — **partial** (timeout enforcement done in portfolio router; per-worker incremental contexts pending);
+11. solver affinity, timeout and preemption — **partial** (timeout enforcement + per-query timeout params done; incremental persistent contexts done in the Z3 FFI backend; preemption pending);
 12. search policies demonstrably better than simple baselines on at least some target classes — **pending** (includes state merging / Veritesting and CFG recovery);
 13. reproducible correctness and performance reports — **partial** (bench sink exists; reproducible harness pending);
-14. **environment model library** (libc/syscall/SimProcedure equivalents, TLS, dynamic linking, CRT startup) — **partial** (SimProcedure stubs done, 29 tests; a minimal syscall model covers `write` and `exit` and is validated against native runs; `read`/`mmap`/`brk`, TLS/dynamic linking/CRT startup pending);
-15. **differential semantic testing** (cross-check against hardware or VEX/QEMU) — **pending** (363 forms verified against author expectations only);
+14. **environment model library** (libc/syscall/SimProcedure equivalents, TLS, dynamic linking, CRT startup) — **partial** (SimProcedure stubs done; syscall table now covers `read` (symbolic stdin materializes input bytes), `write`/`writev`, `mmap`/`munmap`/`brk`, `openat`/`close`/`fstat`/`access`/`ioctl`, `arch_prctl` (TLS), `getrandom`, `prlimit64`, `readlinkat`, `futex`, `set_tid_address`/`set_robust_list`/`rseq`, `getpid`/`gettid`/`uid`/`gid` family, `exit`/`exit_group`; dynamic linking and named-file contents pending);
+15. **differential semantic testing** (cross-check against hardware or VEX/QEMU) — **done for the registered corpus** (`differential_semantics_vs_hardware` + `generated_providers_match_hardware` run all 363+ forms against the host CPU);
 16. **scripting layer** (PyO3, embedded Lua, or Rust plugin ABI for user-authored hooks) — **pending** (CLI only);
 17. **a real binary running end-to-end** (Gate 0) — **done for statically-linked binaries, including `-O2` and `-O0` compiler output** (native XED decode through an instruction-class form mapping, memory operand loads/stores with RIP-relative addressing, narrow/zero-extending/partial register writes, real stack frames with `push`/`pop`/`leave` and `call`/`ret` indirect returns, memory-immediate forms, the ELF64 loader with symbol lookup, SimProcedure dispatch, modeled `write`/`exit` syscalls, portfolio-routed Z3 branch solving that generates a new input, and concrete replay validation showing the generated input reaches the target state natively, all via `cargo test -p angryier-runtime --features xed,z3`; remaining: dynamically-linked binaries and replay-capsule integration for recorded native runs);
 
