@@ -332,6 +332,7 @@ fn run_subcommand(args: &[String]) -> i32 {
     let mut symbolic: Vec<String> = Vec::new();
     let mut find: Vec<String> = Vec::new();
     let mut argv: Option<u64> = None;
+    let mut dynamic = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -355,13 +356,14 @@ fn run_subcommand(args: &[String]) -> i32 {
                 i += 1;
                 argv = args.get(i).and_then(|s| s.parse().ok());
             }
+            "--dynamic" => dynamic = true,
             p if !p.starts_with('-') => path = Some(p.to_string()),
             _ => {}
         }
         i += 1;
     }
     let Some(path) = path else {
-        eprintln!("usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find 0xADDR] [--argv N]");
+        eprintln!("usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find 0xADDR] [--argv N] [--dynamic]");
         return 1;
     };
 
@@ -382,6 +384,7 @@ fn run_subcommand(args: &[String]) -> i32 {
         .collect::<Vec<_>>()
         .join(",");
     let argv_opt = argv.map(|n| format!("argv = {n},")).unwrap_or_default();
+    let dyn_opt = if dynamic { "dynamic = true," } else { "" };
     let driver = if let Some(script) = script {
         match std::fs::read_to_string(&script) {
             Ok(s) => s,
@@ -392,7 +395,7 @@ fn run_subcommand(args: &[String]) -> i32 {
         }
     } else {
         format!(
-            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} steps = 1024, states = 16 }})
+            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = 1024, states = 16 }})
 print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.steps, r.forks, r.merges, r.terminated, r.found))"#
         )
     };

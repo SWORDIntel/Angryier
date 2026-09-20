@@ -89,9 +89,16 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     let bytes = std::fs::read(path).map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
     let runtime =
         crate::Runtime::with_native_xed(angryier_types::SemanticVersion(1), angryier_types::TargetProfileId(1));
-    let process = runtime
-        .load_elf(&bytes)
-        .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?;
+    let use_dynamic = opts.get::<bool>("dynamic").unwrap_or(false);
+    let process = if use_dynamic {
+        runtime
+            .load_elf_dynamic(&bytes, &[])
+            .map_err(|e| mlua::Error::external(format!("load_elf_dynamic: {e:?}")))?
+    } else {
+        runtime
+            .load_elf(&bytes)
+            .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?
+    };
     // The Z3 backend needs a shared arena reader — keep the arena in Arc.
     let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
         angryier_types::ExpressionNormalizationVersion(1),
