@@ -1474,6 +1474,29 @@ impl SymbolicSessionMemory {
         }
     }
 
+    /// Byte-level read for the session's string-op fast path — returns raw
+    /// `ByteValue`s, preserving symbolic bytes.
+    pub fn read_bytes(
+        &self,
+        address: u64,
+        length: usize,
+    ) -> Result<Vec<angryier_memory::ByteValue>, SymbolicEvalError> {
+        self.memory
+            .read_at_address(address, length)
+            .map(|s| s.to_vec())
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory read: {e:?}")))
+    }
+
+    /// Byte-level write for the session's string-op fast path.
+    pub fn write_bytes(&mut self, address: u64, bytes: &[angryier_memory::ByteValue]) -> Result<(), SymbolicEvalError> {
+        let next = self
+            .memory
+            .write_at_address(address, bytes)
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory write: {e:?}")))?;
+        self.memory = next;
+        Ok(())
+    }
+
     /// Reads `width`-many bytes at `address`, concatenating byte values
     /// little-endian. Concrete bytes become constant expressions.
     pub fn read(&self, arena: &SymbolicArena, address: u64, width: u16) -> Result<ExprId, SymbolicEvalError> {

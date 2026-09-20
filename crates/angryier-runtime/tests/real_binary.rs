@@ -2190,6 +2190,7 @@ end:
     let report = session.run_with_policy(512, 16, None, std::time::Duration::from_secs(5), false, &policy)?;
     assert_eq!(report.forks, 1);
     assert_eq!(report.pruned_states, 1, "the target path must be pruned");
+    eprintln!("avoid report: {report:?} dead={}", session.dead.len());
     assert_eq!(report.terminated, 1, "the fall-through path terminates");
     Ok(())
 }
@@ -2222,7 +2223,11 @@ fn symbolic_session_real_binary() -> Result<(), Box<dyn std::error::Error>> {
     // symbolic forks the aux-vector scan, and the engine ran ~200 real
     // instructions symbolically before the pointer-chase depth exceeded
     // the concrete-address resolver.
-    assert!(report.steps > 64, "session should step real startup code");
+    // REP_STOSQ (glibc's memset path) used to kill every state; with the
+    // symbolic string-op fast path the session runs hundreds of real
+    // instructions deep into __libc_start_main.
+    assert!(report.steps >= 256, "session should step deep into real startup code");
+    assert!(report.forks >= 8, "symbolic rdi should produce many real forks");
     assert!(report.forks >= 1, "symbolic rdi should produce real forks");
     Ok(())
 }

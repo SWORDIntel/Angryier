@@ -74,10 +74,10 @@ const MAX_TRACE: usize = 4096;
 
 /// Form id reserved for instructions executed by the environment model rather
 /// than the semantic corpus (`syscall`). No corpus form uses this id.
-pub const SYSCALL_FORM_ID: u32 = 0xFFFF_0001;
+pub const SYSCALL_FORM_ID: u32 = 0xFFFF_0100;
 /// Reserved form id for `cpuid`, which is modeled as a direct register
 /// assignment rather than straight-line corpus semantics.
-pub const CPUID_FORM_ID: u32 = 0xFFFF_0002;
+pub const CPUID_FORM_ID: u32 = 0xFFFF_0101;
 
 /// Errors produced by the runtime pipeline.
 #[derive(Debug)]
@@ -2446,6 +2446,15 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .decode(pc, &raw)
             .map_err(|e| RuntimeError::Decode(format!("{e:?}")))?;
 
+        // REP string ops: the concrete engine intercepts them before the
+        // semantic registry; the symbolic path needs the same fast path,
+        // writing symbolic bytes into the state's store when the fill value
+        // or source is symbolic.
+        #[cfg(feature = "xed")]
+        if let Some(outcome) = self.step_state_string_op(index, &decoded)? {
+            return Ok(outcome);
+        }
+
         if decoded.form_id == SYSCALL_FORM_ID || decoded.form_id == CPUID_FORM_ID {
             // Environment interactions run concretely — but the syscall
             // number/args may be symbolic in this state. Concretize them:
@@ -2997,6 +3006,77 @@ impl std::fmt::Debug for SymbolicState {
 }
 
 impl<'a, D: Decoder> SymbolicSession<'a, D> {
+    /// Symbolic REP_/string-op fast path: STOS*/MOVS* with a concrete
+    /// count/dest executes the byte loop against the state's symbolic
+    /// memory — a symbolic fill value writes `ByteValue::Symbolic` bytes.
+    /// Returns `None` when the decoded form isn't a string op.
+    #[cfg(feature = "xed")]
+    fn step_state_string_op(
+        &mut self,
+        index: usize,
+        decoded: &angryier_arch::DecodedInstruction,
+    ) -> Result<Option<SymbolicStepOutcome>, RuntimeError> {
+        use crate::form_map::*;
+        let (is_move, size, rep) = match decoded.form_id {
+            STOSB_FORM_ID | REP_STOSB_FORM_ID => (false, 1usize, decoded.form_id == REP_STOSB_FORM_ID),
+            STOSW_FORM_ID | REP_STOSW_FORM_ID => (false, 2, decoded.form_id == REP_STOSW_FORM_ID),
+            STOSD_FORM_ID | REP_STOSD_FORM_ID => (false, 4, decoded.form_id == REP_STOSD_FORM_ID),
+            STOSQ_FORM_ID | REP_STOSQ_FORM_ID => (false, 8, decoded.form_id == REP_STOSQ_FORM_ID),
+            MOVSB_FORM_ID | REP_MOVSB_FORM_ID => (true, 1, decoded.form_id == REP_MOVSB_FORM_ID),
+            MOVSW_FORM_ID | REP_MOVSW_FORM_ID => (true, 2, decoded.form_id == REP_MOVSW_FORM_ID),
+            MOVSD_FORM_ID | REP_MOVSD_FORM_ID => (true, 4, decoded.form_id == REP_MOVSD_FORM_ID),
+            MOVSQ_FORM_ID | REP_MOVSQ_FORM_ID => (true, 8, decoded.form_id == REP_MOVSQ_FORM_ID),
+            _ => return Ok(None),
+        };
+        let state = &mut self.states[index];
+        let mut rcx = state.process.read_register(register_id::GPR_BASE + 1)?;
+        let mut rsi = state.process.read_register(register_id::GPR_BASE + 6)?;
+        let mut rdi = state.process.read_register(register_id::GPR_BASE + 7)?;
+        let rax = state.process.read_register(register_id::GPR_BASE)?;
+        let store_bytes = rax.to_le_bytes();
+        // A symbolic rax fills with symbolic bytes (the same byte expr in
+        // every byte position for now — byte-exact slicing is a refinement).
+        let rax_symbolic = state.registers.get(&register_id::GPR_BASE).map(|(e, _)| *e);
+
+        let mut count = if rep { rcx } else { 1 };
+        while count > 0 {
+            let data: Vec<angryier_memory::ByteValue> = if is_move {
+                // MOVS copies the source bytes — symbolic source bytes
+                // carry through.
+                state
+                    .memory
+                    .read_bytes(rsi, size)
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?
+            } else if let Some(expr) = rax_symbolic {
+                vec![angryier_memory::ByteValue::Symbolic(expr); size]
+            } else {
+                store_bytes[..size]
+                    .iter()
+                    .map(|b| angryier_memory::ByteValue::Concrete(*b))
+                    .collect()
+            };
+            state
+                .memory
+                .write_bytes(rdi, &data)
+                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+            if is_move {
+                rsi = rsi.wrapping_add(size as u64);
+            }
+            rdi = rdi.wrapping_add(size as u64);
+            count -= 1;
+        }
+        if rep {
+            rcx = 0;
+        }
+        state.process.write_register(register_id::GPR_BASE + 1, rcx)?;
+        state.process.write_register(register_id::GPR_BASE + 6, rsi)?;
+        state.process.write_register(register_id::GPR_BASE + 7, rdi)?;
+        let next_pc = decoded.address.wrapping_add(u64::from(decoded.length));
+        state.process.write_pc(next_pc)?;
+        state.process.step_count += 1;
+        Ok(Some(SymbolicStepOutcome::Stepped { next_pc }))
+    }
+
     /// Solves state `index`'s path constraints and returns a concrete value
     /// for each of its symbolic input registers — the "generate an input
     /// that reaches this state" primitive.
