@@ -3877,9 +3877,9 @@ impl SemanticProvider for PshufdXmmImm8 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, I32X4)?;
+        let dst = out.read_operand(1, I32X4)?;
         let imm = insn
-            .operand(1)
+            .operand(2)
             .and_then(|op| match op.kind {
                 OperandKind::Immediate(imm) => Some(imm.value),
                 _ => None,
@@ -3918,9 +3918,9 @@ impl SemanticProvider for PshufhwXmmImm8 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let dst = out.read_operand(0, I16X8)?;
+        let dst = out.read_operand(1, I16X8)?;
         let imm = insn
-            .operand(1)
+            .operand(2)
             .and_then(|op| match op.kind {
                 OperandKind::Immediate(imm) => Some(imm.value),
                 _ => None,
@@ -4560,7 +4560,7 @@ impl SemanticProvider for PinsrbXmmR32Imm8 {
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
         let xmm = out.read_operand(0, U128)?;
-        let gpr = out.read_operand(1, U64)?;
+        let gpr = out.read_operand(1, U32)?;
         let imm = insn
             .operand(2)
             .and_then(|op| match op.kind {
@@ -4824,10 +4824,9 @@ impl SemanticProvider for Crc32R32R32 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let src = out.read_operand(1, U64)?;
-        let zero = const_u64(out, 0)?;
-        let extracted = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src, zero])?;
-        let crc = out.emit(SemanticOp::Primitive(PrimitiveOp::Crc32), U32, &[extracted])?;
+        let dst = out.read_operand(0, U32)?;
+        let src = out.read_operand(1, U32)?;
+        let crc = out.emit(SemanticOp::Primitive(PrimitiveOp::Crc32), U32, &[dst, src])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[crc])?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
@@ -4855,9 +4854,13 @@ impl SemanticProvider for Crc32R64R64 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
+        let dst = out.read_operand(0, U64)?;
+        let zero = const_u64(out, 0)?;
+        let dst32 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[dst, zero])?;
         let src = out.read_operand(1, U64)?;
-        let crc = out.emit(SemanticOp::Primitive(PrimitiveOp::Crc32), U64, &[src])?;
-        out.write_operand(0, crc)?;
+        let crc = out.emit(SemanticOp::Primitive(PrimitiveOp::Crc32), U32, &[dst32, src])?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[crc])?;
+        out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(0x144, context))
     }

@@ -4381,7 +4381,11 @@ fn pshufd_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::PSHUFD_XMM_IMM8,
-        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 0x1B)],
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM0, 128, AccessKind::Read),
+            imm8_operand(2, 0x1B),
+        ],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
@@ -4417,7 +4421,11 @@ fn pshufhw_xmm_imm8_executes() -> Result<(), Box<dyn std::error::Error>> {
 
     let decoded = make_decoded(
         forms::PSHUFHW_XMM_IMM8,
-        vec![xmm_operand(0, XMM0, 128, AccessKind::ReadWrite), imm8_operand(1, 0x1B)],
+        vec![
+            xmm_operand(0, XMM0, 128, AccessKind::Write),
+            xmm_operand(1, XMM0, 128, AccessKind::Read),
+            imm8_operand(2, 0x1B),
+        ],
     );
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;

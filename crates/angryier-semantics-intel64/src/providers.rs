@@ -3704,7 +3704,7 @@ impl SemanticProvider for CmpxchgR64R64 {
         let dest_is_acc = matches!(
             insn.operand(0).map(|op| op.kind),
             Some(angryier_semantics::OperandKind::Register(view))
-                if view.parent.0 == register_id::GPR_BASE as u32 && view.bit_offset == 0 && view.width_bits == 64
+                if view.parent.0 == register_id::GPR_BASE && view.bit_offset == 0 && view.width_bits == 64
         );
         if !dest_is_acc {
             out.write_register(RegisterId(register_id::GPR_BASE), new_rax)?;

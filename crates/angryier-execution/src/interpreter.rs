@@ -2023,11 +2023,14 @@ fn evaluate_primitive<R, M>(
             return Ok(ConcreteValue::from_u128(ty, flags as u128, 64));
         }
         IrPrimitive::Crc32 => {
-            require_arity(operation, &resolved, 1)?;
-            let input_bits = scalar_bits(resolved[0].ty)?;
+            // SSE4.2 crc32 dst, src: dst is the running CRC state. The
+            // instruction is the raw CRC-32C update — no input/output
+            // complement (that's a protocol convention the caller applies).
+            require_arity(operation, &resolved, 2)?;
+            let input_bits = scalar_bits(resolved[1].ty)?;
             let byte_count = usize::from(input_bits) / 8;
-            let data = as_u128(resolved[0]);
-            let mut crc: u32 = 0;
+            let data = as_u128(resolved[1]);
+            let mut crc: u32 = as_u128(resolved[0]) as u32;
             for byte_idx in 0..byte_count {
                 let byte = ((data >> (byte_idx * 8)) & 0xFF) as u8;
                 crc ^= byte as u32;
@@ -2211,11 +2214,14 @@ fn evaluate_primitive<R, M>(
             if lane_bits != 16 || width_bits != 128 {
                 return Err(ConcreteExecutionError::UnsupportedType(ty));
             }
+            // MPSADBW: the sliding 4-byte window moves over src1 (first
+            // operand, start imm8[3:2]*4); the fixed 4-byte block is in src2
+            // (second operand, imm8[1:0]*4). Result lane i is the SAD.
             let src1 = as_u128(resolved[0]);
             let src2 = as_u128(resolved[1]);
             let imm = as_u128(resolved[2]) as u8;
-            let offset1 = (imm & 0x3) as u32 * 4;
-            let offset2 = ((imm >> 2) & 0x3) as u32 * 4;
+            let offset1 = ((imm >> 2) & 0x3) as u32 * 4;
+            let offset2 = (imm & 0x3) as u32 * 4;
             let lane_mask = bit_mask(lane_bits as u16);
             let mut result: u128 = 0;
             for i in 0..8u32 {

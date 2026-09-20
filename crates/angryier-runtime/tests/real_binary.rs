@@ -890,9 +890,8 @@ fn concolic_and_prove_modes_agree_and_outpace() -> Result<(), Box<dyn std::error
     session.mark_input_register(register_id::GPR_BASE, IrType::Bits(64))?;
     let explore_start = Instant::now();
     while !session.process.terminated && session.process.step_count < 64 {
-        match session.step()? {
-            StepOutcome::SimProcedure { .. } => break,
-            _ => {}
+        if let StepOutcome::SimProcedure { .. } = session.step()? {
+            break;
         }
     }
     let explore_eval = explore_start.elapsed();
@@ -1167,9 +1166,8 @@ fn sliced_queries_reuse_across_inputs() -> Result<(), Box<dyn std::error::Error>
         let mut session = runtime.concolic(process, arena.as_ref());
         session.mark_input_register(register_id::GPR_BASE, IrType::Bits(64))?;
         while !session.process.terminated && session.process.step_count < 64 {
-            match session.step()? {
-                StepOutcome::SimProcedure { .. } => break,
-                _ => {}
+            if let StepOutcome::SimProcedure { .. } = session.step()? {
+                break;
             }
         }
         let solution = session.solve_last_branch(&mut backend, Duration::from_secs(10))?;
@@ -1542,6 +1540,25 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         0x4059_0000_0000_0000,
         0x8000_0000_0000_0000,
     ];
+    // SSE4.x tail of the corpus: ptest sets ZF/CF from xmm, crc32 is a GPR
+    // op, the rest observed via movq.
+    let sse4_templates = [
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    ptest %xmm1, %xmm0\n    mov $0, %rax",
+        "crc32 %ebx, %eax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pcmpgtq %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pblendvb %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    packuswb %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    mpsadbw $1, %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pshufd $0x1b, %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pmovzxbd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pinsrb $3, %ebx, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pminsb %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pminud %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pmaxsd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    paddd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    paddb %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    psubd %xmm1, %xmm0\n    movq %xmm0, %rax",
+    ];
     // 32-bit forms (zero-extension semantics must match too).
     let w32_templates = [
         "add %ebx, %eax",
@@ -1706,6 +1723,13 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
     for insn in float_templates {
         for &a in &F64_SEEDS {
             let ran = differential_case(insn, &[("rbx", a), ("rcx", 0x4004_0000_0000_0000)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in sse4_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rbx", a), ("rcx", 0x0f0f_0f0f_0f0f_0f0f)], flag_mask_for(insn))?;
             skipped |= !ran;
             executed += usize::from(ran);
         }

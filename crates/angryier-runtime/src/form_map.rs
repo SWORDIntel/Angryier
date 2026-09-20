@@ -674,6 +674,26 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_PMINUB => Some(forms::PMINUB_XMM_XMM),
+        iclass::XED_ICLASS_PTEST => Some(forms::PTEST_XMM_XMM),
+        iclass::XED_ICLASS_PACKUSWB => Some(forms::PACKUSWB_XMM_XMM),
+        iclass::XED_ICLASS_PADDB => Some(forms::PADDB_XMM_XMM),
+        iclass::XED_ICLASS_PADDD => Some(forms::PADDD_XMM_XMM),
+        iclass::XED_ICLASS_PBLENDVB => Some(forms::PBLENDVB_XMM_XMM),
+        iclass::XED_ICLASS_PCMPGTQ => Some(forms::PCMPGTQ_XMM_XMM),
+        iclass::XED_ICLASS_PSUBD => Some(forms::PSUBD_XMM_XMM),
+        iclass::XED_ICLASS_PMINSB => Some(forms::PMINSB_XMM_XMM),
+        iclass::XED_ICLASS_PMINUD => Some(forms::PMINUD_XMM_XMM),
+        iclass::XED_ICLASS_PMAXSD => Some(forms::PMAXSD_XMM_XMM),
+        iclass::XED_ICLASS_PMOVZXBD => Some(forms::PMOVZXBD_XMM_XMM),
+
+        iclass::XED_ICLASS_PINSRB => match shapes {
+            [Shape::Xmm, Shape::Reg32, Shape::Imm] => Some(forms::PINSRB_XMM_R32_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_MPSADBW => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Imm] => Some(forms::MPSADBW_XMM_XMM_IMM8),
+            _ => None,
+        },
         iclass::XED_ICLASS_PMAXUB => Some(forms::PMAXUB_XMM_XMM),
         iclass::XED_ICLASS_PAND => Some(forms::PAND_XMM_XMM),
         iclass::XED_ICLASS_PANDN => Some(forms::PANDN_XMM_XMM),
@@ -1032,6 +1052,11 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem32] => Some(forms::MUL_MEM32),
             _ => None,
         },
+        iclass::XED_ICLASS_CRC32 => match shapes {
+            [Shape::Reg32, Shape::Reg32] => Some(forms::CRC32_R32_R32),
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CRC32_R64_R64),
+            _ => None,
+        },
         iclass::XED_ICLASS_CMPXCHG_LOCK => match shapes {
             [Shape::Mem32, Shape::Reg32] => Some(forms::CMPXCHG_MEM32_R32),
             [Shape::Mem64, Shape::Reg64] => Some(forms::CMPXCHG_MEM64_R64),
@@ -1180,28 +1205,5 @@ mod tests {
         assert_ne!(forms::MOV_R64_R64, UNMAPPED_FORM_ID);
         assert_ne!(forms::HLT, UNMAPPED_FORM_ID);
         assert_ne!(crate::SYSCALL_FORM_ID, UNMAPPED_FORM_ID);
-    }
-}
-
-#[cfg(all(test, feature = "xed"))]
-mod dbg_imul {
-    use angryier_arch::Decoder;
-    use angryier_arch_xed_ffi::XedDecoder;
-    use angryier_types::TargetProfileId;
-
-    #[test]
-    fn dump() {
-        let decoder = XedDecoder::with_profile_id(TargetProfileId(1));
-        for bytes in [&[0x48, 0xf7, 0xeb][..], &[0x48, 0x99][..]] {
-            let decoded = decoder.decode(0x1000, bytes).expect("decode");
-            eprintln!(
-                "{bytes:x?} class={:#x} mapped={:?}",
-                decoded.form_id,
-                crate::form_map::map_form(&decoded)
-            );
-            for (i, op) in decoded.operands.iter().enumerate() {
-                eprintln!("  op{i}: {op:?}");
-            }
-        }
     }
 }
