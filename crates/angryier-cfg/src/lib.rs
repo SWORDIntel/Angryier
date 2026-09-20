@@ -404,7 +404,7 @@ mod tests {
         assert_eq!(cfg.edges.len(), 1);
         assert_eq!(cfg.edges[0].kind, EdgeKind::Return);
         assert_eq!(cfg.edges[0].to, None);
-      Ok(())
+        Ok(())
     }
 
     #[test]
@@ -419,7 +419,7 @@ mod tests {
         let mut successors = cfg.successors(head);
         successors.sort();
         assert_eq!(successors, vec![0x1003, 0x1005]);
-      Ok(())
+        Ok(())
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(cfg.successors(head), vec![0x1004]);
         // The dead nop/ret at 0x1002 is unreachable — not recovered.
         assert!(!cfg.blocks.contains_key(&0x1002));
-      Ok(())
+        Ok(())
     }
 
     #[test]
@@ -446,7 +446,7 @@ mod tests {
         let mut successors = cfg.successors(head);
         successors.sort();
         assert_eq!(successors, vec![0x1005, 0x1006]);
-      Ok(())
+        Ok(())
     }
 
     #[test]
@@ -454,7 +454,7 @@ mod tests {
         let code = [0xc3];
         let result = recover(&TestDecoder, 0x1000, &code, 0x2000, identity_form);
         assert_eq!(result.err(), Some(CfgError::EntryOutOfRange { entry: 0x2000 }));
-      Ok(())
+        Ok(())
     }
 
     #[test]
@@ -465,6 +465,6 @@ mod tests {
         assert_eq!(cfg.blocks.len(), 1);
         let head = cfg.blocks.get(&0x1000).ok_or("head")?;
         assert_eq!(cfg.successors(head), vec![0x1000]);
-      Ok(())
+        Ok(())
     }
 }

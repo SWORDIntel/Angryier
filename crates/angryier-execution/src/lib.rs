@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod interpreter;
-mod symbolic;
+pub mod symbolic;
 
 pub use interpreter::{ConcreteExecutionError, ConcreteInterpreter};
 pub use symbolic::{

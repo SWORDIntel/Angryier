@@ -106,6 +106,15 @@ impl<'a> SymbolicEvaluator<'a> {
         self.registers.get(&register).map(|(expression, _)| *expression)
     }
 
+    /// Snapshot the register file for state merging.
+    pub fn snapshot(&self) -> SymbolicStateSnapshot {
+        SymbolicStateSnapshot {
+            registers: self.registers.clone(),
+            constraints: Vec::new(),
+            symbols: self.symbols.clone(),
+        }
+    }
+
     /// Symbolically evaluates one block.
     pub fn eval_block(&mut self, block: &IrBlock) -> Result<SymbolicBlockSummary, SymbolicEvalError> {
         let mut values: Vec<Option<(ExprId, IrType)>> = Vec::new();
@@ -1183,6 +1192,137 @@ fn splice_concrete(parent: u128, parent_width: u16, value: u128, bit_offset: u16
     (high << (bit_offset + source_width)) | ((value & mask_u128(source_width)) << bit_offset) | (parent & low_mask)
 }
 
+/// A mergeable snapshot of a symbolic state: the register bindings plus the
+/// path constraints accumulated since the last fork.
+///
+/// Snapshots are produced by [`SymbolicEvaluator::snapshot`] (registers only —
+/// constraints come from the enclosing session) and consumed by
+/// [`merge_snapshots`].
+#[derive(Clone, Debug, Default)]
+pub struct SymbolicStateSnapshot {
+    /// Register id → (symbolic expression, its IR type) for touched registers.
+    pub registers: BTreeMap<u32, (ExprId, IrType)>,
+    /// Path constraints guarding this state (Bool-sorted expressions).
+    pub constraints: Vec<ExprId>,
+    /// Symbols bound during this state's execution, for lineage.
+    pub symbols: Vec<SymbolBinding>,
+}
+
+/// Merges two sibling symbolic states that reconverge at the same program
+/// point — the primitive Phase 10's state merging and Veritesting both reduce
+/// to.
+///
+/// `parent` is the snapshot at the fork point: registers touched on only one
+/// side inherit the parent's value on the other. The merge rule:
+///
+/// - `merged_pc = left_guard ∨ right_guard` where each guard is the
+///   conjunction of that side's path constraints;
+/// - registers equal on both sides keep their expression;
+/// - registers diverging with matching types become
+///   `Ite(left_guard, left_expr, right_expr)`;
+/// - type-mismatched bindings fail — a sound merge cannot synthesize a
+///   common sort, so the caller must keep the states separate.
+///
+/// The result's `symbols` are the union of both sides' (order-stable).
+pub fn merge_snapshots(
+    arena: &SymbolicArena,
+    parent: &SymbolicStateSnapshot,
+    left: &SymbolicStateSnapshot,
+    right: &SymbolicStateSnapshot,
+) -> Result<SymbolicStateSnapshot, SymbolicEvalError> {
+    let left_guard = bool_and_chain(arena, &left.constraints)?;
+    let right_guard = bool_and_chain(arena, &right.constraints)?;
+    let merged_pc = intern(
+        arena,
+        ExprSort::Bool,
+        ExprOp::Or,
+        vec![left_guard, right_guard],
+        Vec::new(),
+    )?;
+
+    let mut registers = BTreeMap::new();
+    for (&register, &(left_expr, left_ty)) in &left.registers {
+        let right_binding = right
+            .registers
+            .get(&register)
+            .copied()
+            .or_else(|| parent.registers.get(&register).copied());
+        match right_binding {
+            Some((right_expr, right_ty)) => {
+                if right_expr == left_expr {
+                    registers.insert(register, (left_expr, left_ty));
+                } else {
+                    if right_ty != left_ty {
+                        return Err(SymbolicEvalError::UnsupportedOperation(format!(
+                            "merge type mismatch on register {register}: {left_ty:?} vs {right_ty:?}"
+                        )));
+                    }
+                    let sort = sort_of(left_ty)?;
+                    let merged = intern(
+                        arena,
+                        sort,
+                        ExprOp::Ite,
+                        vec![left_guard, left_expr, right_expr],
+                        Vec::new(),
+                    )?;
+                    registers.insert(register, (merged, left_ty));
+                }
+            }
+            // Touched only on the left and absent in the parent — keep the
+            // left binding (the other side never defined it).
+            None => {
+                registers.insert(register, (left_expr, left_ty));
+            }
+        }
+    }
+    // Registers touched only on the right (or only in the parent).
+    for (&register, &(right_expr, right_ty)) in right.registers.iter().chain(parent.registers.iter()) {
+        registers.entry(register).or_insert((right_expr, right_ty));
+    }
+
+    let mut symbols = left.symbols.clone();
+    for symbol in &right.symbols {
+        if !symbols.contains(symbol) {
+            symbols.push(*symbol);
+        }
+    }
+
+    Ok(SymbolicStateSnapshot {
+        registers,
+        constraints: vec![merged_pc],
+        symbols,
+    })
+}
+
+/// `a ∧ b ∧ ...` as a Bool expression; an empty slice yields `true`.
+fn bool_and_chain(arena: &SymbolicArena, constraints: &[ExprId]) -> Result<ExprId, SymbolicEvalError> {
+    let mut acc = intern(arena, ExprSort::Bool, ExprOp::Constant, Vec::new(), vec![1])?;
+    for &constraint in constraints {
+        acc = intern(arena, ExprSort::Bool, ExprOp::And, vec![acc, constraint], Vec::new())?;
+    }
+    Ok(acc)
+}
+
+/// IR type → expression sort for mergeable bindings.
+fn sort_of(ty: IrType) -> Result<ExprSort, SymbolicEvalError> {
+    match ty {
+        IrType::Bits(bits) => Ok(ExprSort::BitVec(bits)),
+        IrType::Vector { width_bits, lane_bits } => Ok(ExprSort::Vector {
+            lanes: width_bits / lane_bits.max(1),
+            lane_bits,
+        }),
+        IrType::Float32 => Ok(ExprSort::Float {
+            exponent_bits: 8,
+            significand_bits: 24,
+        }),
+        IrType::Float64 => Ok(ExprSort::Float {
+            exponent_bits: 11,
+            significand_bits: 53,
+        }),
+        other => Err(SymbolicEvalError::UnsupportedType(format!("{other:?}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1192,6 +1332,40 @@ mod tests {
 
     fn arena() -> ShardedExprArena {
         ShardedExprArena::new(ExpressionNormalizationVersion(1))
+    }
+
+    fn symbol(arena: &ShardedExprArena, width: u16) -> Result<ExprId, String> {
+        arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(width),
+                op: ExprOp::Symbol,
+                operands: Vec::new(),
+                immediate: 7u64.to_le_bytes().to_vec(),
+            })
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    fn constant(arena: &ShardedExprArena, width: u16, value: u64) -> Result<ExprId, String> {
+        arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(width),
+                op: ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: value.to_le_bytes().to_vec(),
+            })
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    fn eq(arena: &ShardedExprArena, width: u16, a: ExprId, b: ExprId) -> Result<ExprId, String> {
+        let _ = width;
+        arena
+            .intern(ExprNode {
+                sort: ExprSort::Bool,
+                op: ExprOp::Eq,
+                operands: vec![a, b],
+                immediate: Vec::new(),
+            })
+            .map_err(|e| format!("{e:?}"))
     }
 
     fn block(instructions: Vec<IrInstruction>) -> IrBlock {
@@ -1405,5 +1579,109 @@ mod tests {
             .err()
             .unwrap_or(SymbolicEvalError::UnsupportedOperation("expected an error".into()));
         assert!(matches!(error, SymbolicEvalError::UnsupportedOperation(_)));
+    }
+
+    #[test]
+    fn merge_snapshots_ite_on_divergent_register() -> Result<(), String> {
+        // parent: rax = sym0; left branch took `rax > 0` and wrote rax=1;
+        // right fell through, rax=2. Merged rax = Ite(left_guard, 1, 2).
+        let arena = arena();
+        let sym = symbol(&arena, 64)?;
+        let one = constant(&arena, 64, 1)?;
+        let two = constant(&arena, 64, 2)?;
+
+        let parent = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(0u32, (sym, IrType::Bits(64)))]),
+            constraints: Vec::new(),
+            symbols: Vec::new(),
+        };
+        let gt = eq(&arena, 64, sym, one)?; // any Bool constraint
+        let left = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(0u32, (one, IrType::Bits(64)))]),
+            constraints: vec![gt],
+            symbols: Vec::new(),
+        };
+        let right = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(0u32, (two, IrType::Bits(64)))]),
+            constraints: Vec::new(),
+            symbols: Vec::new(),
+        };
+
+        let merged = merge_snapshots(&arena, &parent, &left, &right).map_err(|e| format!("{e:?}"))?;
+        let (expr, _) = *merged.registers.get(&0u32).ok_or("rax")?;
+        let node = arena.get(expr).ok_or("merged node")?;
+        assert_eq!(node.op, ExprOp::Ite);
+        // Operands: [left_guard, 1, 2].
+        assert_eq!(node.operands[1], one);
+        assert_eq!(node.operands[2], two);
+        // Merged constraint = Or(guard_left, guard_right).
+        assert_eq!(merged.constraints.len(), 1);
+        let pc = arena.get(merged.constraints[0]).ok_or("pc node")?;
+        assert_eq!(pc.op, ExprOp::Or);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_snapshots_keeps_equal_registers() -> Result<(), String> {
+        let arena = arena();
+        let sym = symbol(&arena, 64)?;
+        let parent = SymbolicStateSnapshot::default();
+        let left = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(0u32, (sym, IrType::Bits(64)))]),
+            constraints: Vec::new(),
+            symbols: Vec::new(),
+        };
+        let right = left.clone();
+        let merged = merge_snapshots(&arena, &parent, &left, &right).map_err(|e| format!("{e:?}"))?;
+        assert_eq!(merged.registers.get(&0u32).map(|(e, _)| *e), Some(sym));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_snapshots_one_sided_register_uses_parent() -> Result<(), String> {
+        // rbx written only on the left; the right inherits the parent's
+        // binding — the merge records rbx = Ite(guard, new, parent_val).
+        let arena = arena();
+        let parent_sym = symbol(&arena, 64)?;
+        let new_val = constant(&arena, 64, 9)?;
+        let parent = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(1u32, (parent_sym, IrType::Bits(64)))]),
+            constraints: Vec::new(),
+            symbols: Vec::new(),
+        };
+        let cond = eq(&arena, 64, parent_sym, parent_sym)?;
+        let left = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(1u32, (new_val, IrType::Bits(64)))]),
+            constraints: vec![cond],
+            symbols: Vec::new(),
+        };
+        let right = SymbolicStateSnapshot::default();
+        let merged = merge_snapshots(&arena, &parent, &left, &right).map_err(|e| format!("{e:?}"))?;
+        let (expr, _) = *merged.registers.get(&1u32).ok_or("rbx")?;
+        let node = arena.get(expr).ok_or("node")?;
+        assert_eq!(node.op, ExprOp::Ite);
+        assert_eq!(node.operands[1], new_val);
+        assert_eq!(node.operands[2], parent_sym);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_snapshots_type_mismatch_fails() -> Result<(), String> {
+        let arena = arena();
+        let a64 = symbol(&arena, 64)?;
+        let a32 = symbol(&arena, 32)?;
+        let parent = SymbolicStateSnapshot::default();
+        let left = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(0u32, (a64, IrType::Bits(64)))]),
+            constraints: Vec::new(),
+            symbols: Vec::new(),
+        };
+        let right = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(0u32, (a32, IrType::Bits(32)))]),
+            constraints: Vec::new(),
+            symbols: Vec::new(),
+        };
+        assert!(merge_snapshots(&arena, &parent, &left, &right).is_err());
+        Ok(())
     }
 }
