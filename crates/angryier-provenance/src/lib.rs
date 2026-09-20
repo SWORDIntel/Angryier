@@ -31,6 +31,9 @@ pub enum ProvenanceEventKind {
     Approximation,
     JitInvalidation,
     ReplayCheckpoint,
+    StateMerge,
+    StateTerminate,
+    Syscall,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -341,6 +344,83 @@ impl TraceGovernor for AdaptiveTraceGovernor {
 }
 
 // ---------------------------------------------------------------------------
+// Per-worker circular flight recorder
+// ---------------------------------------------------------------------------
+
+/// A bounded ring of provenance events for one worker. Tier-1 events are
+/// never evicted (structural lineage is permanent); under pressure the
+/// recorder drops the oldest Tier-0 event, then Tier-2, then reports
+/// `ProvenanceError::Full` rather than lose structural data.
+pub struct FlightRecorder {
+    capacity: usize,
+    events: std::collections::VecDeque<ProvenanceEvent>,
+    dropped_tier0: u64,
+    dropped_tier2: u64,
+}
+
+impl FlightRecorder {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            events: std::collections::VecDeque::with_capacity(capacity.max(1)),
+            dropped_tier0: 0,
+            dropped_tier2: 0,
+        }
+    }
+
+    /// Appends `event`, evicting the oldest droppable event when full.
+    pub fn record(&mut self, event: ProvenanceEvent) -> Result<(), ProvenanceError> {
+        if self.events.len() >= self.capacity {
+            // Evict oldest Tier-0 first; then Tier-2; never Tier-1.
+            let pos = self
+                .events
+                .iter()
+                .position(|e| e.tier == ProvenanceTier::Tier0)
+                .or_else(|| self.events.iter().position(|e| e.tier == ProvenanceTier::Tier2));
+            match pos {
+                Some(i) => {
+                    let ev = self.events.remove(i);
+                    match ev.map(|e| e.tier) {
+                        Some(ProvenanceTier::Tier0) => self.dropped_tier0 += 1,
+                        Some(ProvenanceTier::Tier2) => self.dropped_tier2 += 1,
+                        _ => {}
+                    }
+                }
+                None => return Err(ProvenanceError::Full),
+            }
+        }
+        self.events.push_back(event);
+        Ok(())
+    }
+
+    /// Flushes all events to `sink` in order; the recorder is empty after.
+    pub fn drain_to<S: ProvenanceSink>(&mut self, sink: &S) -> Result<usize, S::Error> {
+        let batch: Vec<ProvenanceEvent> = self.events.drain(..).collect();
+        let n = batch.len();
+        sink.publish(&batch)?;
+        Ok(n)
+    }
+
+    /// Oldest-to-newest events currently held.
+    pub fn events(&self) -> impl Iterator<Item = &ProvenanceEvent> {
+        self.events.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// How many events were evicted under pressure, per droppable tier.
+    pub fn dropped(&self) -> (u64, u64) {
+        (self.dropped_tier0, self.dropped_tier2)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Batching sink for worker-local provenance
 // ---------------------------------------------------------------------------
 
@@ -564,5 +644,48 @@ mod tests {
         assert!(s2.is_ok());
         assert_eq!(s1, Ok(ProvenanceSeq(1)));
         assert_eq!(s2, Ok(ProvenanceSeq(2)));
+    }
+}
+
+#[cfg(test)]
+mod flight_recorder_tests {
+    use super::*;
+
+    fn event(tier: ProvenanceTier, kind: ProvenanceEventKind, id: u64) -> ProvenanceEvent {
+        ProvenanceEvent {
+            id: ProvenanceNodeId(id),
+            sequence: ProvenanceSeq(id),
+            state: StateId(0),
+            tier,
+            kind,
+            semantic_content: None,
+            parents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn recorder_evicts_tier0_before_tier1() {
+        let mut rec = FlightRecorder::new(2);
+        rec.record(event(ProvenanceTier::Tier0, ProvenanceEventKind::Branch, 0))
+            .unwrap();
+        rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 1))
+            .unwrap();
+        // Third event: evicts the Tier-0, keeps the Tier-1.
+        rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 2))
+            .unwrap();
+        let ids: Vec<u64> = rec.events().map(|e| e.id.0).collect();
+        assert_eq!(ids, vec![1, 2], "tier-0 evicted, tier-1s retained");
+        assert_eq!(rec.dropped(), (1, 0));
+    }
+
+    #[test]
+    fn recorder_full_of_tier1_reports_full() {
+        let mut rec = FlightRecorder::new(1);
+        rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 0))
+            .unwrap();
+        let err = rec
+            .record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 1))
+            .unwrap_err();
+        assert_eq!(err, ProvenanceError::Full);
     }
 }

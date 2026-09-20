@@ -2429,6 +2429,10 @@ pub struct SymbolicSession<'a, D: Decoder> {
     /// state_b_id, target_pc). A state parked at `target_pc` while its sibling hasn't
     /// arrived is held rather than stepped — the CFG-scheduled merge.
     pub pending_merges: Vec<(u64, u64, Address)>,
+    /// Per-session flight recorder (Phase 12) — bounded provenance ring.
+    pub recorder: angryier_provenance::FlightRecorder,
+    /// Next provenance node id.
+    next_prov_node: u64,
 }
 
 impl<'a, D: Decoder> SymbolicSession<'a, D> {
@@ -2467,7 +2471,31 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             cfg: None,
             next_state_id: 1,
             pending_merges: Vec::new(),
+            recorder: angryier_provenance::FlightRecorder::new(4096),
+            next_prov_node: 0,
         }
+    }
+
+    /// Emits a provenance event into the flight recorder.
+    fn record_event(
+        &mut self,
+        state: u64,
+        kind: angryier_provenance::ProvenanceEventKind,
+        tier: angryier_types::ProvenanceTier,
+        parents: Vec<angryier_types::ProvenanceNodeId>,
+    ) {
+        let node = angryier_types::ProvenanceNodeId(self.next_prov_node);
+        self.next_prov_node += 1;
+        let event = angryier_provenance::ProvenanceEvent {
+            id: node,
+            sequence: angryier_types::ProvenanceSeq(self.next_prov_node),
+            state: angryier_types::StateId(state),
+            tier,
+            kind,
+            semantic_content: None,
+            parents,
+        };
+        let _ = self.recorder.record(event);
     }
 
     /// Attaches a CFG so `run_with_policy` merges reconverging states at
@@ -2919,6 +2947,19 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 child.id = self.next_state_id;
                 self.next_state_id += 1;
                 self.states.push(child);
+                let (parent_id, child_id) = (self.states[index].id, self.states[child_index].id);
+                self.record_event(
+                    parent_id,
+                    angryier_provenance::ProvenanceEventKind::StateFork,
+                    angryier_types::ProvenanceTier::Tier1,
+                    Vec::new(),
+                );
+                self.record_event(
+                    child_id,
+                    angryier_provenance::ProvenanceEventKind::StateFork,
+                    angryier_types::ProvenanceTier::Tier1,
+                    Vec::new(),
+                );
                 // Veritesting schedule: if the CFG knows where these two
                 // reconverge, park the first arrival until its sibling gets
                 // there instead of letting it run ahead.
@@ -3262,6 +3303,12 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         },
                     );
                     report.merges += 1;
+                    self.record_event(
+                        left.id,
+                        angryier_provenance::ProvenanceEventKind::StateMerge,
+                        angryier_types::ProvenanceTier::Tier1,
+                        Vec::new(),
+                    );
                 }
             }
             // Round-robin: one state steps per iteration so a state that
@@ -3300,6 +3347,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             steps += 1;
             match outcome {
                 Ok(SymbolicStepOutcome::Terminated) => {
+                    let dead_id = self.states.get(index).map(|s| s.id).unwrap_or(0);
+                    self.record_event(
+                        dead_id,
+                        angryier_provenance::ProvenanceEventKind::StateTerminate,
+                        angryier_types::ProvenanceTier::Tier2,
+                        Vec::new(),
+                    );
                     if index < self.states.len() {
                         let state = self.states.remove(index);
                         self.dead.push(state);
@@ -3636,6 +3690,8 @@ where
                         cfg,
                         next_state_id: 1,
                         pending_merges: Vec::new(),
+                        recorder: angryier_provenance::FlightRecorder::new(4096),
+                        next_prov_node: 0,
                     };
                     let report = sub.run(max_steps, max_states, None, timeout, false)?;
                     Ok((report, sub.states, sub.dead))

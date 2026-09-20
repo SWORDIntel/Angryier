@@ -208,6 +208,7 @@ dependencies = [
  "angryier-loader",
  "angryier-memory",
  "angryier-models",
+ "angryier-provenance",
  "angryier-scheduler",
  "angryier-semantics",
  "angryier-semantics-gen",
