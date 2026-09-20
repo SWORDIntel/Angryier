@@ -3013,3 +3013,42 @@ target:
     assert_ne!(rdi, 5, "promoted path constraint must exclude rdi==5");
     Ok(())
 }
+
+/// Lua solve: `solve = true` returns input models — a script finds the
+/// input byte that reaches `target`.
+#[cfg(all(feature = "xed", feature = "script", target_arch = "x86_64"))]
+#[test]
+fn lua_solve_returns_input_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = temp_dir("angryier-luasolve").ok_or("no tempdir")?;
+    let path_s = dir.join("s.s");
+    let path_o = dir.join("s.o");
+    let path_bin = dir.join("s");
+    std::fs::write(
+        &path_s,
+        "_start:\n    cmp $5, %rdi\n    je target\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall\ntarget:\n    mov $60, %rax\n    mov $9, %rdi\n    syscall\n",
+    )?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let lua = mlua::Lua::new();
+    angryier_runtime::script::register(&lua)?;
+    // target at _start+0x12 (cmp=4B, je=2B, mov=7B, xor=2B, syscall=2B → +17=0x11... compute: 0x401012)
+    let script = format!(
+        r#"
+        local r = angry.run("{}", {{
+            symbolic = {{ rdi = 64 }},
+            find = {{ 0x401012 }},
+            solve = true,
+            steps = 64, states = 8,
+        }})
+        assert(r.found == 1, "found state expected")
+        assert(#r.inputs == 1, "one model expected")
+        return r.found
+        "#,
+        path_bin.display()
+    );
+    let found: u64 = lua.load(&script).eval()?;
+    assert_eq!(found, 1);
+    Ok(())
+}

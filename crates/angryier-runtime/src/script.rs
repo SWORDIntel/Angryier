@@ -46,21 +46,21 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     let process = runtime
         .load_elf(&bytes)
         .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?;
-    let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
-    let mut session = crate::SymbolicSession::new(&runtime, &arena, process);
+    // The Z3 backend needs a shared arena reader — keep the arena in Arc.
+    let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    ));
+    let mut session = crate::SymbolicSession::new(&runtime, arena.as_ref(), process);
 
     // Symbolic register marks: `symbolic = { rdi = 64 }` or `{ "rdi" }`.
     if let Ok(sym) = opts.get::<Table>("symbolic") {
         for pair in sym.pairs::<Value, Value>() {
             let (k, v) = pair?;
-            let name = match &k {
-                Value::String(s) => s.to_str()?.to_string(),
-                _ => match &v {
-                    Value::String(s) => s.to_str()?.to_string(),
-                    _ => continue,
-                },
+            let name = match (&k, &v) {
+                (Value::String(s), _) => s.to_str()?.to_string(),
+                (_, Value::String(s)) => s.to_str()?.to_string(),
+                _ => continue,
             };
-            let _ = v;
             if let Some(reg) = reg_by_name(&name) {
                 session
                     .mark_symbolic(0, reg, angryier_ir::IrType::Bits(64))
@@ -68,7 +68,6 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             }
         }
     }
-
     // Symbolic argv: `argv = 8` materializes 8 bytes (7 + NUL) into
     // argv[0]'s stack string.
     if let Ok(argv_len) = opts.get::<u64>("argv") {
@@ -76,7 +75,6 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             .symbolize_argv0(0, argv_len)
             .map_err(|e| mlua::Error::external(format!("symbolize_argv0: {e:?}")))?;
     }
-
     // Symbolic files: `files = { "flag.txt" = true }` — openat on those
     // paths returns a fd whose reads materialize symbolic bytes.
     if let Ok(files) = opts.get::<Table>("files") {
@@ -106,17 +104,26 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         .unwrap_or_default();
     let steps = opts.get::<u64>("steps").unwrap_or(256);
     let max_states = opts.get::<usize>("states").unwrap_or(16);
+    let use_solver = opts.get::<bool>("solve").unwrap_or(false);
 
     let policy = crate::ExplorationPolicy {
         find,
         avoid,
         ..Default::default()
     };
+    let mut backend = if use_solver {
+        Some(
+            angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>)
+                .map_err(|e| mlua::Error::external(format!("z3: {e:?}")))?,
+        )
+    } else {
+        None
+    };
     let report = session
         .run_with_policy(
             steps,
             max_states,
-            None,
+            backend.as_mut().map(|b| b as &mut dyn angryier_solver::SolverBackend),
             std::time::Duration::from_secs(30),
             true,
             &policy,
@@ -131,11 +138,28 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     out.set("failed", report.failed)?;
     out.set("live_states", report.live_states)?;
     out.set("found", report.found.len())?;
+    // `solve = true`: solve each found state; `inputs` is an array of
+    // per-state tables mapping symbol index → byte-string.
+    if let Some(backend) = backend.as_mut() {
+        let inputs = lua.create_table()?;
+        for found in report.found.iter() {
+            session.states.push(found.clone());
+            let idx = session.states.len() - 1;
+            if let Ok(model) = session.solve_state_symbols(idx, backend, std::time::Duration::from_secs(10)) {
+                let entry = lua.create_table()?;
+                for (i, (_eid, bytes)) in model.iter().enumerate() {
+                    entry.set(i + 1, lua.create_string(bytes)?)?;
+                }
+                inputs.set(inputs.len()? + 1, entry)?;
+            }
+            session.states.pop();
+        }
+        out.set("inputs", inputs)?;
+    }
     // Register bindings of the first found state as `regs`.
     if let Some(found) = report.found.first() {
         let regs = lua.create_table()?;
         for (reg, (expr, _ty)) in &found.registers {
-            // Only concrete leaves are readable from Lua for now.
             if let Some(node) = arena.get(*expr)
                 && node.op == angryier_expr::ExprOp::Constant
                 && node.immediate.len() >= 8

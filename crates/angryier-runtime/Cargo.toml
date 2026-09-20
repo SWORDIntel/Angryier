@@ -35,7 +35,7 @@ xed = ["dep:angryier-arch-xed-ffi"]
 z3 = ["dep:angryier-solver-z3", "angryier-solver-z3/ffi"]
 # Embedded Lua scripting — user hooks and exploration predicates without
 # recompiling (Phase 15).
-script = ["dep:mlua"]
+script = ["dep:mlua", "z3"]
 
 [dev-dependencies]
 angryier-solver-fuzzy = { path = "../angryier-solver-fuzzy" }
