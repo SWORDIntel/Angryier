@@ -617,15 +617,37 @@ impl Intel64CorpusRegistry {
             form_index.insert(form, index);
         }
 
-        Self {
+        let registry = Self {
             providers,
             form_index,
             semantic_version,
-        }
+        };
+        registry.assert_unique_rule_ids();
+        registry
     }
 
     pub fn providers(&self) -> &[Arc<dyn angryier_semantics::SemanticProvider>] {
         &self.providers
+    }
+
+    /// Returns the provider registered for `form_id` directly, bypassing the
+    /// rule-id lookup: provider indices are positional, and a duplicated
+    /// hand-picked rule offset would otherwise silently misroute the form.
+    pub fn provider_for_form(&self, form_id: u32) -> Option<&Arc<dyn angryier_semantics::SemanticProvider>> {
+        self.form_index.get(&form_id).map(|&index| &self.providers[index])
+    }
+
+    fn assert_unique_rule_ids(&self) {
+        let mut seen = std::collections::BTreeMap::new();
+        for (index, provider) in self.providers.iter().enumerate() {
+            let id = provider.rule_id().0;
+            if let Some(previous) = seen.insert(id, index) {
+                debug_assert!(
+                    false,
+                    "duplicate rule id {id:#x} across providers {previous} and {index}"
+                );
+            }
+        }
     }
 }
 

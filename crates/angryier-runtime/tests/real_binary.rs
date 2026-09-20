@@ -1391,6 +1391,26 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         "shl %cl, %rax",
         "shr %cl, %rax",
     ];
+    // Carry-flow instructions: stc/clc prefixes seed CF before the op.
+    let carry_templates = [
+        "stc\n    adc %rbx, %rax",
+        "clc\n    adc %rbx, %rax",
+        "stc\n    sbb %rbx, %rax",
+        "clc\n    sbb %rbx, %rax",
+        "stc\n    bt %rbx, %rax",
+        "clc\n    bt %rbx, %rax",
+    ];
+    // SIMD: seed xmm via movq, observe via movq back to rax.
+    let simd_templates = [
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pcmpeqb %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pcmpeqd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    paddq %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    psubq %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pminub %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pmaxub %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pxor %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pand %xmm1, %xmm0\n    movq %xmm0, %rax",
+    ];
     // 32-bit forms (zero-extension semantics must match too).
     let w32_templates = [
         "add %ebx, %eax",
@@ -1465,6 +1485,20 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
                 &[("rax", a), ("rbx", 0x1234_5678_9abc_def0), ("rcx", 5)],
                 flag_mask_for(insn),
             )?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in carry_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 0x1234_5678_9abc_def0)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in simd_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rbx", a), ("rcx", 0x1234_5678_9abc_def0)], flag_mask_for(insn))?;
             skipped |= !ran;
             executed += usize::from(ran);
         }

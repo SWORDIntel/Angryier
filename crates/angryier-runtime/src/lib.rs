@@ -737,17 +737,16 @@ impl<D: Decoder> Runtime<D> {
         }
 
         // Resolve semantic provider.
-        let resolution = self
-            .registry
+        self.registry
             .resolve(&decoded, self.semantic_version)
             .map_err(|e| RuntimeError::Semantic(format!("{e:?}")))?;
 
-        // Find the provider by rule_id.
+        // Look the provider up by its positional form index: resolution is
+        // positional, and a duplicated hand-picked rule offset would silently
+        // route the form to a different provider if we searched by rule_id.
         let provider = self
             .registry
-            .providers()
-            .iter()
-            .find(|p| p.rule_id() == resolution.rule_id)
+            .provider_for_form(decoded.form_id)
             .ok_or(RuntimeError::UnsupportedForm(decoded.form_id))?;
 
         // Emit semantic block.
