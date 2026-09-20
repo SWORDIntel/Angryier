@@ -84,6 +84,10 @@ pub struct SymbolicEvaluator<'a> {
     arena: &'a SymbolicArena,
     registers: BTreeMap<u32, (ExprId, IrType)>,
     concrete_registers: BTreeMap<u32, u64>,
+    /// Concrete value a load's result expression stands for — memory-
+    /// derived pointers resolve through this when they have no register
+    /// binding.
+    expr_concrete: BTreeMap<ExprId, u64>,
     symbols: Vec<SymbolBinding>,
     next_symbol: u64,
 }
@@ -95,6 +99,7 @@ impl<'a> SymbolicEvaluator<'a> {
             arena,
             registers: BTreeMap::new(),
             concrete_registers: BTreeMap::new(),
+            expr_concrete: BTreeMap::new(),
             symbols: Vec::new(),
             next_symbol: 0,
         }
@@ -110,17 +115,34 @@ impl<'a> SymbolicEvaluator<'a> {
     /// value — the concretize-at-boundary policy (the concrete values are
     /// the state's, so `rsp`-derived addresses stay exact).
     fn resolve_address(&self, expression: ExprId) -> Result<u64, SymbolicEvalError> {
-        constant_value_resolved(self.arena, expression, &|symbol_id| {
-            self.symbols
-                .iter()
-                .find(|binding| {
-                    self.arena.get(binding.expression).and_then(|n| {
-                        n.immediate
-                            .get(..8)
-                            .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
-                    }) == Some(symbol_id)
-                })
-                .and_then(|binding| self.concrete_registers.get(&binding.register).copied())
+        constant_value_resolved(self.arena, expression, &|expr| {
+            // A bare register Symbol resolves through its concrete register
+            // value; a memory-derived expression resolves through the
+            // concrete bytes it was loaded from.
+            self.expr_concrete.get(&expr).copied().or_else(|| {
+                let node = self.arena.get(expr)?;
+                if node.op != ExprOp::Symbol {
+                    return None;
+                }
+                let symbol_id = u64::from_le_bytes(node.immediate.get(..8)?.try_into().ok()?);
+                self.symbols
+                    .iter()
+                    .find(|binding| {
+                        binding.expression == expr
+                            || self.arena.get(binding.expression).and_then(|n| {
+                                n.immediate
+                                    .get(..8)
+                                    .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                            }) == Some(symbol_id)
+                    })
+                    .and_then(|binding| self.concrete_registers.get(&binding.register).copied())
+            })
+        })
+        .or_else(|_| {
+            self.expr_concrete
+                .get(&expression)
+                .copied()
+                .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("non-constant operand".into()))
         })
     }
 
@@ -158,6 +180,7 @@ impl<'a> SymbolicEvaluator<'a> {
             concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: self.symbols.clone(),
+            expr_concrete: self.expr_concrete.clone(),
         }
     }
 
@@ -167,6 +190,7 @@ impl<'a> SymbolicEvaluator<'a> {
     pub fn restore(&mut self, snapshot: &SymbolicStateSnapshot) {
         self.registers = snapshot.registers.clone();
         self.concrete_registers = snapshot.concrete_registers.clone();
+        self.expr_concrete = snapshot.expr_concrete.clone();
         self.symbols = snapshot.symbols.clone();
     }
 
@@ -260,7 +284,28 @@ impl<'a> SymbolicEvaluator<'a> {
                     let (addr_expr, _) = get_value(&values, *address)?;
                     let addr = self.resolve_address(addr_expr)?;
                     let width = bit_width(*ty)?;
-                    Some((memory.read(self.arena, addr, width)?, *ty))
+                    let expr = memory.read(self.arena, addr, width)?;
+                    // Record the load's concrete value so pointer-chasing
+                    // addresses (loaded pointers feeding later loads)
+                    // resolve through this map.
+                    if let Ok(bytes) = memory.read_bytes(addr, usize::from(width).div_ceil(8)) {
+                        let mut concrete = 0u64;
+                        let mut all_concrete = true;
+                        for (i, byte) in bytes.iter().enumerate().take(8) {
+                            match byte {
+                                angryier_memory::ByteValue::Concrete(v) => {
+                                    concrete |= u64::from(*v) << (i * 8);
+                                }
+                                angryier_memory::ByteValue::Symbolic(_) => {
+                                    all_concrete = false;
+                                }
+                            }
+                        }
+                        if all_concrete {
+                            self.expr_concrete.insert(expr, concrete);
+                        }
+                    }
+                    Some((expr, *ty))
                 }
                 IrOp::Store { address, value } => {
                     let (addr_expr, _) = get_value(&values, *address)?;
@@ -432,22 +477,27 @@ fn constant_value(arena: &SymbolicArena, expression: ExprId) -> Result<u64, Symb
     constant_value_resolved(arena, expression, &|_| None)
 }
 
-/// Like [`constant_value`], but `resolve_symbol(symbol_id)` can bind Symbol
+/// Like [`constant_value`], but `resolve_expr(symbol_id)` can bind Symbol
 /// leaves to concrete values — the session passes each symbol's concrete
 /// register value so `rsp-symbolic` addresses still resolve.
 fn constant_value_resolved(
     arena: &SymbolicArena,
     expression: ExprId,
-    resolve_symbol: &dyn Fn(u64) -> Option<u64>,
+    resolve_expr: &dyn Fn(ExprId) -> Option<u64>,
 ) -> Result<u64, SymbolicEvalError> {
     fn eval(
         arena: &SymbolicArena,
         expression: ExprId,
         depth: u8,
-        resolve_symbol: &dyn Fn(u64) -> Option<u64>,
+        resolve_expr: &dyn Fn(ExprId) -> Option<u64>,
     ) -> Option<u64> {
         if depth > 16 {
             return None;
+        }
+        // A recorded concrete value (memory-derived pointer) short-
+        // circuits structural evaluation.
+        if let Some(v) = resolve_expr(expression) {
+            return Some(v);
         }
         let node = arena.get(expression)?;
         match node.op {
@@ -459,62 +509,61 @@ fn constant_value_resolved(
             }
             ExprOp::Symbol => {
                 let id = u64::from_le_bytes(node.immediate.get(..8)?.try_into().ok()?);
-                resolve_symbol(id)
+                let _ = id;
+                None
             }
             ExprOp::Add => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?.wrapping_add(eval(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?.wrapping_add(eval(
                     arena,
                     *node.operands.get(1)?,
                     depth + 1,
-                    resolve_symbol,
+                    resolve_expr,
                 )?),
             ),
             ExprOp::Sub => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?.wrapping_sub(eval(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?.wrapping_sub(eval(
                     arena,
                     *node.operands.get(1)?,
                     depth + 1,
-                    resolve_symbol,
+                    resolve_expr,
                 )?),
             ),
             ExprOp::And => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?
-                    & eval(arena, *node.operands.get(1)?, depth + 1, resolve_symbol)?,
+                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?
+                    & eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr)?,
             ),
             ExprOp::Or => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?
-                    | eval(arena, *node.operands.get(1)?, depth + 1, resolve_symbol)?,
+                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?
+                    | eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr)?,
             ),
             ExprOp::Xor => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?
-                    ^ eval(arena, *node.operands.get(1)?, depth + 1, resolve_symbol)?,
+                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?
+                    ^ eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr)?,
             ),
             ExprOp::Shl => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?.wrapping_shl(eval(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?.wrapping_shl(eval(
                     arena,
                     *node.operands.get(1)?,
                     depth + 1,
-                    resolve_symbol,
-                )?
-                    as u32),
+                    resolve_expr,
+                )? as u32),
             ),
             ExprOp::LShr => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?.wrapping_shr(eval(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?.wrapping_shr(eval(
                     arena,
                     *node.operands.get(1)?,
                     depth + 1,
-                    resolve_symbol,
-                )?
-                    as u32),
+                    resolve_expr,
+                )? as u32),
             ),
             ExprOp::ZExt | ExprOp::SExt | ExprOp::Extract => {
-                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)
+                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)
             }
             ExprOp::Concat => {
                 // Concat(hi, lo) — value = (hi << lo_bits) | lo.
-                let hi = eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?;
+                let hi = eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?;
                 let lo_id = *node.operands.get(1)?;
-                let lo = eval(arena, lo_id, depth + 1, resolve_symbol)?;
+                let lo = eval(arena, lo_id, depth + 1, resolve_expr)?;
                 let lo_bits = arena
                     .get(lo_id)
                     .and_then(|n| match n.sort {
@@ -527,7 +576,7 @@ fn constant_value_resolved(
             _ => None,
         }
     }
-    eval(arena, expression, 0, resolve_symbol)
+    eval(arena, expression, 0, resolve_expr)
         .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("non-constant operand".into()))
 }
 
@@ -1631,6 +1680,9 @@ pub struct SymbolicStateSnapshot {
     pub constraints: Vec<ExprId>,
     /// Symbols bound during this state's execution, for lineage.
     pub symbols: Vec<SymbolBinding>,
+    /// Concrete value each load-derived expression stands for — lets
+    /// pointer-chasing addresses resolve without a register binding.
+    pub expr_concrete: BTreeMap<ExprId, u64>,
 }
 
 /// Merges two sibling symbolic states that reconverge at the same program
@@ -1712,11 +1764,14 @@ pub fn merge_snapshots(
         }
     }
 
+    let mut expr_concrete = left.expr_concrete.clone();
+    expr_concrete.extend(right.expr_concrete.iter().map(|(k, v)| (*k, *v)));
     Ok(SymbolicStateSnapshot {
         registers,
         concrete_registers: left.concrete_registers.clone(),
         constraints: vec![merged_pc],
         symbols,
+        expr_concrete,
     })
 }
 

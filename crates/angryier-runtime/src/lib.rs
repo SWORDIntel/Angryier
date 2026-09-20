@@ -2255,6 +2255,9 @@ pub struct SymbolicState {
     /// Stable identity — indices shift as states are added/removed, so
     /// merge schedules and external bookkeeping key on `id`.
     pub id: u64,
+    /// Concrete value each load-derived expression stands for (pointer
+    /// provenance for address concretization).
+    pub expr_concrete: BTreeMap<ExprId, u64>,
 }
 
 /// What one symbolic step did to a state.
@@ -2324,6 +2327,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             symbols: Vec::new(),
             concrete_registers,
             id: 0,
+            expr_concrete: BTreeMap::new(),
         };
         Self {
             runtime,
@@ -2499,11 +2503,14 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             concrete_registers: state.concrete_registers.clone(),
             constraints: state.constraints.clone(),
             symbols: state.symbols.clone(),
+            expr_concrete: state.expr_concrete.clone(),
         });
         let summary = evaluator
             .eval_block_with_memory(&ir_block, &mut state.memory)
             .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-        state.registers = evaluator.snapshot().registers;
+        let post = evaluator.snapshot();
+        state.registers = post.registers;
+        state.expr_concrete = post.expr_concrete;
         state.symbols = evaluator.symbols().to_vec();
 
         if let Some(branch) = summary.branch {
@@ -2698,12 +2705,14 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         concrete_registers: left.concrete_registers.clone(),
                         constraints: left.constraints.clone(),
                         symbols: left.symbols.clone(),
+                        expr_concrete: left.expr_concrete.clone(),
                     },
                     &angryier_execution::SymbolicStateSnapshot {
                         registers: right.registers.clone(),
                         concrete_registers: right.concrete_registers.clone(),
                         constraints: right.constraints.clone(),
                         symbols: right.symbols.clone(),
+                        expr_concrete: right.expr_concrete.clone(),
                     },
                 )
                 .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
@@ -2715,6 +2724,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     symbols: snapshot.symbols,
                     concrete_registers: left.concrete_registers.clone(),
                     id: left.id,
+                    expr_concrete: snapshot.expr_concrete.clone(),
                 };
                 self.states.insert(a, merged_state);
                 merged += 1;
@@ -2864,12 +2874,14 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             concrete_registers: left.concrete_registers.clone(),
                             constraints: left.constraints.clone(),
                             symbols: left.symbols.clone(),
+                            expr_concrete: left.expr_concrete.clone(),
                         },
                         &angryier_execution::SymbolicStateSnapshot {
                             registers: right.registers.clone(),
                             concrete_registers: right.concrete_registers.clone(),
                             constraints: right.constraints.clone(),
                             symbols: right.symbols.clone(),
+                            expr_concrete: right.expr_concrete.clone(),
                         },
                     )
                     .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
@@ -2883,6 +2895,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             symbols: snapshot.symbols,
                             concrete_registers: left.concrete_registers,
                             id: left.id,
+                            expr_concrete: snapshot.expr_concrete.clone(),
                         },
                     );
                     report.merges += 1;
