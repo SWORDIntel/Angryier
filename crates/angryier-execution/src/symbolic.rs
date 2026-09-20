@@ -75,12 +75,15 @@ pub struct SymbolicBlockSummary {
     pub written_registers: Vec<u32>,
     /// True when the block ends in branch/jump/call/return/trap.
     pub terminated: bool,
+    /// For `JumpIndirect`, the evaluated target expression.
+    pub jump_target: Option<ExprId>,
 }
 
 /// Symbolically evaluates AngryIR blocks with a shared symbolic register file.
 pub struct SymbolicEvaluator<'a> {
     arena: &'a SymbolicArena,
     registers: BTreeMap<u32, (ExprId, IrType)>,
+    concrete_registers: BTreeMap<u32, u64>,
     symbols: Vec<SymbolBinding>,
     next_symbol: u64,
 }
@@ -91,6 +94,7 @@ impl<'a> SymbolicEvaluator<'a> {
         Self {
             arena,
             registers: BTreeMap::new(),
+            concrete_registers: BTreeMap::new(),
             symbols: Vec::new(),
             next_symbol: 0,
         }
@@ -99,6 +103,25 @@ impl<'a> SymbolicEvaluator<'a> {
     /// Symbols created so far, in creation order.
     pub fn symbols(&self) -> &[SymbolBinding] {
         &self.symbols
+    }
+
+    /// Resolves a memory address expression: constants evaluate directly;
+    /// symbolic expressions resolve via each Symbol leaf's concrete register
+    /// value — the concretize-at-boundary policy (the concrete values are
+    /// the state's, so `rsp`-derived addresses stay exact).
+    fn resolve_address(&self, expression: ExprId) -> Result<u64, SymbolicEvalError> {
+        constant_value_resolved(self.arena, expression, &|symbol_id| {
+            self.symbols
+                .iter()
+                .find(|binding| {
+                    self.arena.get(binding.expression).and_then(|n| {
+                        n.immediate
+                            .get(..8)
+                            .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                    }) == Some(symbol_id)
+                })
+                .and_then(|binding| self.concrete_registers.get(&binding.register).copied())
+        })
     }
 
     /// Seeds `register` as a fresh input symbol of `ty`.
@@ -132,6 +155,7 @@ impl<'a> SymbolicEvaluator<'a> {
     pub fn snapshot(&self) -> SymbolicStateSnapshot {
         SymbolicStateSnapshot {
             registers: self.registers.clone(),
+            concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: self.symbols.clone(),
         }
@@ -142,6 +166,7 @@ impl<'a> SymbolicEvaluator<'a> {
     /// run a state across blocks.
     pub fn restore(&mut self, snapshot: &SymbolicStateSnapshot) {
         self.registers = snapshot.registers.clone();
+        self.concrete_registers = snapshot.concrete_registers.clone();
         self.symbols = snapshot.symbols.clone();
     }
 
@@ -165,6 +190,7 @@ impl<'a> SymbolicEvaluator<'a> {
         let mut written_registers = Vec::new();
         let mut branch = None;
         let mut terminated = false;
+        let mut jump_target = None;
 
         for instruction in &block.instructions {
             let produced = match &instruction.op {
@@ -221,25 +247,24 @@ impl<'a> SymbolicEvaluator<'a> {
                     terminated = true;
                     None
                 }
-                IrOp::Jump { .. }
-                | IrOp::JumpIndirect { .. }
-                | IrOp::Call { .. }
-                | IrOp::Return
-                | IrOp::Trap { .. } => {
+                IrOp::Jump { .. } | IrOp::Call { .. } | IrOp::Return | IrOp::Trap { .. } => {
                     terminated = true;
+                    None
+                }
+                IrOp::JumpIndirect { target } => {
+                    terminated = true;
+                    jump_target = Some(get_value(&values, *target)?.0);
                     None
                 }
                 IrOp::Load { address, ty } => {
                     let (addr_expr, _) = get_value(&values, *address)?;
-                    let addr = constant_value(self.arena, addr_expr)
-                        .map_err(|_| SymbolicEvalError::UnsupportedOperation("symbolic memory address".into()))?;
+                    let addr = self.resolve_address(addr_expr)?;
                     let width = bit_width(*ty)?;
                     Some((memory.read(self.arena, addr, width)?, *ty))
                 }
                 IrOp::Store { address, value } => {
                     let (addr_expr, _) = get_value(&values, *address)?;
-                    let addr = constant_value(self.arena, addr_expr)
-                        .map_err(|_| SymbolicEvalError::UnsupportedOperation("symbolic memory address".into()))?;
+                    let addr = self.resolve_address(addr_expr)?;
                     let (expr, ty) = get_value(&values, *value)?;
                     memory.write(self.arena, addr, expr, bit_width(ty)?)?;
                     None
@@ -266,6 +291,7 @@ impl<'a> SymbolicEvaluator<'a> {
             branch,
             written_registers,
             terminated,
+            jump_target,
         })
     }
 
@@ -283,6 +309,17 @@ impl<'a> SymbolicEvaluator<'a> {
             return Ok(*expression);
         }
         let width = bit_width(ty)?;
+        // Concrete fallback: untouched registers read their concrete value
+        // from the state's snapshot instead of materializing a free symbol —
+        // keeps stack pointers and startup registers concrete.
+        if let Some(&value) = self.concrete_registers.get(&register) {
+            let byte_len = usize::from(width).div_ceil(8);
+            let mut bytes = value.to_le_bytes().to_vec();
+            bytes.truncate(byte_len.clamp(1, 8));
+            let expression = self.intern(ExprSort::BitVec(width), ExprOp::Constant, Vec::new(), bytes)?;
+            self.registers.insert(register, (expression, ty));
+            return Ok(expression);
+        }
         let symbol_id = self.next_symbol;
         self.next_symbol = symbol_id
             .checked_add(1)
@@ -362,19 +399,136 @@ pub fn bit_to_bool(arena: &SymbolicArena, expression: ExprId) -> Result<ExprId, 
     intern(arena, ExprSort::Bool, ExprOp::Eq, vec![expression, one], Vec::new())
 }
 
-/// Reads the value of a constant expression.
-fn constant_value(arena: &SymbolicArena, expression: ExprId) -> Result<u64, SymbolicEvalError> {
-    let node = arena.get(expression).ok_or(SymbolicEvalError::Expression(format!(
-        "unknown expression {}",
-        expression.0
-    )))?;
-    if node.op != ExprOp::Constant {
-        return Err(SymbolicEvalError::UnsupportedOperation("non-constant operand".into()));
+/// Coerces `expr` to `width` bits — ZExt when narrower, Extract the low
+/// bits when wider, identity when equal. Shadow types can disagree with a
+/// register's declared IR width when a sub-view write left a narrower
+/// expression behind; coercion keeps binary ops well-sorted without
+/// concretizing.
+fn coerce_width(arena: &SymbolicArena, expr: ExprId, width: u16) -> Result<ExprId, SymbolicEvalError> {
+    let current = arena
+        .get(expr)
+        .and_then(|node| match node.sort {
+            ExprSort::BitVec(w) => Some(w),
+            ExprSort::Bool => Some(1),
+            _ => None,
+        })
+        .ok_or_else(|| SymbolicEvalError::UnsupportedType("non-bitvector operand".into()))?;
+    if current == width {
+        return Ok(expr);
     }
-    let mut buffer = [0u8; 8];
-    let len = node.immediate.len().min(8);
-    buffer[..len].copy_from_slice(&node.immediate[..len]);
-    Ok(u64::from_le_bytes(buffer))
+    if current < width {
+        return intern(arena, ExprSort::BitVec(width), ExprOp::ZExt, vec![expr], Vec::new());
+    }
+    let mut imm = Vec::with_capacity(4);
+    imm.extend_from_slice(&0u16.to_le_bytes());
+    imm.extend_from_slice(&width.to_le_bytes());
+    intern(arena, ExprSort::BitVec(width), ExprOp::Extract, vec![expr], imm)
+}
+
+/// Reads the value of a constant expression — recursively evaluating
+/// arithmetic over literal leaves so `Add(Const, Const)`-shaped addresses
+/// (from rip-relative or rsp-offset computations) resolve without a solver.
+fn constant_value(arena: &SymbolicArena, expression: ExprId) -> Result<u64, SymbolicEvalError> {
+    constant_value_resolved(arena, expression, &|_| None)
+}
+
+/// Like [`constant_value`], but `resolve_symbol(symbol_id)` can bind Symbol
+/// leaves to concrete values — the session passes each symbol's concrete
+/// register value so `rsp-symbolic` addresses still resolve.
+fn constant_value_resolved(
+    arena: &SymbolicArena,
+    expression: ExprId,
+    resolve_symbol: &dyn Fn(u64) -> Option<u64>,
+) -> Result<u64, SymbolicEvalError> {
+    fn eval(
+        arena: &SymbolicArena,
+        expression: ExprId,
+        depth: u8,
+        resolve_symbol: &dyn Fn(u64) -> Option<u64>,
+    ) -> Option<u64> {
+        if depth > 16 {
+            return None;
+        }
+        let node = arena.get(expression)?;
+        match node.op {
+            ExprOp::Constant => {
+                let mut buffer = [0u8; 8];
+                let len = node.immediate.len().min(8);
+                buffer[..len].copy_from_slice(&node.immediate[..len]);
+                Some(u64::from_le_bytes(buffer))
+            }
+            ExprOp::Symbol => {
+                let id = u64::from_le_bytes(node.immediate.get(..8)?.try_into().ok()?);
+                resolve_symbol(id)
+            }
+            ExprOp::Add => Some(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?.wrapping_add(eval(
+                    arena,
+                    *node.operands.get(1)?,
+                    depth + 1,
+                    resolve_symbol,
+                )?),
+            ),
+            ExprOp::Sub => Some(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?.wrapping_sub(eval(
+                    arena,
+                    *node.operands.get(1)?,
+                    depth + 1,
+                    resolve_symbol,
+                )?),
+            ),
+            ExprOp::And => Some(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?
+                    & eval(arena, *node.operands.get(1)?, depth + 1, resolve_symbol)?,
+            ),
+            ExprOp::Or => Some(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?
+                    | eval(arena, *node.operands.get(1)?, depth + 1, resolve_symbol)?,
+            ),
+            ExprOp::Xor => Some(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?
+                    ^ eval(arena, *node.operands.get(1)?, depth + 1, resolve_symbol)?,
+            ),
+            ExprOp::Shl => Some(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?.wrapping_shl(eval(
+                    arena,
+                    *node.operands.get(1)?,
+                    depth + 1,
+                    resolve_symbol,
+                )?
+                    as u32),
+            ),
+            ExprOp::LShr => Some(
+                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?.wrapping_shr(eval(
+                    arena,
+                    *node.operands.get(1)?,
+                    depth + 1,
+                    resolve_symbol,
+                )?
+                    as u32),
+            ),
+            ExprOp::ZExt | ExprOp::SExt | ExprOp::Extract => {
+                eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)
+            }
+            ExprOp::Concat => {
+                // Concat(hi, lo) — value = (hi << lo_bits) | lo.
+                let hi = eval(arena, *node.operands.first()?, depth + 1, resolve_symbol)?;
+                let lo_id = *node.operands.get(1)?;
+                let lo = eval(arena, lo_id, depth + 1, resolve_symbol)?;
+                let lo_bits = arena
+                    .get(lo_id)
+                    .and_then(|n| match n.sort {
+                        ExprSort::BitVec(w) => Some(u32::from(w)),
+                        _ => None,
+                    })
+                    .unwrap_or(8);
+                Some((hi << lo_bits.min(63)) | lo)
+            }
+            _ => None,
+        }
+    }
+    eval(arena, expression, 0, resolve_symbol)
+        .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("non-constant operand".into()))
 }
 
 /// Builds the expression for an IR primitive. Shared by the fully symbolic
@@ -438,11 +592,15 @@ fn primitive_expr(
                 IrPrimitive::LShr => ExprOp::LShr,
                 _ => ExprOp::AShr,
             };
+            let coerced = operands
+                .iter()
+                .map(|operand| coerce_width(arena, *operand, output_width))
+                .collect::<Result<Vec<_>, _>>()?;
             let value = intern(
                 arena,
                 ExprSort::BitVec(output_width),
                 expression_op,
-                operands,
+                coerced,
                 Vec::new(),
             )?;
             Ok((value, ty))
@@ -452,14 +610,23 @@ fn primitive_expr(
             Ok((value, ty))
         }
         IrPrimitive::ZExt | IrPrimitive::SExt => {
-            let input_width = inputs
-                .first()
-                .map(|(_, input_ty)| bit_width(*input_ty))
-                .transpose()?
-                .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("extension without input".into()))?;
-            if input_width >= output_width {
+            // Reconcile on the operand's *expression* width — a Bool flag or
+            // a widened sub-view may disagree with the declared IR type.
+            let operand_expr = operands[0];
+            let operand_width = arena
+                .get(operand_expr)
+                .and_then(|node| match node.sort {
+                    ExprSort::BitVec(w) => Some(u32::from(w)),
+                    ExprSort::Bool => Some(1),
+                    _ => None,
+                })
+                .ok_or_else(|| SymbolicEvalError::UnsupportedType("non-bitvector extension operand".into()))?;
+            if operand_width == u32::from(output_width) {
+                return Ok((operand_expr, ty));
+            }
+            if operand_width > u32::from(output_width) {
                 return Err(SymbolicEvalError::UnsupportedType(format!(
-                    "{op:?} {input_width}->{output_width}"
+                    "{op:?} {operand_width}->{output_width}"
                 )));
             }
             let expression_op = if op == IrPrimitive::ZExt {
@@ -524,11 +691,38 @@ fn primitive_expr(
             let start = constant_value(arena, inputs[1].0)?;
             let start =
                 u16::try_from(start).map_err(|_| SymbolicEvalError::UnsupportedOperation("extract offset".into()))?;
-            if u32::from(start) + u32::from(output_width) > u32::from(input_width) {
-                return Err(SymbolicEvalError::UnsupportedType(format!(
-                    "extract {start}+{output_width}"
-                )));
+            // Reconcile on the operand's *expression* width — a widened or
+            // narrowed value may disagree with the declared IR type.
+            let operand_width = arena
+                .get(operands[0])
+                .and_then(|node| match node.sort {
+                    ExprSort::BitVec(w) => Some(u32::from(w)),
+                    ExprSort::Bool => Some(1),
+                    _ => None,
+                })
+                .ok_or_else(|| SymbolicEvalError::UnsupportedType("non-bitvector extract operand".into()))?;
+            if u32::from(start) + u32::from(output_width) > operand_width {
+                // Zero-extend the operand to cover the extract window.
+                let zext = intern(
+                    arena,
+                    ExprSort::BitVec((u32::from(start) + u32::from(output_width)) as u16),
+                    ExprOp::ZExt,
+                    vec![operands[0]],
+                    Vec::new(),
+                )?;
+                let mut immediate = Vec::with_capacity(4);
+                immediate.extend_from_slice(&start.to_le_bytes());
+                immediate.extend_from_slice(&output_width.to_le_bytes());
+                let value = intern(
+                    arena,
+                    ExprSort::BitVec(output_width),
+                    ExprOp::Extract,
+                    vec![zext],
+                    immediate,
+                )?;
+                return Ok((value, ty));
             }
+            let _ = input_width;
             let mut immediate = Vec::with_capacity(4);
             immediate.extend_from_slice(&start.to_le_bytes());
             immediate.extend_from_slice(&output_width.to_le_bytes());
@@ -818,6 +1012,7 @@ impl<'a> ConcolicEvaluator<'a> {
             branch,
             written_registers,
             terminated,
+            jump_target: None,
         })
     }
 
@@ -1282,14 +1477,40 @@ impl SymbolicSessionMemory {
             .read_at_address(address, byte_count)
             .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory read: {e:?}")))?;
         let mut parts = Vec::with_capacity(byte_count);
+        let mut all_concrete = true;
+        let mut concrete_bytes = Vec::with_capacity(byte_count);
         for byte in bytes {
-            let expr = match byte {
+            match byte {
                 angryier_memory::ByteValue::Concrete(value) => {
-                    intern(arena, ExprSort::BitVec(8), ExprOp::Constant, Vec::new(), vec![value])?
+                    concrete_bytes.push(value);
+                    parts.push(intern(
+                        arena,
+                        ExprSort::BitVec(8),
+                        ExprOp::Constant,
+                        Vec::new(),
+                        vec![value],
+                    )?);
                 }
-                angryier_memory::ByteValue::Symbolic(expr) => expr,
-            };
-            parts.push(expr);
+                angryier_memory::ByteValue::Symbolic(expr) => {
+                    all_concrete = false;
+                    concrete_bytes.push(0);
+                    parts.push(expr);
+                }
+            }
+        }
+        // Fold all-concrete reads into one Constant so downstream
+        // `constant_value` resolution (indirect targets, addresses) sees a
+        // literal rather than a Concat of literal bytes.
+        if all_concrete {
+            let width_bits = usize::from(width).div_ceil(8);
+            concrete_bytes.truncate(width_bits);
+            return intern(
+                arena,
+                ExprSort::BitVec(width),
+                ExprOp::Constant,
+                Vec::new(),
+                concrete_bytes,
+            );
         }
         let mut acc = parts[byte_count - 1];
         let mut acc_bits = 8u16;
@@ -1322,6 +1543,25 @@ impl SymbolicSessionMemory {
         width: u16,
     ) -> Result<(), SymbolicEvalError> {
         let byte_count = usize::from(width).div_ceil(8);
+        // The expression's own width may be narrower than the declared
+        // store width (widened sub-view) — extend to cover the split.
+        let expression = match arena.get(expression).map(|n| n.sort) {
+            Some(ExprSort::BitVec(w)) if w < width => intern(
+                arena,
+                ExprSort::BitVec(width),
+                ExprOp::ZExt,
+                vec![expression],
+                Vec::new(),
+            )?,
+            Some(ExprSort::Bool) if width > 1 => intern(
+                arena,
+                ExprSort::BitVec(width),
+                ExprOp::ZExt,
+                vec![expression],
+                Vec::new(),
+            )?,
+            _ => expression,
+        };
         let mut bytes = Vec::with_capacity(byte_count);
         for i in 0..byte_count {
             let byte = if byte_count == 1 && width == 8 {
@@ -1354,6 +1594,10 @@ impl SymbolicSessionMemory {
 pub struct SymbolicStateSnapshot {
     /// Register id → (symbolic expression, its IR type) for touched registers.
     pub registers: BTreeMap<u32, (ExprId, IrType)>,
+    /// Concrete values for registers with no symbolic binding — a register
+    /// read with no symbolic entry falls back to this so untouched state
+    /// (rsp, rip, startup GPRs) stays concrete instead of auto-symboling.
+    pub concrete_registers: BTreeMap<u32, u64>,
     /// Path constraints guarding this state (Bool-sorted expressions).
     pub constraints: Vec<ExprId>,
     /// Symbols bound during this state's execution, for lineage.
@@ -1441,6 +1685,7 @@ pub fn merge_snapshots(
 
     Ok(SymbolicStateSnapshot {
         registers,
+        concrete_registers: left.concrete_registers.clone(),
         constraints: vec![merged_pc],
         symbols,
     })
@@ -1744,17 +1989,20 @@ mod tests {
 
         let parent = SymbolicStateSnapshot {
             registers: BTreeMap::from([(0u32, (sym, IrType::Bits(64)))]),
+            concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
         };
         let gt = eq(&arena, 64, sym, one)?; // any Bool constraint
         let left = SymbolicStateSnapshot {
             registers: BTreeMap::from([(0u32, (one, IrType::Bits(64)))]),
+            concrete_registers: BTreeMap::new(),
             constraints: vec![gt],
             symbols: Vec::new(),
         };
         let right = SymbolicStateSnapshot {
             registers: BTreeMap::from([(0u32, (two, IrType::Bits(64)))]),
+            concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
         };
@@ -1780,6 +2028,7 @@ mod tests {
         let parent = SymbolicStateSnapshot::default();
         let left = SymbolicStateSnapshot {
             registers: BTreeMap::from([(0u32, (sym, IrType::Bits(64)))]),
+            concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
         };
@@ -1798,12 +2047,14 @@ mod tests {
         let new_val = constant(&arena, 64, 9)?;
         let parent = SymbolicStateSnapshot {
             registers: BTreeMap::from([(1u32, (parent_sym, IrType::Bits(64)))]),
+            concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
         };
         let cond = eq(&arena, 64, parent_sym, parent_sym)?;
         let left = SymbolicStateSnapshot {
             registers: BTreeMap::from([(1u32, (new_val, IrType::Bits(64)))]),
+            concrete_registers: BTreeMap::new(),
             constraints: vec![cond],
             symbols: Vec::new(),
         };
@@ -1825,11 +2076,13 @@ mod tests {
         let parent = SymbolicStateSnapshot::default();
         let left = SymbolicStateSnapshot {
             registers: BTreeMap::from([(0u32, (a64, IrType::Bits(64)))]),
+            concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
         };
         let right = SymbolicStateSnapshot {
             registers: BTreeMap::from([(0u32, (a32, IrType::Bits(32)))]),
+            concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
         };

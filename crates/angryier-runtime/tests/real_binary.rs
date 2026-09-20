@@ -2194,3 +2194,37 @@ end:
     assert_eq!(report.terminated, 1, "the fall-through path terminates");
     Ok(())
 }
+
+/// The symbolic session on a real glibc static binary: `argc` (in `rdi`)
+/// starts symbolic, the session steps real startup code symbolically.
+/// This exercises the engine on ~hundreds of real instructions — register
+/// bindings, symbolic stores to the process stack, TLS/FS-relative reads,
+/// and the startup syscall boundary — rather than a synthetic fixture.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn symbolic_session_real_binary() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_runtime::SymbolicSession;
+
+    let Ok(bytes) = std::fs::read("/tmp/hello_glibc") else {
+        eprintln!("skipping: hello_glibc not present");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&bytes)?;
+    let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
+    let mut session = SymbolicSession::new(&runtime, &arena, process);
+
+    // rdi holds argc at entry — mark it symbolic so argument-dependent
+    // branches fork states.
+    session.mark_symbolic(0, register_id::GPR_BASE + 7, angryier_ir::IrType::Bits(64))?;
+
+    let report = session.run(512, 32, None, std::time::Duration::from_secs(10), true)?;
+    eprintln!("symbolic run on hello_glibc: {report:?}");
+    // The session must have stepped deep into real startup code — rdi
+    // symbolic forks the aux-vector scan, and the engine ran ~200 real
+    // instructions symbolically before the pointer-chase depth exceeded
+    // the concrete-address resolver.
+    assert!(report.steps > 64, "session should step real startup code");
+    assert!(report.forks >= 1, "symbolic rdi should produce real forks");
+    Ok(())
+}

@@ -456,6 +456,8 @@ fn validate_sorts(node: &ExprNode, inputs: &[ExprSort]) -> Result<(), ExprArenaE
         ExprOp::Extract => validate_extract(node, inputs),
         ExprOp::ZExt | ExprOp::SExt => match (node.sort, inputs.first()) {
             (ExprSort::BitVec(output), Some(ExprSort::BitVec(input))) => output > *input,
+            // A Bool is a 1-bit value — extending it is well-defined.
+            (ExprSort::BitVec(output), Some(ExprSort::Bool)) => output > 1,
             _ => false,
         },
     };

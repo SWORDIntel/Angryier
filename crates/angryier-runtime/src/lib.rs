@@ -2247,6 +2247,11 @@ pub struct SymbolicState {
     pub memory: angryier_execution::SymbolicSessionMemory,
     /// Symbols bound during this state's execution.
     pub symbols: Vec<angryier_execution::SymbolBinding>,
+    /// Concrete values for registers with no symbolic binding — untouched
+    /// registers (rsp, rip, startup GPRs) read concrete instead of
+    /// auto-symboling; a register that was *written* symbolically has a
+    /// `registers` entry which shadows this.
+    pub concrete_registers: BTreeMap<u32, u64>,
 }
 
 /// What one symbolic step did to a state.
@@ -2288,12 +2293,25 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     /// via [`SymbolicSession::mark_symbolic`]).
     pub fn new(runtime: &'a Runtime<D>, arena: &'a SymbolicArena, process: Process) -> Self {
         let memory = angryier_execution::SymbolicSessionMemory::new(process.state.memory.clone());
+        let mut concrete_registers = BTreeMap::new();
+        for i in 0..16u32 {
+            if let Ok(value) = process.read_register(register_id::GPR_BASE + i) {
+                concrete_registers.insert(register_id::GPR_BASE + i, value);
+            }
+        }
+        if let Ok(value) = process.read_register(register_id::RIP.0) {
+            concrete_registers.insert(register_id::RIP.0, value);
+        }
+        if let Ok(value) = process.read_register(register_id::RFLAGS.0) {
+            concrete_registers.insert(register_id::RFLAGS.0, value);
+        }
         let state = SymbolicState {
             process,
             registers: BTreeMap::new(),
             constraints: Vec::new(),
             memory,
             symbols: Vec::new(),
+            concrete_registers,
         };
         Self {
             runtime,
@@ -2356,6 +2374,18 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .process
             .pc()
             .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+
+        // SimProcedure hooks dispatch like they do in concrete mode.
+        if state.process.simproc_hooks.contains_key(&pc) {
+            let state = &mut self.states[index];
+            let outcome = self.runtime.step(&mut state.process)?;
+            return Ok(match outcome {
+                StepOutcome::Terminated { .. } => SymbolicStepOutcome::Terminated,
+                _ => SymbolicStepOutcome::Stepped {
+                    next_pc: state.process.pc().unwrap_or(0),
+                },
+            });
+        }
 
         // Decode at pc from the state's concrete memory, bounded to the
         // containing region so tail instructions don't overrun.
@@ -2434,6 +2464,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         let mut evaluator = SymbolicEvaluator::new(self.arena);
         evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
             registers: state.registers.clone(),
+            concrete_registers: state.concrete_registers.clone(),
             constraints: state.constraints.clone(),
             symbols: state.symbols.clone(),
         });
@@ -2616,11 +2647,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     &empty_parent,
                     &angryier_execution::SymbolicStateSnapshot {
                         registers: left.registers.clone(),
+                        concrete_registers: left.concrete_registers.clone(),
                         constraints: left.constraints.clone(),
                         symbols: left.symbols.clone(),
                     },
                     &angryier_execution::SymbolicStateSnapshot {
                         registers: right.registers.clone(),
+                        concrete_registers: right.concrete_registers.clone(),
                         constraints: right.constraints.clone(),
                         symbols: right.symbols.clone(),
                     },
@@ -2632,6 +2665,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     constraints: snapshot.constraints,
                     memory: left.memory,
                     symbols: snapshot.symbols,
+                    concrete_registers: left.concrete_registers.clone(),
                 };
                 self.states.insert(a, merged_state);
                 merged += 1;
@@ -2751,7 +2785,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 }
                 Ok(SymbolicStepOutcome::Stepped { .. }) => {}
                 Err(error) => {
-                    eprintln!("symbolic state {index} failed: {error}");
+                    let _ = error;
                     if index < self.states.len() {
                         let state = self.states.remove(index);
                         self.dead.push(state);
