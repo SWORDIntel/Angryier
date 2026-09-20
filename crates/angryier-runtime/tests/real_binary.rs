@@ -2300,3 +2300,67 @@ end:
     assert_eq!(rbx, 5, "the model must satisfy rbx == 5 to reach target");
     Ok(())
 }
+
+/// Parallel symbolic exploration: a double-branch program forked twice
+/// (4 leaf states) distributes across workers and all terminate.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn symbolic_session_parallel_workers() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_runtime::SymbolicSession;
+
+    let source = r#"
+        .global _start
+        .text
+_start:
+    cmp $5, %rbx
+    je t1
+    mov $1, %rax
+    jmp j2
+t1:
+    mov $2, %rax
+j2:
+    cmp $7, %rcx
+    je t2
+    mov $3, %rdx
+    jmp end
+t2:
+    mov $4, %rdx
+end:
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-symbolic-par").ok_or("no tempdir")?;
+    let path_s = dir.join("fork.s");
+    let path_o = dir.join("fork.o");
+    let path_bin = dir.join("fork");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
+    let mut session = SymbolicSession::new(&runtime, &arena, process);
+    session.mark_symbolic(0, register_id::GPR_BASE + 3, angryier_ir::IrType::Bits(64))?;
+    session.mark_symbolic(0, register_id::GPR_BASE + 1, angryier_ir::IrType::Bits(64))?;
+
+    let reports = session.run_parallel(512, 16, 4, std::time::Duration::from_secs(5))?;
+    let total_terminated: u64 = reports.iter().map(|r| r.terminated).sum();
+    let total_forks: u64 = reports.iter().map(|r| r.forks).sum();
+    let total_failed: u64 = reports.iter().map(|r| r.failed).sum();
+    eprintln!(
+        "parallel: {reports:?} failed={total_failed} live={}",
+        session.states.len()
+    );
+    // Warm-up forks the first `je` serially; the dealt workers then cover
+    // every leaf — four paths terminate across the pool.
+    let _ = total_forks;
+    assert_eq!(total_terminated, 4, "all four leaf paths should terminate");
+    assert_eq!(total_failed, 0);
+    assert!(reports.len() > 1, "the deal must reach more than one worker");
+    Ok(())
+}

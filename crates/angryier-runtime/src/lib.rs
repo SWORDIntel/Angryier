@@ -2925,3 +2925,80 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Ok(bindings)
     }
 }
+
+impl<'a, D: Decoder> SymbolicSession<'a, D>
+where
+    D: Sync,
+{
+    /// Parallel symbolic exploration: partitions the live states across
+    /// `workers` OS threads, each stepping its own subset privately (branch
+    /// forks push to the worker's own queue — no shared work list), then
+    /// concatenates the survivors back. The arena is shared read-mostly
+    /// (ShardedExprArena is Sync), and each worker keeps its own evaluator
+    /// — so per-worker states stay cache-local like the concolic pool.
+    ///
+    /// Returns the per-worker reports; `self.states` is refilled with all
+    /// surviving states and `self.dead` accumulates their dead.
+    pub fn run_parallel(
+        &mut self,
+        max_steps: u64,
+        max_states: usize,
+        workers: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SymbolicRunReport>, RuntimeError> {
+        let workers = workers.max(1);
+        // Warm-up: step serially until we have at least `workers` live
+        // states or the exploration stalls — the deal must see forked
+        // states to be parallel.
+        let mut warmup = 0u64;
+        while self.states.len() < workers && warmup < max_steps && !self.states.is_empty() {
+            if self.step_state(0).is_err() {
+                break;
+            }
+            warmup += 1;
+        }
+        // Round-robin deal the states out.
+        let mut shards: Vec<Vec<SymbolicState>> = (0..workers).map(|_| Vec::new()).collect();
+        for (i, state) in self.states.drain(..).enumerate() {
+            shards[i % workers].push(state);
+        }
+
+        let arena = self.arena;
+        let runtime = self.runtime;
+        let results: Vec<Result<(SymbolicRunReport, Vec<SymbolicState>, Vec<SymbolicState>), RuntimeError>> =
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(workers);
+                for shard in shards {
+                    if shard.is_empty() {
+                        continue;
+                    }
+                    handles.push(scope.spawn(move || {
+                        let mut sub = SymbolicSession {
+                            runtime,
+                            arena,
+                            states: shard,
+                            dead: Vec::new(),
+                        };
+                        let report = sub.run(max_steps, max_states, None, timeout, false)?;
+                        Ok((report, sub.states, sub.dead))
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join()
+                            .unwrap_or_else(|_| Err(RuntimeError::Execution("worker panicked".into())))
+                    })
+                    .collect()
+            });
+
+        let mut reports = Vec::new();
+        for result in results {
+            let (report, states, dead) = result?;
+            self.states.extend(states);
+            self.dead.extend(dead);
+            reports.push(report);
+        }
+        Ok(reports)
+    }
+}
