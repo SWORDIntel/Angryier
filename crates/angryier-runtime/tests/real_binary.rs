@@ -1868,3 +1868,137 @@ fn generated_providers_match_hardware() -> Result<(), Box<dyn std::error::Error>
     }
     Ok(())
 }
+
+/// PROVE-mode symbolic session: `rbx` marked symbolic, `cmp`/`je` forks two
+/// states with complementary path constraints; reconverging pcs merge into
+/// one state whose `rax` is an Ite over the branch.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn symbolic_session_forks_and_merges() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::ExprArena;
+    use angryier_runtime::{SymbolicSession, SymbolicStepOutcome};
+
+    let source = r#"
+        .global _start
+        .text
+_start:
+    cmp $5, %rbx
+    je target
+    mov $1, %rax
+    jmp end
+target:
+    mov $2, %rax
+end:
+    mov %rax, out(%rip)
+    mov $1, %rax
+    mov $1, %rdi
+    mov $out, %rsi
+    mov $8, %rdx
+    syscall
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+        .data
+out:    .quad 0
+"#;
+    let dir = temp_dir("angryier-symbolic-fork").ok_or("no tempdir")?;
+    let path_s = dir.join("fork.s");
+    let path_o = dir.join("fork.o");
+    let path_bin = dir.join("fork");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
+    let mut session = SymbolicSession::new(&runtime, &arena, process);
+    session.mark_symbolic(0, register_id::GPR_BASE + 3, angryier_ir::IrType::Bits(64))?;
+
+    // Walk the single state until the `je` fork.
+    let mut branch_index = None;
+    for _ in 0..64 {
+        let outcome = session.step_state(0)?;
+        match outcome {
+            SymbolicStepOutcome::Branched { child } => {
+                branch_index = Some(child);
+                break;
+            }
+            SymbolicStepOutcome::Terminated => break,
+            _ => {}
+        }
+    }
+    let child = branch_index.ok_or("expected the cmp/je to fork")?;
+    assert_eq!(session.states.len(), 2);
+
+    // Two distinct pcs, complementary constraints.
+    let (pc_a, pc_b) = (session.states[0].process.pc()?, session.states[child].process.pc()?);
+    assert_ne!(pc_a, pc_b);
+    assert_eq!(session.states[0].constraints.len(), 1);
+    assert_eq!(session.states[child].constraints.len(), 1);
+    let cond_a = session.states[0].constraints[0];
+    let cond_b = session.states[child].constraints[0];
+    let node_b = arena.get(cond_b).ok_or("child constraint")?;
+    assert_eq!(node_b.op, angryier_expr::ExprOp::Not);
+    assert_eq!(node_b.operands[0], cond_a);
+
+    // Run both to the reconvergence point (`end` at the store site), then
+    // merge so `out` receives the Ite'd rax.
+    for i in [0usize, child] {
+        for _ in 0..64 {
+            let pc = session.states[i].process.pc()?;
+            if pc == 0x401016 {
+                break;
+            }
+            if session.step_state(i)? == SymbolicStepOutcome::Terminated {
+                break;
+            }
+        }
+    }
+    // Both should be at `end` — same pc.
+    let pc_a = session.states[0].process.pc()?;
+    let pc_b = session.states[1].process.pc()?;
+    assert_eq!(pc_a, pc_b, "states should reconverge at `end`");
+
+    let merged = session.merge_at()?;
+    assert!(merged >= 1, "expected at least one merge");
+    assert_eq!(session.states.len(), 1);
+
+    // Step the merged state through the store, then `out`'s first byte is
+    // Ite(cond, 1, 2) — the divergent rax.
+    for _ in 0..4 {
+        if session.step_state(0)? == SymbolicStepOutcome::Terminated {
+            break;
+        }
+    }
+    // The store of rax→out happened pre-merge, so `out`'s first byte is the
+    // divergent value — a symbolic byte in the merged state's memory.
+    let out_expr = session.states[0]
+        .memory
+        .memory
+        .read_at_address(0x402000, 1)
+        .map_err(|e| format!("read out: {e:?}"))?
+        .into_iter()
+        .next()
+        .ok_or("no byte")?;
+    match out_expr {
+        angryier_memory::ByteValue::Symbolic(expr) => {
+            let node = arena.get(expr).ok_or("byte node")?;
+            // Byte 0 of a merged 64-bit value is Extract(Ite(...), 0..8).
+            let inner = if node.op == angryier_expr::ExprOp::Extract {
+                let operand = node.operands[0];
+                arena.get(operand).ok_or("inner node")?
+            } else {
+                node
+            };
+            assert_eq!(inner.op, angryier_expr::ExprOp::Ite, "merged out byte should be Ite");
+        }
+        angryier_memory::ByteValue::Concrete(v) => {
+            return Err(format!("out byte was concrete {v:#x} — store never ran symbolically").into());
+        }
+    }
+    Ok(())
+}

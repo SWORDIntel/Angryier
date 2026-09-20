@@ -18,9 +18,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-#[cfg(feature = "xed")]
-use angryier_arch::DecodedInstruction;
-use angryier_arch::Decoder;
+use angryier_arch::{DecodedInstruction, Decoder};
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 use angryier_execution::{
     ConcolicEvaluator, ConcolicImage, ConcolicSource, ConcreteInterpreter, ExecutionEngine, ExecutionMode,
@@ -782,9 +780,65 @@ impl<D: Decoder> Runtime<D> {
             return Ok(outcome);
         }
 
+        let (ir_block, decoded) = self.lower_at(process, pc, &decoded)?;
+
+        // Observers see the lowered block against the pre-execution state.
+        observe(process, &ir_block)?;
+
+        // Execute.
+        let (new_state, outcome) = self
+            .interpreter
+            .execute_block(&process.state, &ir_block, ExecutionMode::Concrete)
+            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+
+        process.state = new_state;
+        process.step_count += 1;
+
+        let length = decoded.length;
+        let form_id = decoded.form_id;
+
+        // Cache the block.
+        process.block_cache.insert(pc, ir_block.clone());
+
+        match outcome {
+            ExecutionOutcome::Continue { next_pc, .. } => {
+                process.write_pc(next_pc)?;
+                if process.trace.len() >= MAX_TRACE {
+                    process.trace.remove(0);
+                }
+                process.trace.push(pc);
+                Ok(StepOutcome::Stepped {
+                    pc,
+                    next_pc,
+                    length,
+                    form_id,
+                })
+            }
+            ExecutionOutcome::Fork { .. } => Err(RuntimeError::ForkInConcreteMode),
+            ExecutionOutcome::Terminated { .. } => {
+                process.terminated = true;
+                Ok(StepOutcome::Terminated { pc })
+            }
+            ExecutionOutcome::Trap { vector, .. } => {
+                process.terminated = true;
+                Ok(StepOutcome::Trap { pc, vector })
+            }
+        }
+    }
+
+    /// Decodes `decoded` (at `pc`) through the semantic registry, seals the
+    /// emitted block, and lowers it to AngryIR — the shared front half of
+    /// [`Runtime::step_with`], reused by the symbolic session so both engines
+    /// consume identical blocks.
+    pub fn lower_at(
+        &self,
+        process: &mut Process,
+        pc: Address,
+        decoded: &DecodedInstruction,
+    ) -> Result<(IrBlock, DecodedInstruction), RuntimeError> {
         // Resolve semantic provider.
         self.registry
-            .resolve(&decoded, self.semantic_version)
+            .resolve(decoded, self.semantic_version)
             .map_err(|e| RuntimeError::Semantic(format!("{e:?}")))?;
 
         // Look the provider up by its positional form index: resolution is
@@ -798,7 +852,7 @@ impl<D: Decoder> Runtime<D> {
         // Emit semantic block.
         let mut builder = SemanticBlockBuilder::new(self.semantic_version);
         provider
-            .emit(&self.context, &decoded, &mut builder)
+            .emit(&self.context, decoded, &mut builder)
             .map_err(|e| RuntimeError::Semantic(format!("{e:?}")))?;
 
         // Seal the block.
@@ -828,51 +882,11 @@ impl<D: Decoder> Runtime<D> {
         // Lower to IR.
         let ir_block = self
             .lowerer
-            .lower_with_decode(&sealed, &validity_key, &decoded)
+            .lower_with_decode(&sealed, &validity_key, decoded)
             .map_err(|e| RuntimeError::Lowering(format!("{e:?}")))?;
 
-        // Cache the block.
         process.block_cache.insert(pc, ir_block.clone());
-
-        // Observers see the lowered block against the pre-execution state.
-        observe(process, &ir_block)?;
-
-        // Execute.
-        let (new_state, outcome) = self
-            .interpreter
-            .execute_block(&process.state, &ir_block, ExecutionMode::Concrete)
-            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-
-        process.state = new_state;
-        process.step_count += 1;
-
-        let length = decoded.length;
-        let form_id = decoded.form_id;
-
-        match outcome {
-            ExecutionOutcome::Continue { next_pc, .. } => {
-                process.write_pc(next_pc)?;
-                if process.trace.len() >= MAX_TRACE {
-                    process.trace.remove(0);
-                }
-                process.trace.push(pc);
-                Ok(StepOutcome::Stepped {
-                    pc,
-                    next_pc,
-                    length,
-                    form_id,
-                })
-            }
-            ExecutionOutcome::Fork { .. } => Err(RuntimeError::ForkInConcreteMode),
-            ExecutionOutcome::Terminated { .. } => {
-                process.terminated = true;
-                Ok(StepOutcome::Terminated { pc })
-            }
-            ExecutionOutcome::Trap { vector, .. } => {
-                process.terminated = true;
-                Ok(StepOutcome::Trap { pc, vector })
-            }
-        }
+        Ok((ir_block, decoded.clone()))
     }
 
     /// Runs execution for up to `max_steps` instructions.
@@ -2213,5 +2227,335 @@ mod tests {
         assert!(!process.terminated);
 
         Ok(())
+    }
+}
+
+/// A symbolic execution state: the concrete [`Process`] (decode source,
+/// concrete fallbacks, environment model) plus the symbolic register
+/// bindings, path constraints, and symbolic byte store that make this the
+/// PROVE-mode engine — control flow is symbolic, branches fork states.
+#[derive(Clone)]
+pub struct SymbolicState {
+    /// The concrete substrate (registers hold concrete views; the symbolic
+    /// bindings in `registers` shadow them).
+    pub process: Process,
+    /// Symbolic register expressions by register id.
+    pub registers: BTreeMap<u32, (ExprId, angryier_ir::IrType)>,
+    /// Path constraints (Bool expressions) accumulated on this path.
+    pub constraints: Vec<ExprId>,
+    /// Symbolic byte memory seeded from the process image.
+    pub memory: angryier_execution::SymbolicSessionMemory,
+    /// Symbols bound during this state's execution.
+    pub symbols: Vec<angryier_execution::SymbolBinding>,
+}
+
+/// What one symbolic step did to a state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymbolicStepOutcome {
+    /// The block fell through or jumped to a single successor.
+    Stepped {
+        /// Next program counter.
+        next_pc: Address,
+    },
+    /// A conditional branch forked the state — the child was pushed.
+    Branched {
+        /// Index of the child state in `SymbolicSession::states`.
+        child: usize,
+    },
+    /// The state terminated (ret with concrete return address, exit, trap).
+    Terminated,
+}
+
+/// Symbolic exploration session — the full-symbolic counterpart of
+/// [`ConcolicSession`]. Each state carries symbolic register expressions and
+/// path constraints; conditional branches fork the state into both
+/// directions (taken gets the constraint, not-taken its negation), and
+/// [`SymbolicSession::merge_at`] can reconverge sibling states via
+/// [`merge_snapshots`]. States that hit unsupported symbolic operations fail
+/// that state only — sibling states keep exploring (per-state isolation).
+pub struct SymbolicSession<'a, D: Decoder> {
+    runtime: &'a Runtime<D>,
+    arena: &'a SymbolicArena,
+    /// Live states awaiting exploration.
+    pub states: Vec<SymbolicState>,
+    /// States that terminated or errored, kept for inspection.
+    pub dead: Vec<SymbolicState>,
+}
+
+impl<'a, D: Decoder> SymbolicSession<'a, D> {
+    /// Opens a session from `process` — its memory seeds every state's
+    /// symbolic byte store; registers start concrete (mark input registers
+    /// via [`SymbolicSession::mark_symbolic`]).
+    pub fn new(runtime: &'a Runtime<D>, arena: &'a SymbolicArena, process: Process) -> Self {
+        let memory = angryier_execution::SymbolicSessionMemory::new(process.state.memory.clone());
+        let state = SymbolicState {
+            process,
+            registers: BTreeMap::new(),
+            constraints: Vec::new(),
+            memory,
+            symbols: Vec::new(),
+        };
+        Self {
+            runtime,
+            arena,
+            states: vec![state],
+            dead: Vec::new(),
+        }
+    }
+
+    /// Marks `register` symbolic with `ty` in state `index` — the input
+    /// binding entry point.
+    pub fn mark_symbolic(&mut self, index: usize, register: u32, ty: angryier_ir::IrType) -> Result<(), RuntimeError> {
+        let state = self
+            .states
+            .get_mut(index)
+            .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
+        let mut evaluator = SymbolicEvaluator::new(self.arena);
+        let expr = evaluator
+            .mark_register(register, ty)
+            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+        state.registers.insert(register, (expr, ty));
+        state.symbols.extend(evaluator.symbols().iter().copied());
+        Ok(())
+    }
+
+    /// Steps state `index` through one instruction: decode → lower → symbolic
+    /// eval. Conditional branches fork the state (taken gets the condition,
+    /// not-taken its negation); unconditional jumps and direct calls follow
+    /// their static target.
+    pub fn step_state(&mut self, index: usize) -> Result<SymbolicStepOutcome, RuntimeError> {
+        let state = self
+            .states
+            .get(index)
+            .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
+        if state.process.terminated {
+            return Ok(SymbolicStepOutcome::Terminated);
+        }
+        let pc = state
+            .process
+            .pc()
+            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+
+        // Decode at pc from the state's concrete memory, bounded to the
+        // containing region so tail instructions don't overrun.
+        let raw = {
+            let available = state
+                .process
+                .state
+                .memory
+                .regions()
+                .iter()
+                .find(|region| pc >= region.base && pc < region.base.saturating_add(region.size))
+                .map_or(MAX_INSN_LEN, |region| {
+                    usize::try_from(region.base.saturating_add(region.size).saturating_sub(pc)).unwrap_or(MAX_INSN_LEN)
+                });
+            let bytes = state
+                .process
+                .state
+                .memory
+                .read(pc, available.min(MAX_INSN_LEN))
+                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+            bytes
+                .iter()
+                .map(|b| match b {
+                    ByteValue::Concrete(v) => *v,
+                    ByteValue::Symbolic(_) => 0,
+                })
+                .collect::<Vec<u8>>()
+        };
+        if raw.is_empty() {
+            return Err(RuntimeError::Decode("no bytes at PC".into()));
+        }
+        let decoded = self
+            .runtime
+            .decoder
+            .decode(pc, &raw)
+            .map_err(|e| RuntimeError::Decode(format!("{e:?}")))?;
+
+        if decoded.form_id == SYSCALL_FORM_ID || decoded.form_id == CPUID_FORM_ID {
+            // Environment interactions run concretely — but the syscall
+            // number/args may be symbolic in this state. Concretize them:
+            // constant symbolic bindings are materialized into the concrete
+            // register file before dispatch (non-constant symbolic args are
+            // EXPLORE-level: the concrete value stands and the state records
+            // the concretization debt upstream).
+            let state = &mut self.states[index];
+            for reg in [
+                register_id::GPR_BASE,      // rax — syscall number
+                register_id::GPR_BASE + 7,  // rdi
+                register_id::GPR_BASE + 6,  // rsi
+                register_id::GPR_BASE + 2,  // rdx
+                register_id::GPR_BASE + 10, // r10
+                register_id::GPR_BASE + 8,  // r8
+                register_id::GPR_BASE + 9,  // r9
+            ] {
+                if let Some((expr, _)) = state.registers.get(&reg)
+                    && let Some(node) = self.arena.get(*expr)
+                    && node.op == angryier_expr::ExprOp::Constant
+                    && node.immediate.len() >= 8
+                {
+                    let value = u64::from_le_bytes(node.immediate[..8].try_into().unwrap_or([0; 8]));
+                    let _ = state.process.write_register(reg, value);
+                }
+            }
+            let outcome = self.runtime.step(&mut state.process)?;
+            return Ok(match outcome {
+                StepOutcome::Terminated { .. } => SymbolicStepOutcome::Terminated,
+                _ => SymbolicStepOutcome::Stepped {
+                    next_pc: state.process.pc().unwrap_or(0),
+                },
+            });
+        }
+
+        let state = &mut self.states[index];
+        let (ir_block, _decoded) = self.runtime.lower_at(&mut state.process, pc, &decoded)?;
+
+        let mut evaluator = SymbolicEvaluator::new(self.arena);
+        evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
+            registers: state.registers.clone(),
+            constraints: state.constraints.clone(),
+            symbols: state.symbols.clone(),
+        });
+        let summary = evaluator
+            .eval_block_with_memory(&ir_block, &mut state.memory)
+            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+        state.registers = evaluator.snapshot().registers;
+        state.symbols = evaluator.symbols().to_vec();
+
+        if let Some(branch) = summary.branch {
+            // Fork: this state takes `taken` under `condition`; the child
+            // takes `not_taken` under its negation.
+            let condition = angryier_execution::bit_to_bool(self.arena, branch.condition)
+                .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+            let not_cond = self
+                .arena
+                .intern(angryier_expr::ExprNode {
+                    sort: angryier_expr::ExprSort::Bool,
+                    op: angryier_expr::ExprOp::Not,
+                    operands: vec![condition],
+                    immediate: Vec::new(),
+                })
+                .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+
+            let state = &mut self.states[index];
+            state.constraints.push(condition);
+            let _ = state.process.write_pc(branch.taken);
+
+            let mut child = state.clone();
+            child.constraints.pop();
+            child.constraints.push(not_cond);
+            let _ = child.process.write_pc(branch.not_taken);
+            let child_index = self.states.len();
+            self.states.push(child);
+            return Ok(SymbolicStepOutcome::Branched { child: child_index });
+        }
+
+        // Unconditional / call / fall-through — the block's terminator op
+        // carries the successor.
+        let state = &mut self.states[index];
+        let terminator = ir_block.instructions.last().map(|insn| &insn.op);
+        match terminator {
+            Some(angryier_ir::IrOp::Jump { target }) | Some(angryier_ir::IrOp::Call { target }) => {
+                let _ = state.process.write_pc(*target);
+                Ok(SymbolicStepOutcome::Stepped { next_pc: *target })
+            }
+            Some(angryier_ir::IrOp::JumpIndirect { .. }) | Some(angryier_ir::IrOp::Return) => {
+                // ret/indirect — read the return address off the state's
+                // symbolic stack (rsp points at the pushed return target).
+                let rsp = state
+                    .registers
+                    .get(&(register_id::GPR_BASE + 4))
+                    .and_then(|(expr, _)| {
+                        self.arena
+                            .get(*expr)
+                            .filter(|n| n.op == angryier_expr::ExprOp::Constant)
+                            .and_then(|n| {
+                                n.immediate
+                                    .get(..8)
+                                    .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                            })
+                    })
+                    .or_else(|| state.process.read_register(register_id::GPR_BASE + 4).ok());
+                if let Some(rsp) = rsp
+                    && let Ok(ret_expr) = state.memory.read(self.arena, rsp, 64)
+                    && let Some(node) = self.arena.get(ret_expr)
+                    && node.op == angryier_expr::ExprOp::Constant
+                    && let Some(b) = node.immediate.get(..8)
+                {
+                    let target = u64::from_le_bytes(b.try_into().unwrap_or([0; 8]));
+                    let _ = state.process.write_pc(target);
+                    return Ok(SymbolicStepOutcome::Stepped { next_pc: target });
+                }
+                Ok(SymbolicStepOutcome::Terminated)
+            }
+            Some(angryier_ir::IrOp::Trap { .. }) => Ok(SymbolicStepOutcome::Terminated),
+            _ => {
+                let next_pc = pc.wrapping_add(u64::from(decoded.length));
+                let _ = state.process.write_pc(next_pc);
+                Ok(SymbolicStepOutcome::Stepped { next_pc })
+            }
+        }
+    }
+
+    /// Merges every group of live states sharing the same pc via
+    /// [`merge_snapshots`] — the Veritesting reconvergence primitive.
+    /// Divergent registers become `Ite(left_guard, l, r)` under each state's
+    /// accumulated constraints; states that fail the merge (type mismatch)
+    /// stay separate. The merge parent is the empty snapshot, so registers
+    /// touched on only one side keep that side's binding (documented
+    /// EXPLORE-level approximation for absent parents).
+    pub fn merge_at(&mut self) -> Result<u64, RuntimeError> {
+        let mut by_pc: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        for (index, state) in self.states.iter().enumerate() {
+            if let Ok(pc) = state.process.pc() {
+                by_pc.entry(pc).or_default().push(index);
+            }
+        }
+        let mut merged = 0u64;
+        // Merge groups largest-first so indices stay valid when draining.
+        for (_pc, mut indices) in by_pc {
+            while indices.len() > 1 {
+                let b = indices.pop().unwrap_or(0);
+                let a = indices.pop().unwrap_or(0);
+                // Keep `a` as the lower index; drain `b` first (larger index
+                // order) to preserve `a`'s position.
+                let (a, b) = if a < b { (a, b) } else { (b, a) };
+                let right = self.states.remove(b);
+                let left = self.states.remove(a);
+                let empty_parent = angryier_execution::SymbolicStateSnapshot::default();
+                let snapshot = angryier_execution::merge_snapshots(
+                    self.arena,
+                    &empty_parent,
+                    &angryier_execution::SymbolicStateSnapshot {
+                        registers: left.registers.clone(),
+                        constraints: left.constraints.clone(),
+                        symbols: left.symbols.clone(),
+                    },
+                    &angryier_execution::SymbolicStateSnapshot {
+                        registers: right.registers.clone(),
+                        constraints: right.constraints.clone(),
+                        symbols: right.symbols.clone(),
+                    },
+                )
+                .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                let merged_state = SymbolicState {
+                    process: left.process,
+                    registers: snapshot.registers,
+                    constraints: snapshot.constraints,
+                    memory: left.memory,
+                    symbols: snapshot.symbols,
+                };
+                self.states.insert(a, merged_state);
+                merged += 1;
+                // Re-collect indices at this pc — `remove` shifted them.
+                indices = self
+                    .states
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, s)| s.process.pc().ok().filter(|p| *p == _pc).map(|_| i))
+                    .collect();
+            }
+        }
+        Ok(merged)
     }
 }

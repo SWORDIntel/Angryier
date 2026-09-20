@@ -101,6 +101,28 @@ impl<'a> SymbolicEvaluator<'a> {
         &self.symbols
     }
 
+    /// Seeds `register` as a fresh input symbol of `ty`.
+    pub fn mark_register(&mut self, register: u32, ty: IrType) -> Result<ExprId, SymbolicEvalError> {
+        let width = bit_width(ty)?;
+        let symbol_id = self.next_symbol;
+        self.next_symbol = symbol_id
+            .checked_add(1)
+            .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("symbol id overflow".into()))?;
+        let expression = self.intern(
+            ExprSort::BitVec(width),
+            ExprOp::Symbol,
+            Vec::new(),
+            symbol_id.to_le_bytes().to_vec(),
+        )?;
+        self.registers.insert(register, (expression, ty));
+        self.symbols.push(SymbolBinding {
+            register,
+            width,
+            expression,
+        });
+        Ok(expression)
+    }
+
     /// Current symbolic value of a register, if it has been read or written.
     pub fn register_value(&self, register: u32) -> Option<ExprId> {
         self.registers.get(&register).map(|(expression, _)| *expression)
@@ -115,8 +137,30 @@ impl<'a> SymbolicEvaluator<'a> {
         }
     }
 
+    /// Seeds the register file from a snapshot (the restore half of
+    /// [`SymbolicEvaluator::snapshot`]) — used by the symbolic session to
+    /// run a state across blocks.
+    pub fn restore(&mut self, snapshot: &SymbolicStateSnapshot) {
+        self.registers = snapshot.registers.clone();
+        self.symbols = snapshot.symbols.clone();
+    }
+
     /// Symbolically evaluates one block.
     pub fn eval_block(&mut self, block: &IrBlock) -> Result<SymbolicBlockSummary, SymbolicEvalError> {
+        let mut memory = SymbolicSessionMemory::new(
+            angryier_memory::PersistentMemory::new(Vec::new())
+                .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory init: {e:?}")))?,
+        );
+        self.eval_block_with_memory(block, &mut memory)
+    }
+
+    /// Symbolically evaluates one block, routing Load/Store through
+    /// `memory` — the per-state symbolic byte map.
+    pub fn eval_block_with_memory(
+        &mut self,
+        block: &IrBlock,
+        memory: &mut SymbolicSessionMemory,
+    ) -> Result<SymbolicBlockSummary, SymbolicEvalError> {
         let mut values: Vec<Option<(ExprId, IrType)>> = Vec::new();
         let mut written_registers = Vec::new();
         let mut branch = None;
@@ -185,8 +229,20 @@ impl<'a> SymbolicEvaluator<'a> {
                     terminated = true;
                     None
                 }
-                IrOp::Load { .. } | IrOp::Store { .. } => {
-                    return Err(SymbolicEvalError::UnsupportedOperation("memory access".into()));
+                IrOp::Load { address, ty } => {
+                    let (addr_expr, _) = get_value(&values, *address)?;
+                    let addr = constant_value(self.arena, addr_expr)
+                        .map_err(|_| SymbolicEvalError::UnsupportedOperation("symbolic memory address".into()))?;
+                    let width = bit_width(*ty)?;
+                    Some((memory.read(self.arena, addr, width)?, *ty))
+                }
+                IrOp::Store { address, value } => {
+                    let (addr_expr, _) = get_value(&values, *address)?;
+                    let addr = constant_value(self.arena, addr_expr)
+                        .map_err(|_| SymbolicEvalError::UnsupportedOperation("symbolic memory address".into()))?;
+                    let (expr, ty) = get_value(&values, *value)?;
+                    memory.write(self.arena, addr, expr, bit_width(ty)?)?;
+                    None
                 }
             };
 
@@ -273,18 +329,22 @@ fn intern(
     operands: Vec<ExprId>,
     immediate: Vec<u8>,
 ) -> Result<ExprId, SymbolicEvalError> {
+    let node = ExprNode {
+        sort,
+        op,
+        operands,
+        immediate,
+    };
+    let dbg = format!("{node:?}");
     arena
-        .intern(ExprNode {
-            sort,
-            op,
-            operands,
-            immediate,
-        })
-        .map_err(|error| SymbolicEvalError::Expression(format!("{error:?}")))
+        .intern(node)
+        .map_err(|error| SymbolicEvalError::Expression(format!("{error:?} from {dbg}")))
 }
 
 /// Converts a 1-bit bitvector expression into a boolean expression.
-fn bit_to_bool(arena: &SymbolicArena, expression: ExprId) -> Result<ExprId, SymbolicEvalError> {
+/// Converts a Bits(1) branch condition into a Bool expression — Bool when
+/// already sorted, otherwise `ite(bit, true, false)` as a Bool node.
+pub fn bit_to_bool(arena: &SymbolicArena, expression: ExprId) -> Result<ExprId, SymbolicEvalError> {
     let node = arena.get(expression).ok_or(SymbolicEvalError::Expression(format!(
         "unknown expression {}",
         expression.0
@@ -1190,6 +1250,98 @@ fn splice_concrete(parent: u128, parent_width: u16, value: u128, bit_offset: u16
     let high_mask = mask_u128(parent_width - bit_offset - source_width);
     let high = (parent >> (bit_offset + source_width)) & high_mask;
     (high << (bit_offset + source_width)) | ((value & mask_u128(source_width)) << bit_offset) | (parent & low_mask)
+}
+
+/// Byte-addressable symbolic memory over [`PersistentMemory`]: concrete
+/// bytes come from the process image, and `ByteValue::Symbolic(ExprId)`
+/// bindings are stored per byte. Reads concatenate byte expressions
+/// little-endian; writes split the expression into bytes. Symbolic
+/// *addresses* are not dereferenceable here — the caller applies its
+/// concretization policy upstream.
+/// Session-level symbolic byte store over [`PersistentMemory`].
+#[derive(Clone, Debug)]
+pub struct SymbolicSessionMemory {
+    /// The persistent byte store (may itself hold symbolic bytes).
+    pub memory: angryier_memory::SymbolicMemory,
+}
+
+impl SymbolicSessionMemory {
+    /// Wraps a persistent memory snapshot as the session's byte store.
+    pub fn new(memory: angryier_memory::PersistentMemory) -> Self {
+        Self {
+            memory: angryier_memory::SymbolicMemory::new(memory),
+        }
+    }
+
+    /// Reads `width`-many bytes at `address`, concatenating byte values
+    /// little-endian. Concrete bytes become constant expressions.
+    pub fn read(&self, arena: &SymbolicArena, address: u64, width: u16) -> Result<ExprId, SymbolicEvalError> {
+        let byte_count = usize::from(width).div_ceil(8);
+        let bytes = self
+            .memory
+            .read_at_address(address, byte_count)
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory read: {e:?}")))?;
+        let mut parts = Vec::with_capacity(byte_count);
+        for byte in bytes {
+            let expr = match byte {
+                angryier_memory::ByteValue::Concrete(value) => {
+                    intern(arena, ExprSort::BitVec(8), ExprOp::Constant, Vec::new(), vec![value])?
+                }
+                angryier_memory::ByteValue::Symbolic(expr) => expr,
+            };
+            parts.push(expr);
+        }
+        let mut acc = parts[byte_count - 1];
+        let mut acc_bits = 8u16;
+        for i in (0..byte_count - 1).rev() {
+            acc = intern(
+                arena,
+                ExprSort::BitVec(acc_bits + 8),
+                ExprOp::Concat,
+                vec![acc, parts[i]],
+                Vec::new(),
+            )?;
+            acc_bits += 8;
+        }
+        if acc_bits != width {
+            let mut imm = Vec::with_capacity(4);
+            imm.extend_from_slice(&0u16.to_le_bytes());
+            imm.extend_from_slice(&width.to_le_bytes());
+            acc = intern(arena, ExprSort::BitVec(width), ExprOp::Extract, vec![acc], imm)?;
+        }
+        Ok(acc)
+    }
+
+    /// Writes the low `width` bits of `expression` at `address`, split
+    /// little-endian into symbolic bytes.
+    pub fn write(
+        &mut self,
+        arena: &SymbolicArena,
+        address: u64,
+        expression: ExprId,
+        width: u16,
+    ) -> Result<(), SymbolicEvalError> {
+        let byte_count = usize::from(width).div_ceil(8);
+        let mut bytes = Vec::with_capacity(byte_count);
+        for i in 0..byte_count {
+            let byte = if byte_count == 1 && width == 8 {
+                expression
+            } else {
+                // Extract immediate = [start:u16][width:u16].
+                let start = (i * 8) as u16;
+                let mut imm = Vec::with_capacity(4);
+                imm.extend_from_slice(&start.to_le_bytes());
+                imm.extend_from_slice(&8u16.to_le_bytes());
+                intern(arena, ExprSort::BitVec(8), ExprOp::Extract, vec![expression], imm)?
+            };
+            bytes.push(angryier_memory::ByteValue::Symbolic(byte));
+        }
+        self.memory = self
+            .memory
+            .write_at_address(address, &bytes)
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory write: {e:?}")))?;
+        Ok(())
+    }
 }
 
 /// A mergeable snapshot of a symbolic state: the register bindings plus the
