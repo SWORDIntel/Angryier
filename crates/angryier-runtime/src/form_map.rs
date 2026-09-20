@@ -1123,28 +1123,3 @@ mod tests {
         assert_ne!(crate::SYSCALL_FORM_ID, UNMAPPED_FORM_ID);
     }
 }
-
-#[cfg(test)]
-mod dbg_callmem {
-    use angryier_arch::{Decoder, OperandKind};
-    use angryier_arch_xed_ffi::XedDecoder;
-
-    #[test]
-    fn dump() {
-        let decoder = XedDecoder::new();
-        for (name, bytes) in [
-            ("call *(rbx)", vec![0xffu8, 0x13]),
-            ("call rel32", vec![0xe8u8, 0, 0, 0, 0]),
-            ("jmp *(rbx)", vec![0xffu8, 0x23]),
-        ] {
-            let d = decoder.decode(0x401410, &bytes).expect("decode");
-            eprintln!("{name} iclass={:#x}", d.form_id);
-            for (i, op) in d.operands.iter().enumerate() {
-                eprintln!(
-                    "  op{i} vis={:?} access={:?} kind={:?}",
-                    op.visibility, op.access, op.kind
-                );
-            }
-        }
-    }
-}

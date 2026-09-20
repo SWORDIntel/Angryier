@@ -5,7 +5,8 @@ mod symbolic;
 
 pub use interpreter::{ConcreteExecutionError, ConcreteInterpreter};
 pub use symbolic::{
-    SymbolBinding, SymbolicArena, SymbolicBlockSummary, SymbolicBranch, SymbolicEvalError, SymbolicEvaluator,
+    ConcolicBinding, ConcolicEvaluator, ConcolicImage, ConcolicSource, PathConstraint, SymbolBinding, SymbolicArena,
+    SymbolicBlockSummary, SymbolicBranch, SymbolicEvalError, SymbolicEvaluator,
 };
 
 use angryier_ir::IrBlock;

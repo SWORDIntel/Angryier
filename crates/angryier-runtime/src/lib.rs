@@ -23,8 +23,8 @@ use angryier_arch::DecodedInstruction;
 use angryier_arch::Decoder;
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 use angryier_execution::{
-    ConcreteInterpreter, ExecutionEngine, ExecutionMode, ExecutionOutcome, SymbolBinding, SymbolicArena,
-    SymbolicBranch, SymbolicEvaluator,
+    ConcolicEvaluator, ConcolicImage, ConcolicSource, ConcreteInterpreter, ExecutionEngine,
+    ExecutionMode, ExecutionOutcome, PathConstraint, SymbolBinding, SymbolicArena, SymbolicBranch, SymbolicEvaluator,
 };
 use angryier_expr::{ExprNode, ExprOp, ExprSort};
 use angryier_ir::{BasicSemanticLowerer, IrBlock};
@@ -39,13 +39,14 @@ use angryier_semantics::{
     VectorRepresentation,
 };
 use angryier_semantics_intel64::Intel64CorpusRegistry;
-use angryier_solver::{SolverBackend, SolverOutcomeKind, SolverQuery};
+use angryier_solver::{CanonicalConstraint, SolverBackend, SolverOutcomeKind, SolverQuery};
 use angryier_state::{
     ExecutionState, FidelityLedger, PersistentConstraintLineage, PersistentRegisters, RegisterState, StateOwnership,
 };
 use angryier_types::{
-    Address, BlockId, ConstraintCanonicalizationVersion, ContentIdentitySchemaVersion, ExprId, FidelityProfile,
-    ImageId, SemanticFingerprintSchemaVersion, SemanticVersion, SolverQueryId, StateId, TargetProfileId,
+    Address, AnalysisDebtKind, BlockId, ConstraintCanonicalizationVersion, ConstraintId, ContentIdentitySchemaVersion,
+    ExprId, FidelityProfile, ImageId, SemanticFingerprintSchemaVersion, SemanticVersion, SolverQueryId, StateId,
+    TargetProfileId,
 };
 
 #[cfg(feature = "xed")]
@@ -648,6 +649,18 @@ impl<D: Decoder> Runtime<D> {
 
     /// Executes a single instruction at the current PC.
     pub fn step(&self, process: &mut Process) -> Result<StepOutcome, RuntimeError> {
+        self.step_with(process, |_, _| Ok(()))
+    }
+
+    /// Executes a single instruction, invoking `observe` with the pre-execution
+    /// process state and the freshly lowered block just before interpretation.
+    /// The concolic path uses this hook to shadow each block with the same
+    /// lowered semantics the concrete interpreter then runs.
+    pub fn step_with(
+        &self,
+        process: &mut Process,
+        mut observe: impl FnMut(&Process, &IrBlock) -> Result<(), RuntimeError>,
+    ) -> Result<StepOutcome, RuntimeError> {
         if process.terminated {
             return Ok(StepOutcome::Terminated { pc: process.pc()? });
         }
@@ -765,6 +778,9 @@ impl<D: Decoder> Runtime<D> {
         // Cache the block.
         process.block_cache.insert(pc, ir_block.clone());
 
+        // Observers see the lowered block against the pre-execution state.
+        observe(process, &ir_block)?;
+
         // Execute.
         let (new_state, outcome) = self
             .interpreter
@@ -817,6 +833,51 @@ impl<D: Decoder> Runtime<D> {
             simproc_dispatches: process.simproc_dispatches,
             terminated: process.terminated,
         })
+    }
+
+    /// Opens a concolic session over `process`: the concrete interpreter
+    /// drives control flow while a symbolic shadow tracks input-derived
+    /// expressions — the EXPLORE-mode fast path sharing the same decode,
+    /// lowering, and AngryIR semantics as PROVE mode.
+    pub fn concolic<'a>(&'a self, process: Process, arena: &'a SymbolicArena) -> ConcolicSession<'a, D> {
+        self.concolic_with_profile(process, arena, FidelityProfile::Explore)
+    }
+
+    /// Opens a concolic session under an explicit fidelity profile.
+    ///
+    /// - **EXPLORE**: concolic fast path; shadow debt is recorded and reported
+    ///   through [`ConcolicSession::requires_prove`].
+    /// - **HUNT**: concolic fast path with maximum pruning tolerance — debt
+    ///   accumulates without tripping `requires_prove` (explicitly unsound by
+    ///   design); pair with the Fuzzy-SAT tier for cheap inversions.
+    /// - **PROVE** is not a concolic profile: `concolic_with_profile` maps it
+    ///   to EXPLORE bookkeeping so a misrouted state still records debt; use
+    ///   [`Runtime::solve_branch`] for the sound path.
+    pub fn concolic_with_profile<'a>(
+        &'a self,
+        mut process: Process,
+        arena: &'a SymbolicArena,
+        profile: FidelityProfile,
+    ) -> ConcolicSession<'a, D> {
+        let profile = if profile == FidelityProfile::Prove {
+            FidelityProfile::Explore
+        } else {
+            profile
+        };
+        process.state.fidelity = FidelityLedger::new(profile);
+        ConcolicSession {
+            process,
+            runtime: self,
+            evaluator: ConcolicEvaluator::new(arena),
+            arena,
+            path: Vec::new(),
+            hunt: profile == FidelityProfile::Hunt,
+            last_branch: SymbolicBranch {
+                condition: ExprId(0),
+                taken: 0,
+                not_taken: 0,
+            },
+        }
     }
 
     /// Symbolically evaluates the executed trace and asks the solver for an
@@ -1316,6 +1377,257 @@ fn read_concrete_bytes(process: &Process, address: Address, len: u64) -> Result<
         }
     }
     Ok(out)
+}
+
+/// Concrete-state view of a [`Process`] for the concolic shadow: registers
+/// read their live values; memory reads expose concrete/symbolic bytes.
+impl ConcolicImage for Process {
+    fn read_register(&self, register: u32) -> Option<Vec<u8>> {
+        self.state.registers.read(register).ok()
+    }
+
+    fn read_bytes(&self, address: u64, length: usize) -> Option<Vec<ByteValue>> {
+        self.state.memory.read(address, length).ok()
+    }
+}
+
+/// The result of solving a concolic path constraint: a concrete value for each
+/// input symbol, keyed by its architectural source.
+#[derive(Clone, Debug)]
+pub struct ConcolicSolution {
+    /// Whether the solver found a satisfying model.
+    pub outcome: SolverOutcomeKind,
+    /// Concrete value for each binding (register symbols get full-width
+    /// values; memory symbols get one byte).
+    pub assignments: Vec<ConcolicAssignment>,
+    /// The branch that was inverted.
+    pub branch: SymbolicBranch,
+    /// Wall time inside the solver.
+    pub solver_elapsed: Duration,
+}
+
+/// A solver-assigned value for one input symbol.
+#[derive(Clone, Debug)]
+pub struct ConcolicAssignment {
+    pub source: ConcolicSource,
+    /// Concrete bytes for the source (8 bytes for registers, 1 for memory).
+    pub value: u64,
+}
+
+impl ConcolicSolution {
+    pub fn is_sat(&self) -> bool {
+        self.outcome == SolverOutcomeKind::Sat
+    }
+}
+
+/// Concolic execution session: the concrete interpreter drives control flow
+/// while [`ConcolicEvaluator`] shadows the same lowered blocks, keeping
+/// expressions bounded to input-derived data. Branch conditions are recorded
+/// as path constraints; inverting one yields a new concrete input through the
+/// solver portfolio. This is the EXPLORE-mode engine — same AngryIR
+/// semantics, same decode and lowering as PROVE, bounded expression cost.
+pub struct ConcolicSession<'a, D: Decoder> {
+    /// The process under concolic execution.
+    pub process: Process,
+    runtime: &'a Runtime<D>,
+    evaluator: ConcolicEvaluator<'a>,
+    arena: &'a SymbolicArena,
+    path: Vec<PathConstraint>,
+    /// HUNT mode tolerates unlimited shadow debt before signaling PROVE.
+    hunt: bool,
+    last_branch: SymbolicBranch,
+}
+
+impl<'a, D: Decoder> ConcolicSession<'a, D> {
+    /// Marks `register` as an input symbol.
+    pub fn mark_input_register(&mut self, register: u32, ty: angryier_ir::IrType) -> Result<(), RuntimeError> {
+        self.evaluator
+            .mark_register(register, ty)
+            .map_err(|e| RuntimeError::Symbolic(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Marks `length` bytes at `address` as input symbols.
+    pub fn mark_input_memory(&mut self, address: u64, length: usize) -> Result<(), RuntimeError> {
+        self.evaluator
+            .mark_memory(address, length)
+            .map_err(|e| RuntimeError::Symbolic(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Path constraints recorded so far, in execution order.
+    pub fn path_constraints(&self) -> &[PathConstraint] {
+        &self.path
+    }
+
+    /// Registers currently carrying non-constant shadow expressions — the
+    /// input-derived set, for diagnostics.
+    pub fn symbolic_registers(&self) -> Vec<(u32, ExprId)> {
+        self.evaluator.symbolic_registers()
+    }
+
+    /// True when the shadow accumulated analysis debt beyond the profile's
+    /// tolerance — the mode-switching signal for the driver to hand this
+    /// state to the PROVE-mode engine. HUNT tolerates unlimited debt (it is
+    /// unsound by design and never asks for PROVE).
+    pub fn requires_prove(&self) -> bool {
+        !self.hunt && !self.process.state.fidelity.is_exact()
+    }
+
+    /// Executes one instruction concretely and shadows the lowered block.
+    /// Branch conditions are recorded as path constraints. A block the shadow
+    /// cannot evaluate (symbolic addresses, unsupported ops) records analysis
+    /// debt on the fidelity ledger and the step proceeds concretely — the
+    /// EXPLORE contract is explicitly unsound; [`Self::requires_prove`]
+    /// reports when the accumulated debt warrants a PROVE-mode handoff.
+    pub fn step(&mut self) -> Result<StepOutcome, RuntimeError> {
+        let mut branch = None;
+        let mut debt = false;
+        let outcome = self.runtime.step_with(&mut self.process, |process, block| {
+            match self.evaluator.eval_block(process, block) {
+                Ok(summary) => branch = summary.branch,
+                Err(e) => {
+                    debt = true;
+                    if std::env::var_os("ANGRYIER_DEBUG_CONCOLIC").is_some() {
+                        eprintln!("concolic eval debt at {:#x}: {e}", process.pc().unwrap_or(0));
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        if debt {
+            let pc = self.process.pc().unwrap_or(0);
+            self.process.state.fidelity = self.process.state.fidelity.record(AnalysisDebtKind::Unsupported, pc);
+        }
+        if let (Some(branch), Some(next_pc)) = (branch, stepped_next_pc(&outcome)) {
+            self.last_branch = branch;
+            self.path.push(PathConstraint {
+                condition: branch.condition,
+                taken: next_pc == branch.taken,
+            });
+        }
+        Ok(outcome)
+    }
+
+    /// Runs until termination or `max_steps`.
+    pub fn run(&mut self, max_steps: u64) -> Result<RunSummary, RuntimeError> {
+        while !self.process.terminated && self.process.step_count < max_steps {
+            self.step()?;
+        }
+        if !self.process.terminated && self.process.step_count >= max_steps {
+            return Err(RuntimeError::StepLimitExceeded);
+        }
+        Ok(RunSummary {
+            steps: self.process.step_count,
+            final_pc: self.process.pc()?,
+            simproc_dispatches: self.process.simproc_dispatches,
+            terminated: self.process.terminated,
+        })
+    }
+
+    /// Inverts the last recorded path constraint and asks `backend` for an
+    /// input that steers the branch the other way. Prior constraints are
+    /// conjoined so the model stays on the recorded path.
+    pub fn solve_last_branch(
+        &self,
+        backend: &mut dyn SolverBackend,
+        timeout: Duration,
+    ) -> Result<ConcolicSolution, RuntimeError> {
+        let (last, prefix) = self.path.split_last().ok_or(RuntimeError::NoBranchInTrace)?;
+        let predicate = self.direction_predicate(last.condition, !last.taken)?;
+        let mut constraints = Vec::with_capacity(prefix.len());
+        for (index, entry) in prefix.iter().enumerate() {
+            let expr = self.direction_predicate(entry.condition, entry.taken)?;
+            let key = self
+                .arena
+                .dependency_summary(expr)
+                .map(|summary| summary.key)
+                .ok_or_else(|| RuntimeError::Symbolic("missing constraint dependency summary".into()))?;
+            constraints.push(CanonicalConstraint {
+                id: ConstraintId(index as u64),
+                key,
+                expr,
+            });
+        }
+        let predicate_key = self
+            .arena
+            .dependency_summary(predicate)
+            .map(|summary| summary.key)
+            .ok_or_else(|| RuntimeError::Symbolic("missing predicate dependency summary".into()))?;
+
+        let query = SolverQuery::canonical(
+            SolverQueryId(self.process.step_count),
+            &constraints,
+            predicate,
+            predicate_key,
+            self.process.target_profile,
+            ConstraintCanonicalizationVersion(1),
+            timeout,
+        )
+        .map_err(|e| RuntimeError::Solver(format!("{e:?}")))?;
+
+        let result = backend.solve(&query);
+
+        let mut assignments = Vec::new();
+        for (key, bytes) in &result.model {
+            let Ok(key) = u32::try_from(*key) else {
+                continue;
+            };
+            let expression = ExprId(key);
+            let Some(binding) = self
+                .evaluator
+                .bindings()
+                .iter()
+                .find(|binding| binding.expression == expression)
+            else {
+                continue;
+            };
+            let mut buffer = [0u8; 8];
+            let len = bytes.len().min(8);
+            buffer[..len].copy_from_slice(&bytes[..len]);
+            assignments.push(ConcolicAssignment {
+                source: binding.source,
+                value: u64::from_le_bytes(buffer),
+            });
+        }
+
+        Ok(ConcolicSolution {
+            outcome: result.outcome,
+            assignments,
+            branch: self.last_branch,
+            solver_elapsed: result.elapsed,
+        })
+    }
+
+    /// `condition == 1` when `taken`, `== 0` otherwise — the boolean form the
+    /// solver consumes.
+    fn direction_predicate(&self, condition: ExprId, taken: bool) -> Result<ExprId, RuntimeError> {
+        let bit = self
+            .arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(1),
+                op: ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: vec![u8::from(taken)],
+            })
+            .map_err(|e| RuntimeError::Symbolic(format!("{e:?}")))?;
+        self.arena
+            .intern(ExprNode {
+                sort: ExprSort::Bool,
+                op: ExprOp::Eq,
+                operands: vec![condition, bit],
+                immediate: Vec::new(),
+            })
+            .map_err(|e| RuntimeError::Symbolic(format!("{e:?}")))
+    }
+}
+
+/// The next PC a stepped outcome jumped to, when it continued.
+fn stepped_next_pc(outcome: &StepOutcome) -> Option<u64> {
+    match outcome {
+        StepOutcome::Stepped { next_pc, .. } => Some(*next_pc),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

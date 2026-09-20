@@ -29,5 +29,8 @@ xed = ["dep:angryier-arch-xed-ffi"]
 # Native Z3 solver backend (links the system libz3) for branch solving.
 z3 = ["dep:angryier-solver-z3", "angryier-solver-z3/ffi"]
 
+[dev-dependencies]
+angryier-solver-fuzzy = { path = "../angryier-solver-fuzzy" }
+
 [lints]
 workspace = true

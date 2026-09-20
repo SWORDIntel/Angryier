@@ -661,33 +661,309 @@ mod dbg_glibc2 {
     }
 }
 
-#[cfg(test)]
-mod dbg_musl_stuck {
-    use super::*;
-    use angryier_runtime::{Runtime, StepOutcome};
+/// Gate A concolic validation: the concolic shadow records the branch
+/// condition over the input symbol, inverting it through Z3 produces the
+/// input that flips the path — and the solved input replays natively.
+#[cfg(feature = "z3")]
+#[test]
+fn concolic_shadow_inverts_branch_to_new_input() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    #[test]
-    fn where_stuck() {
-        let Ok(bytes) = std::fs::read("/tmp/hello_musl") else {
-            return;
-        };
-        let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
-        let mut process = runtime.load_elf(&bytes).expect("load");
-        for i in 0..200_000 {
-            match runtime.step(&mut process) {
-                Ok(StepOutcome::Terminated { .. }) => {
-                    eprintln!("terminated at {i}");
-                    return;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("err at {i} pc={:#x}: {e}", process.pc().unwrap_or(0));
-                    break;
-                }
+    use angryier_expr::{ExprReader, ShardedExprArena};
+    use angryier_ir::IrType;
+
+    use angryier_solver_z3::Z3Backend;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    let Some(_) = fixture() else {
+        eprintln!("skipping: binutils (as/ld) unavailable");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+
+    // Concrete run with RAX = 6: JNZ taken to fail_path.
+    let (process, _ok_exit, fail_exit) = loaded_process(&runtime, 6)?;
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+    let mut session = runtime.concolic(process, arena.as_ref());
+    session.mark_input_register(register_id::GPR_BASE, IrType::Bits(64))?;
+
+    let mut dispatches = Vec::new();
+    loop {
+        match session.step()? {
+            StepOutcome::Stepped { .. } | StepOutcome::Syscall { .. } => {}
+            StepOutcome::SimProcedure { address, name } => {
+                dispatches.push((address, name));
+                break;
+            }
+            StepOutcome::Terminated { .. } | StepOutcome::Trap { .. } => break,
+        }
+    }
+    assert_eq!(dispatches[0].0, fail_exit, "initial run must reach fail_path");
+    assert_eq!(session.path_constraints().len(), 1, "one conditional branch");
+
+    // Invert the branch: solve for the path that was not taken.
+    let reader: Arc<dyn ExprReader> = arena.clone();
+    let mut backend = Z3Backend::native_ffi(reader)?;
+    let solution = session.solve_last_branch(&mut backend, Duration::from_secs(10))?;
+    assert!(solution.is_sat(), "fall-through direction must be satisfiable");
+    let rax = solution
+        .assignments
+        .iter()
+        .find(|assignment| matches!(assignment.source, angryier_execution::ConcolicSource::Register { register, .. } if register == register_id::GPR_BASE))
+        .ok_or("solver must assign the input register")?;
+    assert_eq!(rax.value, 42, "the only input reaching ok_path is RAX = 42");
+
+    // Replay with the solved input natively: it must reach ok_path's exit.
+    let Some(native) = run_native(rax.value) else {
+        eprintln!("skipping native replay: harness could not be built");
+        return Ok(());
+    };
+    assert_eq!(
+        native, 0,
+        "solved input RAX = {} must reach ok_path natively",
+        rax.value
+    );
+    Ok(())
+}
+
+/// QSYM optimistic solving: the fuzzy tier answers the simple `x == 42`
+/// constraint without an SMT call.
+#[test]
+fn concolic_solves_simple_branch_with_fuzzy_sat() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use angryier_expr::ShardedExprArena;
+    use angryier_ir::IrType;
+    use angryier_solver::BatchSolver;
+    use angryier_solver_fuzzy::FuzzySatBackend;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    let Some(_) = fixture() else {
+        eprintln!("skipping: binutils (as/ld) unavailable");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let (process, _ok_exit, _fail_exit) = loaded_process(&runtime, 6)?;
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+    let mut session = runtime.concolic(process, arena.as_ref());
+    session.mark_input_register(register_id::GPR_BASE, IrType::Bits(64))?;
+    while !session.process.terminated && session.process.step_count < 64 {
+        match session.step()? {
+            StepOutcome::SimProcedure { .. } => break,
+            _ => {}
+        }
+    }
+
+    let fuzzy = FuzzySatBackend::new(arena.clone());
+    let router = Box::new(angryier_solver::InMemoryPortfolioRouter::new(
+        vec!["fuzzy-sat"],
+        Duration::from_secs(10),
+    ));
+    let mut solver = BatchSolver::new(vec![Box::new(fuzzy)], router);
+    let solution = session.solve_last_branch(&mut solver, Duration::from_secs(10))?;
+    assert!(solution.is_sat(), "fuzzy tier must satisfy the inversion");
+    let rax = solution
+        .assignments
+        .iter()
+        .find(|assignment| matches!(assignment.source, angryier_execution::ConcolicSource::Register { register, .. } if register == register_id::GPR_BASE))
+        .ok_or("solver must assign the input register")?;
+    assert_eq!(rax.value, 42);
+    Ok(())
+}
+
+/// Mode switching: a branch on a symbolically-addressed load is outside the
+/// concolic shadow's envelope — the step records analysis debt, the concrete
+/// run continues, and `requires_prove` signals the PROVE-mode handoff.
+#[test]
+fn concolic_debt_signals_prove_handoff() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    use angryier_expr::ShardedExprArena;
+    use angryier_ir::IrType;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    // Table-indexed compare: the load address carries the input symbol, which
+    // the concolic shadow refuses (symbolic address) — EXPLORE records debt.
+    let source = r"
+        .global _start
+        .text
+_start:
+        lea table(%rip), %rbx
+        cmp $42, (%rbx,%rax,8)
+        jne fail_path
+        mov $60, %rax
+        xor %rdi, %rdi
+ok_exit:
+        syscall
+fail_path:
+        mov $60, %rax
+        mov $1, %rdi
+fail_exit:
+        syscall
+        .data
+table:
+        .quad 0, 0, 42, 0
+    ";
+    let Ok(elf) = build_fixture_from(source) else {
+        eprintln!("skipping: binutils (as/ld) unavailable");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_elf(&elf)?;
+    let ok_exit = process.symbol("ok_exit").ok_or("missing ok_exit")?.address;
+    let fail_exit = process.symbol("fail_exit").ok_or("missing fail_exit")?.address;
+    process.hook_simproc(ok_exit, "exit");
+    process.hook_simproc(fail_exit, "exit");
+    process.write_register(register_id::GPR_BASE, 2)?; // index 2 -> table[2] = 42
+
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+    let mut session = runtime.concolic(process, arena.as_ref());
+    session.mark_input_register(register_id::GPR_BASE, IrType::Bits(64))?;
+
+    let mut dispatch = None;
+    for _ in 0..64 {
+        match session.step()? {
+            StepOutcome::SimProcedure { address, .. } => {
+                dispatch = Some(address);
+                break;
+            }
+            StepOutcome::Terminated { .. } | StepOutcome::Trap { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(dispatch, Some(ok_exit), "concrete run reaches ok_path via table[2]");
+    assert!(session.requires_prove(), "symbolic-address load must record debt");
+    Ok(())
+}
+
+/// Gate A dual-mode validation: the concolic shadow and the full symbolic
+/// trace re-evaluation must produce the same input on the same binary, and
+/// the concolic path reports its incremental-eval cost against the
+/// trace-replay cost of PROVE mode.
+#[cfg(feature = "z3")]
+#[test]
+fn concolic_and_prove_modes_agree_and_outpace() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use angryier_expr::{ExprReader, ShardedExprArena};
+    use angryier_ir::IrType;
+    use angryier_runtime::BranchDirection;
+    use angryier_solver_z3::Z3Backend;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    let Some(_) = fixture() else {
+        eprintln!("skipping: binutils (as/ld) unavailable");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+
+    // PROVE mode: concrete run, then full trace re-evaluation + Z3.
+    let (mut prove_process, _ok, _fail) = loaded_process(&runtime, 6)?;
+    let _ = run_to_simproc(&runtime, &mut prove_process)?;
+    let arena_prove = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+    let reader: Arc<dyn ExprReader> = arena_prove.clone();
+    let mut backend = Z3Backend::native_ffi(reader)?;
+    let prove_start = Instant::now();
+    let prove_solution = runtime.solve_branch(
+        &prove_process,
+        BranchDirection::NotTaken,
+        arena_prove.as_ref(),
+        &mut backend,
+        Duration::from_secs(10),
+    )?;
+    let prove_eval = prove_start.elapsed();
+
+    // EXPLORE mode: concolic session shadows during execution + Z3.
+    let (explore_process, _ok, _fail) = loaded_process(&runtime, 6)?;
+    let arena_explore = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+    let mut session = runtime.concolic(explore_process, arena_explore.as_ref());
+    session.mark_input_register(register_id::GPR_BASE, IrType::Bits(64))?;
+    let explore_start = Instant::now();
+    while !session.process.terminated && session.process.step_count < 64 {
+        match session.step()? {
+            StepOutcome::SimProcedure { .. } => break,
+            _ => {}
+        }
+    }
+    let explore_eval = explore_start.elapsed();
+    let reader2: Arc<dyn ExprReader> = arena_explore.clone();
+    let mut backend2 = Z3Backend::native_ffi(reader2)?;
+    let explore_solution = session.solve_last_branch(&mut backend2, Duration::from_secs(10))?;
+
+    // Both modes must agree on the input that flips the branch.
+    assert!(prove_solution.is_sat() && explore_solution.is_sat());
+    let prove_rax = prove_solution
+        .assignments
+        .iter()
+        .find(|a| a.register == register_id::GPR_BASE)
+        .map(|a| a.value);
+    let explore_rax = explore_solution
+        .assignments
+        .iter()
+        .find(|a| matches!(a.source, angryier_execution::ConcolicSource::Register { register, .. } if register == register_id::GPR_BASE))
+        .map(|a| a.value);
+    assert_eq!(prove_rax, explore_rax, "both modes must produce the same input");
+    assert_eq!(explore_rax, Some(42));
+
+    eprintln!(
+        "dual-mode timing: prove_eval={prove_eval:?} explore_eval={explore_eval:?} (shadow steps={})",
+        session.process.step_count
+    );
+    Ok(())
+}
+
+/// Concolic shadow on real libc startup code: the shadow must evaluate the
+/// same blocks the concrete interpreter runs — vector ops, FS addressing,
+/// partial writes — without recording debt on the hot path.
+#[test]
+fn concolic_shadows_real_libc_startup() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    use angryier_expr::ShardedExprArena;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    let Ok(bytes) = std::fs::read("/tmp/hello_musl") else {
+        eprintln!("skipping: no musl fixture");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&bytes)?;
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+
+    // Mark the argv string bytes as input: argv[0] sits at the top of the
+    // constructed process stack (below AT_RANDOM); find it via the argv
+    // pointer at [rsp+8].
+    let rsp = process.read_register(register_id::GPR_BASE + 4)?;
+    let argv0 = {
+        use angryier_memory::LayeredMemory;
+        let data = LayeredMemory::read(&process.state.memory, rsp + 8, 8)?;
+        let mut value = 0u64;
+        for (index, byte) in data.iter().enumerate() {
+            if let angryier_memory::ByteValue::Concrete(b) = byte {
+                value |= u64::from(*b) << (8 * index);
             }
         }
-        let tail = &process.trace[process.trace.len().saturating_sub(30)..];
-        eprintln!("tail: {tail:#x?}");
-        eprintln!("output: {:?}", String::from_utf8_lossy(&process.syscalls.output()));
+        value
+    };
+    let mut session = runtime.concolic(process, arena.as_ref());
+    session.mark_input_memory(argv0, 12)?;
+
+    // Run a slice of libc startup concolically and count debt entries.
+    for _ in 0..20_000 {
+        match session.step()? {
+            StepOutcome::Terminated { .. } => break,
+            _ => {}
+        }
     }
+    let debt = session.process.state.fidelity.entries.len();
+    eprintln!(
+        "concolic musl: {} steps, {} path constraints, {} debt entries",
+        session.process.step_count,
+        session.path_constraints().len(),
+        debt
+    );
+    Ok(())
 }

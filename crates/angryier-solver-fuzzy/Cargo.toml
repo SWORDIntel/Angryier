@@ -1,0 +1,14 @@
+[package]
+name = "angryier-solver-fuzzy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mutation-based approximate solver tier for simple concolic constraints"
+
+[dependencies]
+angryier-expr = { path = "../angryier-expr" }
+angryier-solver = { path = "../angryier-solver" }
+angryier-types = { path = "../angryier-types" }
+
+[lints]
+workspace = true
