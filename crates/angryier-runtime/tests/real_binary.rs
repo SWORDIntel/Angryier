@@ -206,12 +206,12 @@ fn unmapped_instructions_fail_explicitly() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn unmodeled_syscalls_fail_explicitly() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
-    // `syscall` with RAX = 107 is `geteuid`, which the environment model
+    // `syscall` with RAX = 99 is `sysinfo`, which the environment model
     // does not implement yet; execution must fail explicitly rather than
     // fabricate a result.
     // result.
     let mut process = runtime.load_elf(&build_fixture_from(
-        "_start:\n    mov $107, %rax\n    syscall\n    hlt\n",
+        "_start:\n    mov $99, %rax\n    syscall\n    hlt\n",
     )?)?;
     runtime.step(&mut process)?; // mov $107, %rax
     let error = runtime
@@ -220,7 +220,7 @@ fn unmodeled_syscalls_fail_explicitly() -> Result<(), Box<dyn std::error::Error>
         .ok_or("expected an unsupported-syscall error")?;
     let message = error.to_string();
     assert!(
-        message.contains("unsupported syscall number 107"),
+        message.contains("unsupported syscall number 99"),
         "unmodeled syscalls must fail explicitly, got: {message}"
     );
     Ok(())
