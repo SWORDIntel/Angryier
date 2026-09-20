@@ -298,6 +298,19 @@ fn run(args: &[String]) -> i32 {
             println!("{}", crates_output());
             0
         }
+        Some("run") => {
+            #[cfg(feature = "run")]
+            {
+                run_subcommand(&args[2..])
+            }
+            #[cfg(not(feature = "run"))]
+            {
+                eprintln!(
+                    "error: 'run' requires the `run` feature\n\nRebuild with: cargo build -p angryier-cli --features run"
+                );
+                1
+            }
+        }
         Some("help") | Some("--help") | Some("-h") => {
             println!("{}", help_output());
             0
@@ -307,6 +320,86 @@ fn run(args: &[String]) -> i32 {
                 "error: unknown command '{cmd}'\n\n\
                  Run 'angryier help' for usage."
             );
+            1
+        }
+    }
+}
+
+#[cfg(feature = "run")]
+fn run_subcommand(args: &[String]) -> i32 {
+    let mut path = None;
+    let mut script = None;
+    let mut symbolic: Vec<String> = Vec::new();
+    let mut find: Vec<String> = Vec::new();
+    let mut argv: Option<u64> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--script" => {
+                i += 1;
+                script = args.get(i).cloned();
+            }
+            "--symbolic" => {
+                i += 1;
+                if let Some(s) = args.get(i) {
+                    symbolic.push(s.clone());
+                }
+            }
+            "--find" => {
+                i += 1;
+                if let Some(s) = args.get(i) {
+                    find.push(s.clone());
+                }
+            }
+            "--argv" => {
+                i += 1;
+                argv = args.get(i).and_then(|s| s.parse().ok());
+            }
+            p if !p.starts_with('-') => path = Some(p.to_string()),
+            _ => {}
+        }
+        i += 1;
+    }
+    let Some(path) = path else {
+        eprintln!("usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find 0xADDR] [--argv N]");
+        return 1;
+    };
+
+    let lua = mlua::Lua::new();
+    if let Err(e) = angryier_runtime::script::register(&lua) {
+        eprintln!("script init: {e}");
+        return 1;
+    }
+    let sym_table = symbolic
+        .iter()
+        .map(|r| format!("{r} = 64"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let find_table = find
+        .iter()
+        .filter_map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let argv_opt = argv.map(|n| format!("argv = {n},")).unwrap_or_default();
+    let driver = if let Some(script) = script {
+        match std::fs::read_to_string(&script) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("read {script}: {e}");
+                return 1;
+            }
+        }
+    } else {
+        format!(
+            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} steps = 1024, states = 16 }})
+print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.steps, r.forks, r.merges, r.terminated, r.found))"#
+        )
+    };
+    match lua.load(&driver).eval::<mlua::Value>() {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("script: {e}");
             1
         }
     }

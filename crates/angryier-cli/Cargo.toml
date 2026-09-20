@@ -9,5 +9,15 @@ description = "Command-line orchestration entry point"
 name = "angryier"
 path = "src/main.rs"
 
+[dependencies]
+angryier-runtime = { path = "../angryier-runtime", optional = true }
+mlua = { version = "0.12", features = ["lua54", "vendored"], optional = true }
+
+[features]
+default = []
+# `run` subcommand — execute binaries symbolically, optionally driven by a
+# Lua script (Phase 15).
+run = ["dep:angryier-runtime", "dep:mlua", "angryier-runtime/xed", "angryier-runtime/script"]
+
 [lints]
 workspace = true

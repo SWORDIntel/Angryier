@@ -50,6 +50,10 @@ dependencies = [
 [[package]]
 name = "angryier-cli"
 version = "0.1.0"
+dependencies = [
+ "angryier-runtime",
+ "mlua",
+]
 
 [[package]]
 name = "angryier-core"
