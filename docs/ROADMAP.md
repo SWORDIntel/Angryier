@@ -467,24 +467,24 @@ The handwritten corpus must exercise:
 
 This is a core competitive milestone, not optional scalability polish.
 
-> **Status: foundations implemented.** In-memory work-stealing scheduler with per-worker queues, NUMA distance model, greedy scoring, and deterministic single-thread baseline is done. OS-thread worker pool, worker-local deques, NUMA-group queues, global emergency queue, solver-context affinity, memory-working-set-aware migration cost, and scheduler performance instrumentation remain future work. This is the make-or-break milestone (Gate B).
+> **Status: worker pool implemented and measured.** `OsWorkerPool` (`angryier-scheduler`) provides OS threads over worker-local deques with LIFO-local/FIFO-steal scheduling, a global overflow queue, in-flight termination tracking, and per-worker `PoolStats` instrumentation. `Runtime::parallel_concolic` parallelizes concolic sessions across inputs (QSYM model — **3.93× wall-time speedup on 4 workers** over static musl `hello`); `Runtime::parallel_explore` parallelizes states across workers with concrete branch forking over `Process` clones (48 states / 377 unique PCs spread across 4 workers on the same binary, EXPLORE-unsound — no solver feasibility gating). Solver-context affinity and the memory-working-set-aware migration cost remain coupled to Phase 8's incremental contexts; a dedicated 10k-live-state footprint benchmark remains to be written.
 
 ## Build
 
-- fixed-size native worker pool;
-- explicit single-worker mutable ownership of each runnable state;
-- worker-local deques;
-- NUMA-group queues;
-- global emergency queue;
-- locality-first work stealing;
-- per-worker solver contexts and hot caches;
-- solver-context affinity for fork descendants;
-- scheduler policy trait;
-- memory-working-set-aware migration cost;
-- solver rebuild/cache/NUMA migration cost model;
-- memory-pressure-aware stealing;
-- deterministic single-thread baseline;
-- scheduler performance instrumentation.
+- ~~fixed-size native worker pool~~ — `OsWorkerPool`;
+- explicit single-worker mutable ownership of each runnable state — each unit is an owned `Process` clone processed exclusively by one worker at a time;
+- ~~worker-local deques~~ — one `VecDeque` per worker;
+- NUMA-group queues — `NumaModel` distances feed `StealCost`; dedicated NUMA-pinned queue groups remain future work;
+- ~~global emergency queue~~ — `global` overflow absorbs pushes from poisoned local deques;
+- ~~locality-first work stealing~~ — own deque first, then most-loaded peer, then global;
+- per-worker solver contexts and hot caches — Phase 8 (incremental contexts);
+- solver-context affinity for fork descendants — pending Phase 8;
+- scheduler policy trait — `Scheduler` trait with `GreedyScore`/`StealCost` exists; the pool is the execution layer beneath it;
+- memory-working-set-aware migration cost — `StealCost.memory`-style fields exist; the working-set model remains to be validated;
+- solver rebuild/cache/NUMA migration cost model — `StealCost` scaffolding exists;
+- memory-pressure-aware stealing — future work;
+- deterministic single-thread baseline — `workers=1` run is deterministic;
+- ~~scheduler performance instrumentation~~ — `PoolStats` (produced/completed/per-worker/elapsed).
 - backend-neutral bounded batch-planner trait plus deterministic CPU reference implementation;
 
 Steal decisions should approximate:
@@ -500,13 +500,13 @@ steal benefit =
 
 ## Exit criteria
 
-- deterministic single-thread results match Phase 4;
-- bounded N-thread runs reach the same expected solution set;
-- no global mutex exists on the normal execution/solver path;
-- branch-parallel workloads scale usefully across physical cores;
-- local steals outperform cross-NUMA steals where expected;
-- solver-context affinity measurably reduces rebuild work on appropriate workloads;
-- scheduler instrumentation identifies contention and poor migration decisions.
+- deterministic single-thread results match Phase 4 — `workers=1` runs are sequential and deterministic;
+- bounded N-thread runs reach the same expected solution set — `parallel_concolic` produces a report per input regardless of worker count;
+- no global mutex exists on the normal execution/solver path — workers pop from local deques; the global queue is only an overflow path;
+- branch-parallel workloads scale usefully across physical cores — **measured 3.93× on 4 workers** (concolic input sweep, static musl);
+- local steals outperform cross-NUMA steals where expected — steal order is own-deque → most-loaded peer → global; NUMA-aware steal weighting is modeled in `StealCost` but not yet measured on NUMA hardware;
+- solver-context affinity measurably reduces rebuild work — pending Phase 8;
+- ~~scheduler instrumentation identifies contention~~ — `PoolStats.per_worker_completed` exposes load balance.
 - the CPU batch planner is deterministic and preserves all runnable work on cancellation or failure.
 - **Gate B is measured on real binaries from Phase 1 (Gate 0), not synthetic branch trees** — a synthetic tree of independent cheap branches will pass Gate B and teach nothing, because real path explosion is exponential and 32 cores is a constant factor against it;
 - **per-state memory footprint including solver context is reported at 10k live states** — memory, not scheduling, is what has killed every parallel symbolic engine before this one;
