@@ -2659,13 +2659,55 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         &mut self,
         max_steps: u64,
         max_states: usize,
-        mut backend: Option<&mut dyn SolverBackend>,
+        backend: Option<&mut dyn SolverBackend>,
         timeout: Duration,
         merge_each_step: bool,
     ) -> Result<SymbolicRunReport, RuntimeError> {
+        self.run_with_policy(
+            max_steps,
+            max_states,
+            backend,
+            timeout,
+            merge_each_step,
+            &ExplorationPolicy::default(),
+        )
+    }
+
+    /// `run` under an [`ExplorationPolicy`]: find-targeted states are
+    /// collected into the report (and left unstepped), avoid-targeted states
+    /// are dropped, and `prefer_new_coverage` picks the least-visited-PC
+    /// state each iteration.
+    pub fn run_with_policy(
+        &mut self,
+        max_steps: u64,
+        max_states: usize,
+        mut backend: Option<&mut dyn SolverBackend>,
+        timeout: Duration,
+        merge_each_step: bool,
+        policy: &ExplorationPolicy,
+    ) -> Result<SymbolicRunReport, RuntimeError> {
         let mut report = SymbolicRunReport::default();
         let mut steps = 0u64;
+        let mut pc_visits: BTreeMap<u64, u64> = BTreeMap::new();
         while steps < max_steps && !self.states.is_empty() {
+            // Apply find/avoid before stepping.
+            let mut i = 0;
+            while i < self.states.len() {
+                let pc = self.states[i].process.pc().unwrap_or(0);
+                if policy.avoid.contains(&pc) {
+                    let state = self.states.remove(i);
+                    self.dead.push(state);
+                    report.pruned_states += 1;
+                } else if policy.find.contains(&pc) {
+                    let state = self.states.remove(i);
+                    report.found.push(state);
+                } else {
+                    i += 1;
+                }
+            }
+            if self.states.is_empty() {
+                break;
+            }
             if self.states.len() > max_states {
                 // Cheapest pruning: drop the newest states past the cap.
                 while self.states.len() > max_states {
@@ -2676,8 +2718,21 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             }
             // Round-robin: one state steps per iteration so a state that
             // reaches a pc where a sibling is parked merges before either
-            // advances past the reconvergence point.
-            let index = (steps as usize) % self.states.len();
+            // advances past the reconvergence point. Under
+            // `prefer_new_coverage` the index is the state whose pc has been
+            // visited least across the run.
+            let index = if policy.prefer_new_coverage {
+                self.states
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, s)| pc_visits.get(&s.process.pc().unwrap_or(0)).copied().unwrap_or(0))
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            } else {
+                (steps as usize) % self.states.len()
+            };
+            let pc = self.states.get(index).and_then(|s| s.process.pc().ok()).unwrap_or(0);
+            *pc_visits.entry(pc).or_default() += 1;
             let outcome = match backend.as_deref_mut() {
                 Some(backend) => self.step_state_checked(index, backend, timeout),
                 None => self.step_state(index),
@@ -2716,6 +2771,20 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     }
 }
 
+/// Search policy for [`SymbolicSession::run`]: analyst-specified find/avoid
+/// targets plus coverage-novelty ordering — the `simgr.explore(find=…,
+/// avoid=…)` equivalent.
+#[derive(Clone, Debug, Default)]
+pub struct ExplorationPolicy {
+    /// PCs whose states are reported as `found` and not stepped further.
+    pub find: Vec<Address>,
+    /// PCs whose states are moved to `dead` immediately.
+    pub avoid: Vec<Address>,
+    /// When set, the round-robin picks the state whose PC is the least
+    /// visited so far — coverage-novelty ordering.
+    pub prefer_new_coverage: bool,
+}
+
 /// Aggregate report for [`SymbolicSession::run`].
 #[derive(Clone, Debug, Default)]
 pub struct SymbolicRunReport {
@@ -2737,4 +2806,17 @@ pub struct SymbolicRunReport {
     pub dead_states: u64,
     /// Peak live-state count.
     pub peak_states: u64,
+    /// States that reached a `find` pc.
+    pub found: Vec<SymbolicState>,
+}
+
+impl std::fmt::Debug for SymbolicState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SymbolicState")
+            .field("pc", &self.process.pc())
+            .field("registers", &self.registers.len())
+            .field("constraints", &self.constraints.len())
+            .field("symbols", &self.symbols.len())
+            .finish()
+    }
 }
