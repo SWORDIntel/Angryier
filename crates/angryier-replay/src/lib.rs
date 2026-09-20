@@ -11,8 +11,8 @@
 //! together to produce a [`ReplayResult`].
 
 use angryier_types::{
-    AnalysisContext, CodeVersionGuard, ContentId, DependencyKey, ReplayCapsuleId, ReplaySchemaVersion, SemanticVersion,
-    StateId,
+    AnalysisContext, CodePageId, CodePageVersion, CodeVersionGuard, ContentId, DependencyKey, ReplayCapsuleId,
+    ReplaySchemaVersion, RunId, SecurityContext, SemanticVersion, StateId, TargetProfileId,
 };
 use core::fmt;
 use std::collections::BTreeMap;
@@ -199,6 +199,130 @@ impl ReplayCapsuleStore {
             Ok(capsules) => capsules.contains_key(&id),
             Err(_) => false,
         }
+    }
+}
+
+/// Durable capsule backend: one binary file per capsule under `dir`.
+/// The on-disk layout is a fixed little-endian record — schema, identity,
+/// environment key, scheduler seed, analysis context, and the sorted
+/// code-version guards — so capsules survive process restarts.
+pub struct FileReplayStore {
+    dir: std::path::PathBuf,
+}
+
+impl FileReplayStore {
+    pub fn new(dir: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
+    }
+
+    fn path(&self, id: ReplayCapsuleId) -> std::path::PathBuf {
+        self.dir.join(format!("{:016x}.capsule", id.0))
+    }
+
+    pub fn publish(&self, capsule: &ReplayCapsule) -> Result<(), ReplayError> {
+        let path = self.path(capsule.id);
+        if path.exists() {
+            return Err(ReplayError::DuplicateCapsule);
+        }
+        let mut buf = Vec::with_capacity(160);
+        buf.extend_from_slice(&capsule.schema.0.to_le_bytes());
+        buf.extend_from_slice(&capsule.id.0.to_le_bytes());
+        buf.extend_from_slice(&capsule.initial_state.0.to_le_bytes());
+        buf.extend_from_slice(&capsule.semantic_version.0.to_le_bytes());
+        buf.extend_from_slice(&capsule.semantic_content.0);
+        buf.extend_from_slice(&capsule.environment_key.0);
+        buf.extend_from_slice(&capsule.scheduler_seed.to_le_bytes());
+        let ctx = &capsule.context;
+        buf.extend_from_slice(&ctx.run_id.0.to_le_bytes());
+        buf.extend_from_slice(&ctx.target_profile.0.to_le_bytes());
+        buf.push(match ctx.fidelity {
+            angryier_types::FidelityProfile::Prove => 0,
+            angryier_types::FidelityProfile::Explore => 1,
+            angryier_types::FidelityProfile::Hunt => 2,
+        });
+        buf.push(match ctx.retention {
+            angryier_types::RetentionProfile::Forensic => 0,
+            angryier_types::RetentionProfile::Research => 1,
+            angryier_types::RetentionProfile::Benchmark => 2,
+            angryier_types::RetentionProfile::Disposable => 3,
+        });
+        buf.extend_from_slice(&ctx.security.classification.to_le_bytes());
+        buf.extend_from_slice(&ctx.security.compartment.to_le_bytes());
+        buf.extend_from_slice(&(capsule.code_versions.len() as u64).to_le_bytes());
+        for g in &capsule.code_versions {
+            buf.extend_from_slice(&g.page.0.to_le_bytes());
+            buf.extend_from_slice(&g.version.0.to_le_bytes());
+        }
+        std::fs::write(&path, &buf).map_err(|_| ReplayError::Poisoned)?;
+        Ok(())
+    }
+
+    pub fn retrieve(&self, id: ReplayCapsuleId) -> Result<ReplayCapsule, ReplayError> {
+        let bytes = std::fs::read(self.path(id)).map_err(|_| ReplayError::UnknownCapsule)?;
+        let mut off = 0usize;
+        let mut take = |n: usize| -> Result<&[u8], ReplayError> {
+            let s = bytes.get(off..off + n).ok_or(ReplayError::BinaryMismatch)?;
+            off += n;
+            Ok(s)
+        };
+        let u64_at = |s: &[u8]| u64::from_le_bytes(s.try_into().unwrap_or([0; 8]));
+        let schema = ReplaySchemaVersion(u64_at(take(8)?));
+        let cid = ReplayCapsuleId(u64_at(take(8)?));
+        let state = StateId(u64_at(take(8)?));
+        let sem = SemanticVersion(u64_at(take(8)?));
+        let mut content = [0u8; 32];
+        content.copy_from_slice(take(32)?);
+        let mut env = [0u8; 32];
+        env.copy_from_slice(take(32)?);
+        let seed = u64_at(take(8)?);
+        let run = u64_at(take(8)?);
+        let profile = u64_at(take(8)?);
+        let fidelity = match take(1)?[0] {
+            0 => angryier_types::FidelityProfile::Prove,
+            1 => angryier_types::FidelityProfile::Explore,
+            _ => angryier_types::FidelityProfile::Hunt,
+        };
+        let retention = match take(1)?[0] {
+            0 => angryier_types::RetentionProfile::Forensic,
+            1 => angryier_types::RetentionProfile::Research,
+            2 => angryier_types::RetentionProfile::Benchmark,
+            _ => angryier_types::RetentionProfile::Disposable,
+        };
+        let classification = u32::from_le_bytes(take(4)?.try_into().unwrap_or([0; 4]));
+        let compartment = u32::from_le_bytes(take(4)?.try_into().unwrap_or([0; 4]));
+        let guard_count = u64_at(take(8)?) as usize;
+        let mut guards = Vec::with_capacity(guard_count);
+        for _ in 0..guard_count {
+            let page = CodePageId(u64_at(take(8)?));
+            let version = CodePageVersion(u64_at(take(8)?));
+            guards.push(CodeVersionGuard { page, version });
+        }
+        Ok(ReplayCapsule {
+            id: cid,
+            schema,
+            context: AnalysisContext {
+                run_id: RunId(run),
+                target_profile: TargetProfileId(profile),
+                fidelity,
+                retention,
+                security: SecurityContext {
+                    classification,
+                    compartment,
+                },
+            },
+            initial_state: state,
+            semantic_version: sem,
+            semantic_content: ContentId(content),
+            code_versions: guards,
+            environment_key: DependencyKey(env),
+            scheduler_seed: seed,
+        })
+    }
+
+    pub fn contains(&self, id: ReplayCapsuleId) -> bool {
+        self.path(id).exists()
     }
 }
 
@@ -471,5 +595,62 @@ mod tests {
             let rendered = format!("{error}");
             assert!(!rendered.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod file_store_tests {
+    use super::*;
+
+    fn capsule(id: u64) -> ReplayCapsule {
+        ReplayCapsule {
+            id: ReplayCapsuleId(id),
+            schema: ReplaySchemaVersion(1),
+            context: AnalysisContext {
+                run_id: RunId(7),
+                target_profile: TargetProfileId(1),
+                fidelity: angryier_types::FidelityProfile::Prove,
+                retention: angryier_types::RetentionProfile::Forensic,
+                security: SecurityContext {
+                    classification: 3,
+                    compartment: 9,
+                },
+            },
+            initial_state: StateId(4),
+            semantic_version: SemanticVersion(11),
+            semantic_content: ContentId([0xAB; 32]),
+            code_versions: vec![
+                CodeVersionGuard {
+                    page: CodePageId(5),
+                    version: CodePageVersion(2),
+                },
+                CodeVersionGuard {
+                    page: CodePageId(9),
+                    version: CodePageVersion(1),
+                },
+            ],
+            environment_key: DependencyKey([0xCD; 32]),
+            scheduler_seed: 42,
+        }
+    }
+
+    #[test]
+    fn file_store_round_trip() {
+        let dir = std::env::temp_dir().join(format!("replay-{}", std::process::id()));
+        let store = match FileReplayStore::new(&dir) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("skip: {e}");
+                return;
+            }
+        };
+        let cap = capsule(1);
+        assert!(store.publish(&cap).is_ok());
+        assert!(store.contains(ReplayCapsuleId(1)));
+        let back = store.retrieve(ReplayCapsuleId(1));
+        assert_eq!(back, Ok(cap));
+        // Duplicate rejected.
+        assert_eq!(store.publish(&capsule(1)), Err(ReplayError::DuplicateCapsule));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
