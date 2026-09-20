@@ -2394,6 +2394,80 @@ impl<'a, D: Decoder> ConcolicSession<'a, D> {
         !self.hunt && !self.process.state.fidelity.is_exact()
     }
 
+    /// Promotes this concolic state into a PROVE-mode `SymbolicState`: the
+    /// shadow registers/memory become symbolic bindings, the recorded path
+    /// becomes initial constraints, and the concrete process carries over.
+    /// The driver can seed a `SymbolicSession` with the result.
+    pub fn promote_to_symbolic(&self, id: u64) -> SymbolicState {
+        let mut registers = BTreeMap::new();
+        let mut symbols = Vec::new();
+        let mut concrete_registers = BTreeMap::new();
+        let mut expr_concrete = BTreeMap::new();
+        for (reg, (expr, ty)) in self.evaluator.shadow_registers() {
+            registers.insert(*reg, (*expr, *ty));
+        }
+        for (reg, v) in self.evaluator.register_concretes() {
+            if let Some(c) = v {
+                concrete_registers.insert(*reg, u64::try_from(*c).unwrap_or(*c as u64));
+                if let Some((expr, _)) = self.evaluator.shadow_registers().get(reg) {
+                    expr_concrete.insert(*expr, u64::try_from(*c).unwrap_or(*c as u64));
+                }
+            }
+        }
+        for b in self.evaluator.bindings() {
+            let (register, width) = match b.source {
+                angryier_execution::ConcolicSource::Register { register, width } => (register, width),
+                // Memory-sourced symbols bind to a synthetic id past the GPR
+                // bank — the solver keys on `expression`, not `register`.
+                angryier_execution::ConcolicSource::Memory { .. } => (u32::MAX, 8),
+            };
+            symbols.push(angryier_execution::SymbolBinding {
+                register,
+                width,
+                expression: b.expression,
+            });
+        }
+        // Seed symbolic memory from the concrete image, then overlay the
+        // shadow's bytes (marked input regions included).
+        let mut memory = angryier_execution::SymbolicSessionMemory::new(self.process.state.memory.clone());
+        for (addr, byte) in self.evaluator.shadow_memory() {
+            if let Ok(m) = memory.memory.write_at_address(*addr, &[*byte]) {
+                memory.memory = m;
+            }
+        }
+        // Path conditions become constraints: `taken` branches keep the
+        // predicate, untaken get its negation.
+        let mut constraints = Vec::with_capacity(self.path.len());
+        for pc in &self.path {
+            // Branch predicates are BitVec(1) — coerce to Bool, then negate
+            // when the concrete run took the not-taken edge.
+            let cond = angryier_execution::bit_to_bool(self.arena, pc.condition).unwrap_or(pc.condition);
+            let expr = if pc.taken {
+                cond
+            } else {
+                self.arena
+                    .intern(angryier_expr::ExprNode {
+                        sort: angryier_expr::ExprSort::Bool,
+                        op: angryier_expr::ExprOp::Not,
+                        operands: vec![cond],
+                        immediate: Vec::new(),
+                    })
+                    .unwrap_or(cond)
+            };
+            constraints.push(expr);
+        }
+        SymbolicState {
+            process: self.process.clone(),
+            registers,
+            constraints,
+            memory,
+            symbols,
+            concrete_registers,
+            id,
+            expr_concrete,
+        }
+    }
+
     /// Executes one instruction concretely and shadows the lowered block.
     /// Branch conditions are recorded as path constraints. A block the shadow
     /// cannot evaluate (symbolic addresses, unsupported ops) records analysis

@@ -882,6 +882,21 @@ impl<'a> ConcolicEvaluator<'a> {
     }
 
     /// Symbols created so far, in creation order.
+    /// All register shadows (symbolic expr + type per register).
+    pub fn shadow_registers(&self) -> &BTreeMap<u32, (ExprId, IrType)> {
+        &self.registers
+    }
+
+    /// All memory shadow bytes (symbolic/concrete per address).
+    pub fn shadow_memory(&self) -> &BTreeMap<u64, ByteValue> {
+        &self.memory
+    }
+
+    /// Concrete value per register when the shadow is fully determined.
+    pub fn register_concretes(&self) -> &BTreeMap<u32, Option<u128>> {
+        &self.register_concretes
+    }
+
     pub fn bindings(&self) -> &[ConcolicBinding] {
         &self.bindings
     }

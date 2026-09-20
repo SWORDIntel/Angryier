@@ -2942,3 +2942,74 @@ fn dynamic_binary_loads_and_runs() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+
+/// EXPLORE→PROVE handoff: a concolic run promotes into a SymbolicState
+/// carrying its path constraints — the solver's model respects them.
+#[cfg(all(feature = "xed", feature = "z3", target_arch = "x86_64"))]
+#[test]
+fn concolic_promotes_to_prove_state() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::ExprReader;
+    use angryier_runtime::SymbolicSession;
+    use angryier_solver_z3::Z3Backend;
+    use std::sync::Arc;
+
+    // rdi symbolic → concolic takes the NOT-taken path (rdi concrete 0) →
+    // promoted state's constraints force rdi != 5.
+    let source = r#"
+        .global _start
+        .text
+_start:
+    cmp $5, %rdi
+    je target
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+target:
+    mov $60, %rax
+    mov $9, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-handoff").ok_or("no tempdir")?;
+    let path_s = dir.join("h.s");
+    let path_o = dir.join("h.o");
+    let path_bin = dir.join("h");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = Arc::new(angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    ));
+
+    let mut concolic = runtime.concolic(process, arena.as_ref());
+    concolic.mark_input_register(register_id::GPR_BASE + 7, angryier_ir::IrType::Bits(64))?;
+    for _ in 0..8 {
+        if matches!(concolic.step()?, StepOutcome::Terminated { .. }) {
+            break;
+        }
+    }
+    assert!(
+        !concolic.path_constraints().is_empty(),
+        "branch must record a constraint"
+    );
+
+    // Promote: the symbolic state carries rdi's symbol + the ¬(rdi==5) path.
+    let promoted = concolic.promote_to_symbolic(0);
+    assert_eq!(promoted.constraints.len(), 1);
+    let mut session = SymbolicSession::new(&runtime, arena.as_ref(), promoted.process.clone());
+    session.states.clear();
+    session.states.push(promoted);
+    let mut backend = Z3Backend::native_ffi(arena.clone() as Arc<dyn ExprReader>)?;
+    let model = session.solve_state(0, &mut backend, std::time::Duration::from_secs(10))?;
+    let rdi = model
+        .iter()
+        .find(|(r, _)| *r == register_id::GPR_BASE + 7)
+        .map(|(_, v)| *v)
+        .ok_or("no rdi in model")?;
+    assert_ne!(rdi, 5, "promoted path constraint must exclude rdi==5");
+    Ok(())
+}
