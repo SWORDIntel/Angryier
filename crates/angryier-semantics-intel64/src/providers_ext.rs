@@ -401,6 +401,79 @@ movzx!(MovzxR64Mem16, forms::MOVZX_R64_MEM16, U16, U64, 0x20E);
 movzx!(MovzxR32Mem8, forms::MOVZX_R32_MEM8, U8, U32, 0x20F);
 movzx!(MovzxR32Mem16, forms::MOVZX_R32_MEM16, U16, U32, 0x210);
 movsx!(MovsxR32R16, forms::MOVSX_R32_R16, U16, U32, 0x60);
+// CQO: rdx = sign extension of rax's top bit (op0=rdx write, op1=rax read,
+// both suppressed).
+#[derive(Clone, Copy, Debug)]
+pub struct Cqo;
+
+impl SemanticProvider for Cqo {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x301)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::CQO
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let rax = out.read_operand(1, U64)?;
+        let sixty_three = const_u64(out, 63)?;
+        let rdx = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::ArithmeticShiftRight),
+            U64,
+            &[rax, sixty_three],
+        )?;
+        out.write_operand(0, rdx)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x301, context))
+    }
+}
+
+// One-operand IMUL: rdx:rax = rax * r/m64 signed, CF/OF from the product's
+// high half. op0=r/m64 read, op1=rax read/write, op2=rdx write, op3=rflags.
+#[derive(Clone, Copy, Debug)]
+pub struct Imul1R64;
+
+impl SemanticProvider for Imul1R64 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x302)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::IMUL_1OP_R64
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let right = out.read_operand(0, U64)?;
+        let rax = out.read_operand(1, U64)?;
+        write_mul_flags(out, rax, right, 64)?;
+        let u128_ty = SemanticType::Scalar(ScalarType::BitVec(128));
+        let rax2 = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), u128_ty, &[rax])?;
+        let right2 = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), u128_ty, &[right])?;
+        let product = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), u128_ty, &[rax2, right2])?;
+        let zero = const_u64(out, 0)?;
+        let sixty_four = const_u64(out, 64)?;
+        let lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[product, zero])?;
+        let hi = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[product, sixty_four])?;
+        out.write_operand(1, lo)?;
+        out.write_operand(2, hi)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x302, context))
+    }
+}
+
 movsx!(MovsxR64R16, forms::MOVSX_R64_R16, U16, U64, 0x230);
 movzx!(MovzxR64R16, forms::MOVZX_R64_R16, U16, U64, 0x300);
 movsx!(MovsxR32R8, forms::MOVSX_R32_R8, U8, U32, 0x62);
@@ -6699,6 +6772,55 @@ div_form!(DivR64, forms::DIV_R64, U64, U128, 0x26D);
 div_form!(DivR32, forms::DIV_R32, U32, U64, 0x26E);
 div_form!(DivMem64, forms::DIV_MEM64, U64, U128, 0x26F);
 div_form!(DivMem32, forms::DIV_MEM32, U32, U64, 0x270);
+
+/// `idiv r/mN` — signed divide; rdx:rax dividend, truncating quotient in
+/// rax, dividend-signed remainder in rdx.
+macro_rules! idiv_form {
+    ($name:ident, $form:expr, $ty:expr, $wide:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let divisor = out.read_operand(0, $ty)?;
+                let lo = out.read_register(RegisterId(register_id::GPR_BASE), $ty)?; // RAX/EAX
+                let hi = out.read_register(RegisterId(register_id::GPR_BASE + 2), $ty)?; // RDX/EDX
+                let dividend = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $wide, &[lo, hi])?;
+                let divisor_w = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), $wide, &[divisor])?;
+                let quot = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::SignedDiv),
+                    $wide,
+                    &[dividend, divisor_w],
+                )?;
+                let prod = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), $wide, &[quot, divisor_w])?;
+                let rem = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), $wide, &[dividend, prod])?;
+                let zero = const_u64(out, 0)?;
+                let quot_n = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[quot, zero])?;
+                let rem_n = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[rem, zero])?;
+                out.write_register(RegisterId(register_id::GPR_BASE), quot_n)?;
+                out.write_register(RegisterId(register_id::GPR_BASE + 2), rem_n)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+idiv_form!(IdivR64, forms::IDIV_R64, U64, U128, 0x303);
 
 /// `mul r/mN` — unsigned multiply; result written into rdx:rax (the
 /// concatenated destination).

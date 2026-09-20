@@ -616,6 +616,9 @@ pub mod forms {
     pub const MOVSX_R64_MEM16: u32 = 0x0172;
     pub const MOVSX_R64_R16: u32 = 0x025C;
     pub const MOVZX_R64_R16: u32 = 0x025D;
+    pub const IMUL_1OP_R64: u32 = 0x025E;
+    pub const CQO: u32 = 0x025F;
+    pub const IDIV_R64: u32 = 0x0260;
     pub const MOVSX_R32_MEM8: u32 = 0x0173;
     pub const MOVSX_R32_MEM16: u32 = 0x0174;
 

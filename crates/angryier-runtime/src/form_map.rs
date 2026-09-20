@@ -377,6 +377,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_IMUL => match shapes {
+            [Shape::Reg64] => Some(forms::IMUL_1OP_R64),
             [Shape::Reg64, Shape::Reg64] => Some(forms::IMUL_R64_R64),
             [Shape::Reg64, Shape::Mem64] => Some(forms::IMUL_R64_MEM64),
             [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::IMUL_R64_R64_IMM32),
@@ -384,6 +385,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Reg32, Shape::Imm] => Some(forms::IMUL_R32_R32_IMM8),
             _ => None,
         },
+        iclass::XED_ICLASS_CQO => Some(forms::CQO),
         iclass::XED_ICLASS_LEAVE => Some(forms::LEAVE),
         iclass::XED_ICLASS_STOSB => Some(STOSB_FORM_ID),
         iclass::XED_ICLASS_STOSW => Some(STOSW_FORM_ID),
@@ -973,6 +975,10 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         // `syscall` is executed by the environment model, not the semantic
         // corpus; it maps to the runtime's reserved syscall form id.
+        iclass::XED_ICLASS_IDIV => match shapes {
+            [Shape::Reg64] => Some(forms::IDIV_R64),
+            _ => None,
+        },
         iclass::XED_ICLASS_DIV => match shapes {
             [Shape::Reg64] => Some(forms::DIV_R64),
             [Shape::Reg32] => Some(forms::DIV_R32),
@@ -1135,5 +1141,28 @@ mod tests {
         assert_ne!(forms::MOV_R64_R64, UNMAPPED_FORM_ID);
         assert_ne!(forms::HLT, UNMAPPED_FORM_ID);
         assert_ne!(crate::SYSCALL_FORM_ID, UNMAPPED_FORM_ID);
+    }
+}
+
+#[cfg(all(test, feature = "xed"))]
+mod dbg_imul {
+    use angryier_arch::Decoder;
+    use angryier_arch_xed_ffi::XedDecoder;
+    use angryier_types::TargetProfileId;
+
+    #[test]
+    fn dump() {
+        let decoder = XedDecoder::with_profile_id(TargetProfileId(1));
+        for bytes in [&[0x48, 0xf7, 0xeb][..], &[0x48, 0x99][..]] {
+            let decoded = decoder.decode(0x1000, bytes).expect("decode");
+            eprintln!(
+                "{bytes:x?} class={:#x} mapped={:?}",
+                decoded.form_id,
+                crate::form_map::map_form(&decoded)
+            );
+            for (i, op) in decoded.operands.iter().enumerate() {
+                eprintln!("  op{i}: {op:?}");
+            }
+        }
     }
 }

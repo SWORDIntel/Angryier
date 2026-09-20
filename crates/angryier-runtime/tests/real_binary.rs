@@ -1411,6 +1411,31 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pxor %xmm1, %xmm0\n    movq %xmm0, %rax",
         "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    pand %xmm1, %xmm0\n    movq %xmm0, %rax",
     ];
+    // Conditional branches: flags come from the preceding cmp, the branch
+    // decides which value lands in rax (1 = not taken path, 0 = taken).
+    let jcc_templates = [
+        "cmp %rbx, %rax\n    jz 1f\n    mov $1, %rax\n1:",
+        "cmp %rbx, %rax\n    jnz 1f\n    mov $1, %rax\n1:",
+        "cmp %rbx, %rax\n    jl 1f\n    mov $1, %rax\n1:",
+        "cmp %rbx, %rax\n    jg 1f\n    mov $1, %rax\n1:",
+        "cmp %rbx, %rax\n    jb 1f\n    mov $1, %rax\n1:",
+        "cmp %rbx, %rax\n    ja 1f\n    mov $1, %rax\n1:",
+        "cmp %rbx, %rax\n    jbe 1f\n    mov $1, %rax\n1:",
+        "cmp %rbx, %rax\n    jle 1f\n    mov $1, %rax\n1:",
+        "cmp %rbx, %rax\n    js 1f\n    mov $1, %rax\n1:",
+        "cmp %rbx, %rax\n    jns 1f\n    mov $1, %rax\n1:",
+    ];
+    // div/idiv write rdx:rax — observe each half in its own case.
+    let div_templates = [
+        "mov $0, %rdx\n    div %rbx",
+        "mov $0, %rdx\n    div %rbx\n    mov %rdx, %rax",
+        "cqo\n    idiv %rbx",
+        "cqo\n    idiv %rbx\n    mov %rdx, %rax",
+        "mul %rbx",
+        "mul %rbx\n    mov %rdx, %rax",
+        "imul %rbx",
+        "imul %rbx\n    mov %rdx, %rax",
+    ];
     // 32-bit forms (zero-extension semantics must match too).
     let w32_templates = [
         "add %ebx, %eax",
@@ -1499,6 +1524,20 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
     for insn in simd_templates {
         for &a in &boundary[..4] {
             let ran = differential_case(insn, &[("rbx", a), ("rcx", 0x1234_5678_9abc_def0)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in jcc_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 0x4000_0000_0000_0000)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in div_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 7)], flag_mask_for(insn))?;
             skipped |= !ran;
             executed += usize::from(ran);
         }
