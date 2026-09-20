@@ -717,6 +717,16 @@ pub mod syscall {
         invocations: AtomicU64,
     }
 
+    impl Clone for SyscallModel {
+        fn clone(&self) -> Self {
+            Self {
+                output: Mutex::new(self.output()),
+                exit_code: Mutex::new(self.exit_code()),
+                invocations: AtomicU64::new(self.invocations()),
+            }
+        }
+    }
+
     impl SyscallModel {
         /// Creates an empty model.
         pub fn new() -> Self {

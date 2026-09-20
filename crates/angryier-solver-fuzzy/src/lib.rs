@@ -100,7 +100,9 @@ impl FuzzySatBackend {
             ExprOp::Add => operand(0, env, budget)?.wrapping_add(operand(1, env, budget)?),
             ExprOp::Sub => operand(0, env, budget)?.wrapping_sub(operand(1, env, budget)?),
             ExprOp::Mul => operand(0, env, budget)?.wrapping_mul(operand(1, env, budget)?),
-            ExprOp::UDiv => operand(0, env, budget)?.checked_div(operand(1, env, budget)?).unwrap_or(0),
+            ExprOp::UDiv => operand(0, env, budget)?
+                .checked_div(operand(1, env, budget)?)
+                .unwrap_or(0),
             ExprOp::SDiv => {
                 let divisor = operand(1, env, budget)? as i128;
                 if divisor == 0 {

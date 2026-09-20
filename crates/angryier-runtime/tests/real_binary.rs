@@ -967,3 +967,163 @@ fn concolic_shadows_real_libc_startup() -> Result<(), Box<dyn std::error::Error>
     );
     Ok(())
 }
+
+/// Gate B (concolic mode): inputs parallelize across OS workers — a sweep of
+/// inputs runs N concolic sessions concurrently, each producing its own path
+/// constraints and coverage.
+#[test]
+fn parallel_concolic_sweeps_inputs_across_workers() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    use angryier_expr::ShardedExprArena;
+    use angryier_ir::IrType;
+    use angryier_runtime::ConcolicInput;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    let Some(_) = fixture() else {
+        eprintln!("skipping: binutils (as/ld) unavailable");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let (process, _ok, _fail) = loaded_process(&runtime, 0)?;
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+
+    // 16 inputs, each marking RAX symbolic with a different concrete seed.
+    let inputs: Vec<ConcolicInput> = (0..16u64)
+        .map(|seed| ConcolicInput {
+            registers: vec![(register_id::GPR_BASE, seed)],
+            symbol_registers: vec![(register_id::GPR_BASE, IrType::Bits(64))],
+            symbol_memory: Vec::new(),
+        })
+        .collect();
+
+    let (reports, stats) = runtime.parallel_concolic(&process, arena.as_ref(), &inputs, 4, 64)?;
+    assert_eq!(reports.len(), 16);
+    assert_eq!(stats.completed, 16);
+    // Every run reaches its branch and records one path constraint.
+    for report in &reports {
+        assert!(
+            report.steps >= 2,
+            "input {} only ran {} steps",
+            report.input_index,
+            report.steps
+        );
+        assert_eq!(report.path_constraints, 1);
+        assert!(report.coverage >= 2);
+    }
+    // Work spread across workers (4 workers, 16 inputs).
+    let used_workers = stats.per_worker_completed.iter().filter(|count| **count > 0).count();
+    assert!(
+        used_workers > 1,
+        "work should spread across workers: {:?}",
+        stats.per_worker_completed
+    );
+    eprintln!(
+        "parallel_concolic: {:?} per-worker, elapsed={:?}",
+        stats.per_worker_completed, stats.elapsed
+    );
+    Ok(())
+}
+
+/// Gate B (state mode): states parallelize across workers — the explorer
+/// forks at the conditional branch so both directions are covered by
+/// different states.
+#[test]
+fn parallel_explore_forks_states_at_branches() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(_) = fixture() else {
+        eprintln!("skipping: binutils (as/ld) unavailable");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let (process, ok_exit, fail_exit) = loaded_process(&runtime, 6)?;
+
+    let report = runtime.parallel_explore(&process, 4, 64, 16)?;
+    // One branch -> one fork -> two states, covering both exits' prefixes.
+    assert_eq!(report.branches_forked, 1, "exactly one conditional branch");
+    assert!(report.states_completed >= 2, "fork produced a second state");
+    // Coverage includes instructions from both paths (distinguished by the
+    // branch's taken/not_taken targets).
+    assert!(
+        report.coverage.len() >= 3,
+        "both paths' blocks covered: {:?}",
+        report.coverage
+    );
+    eprintln!(
+        "parallel_explore: {} states, {} forks, {} pcs, workers={:?}",
+        report.states_completed,
+        report.branches_forked,
+        report.coverage.len(),
+        report.pool.per_worker_completed
+    );
+    Ok(())
+}
+
+/// Gate B scaling measurement: a concolic input sweep over a REAL binary
+/// (static musl hello) reports wall-time scaling 1 worker vs 4 workers.
+/// The report is printed, not asserted — timing is machine-dependent.
+#[test]
+fn parallel_concolic_scales_on_real_binary() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    use angryier_expr::ShardedExprArena;
+    use angryier_runtime::ConcolicInput;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    let Ok(bytes) = std::fs::read("/tmp/hello_musl") else {
+        eprintln!("skipping: no musl fixture");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&bytes)?;
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+
+    // 8 inputs: distinct argv byte patterns (concretely written to argv[0]).
+    let inputs: Vec<ConcolicInput> = (0..8u64)
+        .map(|_| ConcolicInput {
+            registers: Vec::new(),
+            symbol_registers: Vec::new(),
+            symbol_memory: Vec::new(),
+        })
+        .collect();
+
+    let budget = 200_000u64;
+    let (_, stats1) = runtime.parallel_concolic(&process, arena.as_ref(), &inputs, 1, budget)?;
+    let (_, stats4) = runtime.parallel_concolic(&process, arena.as_ref(), &inputs, 4, budget)?;
+    eprintln!(
+        "Gate B scaling (hello_musl, 8 inputs, budget {budget}): 1w={:?} 4w={:?} speedup={:.2}x workers={:?}",
+        stats1.elapsed,
+        stats4.elapsed,
+        stats1.elapsed.as_secs_f64() / stats4.elapsed.as_secs_f64().max(1e-9),
+        stats4.per_worker_completed
+    );
+    assert_eq!(stats1.completed, 8);
+    assert_eq!(stats4.completed, 8);
+    Ok(())
+}
+
+/// Gate B (state mode) on a real binary: the explorer forks states at the
+/// conditional branches of musl libc startup and parallelizes them across
+/// workers.
+#[test]
+fn parallel_explore_scales_states_on_real_binary() -> Result<(), Box<dyn std::error::Error>> {
+    let Ok(bytes) = std::fs::read("/tmp/hello_musl") else {
+        eprintln!("skipping: no musl fixture");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&bytes)?;
+    // Small per-state budget: children forked into unreachable side paths
+    // should still terminate quickly against the step budget.
+    let report = runtime.parallel_explore(&process, 4, 2_000, 48)?;
+    eprintln!(
+        "Gate B states (hello_musl): {} completed, {} forks, {} unique pcs, workers={:?}, elapsed={:?}",
+        report.states_completed,
+        report.branches_forked,
+        report.coverage.len(),
+        report.pool.per_worker_completed,
+        report.pool.elapsed
+    );
+    assert!(report.branches_forked > 4, "musl startup has many branches");
+    assert!(report.coverage.len() > 20, "exploration covers real startup code");
+    Ok(())
+}

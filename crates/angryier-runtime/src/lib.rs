@@ -23,17 +23,18 @@ use angryier_arch::DecodedInstruction;
 use angryier_arch::Decoder;
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 use angryier_execution::{
-    ConcolicEvaluator, ConcolicImage, ConcolicSource, ConcreteInterpreter, ExecutionEngine,
-    ExecutionMode, ExecutionOutcome, PathConstraint, SymbolBinding, SymbolicArena, SymbolicBranch, SymbolicEvaluator,
+    ConcolicEvaluator, ConcolicImage, ConcolicSource, ConcreteInterpreter, ExecutionEngine, ExecutionMode,
+    ExecutionOutcome, PathConstraint, SymbolBinding, SymbolicArena, SymbolicBranch, SymbolicEvaluator,
 };
 use angryier_expr::{ExprNode, ExprOp, ExprSort};
-use angryier_ir::{BasicSemanticLowerer, IrBlock};
+use angryier_ir::{BasicSemanticLowerer, IrBlock, IrInstruction, IrOp};
 use angryier_loader::{Elf64Loader, ImageLoader, LoadedImage, Symbol};
 use angryier_memory::{ByteValue, LayeredMemory, MemoryRegion, PersistentMemory};
 use angryier_models::{
     SimProcedureRegistry, SimResult, SimState,
     syscall::{self, SyscallModel},
 };
+use angryier_scheduler::{OsWorkerPool, PoolStats};
 use angryier_semantics::{
     BlockValidityKey, FloatingPointPolicy, SemanticBlockBuilder, SemanticContext, SemanticRegistry, TileRepresentation,
     VectorRepresentation,
@@ -43,6 +44,11 @@ use angryier_solver::{CanonicalConstraint, SolverBackend, SolverOutcomeKind, Sol
 use angryier_state::{
     ExecutionState, FidelityLedger, PersistentConstraintLineage, PersistentRegisters, RegisterState, StateOwnership,
 };
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
 use angryier_types::{
     Address, AnalysisDebtKind, BlockId, ConstraintCanonicalizationVersion, ConstraintId, ContentIdentitySchemaVersion,
     ExprId, FidelityProfile, ImageId, SemanticFingerprintSchemaVersion, SemanticVersion, SolverQueryId, StateId,
@@ -210,6 +216,10 @@ impl BranchSolution {
 }
 
 /// A loaded process with execution state.
+///
+/// `Clone` shares the persistent register/memory structures (copy-on-write),
+/// so forking a state at a branch is cheap — used by the parallel explorers.
+#[derive(Clone)]
 pub struct Process {
     pub image_id: ImageId,
     pub target_profile: TargetProfileId,
@@ -1421,6 +1431,207 @@ impl ConcolicSolution {
 }
 
 /// Concolic execution session: the concrete interpreter drives control flow
+/// A concrete input seed for [`Runtime::parallel_concolic`].
+///
+/// The worker clones the loaded process, applies `registers` before opening
+/// the concolic session, then marks `symbol_registers`/`symbol_memory` as
+/// input symbols — mirroring [`ConcolicSession::mark_input_register`].
+#[derive(Clone, Debug, Default)]
+pub struct ConcolicInput {
+    /// Concrete register writes applied before the session opens.
+    pub registers: Vec<(u32, u64)>,
+    /// Registers to mark as symbolic input (register, view type).
+    pub symbol_registers: Vec<(u32, angryier_ir::IrType)>,
+    /// Memory ranges to mark as symbolic input (address, byte length).
+    pub symbol_memory: Vec<(u64, usize)>,
+}
+
+/// Per-run instrumentation for [`Runtime::parallel_concolic`].
+#[derive(Clone, Debug)]
+pub struct ConcolicRunReport {
+    /// Index into the submitted input batch.
+    pub input_index: usize,
+    /// Worker that ran the input.
+    pub worker: u32,
+    /// Instructions stepped.
+    pub steps: u64,
+    /// Path constraints recorded.
+    pub path_constraints: usize,
+    /// Unique stepped PCs observed (basic coverage signal).
+    pub coverage: usize,
+    /// Fidelity-ledger debt entries accrued by the shadow.
+    pub debt_entries: usize,
+    /// SimProcedure dispatches observed.
+    pub simproc_dispatches: u64,
+    /// Wall time of this run.
+    pub elapsed: Duration,
+}
+
+/// Aggregate report for [`Runtime::parallel_explore`].
+#[derive(Clone, Debug)]
+pub struct ExploreReport {
+    /// States that ran to termination or budget.
+    pub states_completed: u64,
+    /// Conditional branches that produced a child state.
+    pub branches_forked: u64,
+    /// Unique stepped PCs across all workers.
+    pub coverage: BTreeSet<Address>,
+    /// Pool-level statistics (per-worker load balance, elapsed).
+    pub pool: PoolStats,
+}
+
+impl<D: Decoder> Runtime<D> {
+    /// Runs a batch of concolic inputs across an OS-thread worker pool — the
+    /// QSYM parallelism model: workers parallelize over inputs, each running
+    /// an independent concolic session from a clone of `process`.
+    ///
+    /// `step_budget` caps instructions per input. Returns one report per
+    /// input plus pool statistics in submission order of `inputs`.
+    pub fn parallel_concolic<'a>(
+        &'a self,
+        process: &Process,
+        arena: &'a SymbolicArena,
+        inputs: &[ConcolicInput],
+        workers: u32,
+        step_budget: u64,
+    ) -> Result<(Vec<ConcolicRunReport>, PoolStats), RuntimeError> {
+        let pool = Arc::new(OsWorkerPool::<usize>::new(workers));
+        for index in 0..inputs.len() {
+            pool.push((index as u32) % workers, index);
+        }
+        let reports = Mutex::new(Vec::with_capacity(inputs.len()));
+        let stats = pool.run(|worker, index, _enqueue| {
+            let started = Instant::now();
+            let input = &inputs[index];
+            let mut clone = process.clone();
+            let mut coverage = BTreeSet::new();
+            let mut report = ConcolicRunReport {
+                input_index: index,
+                worker,
+                steps: 0,
+                path_constraints: 0,
+                coverage: 0,
+                debt_entries: 0,
+                simproc_dispatches: 0,
+                elapsed: Duration::ZERO,
+            };
+            let result = (|| -> Result<(), RuntimeError> {
+                for (register, value) in &input.registers {
+                    clone.write_register(*register, *value)?;
+                }
+                let mut session = self.concolic(clone, arena);
+                for (register, ty) in &input.symbol_registers {
+                    session.mark_input_register(*register, *ty)?;
+                }
+                for (address, len) in &input.symbol_memory {
+                    session.mark_input_memory(*address, *len)?;
+                }
+                for _ in 0..step_budget {
+                    match session.step()? {
+                        StepOutcome::Stepped { pc, .. } => {
+                            coverage.insert(pc);
+                        }
+                        StepOutcome::Terminated { .. } | StepOutcome::Trap { .. } => break,
+                        StepOutcome::SimProcedure { .. } => break,
+                        _ => {}
+                    }
+                }
+                report.steps = session.process.step_count;
+                report.path_constraints = session.path_constraints().len();
+                report.debt_entries = session.process.state.fidelity.entries.len();
+                report.simproc_dispatches = session.process.simproc_dispatches;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                eprintln!("parallel concolic input {index} failed: {error}");
+            }
+            report.coverage = coverage.len();
+            report.elapsed = started.elapsed();
+            if let Ok(mut reports) = reports.lock() {
+                reports.push(report);
+            }
+        });
+        let mut reports = reports.into_inner().unwrap_or_default();
+        reports.sort_by_key(|report| report.input_index);
+        Ok((reports, stats))
+    }
+
+    /// Explores states in parallel — the angr parallelism model: workers
+    /// parallelize over states. Each state runs concretely until termination
+    /// or `step_budget`; at every conditional branch the state forks: the
+    /// current state keeps its concrete direction and a clone is enqueued
+    /// starting at the other branch target.
+    ///
+    /// This is the EXPLORE-unsound state graph: no solver feasibility check
+    /// gates forks (a PROVE variant would consult the solver before
+    /// enqueueing). `max_states` bounds total explored states.
+    pub fn parallel_explore(
+        &self,
+        process: &Process,
+        workers: u32,
+        step_budget: u64,
+        max_states: u64,
+    ) -> Result<ExploreReport, RuntimeError> {
+        let pool = Arc::new(OsWorkerPool::<Process>::new(workers));
+        let state_count = AtomicU64::new(1);
+        let forked = AtomicU64::new(0);
+        let coverage = Mutex::new(BTreeSet::new());
+        pool.push(0, process.clone());
+        let stats = pool.run(|worker, mut state, enqueue| {
+            let mut pending: Option<(Process, Address, Address)> = None;
+            for _ in 0..step_budget {
+                if state.terminated {
+                    break;
+                }
+                let outcome = match self.step_with(&mut state, |pre, block| {
+                    if let Some(IrInstruction {
+                        op: IrOp::Branch { taken, not_taken, .. },
+                        ..
+                    }) = block.instructions.last()
+                    {
+                        pending = Some((pre.clone(), *taken, *not_taken));
+                    }
+                    Ok(())
+                }) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        eprintln!("explore state on worker {worker} failed: {error}");
+                        break;
+                    }
+                };
+                if let StepOutcome::Stepped { pc, .. } = outcome
+                    && let Ok(mut coverage) = coverage.lock()
+                {
+                    coverage.insert(pc);
+                }
+                if let Some((mut child, taken, not_taken)) = pending.take() {
+                    // The concrete step already resolved one direction; the
+                    // child explores the other target.
+                    if let Ok(pc) = state.pc() {
+                        let other = if pc == taken { not_taken } else { taken };
+                        if state_count.fetch_add(1, Ordering::Relaxed) < max_states && child.write_pc(other).is_ok() {
+                            forked.fetch_add(1, Ordering::Relaxed);
+                            enqueue(child);
+                        }
+                    }
+                }
+                if matches!(
+                    outcome,
+                    StepOutcome::Terminated { .. } | StepOutcome::Trap { .. } | StepOutcome::SimProcedure { .. }
+                ) {
+                    break;
+                }
+            }
+        });
+        Ok(ExploreReport {
+            states_completed: stats.completed,
+            branches_forked: forked.load(Ordering::Relaxed),
+            coverage: coverage.into_inner().unwrap_or_default(),
+            pool: stats,
+        })
+    }
+}
+
 /// while [`ConcolicEvaluator`] shadows the same lowered blocks, keeping
 /// expressions bounded to input-derived data. Branch conditions are recorded
 /// as path constraints; inverting one yields a new concrete input through the

@@ -195,6 +195,7 @@ dependencies = [
  "angryier-loader",
  "angryier-memory",
  "angryier-models",
+ "angryier-scheduler",
  "angryier-semantics",
  "angryier-semantics-intel64",
  "angryier-solver",

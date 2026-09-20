@@ -10,8 +10,10 @@
 use angryier_types::{StateId, WorkUnitId};
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Existing contracts
@@ -569,6 +571,179 @@ impl Scheduler for InMemoryScheduler {
 impl Default for InMemoryScheduler {
     fn default() -> Self {
         Self::new(4)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------
+// ---------------------------------------------------------------------------
+// OS-thread worker pool
+// ---------------------------------------------------------------------------
+
+/// Statistics reported when an [`OsWorkerPool`] run finishes.
+#[derive(Clone, Debug, Default)]
+pub struct PoolStats {
+    /// Work units ever enqueued (seed units plus children pushed by handlers).
+    pub produced: u64,
+    /// Work units fully processed.
+    pub completed: u64,
+    /// Units completed per worker — load-balance instrumentation for Gate B.
+    pub per_worker_completed: Vec<u64>,
+    /// Wall time of the parallel run.
+    pub elapsed: Duration,
+}
+
+/// A pool of OS threads over worker-local deques with work stealing.
+///
+/// Each worker pops from its own deque first; when empty it steals from the
+/// most-loaded peer, then from a global overflow queue. Termination is
+/// tracked by an in-flight counter: a unit is in-flight from pop until its
+/// handler returns, so a run finishes exactly when every produced unit has
+/// completed and no worker holds an in-flight unit.
+pub struct OsWorkerPool<T: Send> {
+    queues: Vec<Mutex<VecDeque<T>>>,
+    global: Mutex<VecDeque<T>>,
+    produced: AtomicU64,
+    completed: AtomicU64,
+    inflight: AtomicU64,
+    per_worker: Vec<AtomicU64>,
+    worker_count: u32,
+}
+
+impl<T: Send> OsWorkerPool<T> {
+    /// Creates a pool with `worker_count` worker deques.
+    pub fn new(worker_count: u32) -> Self {
+        let count = worker_count.max(1) as usize;
+        let mut queues = Vec::with_capacity(count);
+        let mut per_worker = Vec::with_capacity(count);
+        for _ in 0..count {
+            queues.push(Mutex::new(VecDeque::new()));
+            per_worker.push(AtomicU64::new(0));
+        }
+        Self {
+            queues,
+            global: Mutex::new(VecDeque::new()),
+            produced: AtomicU64::new(0),
+            completed: AtomicU64::new(0),
+            inflight: AtomicU64::new(0),
+            per_worker,
+            worker_count: worker_count.max(1),
+        }
+    }
+
+    /// Enqueues a unit on `worker`'s deque (or the global overflow queue when
+    /// the local deque is at capacity).
+    pub fn push(&self, worker: u32, item: T) {
+        let index = usize::try_from(worker).unwrap_or(0) % self.queues.len();
+        if let Ok(mut queue) = self.queues[index].lock() {
+            queue.push_back(item);
+        } else if let Ok(mut global) = self.global.lock() {
+            global.push_back(item);
+        }
+        self.produced.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Pops the next unit for `worker`: own deque (LIFO), then the
+    /// most-loaded peer (steal), then the global queue.
+    fn next(&self, worker: u32) -> Option<T> {
+        let index = usize::try_from(worker).unwrap_or(0) % self.queues.len();
+        if let Ok(mut queue) = self.queues[index].lock()
+            && let Some(item) = queue.pop_back()
+        {
+            self.inflight.fetch_add(1, Ordering::Relaxed);
+            return Some(item);
+        }
+        // Steal from the most-loaded peer.
+        let mut best = None;
+        let mut best_load = 0usize;
+        for (peer, queue) in self.queues.iter().enumerate() {
+            if peer == index {
+                continue;
+            }
+            if let Ok(guard) = queue.lock() {
+                let load = guard.len();
+                if load > best_load {
+                    best_load = load;
+                    best = Some(peer);
+                }
+            }
+        }
+        if let Some(peer) = best
+            && let Ok(mut queue) = self.queues[peer].lock()
+            && let Some(item) = queue.pop_front()
+        {
+            self.inflight.fetch_add(1, Ordering::Relaxed);
+            return Some(item);
+        }
+        if let Ok(mut global) = self.global.lock()
+            && let Some(item) = global.pop_front()
+        {
+            self.inflight.fetch_add(1, Ordering::Relaxed);
+            return Some(item);
+        }
+        None
+    }
+
+    /// True when the run has finished: every produced unit completed and no
+    /// worker holds an in-flight unit.
+    fn finished(&self) -> bool {
+        self.produced.load(Ordering::Relaxed) == self.completed.load(Ordering::Relaxed)
+            && self.inflight.load(Ordering::Relaxed) == 0
+    }
+
+    /// Number of workers in this pool.
+    pub fn worker_count(&self) -> u32 {
+        self.worker_count
+    }
+}
+
+impl<T: Send + 'static> OsWorkerPool<T> {
+    /// Runs `handler` on `worker_count` OS threads until the pool drains.
+    /// The handler receives the worker index, the unit, and a callback for
+    /// pushing follow-up units (children) onto this worker's deque.
+    pub fn run<H>(self: &Arc<Self>, handler: H) -> PoolStats
+    where
+        H: Fn(u32, T, &dyn Fn(T)) + Send + Sync,
+    {
+        let started = Instant::now();
+        let pool = Arc::clone(self);
+        std::thread::scope(|scope| {
+            for worker in 0..self.worker_count {
+                let pool = Arc::clone(&pool);
+                let handler = &handler;
+                scope.spawn(move || {
+                    loop {
+                        match pool.next(worker) {
+                            Some(item) => {
+                                let pool2 = Arc::clone(&pool);
+                                let enqueue = move |child: T| pool2.push(worker, child);
+                                handler(worker, item, &enqueue);
+                                pool.completed.fetch_add(1, Ordering::Relaxed);
+                                pool.per_worker[usize::try_from(worker).unwrap_or(0)].fetch_add(1, Ordering::Relaxed);
+                                pool.inflight.fetch_sub(1, Ordering::Relaxed);
+                            }
+                            None => {
+                                if pool.finished() {
+                                    return;
+                                }
+                                std::thread::yield_now();
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        PoolStats {
+            produced: self.produced.load(Ordering::Relaxed),
+            completed: self.completed.load(Ordering::Relaxed),
+            per_worker_completed: self
+                .per_worker
+                .iter()
+                .map(|counter| counter.load(Ordering::Relaxed))
+                .collect(),
+            elapsed: started.elapsed(),
+        }
     }
 }
 
