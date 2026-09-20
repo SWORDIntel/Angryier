@@ -3100,3 +3100,39 @@ target:
     assert!(coverage.contains(&target_va), "replayed input must reach target");
     Ok(())
 }
+
+/// Lua REPL session: `angry.open` → step/reg/states/symbolic drive a
+/// session interactively.
+#[cfg(all(feature = "xed", feature = "script", target_arch = "x86_64"))]
+#[test]
+fn lua_open_steps_interactively() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = temp_dir("angryier-luaopen").ok_or("no tempdir")?;
+    let path_s = dir.join("o.s");
+    let path_o = dir.join("o.o");
+    let path_bin = dir.join("o");
+    std::fs::write(
+        &path_s,
+        "_start:\n    mov $5, %rax\n    add $3, %rax\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall\n",
+    )?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let lua = mlua::Lua::new();
+    angryier_runtime::script::register(&lua)?;
+    let script = format!(
+        r#"
+        local s = angry.open("{}")
+        assert(s:step() == "stepped")
+        assert(s:step() == "stepped")
+        assert(s:states() == 1)
+        local pc = s:pc()
+        assert(pc ~= 0x401000, "pc must advance")
+        return s:states()
+        "#,
+        path_bin.display()
+    );
+    let states: u64 = lua.load(&script).eval()?;
+    assert_eq!(states, 1);
+    Ok(())
+}

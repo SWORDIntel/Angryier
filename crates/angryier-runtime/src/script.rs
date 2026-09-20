@@ -17,6 +17,50 @@
 use angryier_expr::ExprArena;
 use mlua::{Lua, Table, Value};
 
+/// A live symbolic session exposed to Lua as a userdata handle. The
+/// runtime and arena are `Box::leak`'d so the session's borrows are
+/// 'static — acceptable for a CLI driver (one VM per process run).
+#[cfg(feature = "xed")]
+pub struct LuaSession {
+    session: crate::SymbolicSession<'static, crate::XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>>,
+}
+
+#[cfg(feature = "xed")]
+impl mlua::UserData for LuaSession {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // s:step() → outcome string ("stepped"|"branched"|"terminated")
+        methods.add_method_mut("step", |_, this, ()| match this.session.step_state(0) {
+            Ok(crate::SymbolicStepOutcome::Stepped { .. }) => Ok("stepped"),
+            Ok(crate::SymbolicStepOutcome::Branched { .. }) => Ok("branched"),
+            Ok(crate::SymbolicStepOutcome::Terminated) => Ok("terminated"),
+            Err(e) => Err(mlua::Error::external(format!("step: {e:?}"))),
+        });
+        // s:pc() → current pc of state 0
+        methods.add_method("pc", |_, this, ()| {
+            this.session.states[0]
+                .process
+                .pc()
+                .map_err(|e| mlua::Error::external(format!("{e:?}")))
+        });
+        // s:reg("rdi") → concrete value (or nil when symbolic)
+        methods.add_method("reg", |_, this, name: String| {
+            let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
+            match this.session.states[0].process.read_register(reg) {
+                Ok(v) => Ok(mlua::Value::Integer(v as i64)),
+                Err(_) => Ok(mlua::Value::Nil),
+            }
+        });
+        methods.add_method("states", |_, this, ()| Ok(this.session.states.len()));
+        // s:symbolic("rdi") — mark a register symbolic on state 0.
+        methods.add_method_mut("symbolic", |_, this, name: String| {
+            let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
+            this.session
+                .mark_symbolic(0, reg, angryier_ir::IrType::Bits(64))
+                .map_err(|e| mlua::Error::external(format!("{e:?}")))
+        });
+    }
+}
+
 /// The `angry` library installed into each script VM.
 pub fn register(lua: &Lua) -> mlua::Result<()> {
     let lib = lua.create_table()?;
@@ -24,6 +68,8 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
         "run",
         lua.create_function(|lua, (path, opts): (String, Table)| run_driver(lua, &path, &opts))?,
     )?;
+    #[cfg(feature = "xed")]
+    lib.set("open", lua.create_function(|_, path: String| open_session(&path))?)?;
     lib.set("version", lua.create_function(|_, ()| Ok(env!("CARGO_PKG_VERSION")))?)?;
     lua.globals().set("angry", lib)?;
     Ok(())
@@ -173,4 +219,25 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         out.set("regs", regs)?;
     }
     Ok(out)
+}
+
+/// `angry.open(path)` → a live session handle with :step()/:pc()/:reg()/
+/// :states()/:symbolic() — REPL-style control.
+#[cfg(feature = "xed")]
+fn open_session(path: &str) -> mlua::Result<LuaSession> {
+    let bytes = std::fs::read(path).map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
+    let runtime: &'static crate::Runtime<crate::XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>> =
+        Box::leak(Box::new(crate::Runtime::with_native_xed(
+            angryier_types::SemanticVersion(1),
+            angryier_types::TargetProfileId(1),
+        )));
+    let arena: &'static angryier_expr::ShardedExprArena = Box::leak(Box::new(angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    )));
+    let process = runtime
+        .load_elf(&bytes)
+        .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?;
+    Ok(LuaSession {
+        session: crate::SymbolicSession::new(runtime, arena, process),
+    })
 }
