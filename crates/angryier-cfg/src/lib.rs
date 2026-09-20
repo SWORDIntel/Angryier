@@ -195,11 +195,7 @@ impl Cfg {
                     continue;
                 }
                 for edge in self.edges.iter().filter(|e| {
-                    e.from == last_pc
-                        && !matches!(
-                            e.kind,
-                            EdgeKind::Call | EdgeKind::IndirectCall | EdgeKind::Return
-                        )
+                    e.from == last_pc && !matches!(e.kind, EdgeKind::Call | EdgeKind::IndirectCall | EdgeKind::Return)
                 }) {
                     if let Some(to) = edge.to
                         && !entries.contains(&to)

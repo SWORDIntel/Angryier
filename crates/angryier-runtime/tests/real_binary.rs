@@ -2520,7 +2520,11 @@ loop:
     eprintln!("loop report: {report:?}");
     // The loop must terminate — solver-gating prunes the UNSAT back-edge.
     assert!(report.terminated >= 1, "loop should terminate via UNSAT back-edge");
-    assert!(report.forks <= 8, "state count should stay bounded, got {}", report.forks);
+    assert!(
+        report.forks <= 8,
+        "state count should stay bounded, got {}",
+        report.forks
+    );
     Ok(())
 }
 
@@ -2564,17 +2568,20 @@ helper:
         .find(|r| r.executable)
         .ok_or("no exec region")?;
     let base = text_region.base;
-    let text = process.state.memory.read(base, text_region.size as usize)
+    let text = process
+        .state
+        .memory
+        .read(base, text_region.size as usize)
         .map_err(|e| format!("text read: {e:?}"))?;
-    let bytes: Vec<u8> = text.iter().map(|b| match b { angryier_memory::ByteValue::Concrete(v) => *v, _ => 0 }).collect();
-    let cfg = angryier_cfg::recover_multi(
-        &runtime.decoder,
-        base,
-        &bytes,
-        [process.entry],
-        |d| d.form_id,
-    )
-    .map_err(|e| format!("cfg: {e:?}"))?;
+    let bytes: Vec<u8> = text
+        .iter()
+        .map(|b| match b {
+            angryier_memory::ByteValue::Concrete(v) => *v,
+            _ => 0,
+        })
+        .collect();
+    let cfg = angryier_cfg::recover_multi(&runtime.decoder, base, &bytes, [process.entry], |d| d.form_id)
+        .map_err(|e| format!("cfg: {e:?}"))?;
 
     let functions = cfg.functions();
     assert_eq!(functions.len(), 2, "main + helper");

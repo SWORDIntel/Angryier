@@ -2807,11 +2807,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 scored.sort_by_key(|(_, cost)| std::cmp::Reverse(*cost));
                 let drop_count = self.states.len() - max_states;
                 // Remove highest-index first so indices stay valid.
-                let mut drop_indices: Vec<usize> = scored
-                    .iter()
-                    .take(drop_count)
-                    .map(|(i, _)| *i)
-                    .collect();
+                let mut drop_indices: Vec<usize> = scored.iter().take(drop_count).map(|(i, _)| *i).collect();
                 drop_indices.sort_unstable_by_key(|i| std::cmp::Reverse(*i));
                 drop_indices.dedup();
                 for idx in drop_indices {
@@ -3113,33 +3109,33 @@ where
         let cfg = self.cfg;
         type ShardResult = Result<(SymbolicRunReport, Vec<SymbolicState>, Vec<SymbolicState>), RuntimeError>;
         let results: Vec<ShardResult> = std::thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(workers);
-                for shard in shards {
-                    if shard.is_empty() {
-                        continue;
-                    }
-                    handles.push(scope.spawn(move || {
-                        let mut sub = SymbolicSession {
-                            runtime,
-                            arena,
-                            states: shard,
-                            dead: Vec::new(),
-                            cfg,
-                            next_state_id: 1,
-                            pending_merges: Vec::new(),
-                        };
-                        let report = sub.run(max_steps, max_states, None, timeout, false)?;
-                        Ok((report, sub.states, sub.dead))
-                    }));
+            let mut handles = Vec::with_capacity(workers);
+            for shard in shards {
+                if shard.is_empty() {
+                    continue;
                 }
-                handles
-                    .into_iter()
-                    .map(|h| {
-                        h.join()
-                            .unwrap_or_else(|_| Err(RuntimeError::Execution("worker panicked".into())))
-                    })
-                    .collect()
-            });
+                handles.push(scope.spawn(move || {
+                    let mut sub = SymbolicSession {
+                        runtime,
+                        arena,
+                        states: shard,
+                        dead: Vec::new(),
+                        cfg,
+                        next_state_id: 1,
+                        pending_merges: Vec::new(),
+                    };
+                    let report = sub.run(max_steps, max_states, None, timeout, false)?;
+                    Ok((report, sub.states, sub.dead))
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err(RuntimeError::Execution("worker panicked".into())))
+                })
+                .collect()
+        });
 
         let mut reports = Vec::new();
         for result in results {
