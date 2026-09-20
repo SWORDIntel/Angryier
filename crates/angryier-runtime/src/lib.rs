@@ -245,6 +245,21 @@ pub struct Process {
     pub heap_end: u64,
     /// Next anonymous `mmap` base — grows downward from [`MMAP_BASE`].
     pub mmap_next: u64,
+    /// Named file contents the process may `openat` — seeded by the
+    /// caller for concrete input files (path → bytes).
+    pub files: BTreeMap<String, Vec<u8>>,
+    /// Open file descriptors: fd → (bytes, read position).
+    pub open_fds: BTreeMap<u64, (Vec<u8>, usize)>,
+    /// File paths whose contents should materialize as symbolic bytes in
+    /// symbolic sessions (concrete sessions serve `files` bytes).
+    pub symbolic_files: std::collections::BTreeSet<String>,
+    /// fds opened on symbolic paths — symbolic `read` materializes bytes.
+    pub symbolic_fds: std::collections::BTreeSet<u64>,
+    /// Where `argv[0]`'s NUL-terminated string landed on the stack —
+    /// `symbolize_argv0` overwrites it with symbolic bytes.
+    pub argv0_addr: Option<u64>,
+    /// Next fd to allocate (3+ — 0/1/2 are std streams).
+    pub next_fd: u64,
     pub next_block_id: u64,
     pub step_count: u64,
     pub simproc_dispatches: u64,
@@ -370,7 +385,12 @@ impl<D: Decoder> Runtime<D> {
     /// The layout mirrors what the Linux kernel builds for a real exec: a
     /// small argv string and `AT_RANDOM` data above an argv/envp/auxv slot
     /// array, with `argc` at the new stack pointer.
-    fn initial_stack_pointer(&self, image: &LoadedImage, memory: &mut PersistentMemory) -> Result<u64, RuntimeError> {
+    /// Returns (rsp, argv0 string address).
+    fn initial_stack_pointer(
+        &self,
+        image: &LoadedImage,
+        memory: &mut PersistentMemory,
+    ) -> Result<(u64, u64), RuntimeError> {
         const AT_NULL: u64 = 0;
         const AT_PHDR: u64 = 3;
         const AT_PHENT: u64 = 4;
@@ -445,7 +465,7 @@ impl<D: Decoder> Runtime<D> {
         *memory = memory
             .write(rsp, &bytes)
             .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
-        Ok(rsp)
+        Ok((rsp, argv0_addr))
     }
 
     /// Executes a `rep`-prefixed string instruction directly against the
@@ -655,7 +675,7 @@ impl<D: Decoder> Runtime<D> {
         // a real exec: argc/argv/envp/auxv. libc `_start` code reads argc from
         // `[rsp]`, so the stack pointer must land on a populated image rather
         // than the top of the mapped region.
-        let stack_pointer = self.initial_stack_pointer(&image, &mut memory)?;
+        let (stack_pointer, argv0_addr) = self.initial_stack_pointer(&image, &mut memory)?;
 
         // Initialize registers with Intel64 canonical widths.
         let reg_file = Intel64RegisterFile::canonical();
@@ -711,6 +731,12 @@ impl<D: Decoder> Runtime<D> {
             program_break: brk_base,
             heap_end: brk_base + HEAP_SIZE,
             mmap_next: MMAP_BASE,
+            files: BTreeMap::new(),
+            open_fds: BTreeMap::new(),
+            symbolic_files: std::collections::BTreeSet::new(),
+            symbolic_fds: std::collections::BTreeSet::new(),
+            argv0_addr: Some(argv0_addr),
+            next_fd: 3,
             next_block_id: 0,
             step_count: 0,
             simproc_dispatches: 0,
@@ -1095,8 +1121,24 @@ impl<D: Decoder> Runtime<D> {
                 Ok(StepOutcome::Terminated { pc })
             }
             syscall::READ => {
-                // stdin: report EOF; other fds: -EBADF.
-                let ret = if arg0 == 0 { 0 } else { 0u64.wrapping_sub(9) };
+                // stdin: EOF. Open file descriptors serve their bytes.
+                // Unknown fds: -EBADF.
+                let ret = if arg0 == 0 {
+                    0
+                } else if let Some((data, pos)) = process.open_fds.get_mut(&arg0) {
+                    let n = (*pos + arg2 as usize).min(data.len()) - *pos;
+                    let slice = data[*pos..*pos + n].to_vec();
+                    *pos += n;
+                    let bytes: Vec<ByteValue> = slice.iter().map(|b| ByteValue::Concrete(*b)).collect();
+                    process.state.memory = process
+                        .state
+                        .memory
+                        .write(arg1, &bytes)
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                    n as u64
+                } else {
+                    0u64.wrapping_sub(9)
+                };
                 process.write_register(register_id::GPR_BASE, ret)?;
                 process.write_pc(next_pc)?;
                 process.step_count += 1;
@@ -1295,14 +1337,44 @@ impl<D: Decoder> Runtime<D> {
                 Ok(StepOutcome::Syscall { pc, number })
             }
             syscall::OPENAT => {
-                // Report -ENOENT: file contents aren't modeled. (Phase 14's
-                // named-file layer is a later refinement.)
-                process.write_register(register_id::GPR_BASE, 0u64.wrapping_sub(2))?;
+                // openat(dirfd, path, flags, mode) — the path is read as a
+                // NUL-terminated string and resolved against the process's
+                // `files` map; unknown paths report -ENOENT.
+                let path_bytes = {
+                    let mut buf = Vec::with_capacity(64);
+                    for i in 0..256u64 {
+                        let b = read_concrete_bytes(process, arg1 + i, 1)?;
+                        if b[0] == 0 {
+                            break;
+                        }
+                        buf.push(b[0]);
+                    }
+                    buf
+                };
+                let path = String::from_utf8_lossy(&path_bytes).to_string();
+                let ret = if let Some(data) = process
+                    .files
+                    .get(&path)
+                    .cloned()
+                    .or_else(|| process.symbolic_files.contains(&path).then(Vec::new))
+                {
+                    let fd = process.next_fd;
+                    process.next_fd += 1;
+                    process.open_fds.insert(fd, (data, 0));
+                    if process.symbolic_files.contains(&path) {
+                        process.symbolic_fds.insert(fd);
+                    }
+                    fd
+                } else {
+                    0u64.wrapping_sub(2) // -ENOENT
+                };
+                process.write_register(register_id::GPR_BASE, ret)?;
                 process.write_pc(next_pc)?;
                 process.step_count += 1;
                 Ok(StepOutcome::Syscall { pc, number })
             }
             syscall::CLOSE => {
+                process.open_fds.remove(&arg0);
                 process.write_register(register_id::GPR_BASE, 0)?;
                 process.write_pc(next_pc)?;
                 process.step_count += 1;
@@ -2533,6 +2605,62 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Ok(())
     }
 
+    /// Overwrites `argv[0]`'s stack string with `len` symbolic bytes (the
+    /// trailing NUL stays concrete) — symbolic argv input for `main(argc,
+    /// argv)` programs. `len` includes the NUL: `symbolize_argv0(0, 8)`
+    /// gives 7 symbolic bytes.
+    pub fn symbolize_argv0(&mut self, index: usize, len: u64) -> Result<(), RuntimeError> {
+        let state = self
+            .states
+            .get_mut(index)
+            .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
+        let argv0 = state
+            .process
+            .argv0_addr
+            .ok_or_else(|| RuntimeError::Execution("no argv0 address".into()))?;
+        let next_symbol = state
+            .symbols
+            .iter()
+            .filter_map(|s| {
+                self.arena.get(s.expression).and_then(|n| {
+                    n.immediate
+                        .get(..8)
+                        .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                })
+            })
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        let mut bytes = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            let byte = if i + 1 == len {
+                ByteValue::Concrete(0) // trailing NUL
+            } else {
+                let expr = self
+                    .arena
+                    .intern(angryier_expr::ExprNode {
+                        sort: angryier_expr::ExprSort::BitVec(8),
+                        op: angryier_expr::ExprOp::Symbol,
+                        operands: Vec::new(),
+                        immediate: (next_symbol + i).to_le_bytes().to_vec(),
+                    })
+                    .map_err(|e| RuntimeError::Symbolic(format!("{e:?}")))?;
+                state.symbols.push(angryier_execution::SymbolBinding {
+                    register: register_id::GPR_BASE + 7, // provenance: argv bytes (rdi-ish)
+                    expression: expr,
+                    width: 8,
+                });
+                ByteValue::Symbolic(expr)
+            };
+            bytes.push(byte);
+        }
+        state
+            .memory
+            .write_bytes(argv0, &bytes)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        Ok(())
+    }
+
     /// Steps state `index` through one instruction: decode → lower → symbolic
     /// eval. Conditional branches fork the state (taken gets the condition,
     /// not-taken its negation); unconditional jumps and direct calls follow
@@ -2674,7 +2802,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 let fd = arg(state, register_id::GPR_BASE + 7);
                 let buf = arg(state, register_id::GPR_BASE + 6);
                 let count = arg(state, register_id::GPR_BASE + 2);
-                if fd == 0 && count > 0 && count <= 4096 {
+                if (fd == 0 || state.process.symbolic_fds.contains(&fd)) && count > 0 && count <= 4096 {
                     let next_symbol = state
                         .symbols
                         .iter()

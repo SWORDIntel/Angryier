@@ -2767,3 +2767,122 @@ fn pe32_loads_and_executes() -> Result<(), Box<dyn std::error::Error>> {
     let _ = outcome;
     Ok(())
 }
+
+/// Named-file input: `openat("input.txt")` + `read(fd)` serves the
+/// process's `files` map; the bytes flow to `write(1)` unchanged.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn openat_read_serves_named_file() -> Result<(), Box<dyn std::error::Error>> {
+    let source = r#"
+        .global _start
+        .text
+_start:
+    mov $257, %rax        # openat
+    mov $-100, %rdi       # AT_FDCWD
+    lea name(%rip), %rsi
+    xor %rdx, %rdx        # O_RDONLY
+    syscall
+    mov %rax, %rdi        # fd
+    xor %rax, %rax        # read
+    lea buf(%rip), %rsi
+    mov $64, %rdx
+    syscall
+    mov %rax, %rdx        # n
+    mov $1, %rax          # write
+    mov $1, %rdi
+    lea buf(%rip), %rsi
+    syscall
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+name:
+    .asciz "input.txt"
+    .data
+buf:
+    .zero 64
+"#;
+    let dir = temp_dir("angryier-file").ok_or("no tempdir")?;
+    let path_s = dir.join("f.s");
+    let path_o = dir.join("f.o");
+    let path_bin = dir.join("f");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_elf(&elf_bytes)?;
+    process
+        .files
+        .insert("input.txt".to_string(), b"file-content-here".to_vec());
+    for _ in 0..32 {
+        if matches!(runtime.step(&mut process)?, StepOutcome::Terminated { .. }) {
+            break;
+        }
+    }
+    assert_eq!(process.syscalls.output(), b"file-content-here");
+    Ok(())
+}
+
+/// Symbolic argv: `symbolize_argv0` writes symbolic bytes into the
+/// argv[0] stack string; a program reading argv[0][0] forks on it.
+#[cfg(all(feature = "xed", feature = "z3", target_arch = "x86_64"))]
+#[test]
+fn symbolic_argv0_forks_on_input() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::ExprReader;
+    use angryier_runtime::{ExplorationPolicy, SymbolicSession};
+    use angryier_solver_z3::Z3Backend;
+    use std::sync::Arc;
+
+    // _start: rdi=argc, argv at rsp+8 → argv[0] ptr → argv[0][0] byte.
+    let source = r#"
+        .global _start
+        .text
+_start:
+    mov 8(%rsp), %rax     # argv[0] pointer
+    cmpb $0x41, (%rax)    # argv[0][0] == 'A'?
+    je target
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+target:
+    mov $60, %rax
+    mov $7, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-argv").ok_or("no tempdir")?;
+    let path_s = dir.join("a.s");
+    let path_o = dir.join("a.o");
+    let path_bin = dir.join("a");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = Arc::new(angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    ));
+    let mut session = SymbolicSession::new(&runtime, arena.as_ref(), process);
+    session.symbolize_argv0(0, 4)?;
+    let mut backend = Z3Backend::native_ffi(arena.clone() as Arc<dyn ExprReader>)?;
+    let entry = session.states[0].process.pc()?;
+    let policy = ExplorationPolicy {
+        find: vec![entry + 0x16],
+        ..Default::default()
+    };
+    let report = session.run_with_policy(
+        64,
+        8,
+        Some(&mut backend),
+        std::time::Duration::from_secs(10),
+        false,
+        &policy,
+    )?;
+    assert!(report.forks >= 1);
+    assert_eq!(report.found.len(), 1, "'A' argv path reaches target");
+    Ok(())
+}
