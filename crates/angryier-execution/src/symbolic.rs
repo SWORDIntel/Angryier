@@ -2076,6 +2076,7 @@ mod tests {
             concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
         };
         let gt = eq(&arena, 64, sym, one)?; // any Bool constraint
         let left = SymbolicStateSnapshot {
@@ -2083,12 +2084,14 @@ mod tests {
             concrete_registers: BTreeMap::new(),
             constraints: vec![gt],
             symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
         };
         let right = SymbolicStateSnapshot {
             registers: BTreeMap::from([(0u32, (two, IrType::Bits(64)))]),
             concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
         };
 
         let merged = merge_snapshots(&arena, &parent, &left, &right).map_err(|e| format!("{e:?}"))?;
@@ -2115,6 +2118,7 @@ mod tests {
             concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
         };
         let right = left.clone();
         let merged = merge_snapshots(&arena, &parent, &left, &right).map_err(|e| format!("{e:?}"))?;
@@ -2134,6 +2138,7 @@ mod tests {
             concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
         };
         let cond = eq(&arena, 64, parent_sym, parent_sym)?;
         let left = SymbolicStateSnapshot {
@@ -2141,6 +2146,7 @@ mod tests {
             concrete_registers: BTreeMap::new(),
             constraints: vec![cond],
             symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
         };
         let right = SymbolicStateSnapshot::default();
         let merged = merge_snapshots(&arena, &parent, &left, &right).map_err(|e| format!("{e:?}"))?;
@@ -2163,12 +2169,14 @@ mod tests {
             concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
         };
         let right = SymbolicStateSnapshot {
             registers: BTreeMap::from([(0u32, (a32, IrType::Bits(32)))]),
             concrete_registers: BTreeMap::new(),
             constraints: Vec::new(),
             symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
         };
         assert!(merge_snapshots(&arena, &parent, &left, &right).is_err());
         Ok(())
