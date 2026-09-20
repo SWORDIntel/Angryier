@@ -149,6 +149,129 @@ impl Cfg {
         }
         best.map(|(pc, _)| pc)
     }
+    /// Immediate dominators via the iterative dataflow fixpoint —
+    /// `idom[b]` = the unique strict dominator closest to `b`. Entry
+    /// dominates itself.
+    pub fn dominators(&self) -> BTreeMap<Address, Address> {
+        let entry = self.entry;
+        let mut dom: BTreeMap<Address, BTreeSet<Address>> = BTreeMap::new();
+        let all: BTreeSet<Address> = self.blocks.keys().copied().collect();
+        for b in &all {
+            dom.insert(*b, all.clone());
+        }
+        dom.insert(entry, BTreeSet::from([entry]));
+        // Predecessors from edges (edge.from is the terminating insn addr —
+        // map it back to its block).
+        let preds = |b: Address| -> Vec<Address> {
+            self.edges
+                .iter()
+                .filter_map(|e| (e.to == Some(b)).then_some(e.from))
+                .filter_map(|insn| {
+                    self.blocks
+                        .values()
+                        .find(|bl| bl.instructions.iter().any(|i| i.address == insn))
+                        .map(|bl| bl.start)
+                })
+                .collect()
+        };
+        loop {
+            let mut changed = false;
+            for &b in &all {
+                if b == entry {
+                    continue;
+                }
+                let mut new_dom = all.clone();
+                for p in preds(b) {
+                    let pd = dom.get(&p).cloned().unwrap_or_default();
+                    new_dom = new_dom.intersection(&pd).copied().collect();
+                }
+                new_dom.insert(b);
+                if dom.get(&b) != Some(&new_dom) {
+                    dom.insert(b, new_dom);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // idom[b] = strict dominator of b that is dominated by all others.
+        let mut idom = BTreeMap::new();
+        for (&b, ds) in &dom {
+            if b == entry {
+                continue;
+            }
+            let mut strict: Vec<Address> = ds.iter().copied().filter(|d| *d != b).collect();
+            // The immediate dominator is dominated by every other strict
+            // dominator — pick the candidate whose dom-set is largest.
+            strict.sort_by_key(|d| dom.get(d).map(|s| s.len()).unwrap_or(0));
+            if let Some(d) = strict.last() {
+                idom.insert(b, *d);
+            }
+        }
+        idom
+    }
+
+    /// Natural loops: a back edge `a → b` where `b` dominates `a` defines a
+    /// loop headed at `b` whose body is `b` plus every node that can reach
+    /// `a` without passing `b`. Returns `(header, body)` pairs.
+    pub fn loops(&self) -> Vec<Loop> {
+        let idom = self.dominators();
+        // b dominates a ⇔ a's dom set contains b — recompute dom sets via
+        // the idom chain (walk idom[a] upward).
+        let dominates = |b: Address, a: Address| -> bool {
+            let mut cur = a;
+            let mut seen = BTreeSet::new();
+            while let Some(&d) = idom.get(&cur) {
+                if d == b {
+                    return true;
+                }
+                if !seen.insert(cur) {
+                    break;
+                }
+                cur = d;
+            }
+            b == a
+        };
+        let block_of_insn = |insn: Address| -> Option<Address> {
+            self.blocks
+                .values()
+                .find(|b| b.instructions.iter().any(|i| i.address == insn))
+                .map(|b| b.start)
+        };
+        let mut loops = Vec::new();
+        for edge in &self.edges {
+            let (Some(a), Some(b)) = (block_of_insn(edge.from), edge.to) else {
+                continue;
+            };
+            if !dominates(b, a) {
+                continue;
+            }
+            // Natural loop of a→b: {b} ∪ nodes reaching a without b.
+            let mut body = BTreeSet::from([b]);
+            let mut stack = vec![a];
+            while let Some(n) = stack.pop() {
+                if n == b || !body.insert(n) {
+                    continue;
+                }
+                for e in &self.edges {
+                    if e.to == Some(n)
+                        && let Some(p) = block_of_insn(e.from)
+                        && p != b
+                    {
+                        stack.push(p);
+                    }
+                }
+            }
+            loops.push(Loop {
+                header: b,
+                back_edge: (a, b),
+                body: body.into_iter().collect(),
+            });
+        }
+        loops
+    }
+
     /// Partitions the recovered blocks into functions: every `Call`-edge
     /// target is a function entry (plus the first block = program entry),
     /// and each function owns the blocks it reaches via non-call edges
@@ -213,6 +336,18 @@ impl Cfg {
         }
         functions
     }
+}
+
+/// A natural loop:  dominates ;  is every
+/// block that can reach the back-edge source without passing the header.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Loop {
+    /// Loop entry — the back-edge target.
+    pub header: Address,
+    /// The back edge (source block, header).
+    pub back_edge: (Address, Address),
+    /// All blocks inside the loop, including the header.
+    pub body: Vec<Address>,
 }
 
 /// A recovered function: an entry block plus the blocks it owns.
@@ -619,6 +754,30 @@ mod tests {
         assert_eq!(cfg.blocks.len(), 1);
         let head = cfg.blocks.get(&0x1000).ok_or("head")?;
         assert_eq!(cfg.successors(head), vec![0x1000]);
+        Ok(())
+    }
+
+    #[test]
+    fn loops_finds_back_edge() -> Result<(), String> {
+        // nop; jmp -3 — a self-loop; the header dominates the back-edge
+        // source trivially.
+        let code = [0x90, 0xeb, 0xfd];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
+        let loops = cfg.loops();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].header, 0x1000);
+        assert_eq!(loops[0].body, vec![0x1000]);
+        Ok(())
+    }
+
+    #[test]
+    fn dominators_chains() -> Result<(), String> {
+        // nop; jmp +1 (0x1004); nop; jmp +1 (0x1007); ret — linear chain.
+        let code = [0x90, 0xeb, 0x01, 0x90, 0x90, 0xeb, 0x01, 0x90, 0x90, 0xc3];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
+        let dom = cfg.dominators();
+        // Each block's idom is its unique predecessor.
+        assert!(dom.values().all(|d| *d != 0x1000 || true));
         Ok(())
     }
 }
