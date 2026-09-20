@@ -46,8 +46,10 @@ pub struct Z3FfiBridge {
     /// per path constraint so consecutive queries sharing a constraint
     /// prefix reuse the solver's learned state instead of rebuilding.
     solver: Z3_solver,
-    /// Dependency key per live scope (scope i asserts constraint i).
-    scope_keys: Vec<angryier_types::DependencyKey>,
+    /// Dependency key + tracking literal per live scope (scope i asserts
+    /// `assumption_i → constraint_i` so UNSAT cores name the culprit
+    /// constraints).
+    scope_keys: Vec<(angryier_types::DependencyKey, angryier_types::ConstraintId, Z3_ast)>,
 }
 
 // SAFETY: The caller must ensure single-threaded access to the Z3 context.
@@ -65,6 +67,15 @@ impl Z3FfiBridge {
         let solver = unsafe {
             let s = Z3_mk_solver(context).ok_or(Z3FfiError::NullContext)?;
             Z3_solver_inc_ref(context, s);
+            // Assumption-based UNSAT-core extraction.
+            if let Some(params) = Z3_mk_params(context) {
+                Z3_params_inc_ref(context, params);
+                if let Some(key) = Z3_mk_string_symbol(context, c"unsat_core".as_ptr()) {
+                    Z3_params_set_bool(context, params, key, true);
+                    Z3_solver_set_params(context, s, params);
+                }
+                Z3_params_dec_ref(context, params);
+            }
             s
         };
         Ok(Self {
@@ -105,7 +116,7 @@ impl Z3FfiBridge {
             .scope_keys
             .iter()
             .zip(keys.iter())
-            .take_while(|(a, b)| a == b)
+            .take_while(|((a, _, _), b)| a == *b)
             .count();
         let excess = self.scope_keys.len() - shared;
         if excess > 0 {
@@ -114,17 +125,29 @@ impl Z3FfiBridge {
         }
         let mut cache = HashMap::new();
         let mut symbols = HashMap::new();
-        // Push one scope per new constraint.
+        // Push one scope per new constraint, guarded by a fresh assumption
+        // literal so UNSAT cores name the responsible constraints.
         for ((cid, expr), key) in query.constraint_expressions().iter().zip(keys.iter()).skip(shared) {
-            let _ = cid;
             match self.translate(*expr, &mut cache, &mut symbols) {
                 Ok(ast) => unsafe {
                     Z3_solver_push(ctx, self.solver);
-                    Z3_solver_assert(ctx, self.solver, ast);
+                    let sym_name = std::ffi::CString::new(format!("pc{}", self.scope_keys.len())).unwrap_or_default();
+                    let name = Z3_mk_string_symbol(ctx, sym_name.as_ptr());
+                    let bool_sort = Z3_mk_bool_sort(ctx);
+                    let assumption = match (name, bool_sort) {
+                        (Some(n), Some(s)) => Z3_mk_const(ctx, n, s),
+                        _ => None,
+                    };
+                    let Some(assumption) = assumption else {
+                        return backend_error();
+                    };
+                    if let Some(imp) = Z3_mk_implies(ctx, assumption, ast) {
+                        Z3_solver_assert(ctx, self.solver, imp);
+                    }
+                    self.scope_keys.push((*key, *cid, assumption));
                 },
                 Err(_) => return backend_error(),
             }
-            self.scope_keys.push(*key);
         }
         // Transient scope for the predicate.
         unsafe { Z3_solver_push(ctx, self.solver) };
@@ -149,7 +172,10 @@ impl Z3FfiBridge {
     fn check_and_extract(&self, symbols: &mut HashMap<ExprId, Z3_ast>) -> SolverResult {
         let ctx = self.context;
         unsafe {
-            let result = Z3_solver_check(ctx, self.solver);
+            // Check under the live scope assumptions — the UNSAT core names
+            // which constraint literals are responsible.
+            let assumptions: Vec<Z3_ast> = self.scope_keys.iter().map(|(_, _, a)| *a).collect();
+            let result = Z3_solver_check_assumptions(ctx, self.solver, assumptions.len() as u32, assumptions.as_ptr());
             let outcome = if result == Z3_L_TRUE {
                 SolverOutcomeKind::Sat
             } else if result == Z3_L_FALSE {
@@ -180,10 +206,28 @@ impl Z3FfiBridge {
             } else {
                 Vec::new()
             };
+            let unsat_core = if outcome == SolverOutcomeKind::Unsat {
+                match Z3_solver_get_unsat_core(ctx, self.solver) {
+                    Some(core) => {
+                        let mut ids = Vec::new();
+                        for i in 0..Z3_ast_vector_size(ctx, core) {
+                            if let Some(ast) = Z3_ast_vector_get(ctx, core, i)
+                                && let Some((_, cid, _)) = self.scope_keys.iter().find(|(_, _, a)| *a == ast)
+                            {
+                                ids.push(*cid);
+                            }
+                        }
+                        ids
+                    }
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
             SolverResult {
                 outcome,
                 model,
-                unsat_core: Vec::new(),
+                unsat_core,
                 elapsed: Duration::ZERO,
             }
         }
@@ -653,5 +697,110 @@ mod tests {
         let bridge = Z3FfiBridge::new(reader)?;
         assert_eq!(bridge.name(), "z3-ffi");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unsat_core_tests {
+    use super::*;
+    use angryier_expr::{ExprArena, ExprNode, ExprOp, ExprSort, ShardedExprArena};
+    use angryier_solver::{CanonicalConstraint, SolverQuery};
+    use angryier_types::{ConstraintCanonicalizationVersion, ConstraintId, SolverQueryId, TargetProfileId};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// A query with two contradictory constraints (x==0 ∧ x==1, predicate
+    /// x>2) must return UNSAT and name both constraints in the core.
+    #[test]
+    fn unsat_core_names_responsible_constraints() {
+        let arena = Arc::new(ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1)));
+        let x = arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(64),
+                op: ExprOp::Symbol,
+                operands: Vec::new(),
+                immediate: 7u64.to_le_bytes().to_vec(),
+            })
+            .unwrap();
+        let zero = arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(64),
+                op: ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: 0u64.to_le_bytes().to_vec(),
+            })
+            .unwrap();
+        let one = arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(64),
+                op: ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: 1u64.to_le_bytes().to_vec(),
+            })
+            .unwrap();
+        let eq0 = arena
+            .intern(ExprNode {
+                sort: ExprSort::Bool,
+                op: ExprOp::Eq,
+                operands: vec![x, zero],
+                immediate: Vec::new(),
+            })
+            .unwrap();
+        let eq1 = arena
+            .intern(ExprNode {
+                sort: ExprSort::Bool,
+                op: ExprOp::Eq,
+                operands: vec![x, one],
+                immediate: Vec::new(),
+            })
+            .unwrap();
+        let two = arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(64),
+                op: ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: 2u64.to_le_bytes().to_vec(),
+            })
+            .unwrap();
+        let gt = arena
+            .intern(ExprNode {
+                sort: ExprSort::Bool,
+                op: ExprOp::Ult,
+                operands: vec![x, two],
+                immediate: Vec::new(),
+            })
+            .unwrap();
+
+        let c0 = CanonicalConstraint {
+            id: ConstraintId(0),
+            key: arena.dependency_summary(eq0).unwrap().key,
+            expr: eq0,
+        };
+        let c1 = CanonicalConstraint {
+            id: ConstraintId(1),
+            key: arena.dependency_summary(eq1).unwrap().key,
+            expr: eq1,
+        };
+        let pred_key = arena.dependency_summary(gt).unwrap().key;
+        let query = SolverQuery::canonical(
+            SolverQueryId(0),
+            &[c0, c1],
+            gt,
+            pred_key,
+            TargetProfileId(1),
+            ConstraintCanonicalizationVersion(1),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let mut bridge = Z3FfiBridge::new(reader).expect("z3");
+        let result = bridge.solve(&query);
+        assert_eq!(result.outcome, SolverOutcomeKind::Unsat);
+        assert!(
+            result.unsat_core.contains(&ConstraintId(0)) && result.unsat_core.contains(&ConstraintId(1)),
+            "core should name both contradictory constraints, got {:?}",
+            result.unsat_core
+        );
     }
 }
