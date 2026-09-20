@@ -56,6 +56,9 @@ use angryier_types::{
 #[cfg(feature = "xed")]
 pub mod form_map;
 
+#[cfg(feature = "script")]
+pub mod script;
+
 /// Default stack size in bytes (64 KiB).
 const STACK_SIZE: u64 = 0x1_0000;
 

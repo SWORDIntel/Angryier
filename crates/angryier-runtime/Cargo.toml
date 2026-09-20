@@ -23,6 +23,7 @@ angryier-semantics-gen = { path = "../angryier-semantics-gen" }
 angryier-solver = { path = "../angryier-solver" }
 angryier-state = { path = "../angryier-state" }
 angryier-types = { path = "../angryier-types" }
+mlua = { version = "0.12", features = ["lua54", "vendored"], optional = true }
 angryier-arch-xed-ffi = { path = "../angryier-arch-xed-ffi", optional = true }
 angryier-solver-z3 = { path = "../angryier-solver-z3", optional = true }
 
@@ -32,6 +33,9 @@ default = []
 xed = ["dep:angryier-arch-xed-ffi"]
 # Native Z3 solver backend (links the system libz3) for branch solving.
 z3 = ["dep:angryier-solver-z3", "angryier-solver-z3/ffi"]
+# Embedded Lua scripting — user hooks and exploration predicates without
+# recompiling (Phase 15).
+script = ["dep:mlua"]
 
 [dev-dependencies]
 angryier-solver-fuzzy = { path = "../angryier-solver-fuzzy" }

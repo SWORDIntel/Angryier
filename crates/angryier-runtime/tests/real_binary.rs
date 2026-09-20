@@ -2697,3 +2697,38 @@ target:
     );
     Ok(())
 }
+
+/// Lua scripting: a script drives a symbolic session — marks rdi
+/// symbolic, runs, and reads the report back without recompiling.
+#[cfg(all(feature = "xed", feature = "script", target_arch = "x86_64"))]
+#[test]
+fn lua_script_drives_session() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = temp_dir("angryier-lua").ok_or("no tempdir")?;
+    let path_s = dir.join("lua.s");
+    let path_o = dir.join("lua.o");
+    let path_bin = dir.join("lua");
+    std::fs::write(
+        &path_s,
+        "_start:\n    cmp $5, %rdi\n    je target\n    xor %eax, %eax\n    mov $60, %rax\n    syscall\ntarget:\n    mov $1, %rax\n    mov $60, %rax\n    syscall\n",
+    )?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let lua = mlua::Lua::new();
+    angryier_runtime::script::register(&lua)?;
+    let script = format!(
+        r#"
+        local r = angry.run("{}", {{
+            symbolic = {{ rdi = 64 }},
+            steps = 64, states = 8,
+        }})
+        assert(r.steps > 0, "session must step")
+        return r.forks
+        "#,
+        path_bin.display()
+    );
+    let forks: u64 = lua.load(&script).eval()?;
+    assert!(forks >= 1, "symbolic rdi should fork the cmp");
+    Ok(())
+}
