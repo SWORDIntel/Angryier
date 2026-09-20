@@ -2854,3 +2854,74 @@ impl std::fmt::Debug for SymbolicState {
             .finish()
     }
 }
+
+impl<'a, D: Decoder> SymbolicSession<'a, D> {
+    /// Solves state `index`'s path constraints and returns a concrete value
+    /// for each of its symbolic input registers — the "generate an input
+    /// that reaches this state" primitive.
+    pub fn solve_state(
+        &self,
+        index: usize,
+        backend: &mut dyn SolverBackend,
+        timeout: Duration,
+    ) -> Result<Vec<(u32, u64)>, RuntimeError> {
+        let state = self
+            .states
+            .get(index)
+            .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
+        let constraints: Vec<CanonicalConstraint> = state
+            .constraints
+            .iter()
+            .enumerate()
+            .filter_map(|(i, expr)| {
+                self.arena.dependency_summary(*expr).map(|s| CanonicalConstraint {
+                    id: ConstraintId(i as u64),
+                    key: s.key,
+                    expr: *expr,
+                })
+            })
+            .collect();
+        // Trivially-satisfiable predicate: the constraints themselves carry
+        // the path; a literal `true` predicate asks for any model.
+        let true_expr = self
+            .arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::Bool,
+                op: angryier_expr::ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: vec![1],
+            })
+            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+        let key = self
+            .arena
+            .dependency_summary(true_expr)
+            .map(|s| s.key)
+            .ok_or_else(|| RuntimeError::Symbolic("missing predicate summary".into()))?;
+        let query = SolverQuery::canonical(
+            SolverQueryId(index as u64),
+            &constraints,
+            true_expr,
+            key,
+            state.process.target_profile,
+            ConstraintCanonicalizationVersion(1),
+            timeout,
+        )
+        .map_err(|e| RuntimeError::Solver(format!("{e:?}")))?;
+        let result = backend.solve(&query);
+        if !matches!(result.outcome, SolverOutcomeKind::Sat) {
+            return Ok(Vec::new());
+        }
+        let mut bindings = Vec::new();
+        for binding in &state.symbols {
+            let expr_key = u64::from(binding.expression.0);
+            let Some((_, bytes)) = result.model.iter().find(|(key, _)| *key == expr_key) else {
+                continue;
+            };
+            let mut buffer = [0u8; 8];
+            let len = bytes.len().min(8);
+            buffer[..len].copy_from_slice(&bytes[..len]);
+            bindings.push((binding.register, u64::from_le_bytes(buffer)));
+        }
+        Ok(bindings)
+    }
+}

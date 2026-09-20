@@ -2228,3 +2228,75 @@ fn symbolic_session_real_binary() -> Result<(), Box<dyn std::error::Error>> {
     assert!(report.forks >= 1, "symbolic rdi should produce real forks");
     Ok(())
 }
+
+/// Solve a found state: rbx symbolic, `find` the `target` block, then
+/// solve_state must return rbx = 5 (the input that reaches it).
+#[cfg(all(feature = "xed", feature = "z3", target_arch = "x86_64"))]
+#[test]
+fn symbolic_session_solve_finds_input() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::{ExprReader, ShardedExprArena};
+    use angryier_runtime::{ExplorationPolicy, SymbolicSession};
+    use angryier_solver_z3::Z3Backend;
+    use std::sync::Arc;
+
+    let source = r#"
+        .global _start
+        .text
+_start:
+    cmp $5, %rbx
+    je target
+    mov $1, %rax
+    jmp end
+target:
+    mov $2, %rax
+end:
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-symbolic-solve").ok_or("no tempdir")?;
+    let path_s = dir.join("fork.s");
+    let path_o = dir.join("fork.o");
+    let path_bin = dir.join("fork");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = Arc::new(ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1)));
+    let mut session = SymbolicSession::new(&runtime, arena.as_ref(), process);
+    session.mark_symbolic(0, register_id::GPR_BASE + 3, angryier_ir::IrType::Bits(64))?;
+
+    // `target` = _start+0xf.
+    let policy = ExplorationPolicy {
+        find: vec![0x40100f],
+        avoid: Vec::new(),
+        prefer_new_coverage: false,
+    };
+    let report = session.run_with_policy(256, 16, None, std::time::Duration::from_secs(5), false, &policy)?;
+    assert_eq!(report.found.len(), 1, "one state should reach `target`");
+
+    // The found state isn't in `states` anymore — solve_state works on
+    // `states`; push it back for solving.
+    session
+        .states
+        .push(report.found.into_iter().next().unwrap_or_else(|| unreachable!()));
+    let reader: Arc<dyn ExprReader> = arena.clone();
+    let mut backend = Z3Backend::native_ffi(reader)?;
+    let bindings = session.solve_state(
+        session.states.len() - 1,
+        &mut backend,
+        std::time::Duration::from_secs(5),
+    )?;
+    let rbx = bindings
+        .iter()
+        .find(|(reg, _)| *reg == register_id::GPR_BASE + 3)
+        .map(|(_, v)| *v)
+        .ok_or("no rbx binding")?;
+    assert_eq!(rbx, 5, "the model must satisfy rbx == 5 to reach target");
+    Ok(())
+}

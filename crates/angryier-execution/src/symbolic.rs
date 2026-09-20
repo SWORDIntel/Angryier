@@ -1442,9 +1442,15 @@ fn mask_u128(width: u16) -> u128 {
 /// Concrete splice for `PreserveParent` writes.
 fn splice_concrete(parent: u128, parent_width: u16, value: u128, bit_offset: u16, source_width: u16) -> u128 {
     let low_mask = mask_u128(bit_offset);
-    let high_mask = mask_u128(parent_width - bit_offset - source_width);
-    let high = (parent >> (bit_offset + source_width)) & high_mask;
-    (high << (bit_offset + source_width)) | ((value & mask_u128(source_width)) << bit_offset) | (parent & low_mask)
+    let high_bits = parent_width.saturating_sub(bit_offset).saturating_sub(source_width);
+    let high_mask = mask_u128(high_bits);
+    let shift = (bit_offset + source_width).min(127);
+    let high = if bit_offset + source_width >= parent_width || bit_offset + source_width >= 128 {
+        0
+    } else {
+        (parent >> shift) & high_mask
+    };
+    (high << shift) | ((value & mask_u128(source_width)) << bit_offset.min(127)) | (parent & low_mask)
 }
 
 /// Byte-addressable symbolic memory over [`PersistentMemory`]: concrete
