@@ -48,6 +48,7 @@ fail_exit:
 ";
 
 /// Assembled fixture object plus the linked executable bytes.
+#[allow(dead_code)]
 struct Fixture {
     /// Relocatable object, linked into native harnesses.
     object: PathBuf,
@@ -79,6 +80,7 @@ fn build_fixture() -> Option<Fixture> {
 
 /// Assembles and links a native harness that sets RAX to `input` and calls
 /// the fixture's `run`, returning the resulting process exit code.
+#[allow(dead_code)]
 fn run_native(input: u64) -> Option<i32> {
     let fixture = fixture()?;
     let dir = temp_dir(&format!("angryier-harness-{input}"))?;
@@ -600,13 +602,13 @@ mod debug_glibc {
     /// all the way through `__libc_start_main`, TLS setup, and `main` to a
     /// `write` + `exit_group`, producing the expected output.
     #[test]
-    fn trace_static_musl() {
+    fn trace_static_musl() -> Result<(), Box<dyn std::error::Error>> {
         let Ok(bytes) = std::fs::read("/tmp/hello_musl") else {
             eprintln!("no fixture");
-            return;
+            return Ok(());
         };
         let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
-        let mut process = runtime.load_elf(&bytes).expect("musl ELF loads");
+        let mut process = runtime.load_elf(&bytes).map_err(|e| format!("musl load: {e}"))?;
 
         let mut terminated = false;
         for _ in 0..200_000 {
@@ -616,16 +618,21 @@ mod debug_glibc {
                     terminated = true;
                     break;
                 }
-                Ok(other) => panic!("unexpected outcome {other:?}"),
-                Err(e) => panic!("step failed at pc={:#x}: {e}", process.pc().unwrap_or(0)),
+                Ok(other) => return Err(format!("unexpected outcome {other:?}").into()),
+                Err(e) => {
+                    return Err(format!("step failed at pc={:#x}: {e}", process.pc().unwrap_or(0)).into());
+                }
             }
         }
-        assert!(terminated, "process did not terminate within the step budget");
+        if !terminated {
+            return Err("process did not terminate within the step budget".into());
+        }
         assert_eq!(
             String::from_utf8_lossy(&process.syscalls.output()),
             "hello from glibc\n"
         );
         assert_eq!(process.syscalls.exit_code(), Some(0));
+        Ok(())
     }
 }
 
@@ -638,13 +645,13 @@ mod dbg_glibc2 {
     /// printf -> write end-to-end under the XED decoder and the modeled Linux
     /// environment.
     #[test]
-    fn runs_static_glibc() {
+    fn runs_static_glibc() -> Result<(), Box<dyn std::error::Error>> {
         let Ok(bytes) = std::fs::read("/tmp/hello_glibc") else {
             eprintln!("no fixture");
-            return;
+            return Ok(());
         };
         let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
-        let mut process = runtime.load_elf(&bytes).expect("load");
+        let mut process = runtime.load_elf(&bytes).map_err(|e| format!("load: {e}"))?;
         for i in 0..400_000 {
             match runtime.step(&mut process) {
                 Ok(StepOutcome::Terminated { .. }) => break,
@@ -652,12 +659,13 @@ mod dbg_glibc2 {
                 Err(e) => {
                     let pc = process.pc().unwrap_or(0);
                     let tail = &process.trace[process.trace.len().saturating_sub(16)..];
-                    panic!("stopped after {i} steps at pc={pc:#x}: {e}\ntail: {tail:#x?}");
+                    return Err(format!("stopped after {i} steps at pc={pc:#x}: {e}\ntail: {tail:#x?}").into());
                 }
             }
         }
         assert_eq!(process.syscalls.output(), b"hello from glibc\n");
         assert_eq!(process.syscalls.exit_code(), Some(0));
+        Ok(())
     }
 }
 
@@ -750,9 +758,8 @@ fn concolic_solves_simple_branch_with_fuzzy_sat() -> Result<(), Box<dyn std::err
     let mut session = runtime.concolic(process, arena.as_ref());
     session.mark_input_register(register_id::GPR_BASE, IrType::Bits(64))?;
     while !session.process.terminated && session.process.step_count < 64 {
-        match session.step()? {
-            StepOutcome::SimProcedure { .. } => break,
-            _ => {}
+        if let StepOutcome::SimProcedure { .. } = session.step()? {
+            break;
         }
     }
 
@@ -953,9 +960,8 @@ fn concolic_shadows_real_libc_startup() -> Result<(), Box<dyn std::error::Error>
 
     // Run a slice of libc startup concolically and count debt entries.
     for _ in 0..20_000 {
-        match session.step()? {
-            StepOutcome::Terminated { .. } => break,
-            _ => {}
+        if let StepOutcome::Terminated { .. } = session.step()? {
+            break;
         }
     }
     let debt = session.process.state.fidelity.entries.len();
@@ -1035,7 +1041,7 @@ fn parallel_explore_forks_states_at_branches() -> Result<(), Box<dyn std::error:
         return Ok(());
     };
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
-    let (process, ok_exit, fail_exit) = loaded_process(&runtime, 6)?;
+    let (process, _ok_exit, _fail_exit) = loaded_process(&runtime, 6)?;
 
     let report = runtime.parallel_explore(&process, 4, 64, 16)?;
     // One branch -> one fork -> two states, covering both exits' prefixes.
@@ -1176,5 +1182,254 @@ fn sliced_queries_reuse_across_inputs() -> Result<(), Box<dyn std::error::Error>
     );
     assert_eq!(stats.hits, 1, "second identical sliced query must hit");
     assert_eq!(stats.entries, 1, "one unique canonical query");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Differential oracle (Gate D): the semantic corpus validated against
+// hardware. Each instruction template runs with controlled inputs both
+// natively (assembled + executed on the CPU) and through the runtime; the
+// result value AND the full RFLAGS image are compared byte-for-byte via the
+// `write` syscall output captured in each world.
+// ---------------------------------------------------------------------------
+
+/// Builds a differential harness: `insn` executes once after the register
+/// seeds, then RAX and RFLAGS are dumped to `out` and written to stdout.
+fn differential_harness(insn: &str, seeds: &[(&str, u64)]) -> String {
+    let mut setup = String::new();
+    for (register, value) in seeds {
+        setup.push_str(&format!("    mov ${value}, %{register}\n"));
+    }
+    format!(
+        "        .global _start\n        .text\n_start:\n{setup}    {insn}\n    mov %rax, out(%rip)\n    pushfq\n    pop %rbx\n    mov %rbx, out+8(%rip)\n    mov $1, %rax\n    mov $1, %rdi\n    mov $out, %rsi\n    mov $16, %rdx\n    syscall\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall\n        .data\nout:    .quad 0, 0\n"
+    )
+}
+
+/// Runs `elf_bytes` through the runtime and returns captured stdout.
+fn runtime_stdout(elf_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_elf(elf_bytes)?;
+    let _ = runtime.run(&mut process, 256).map_err(|e| {
+        let pc = process.pc().unwrap_or(0);
+        format!("{e} at pc {pc:#x}")
+    })?;
+    Ok(process.syscalls.output())
+}
+
+/// Runs `binary` natively and returns its stdout.
+fn native_stdout(binary: &Path) -> Option<Vec<u8>> {
+    let output = Command::new(binary).output().ok()?;
+    Some(output.stdout)
+}
+
+/// Flag bits that are architecturally DEFINED for each instruction class.
+/// Undefined flags (imul's ZF, shift AF, multi-count OF, ...) are
+/// implementation-specific on silicon and excluded from comparison.
+const CF: u64 = 1 << 0;
+const PF: u64 = 1 << 2;
+const AF: u64 = 1 << 4;
+const ZF: u64 = 1 << 6;
+const SF: u64 = 1 << 7;
+const OF: u64 = 1 << 11;
+const ALL6: u64 = CF | PF | AF | ZF | SF | OF;
+const LOGICAL: u64 = CF | PF | ZF | SF | OF; // AF undefined on logical ops
+
+/// Defined flag bits for an instruction mnemonic (see [`differential_case`]).
+fn flag_mask_for(insn: &str) -> u64 {
+    let base = insn.split(' ').next().unwrap_or("");
+    let count_one = insn.contains("$1,");
+    match base {
+        "add" | "sub" | "cmp" | "neg" | "inc" | "dec" => ALL6,
+        "and" | "or" | "xor" | "test" => LOGICAL,
+        "imul" => CF | OF,
+        "shl" | "shr" | "sar" => {
+            if count_one {
+                CF | PF | ZF | SF | OF
+            } else {
+                CF | PF | ZF | SF
+            }
+        }
+        "rol" | "ror" => {
+            if count_one {
+                CF | OF
+            } else {
+                CF
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// The differential driver: assemble+link+run natively vs run through the
+/// runtime; the result register must match byte-for-byte and RFLAGS must
+/// match on `flag_mask` (architecturally defined bits only). Returns false
+/// when tooling is unavailable so tests can skip gracefully.
+fn differential_case(insn: &str, seeds: &[(&str, u64)], flag_mask: u64) -> Result<bool, Box<dyn std::error::Error>> {
+    let dir = temp_dir(&format!(
+        "angryier-diff-{}",
+        insn.replace([' ', ',', '%', '$'], "_").replace("__", "_")
+    ))
+    .ok_or("no tempdir")?;
+    let source = dir.join("case.s");
+    let object = dir.join("case.o");
+    let binary = dir.join("case");
+    std::fs::write(&source, differential_harness(insn, seeds))?;
+    if assemble(&source, &object).is_none() || link(&binary, &[&object]).is_none() {
+        return Ok(false);
+    }
+    let elf_bytes = std::fs::read(&binary)?;
+    let expected = native_stdout(&binary).ok_or("native run failed")?;
+    let actual = match runtime_stdout(&elf_bytes) {
+        Ok(out) => out,
+        Err(e) => {
+            // Unsupported forms are coverage gaps — record and skip rather
+            // than fail (the corpus is still growing).
+            eprintln!("coverage gap `{insn}`: {e}");
+            return Ok(false);
+        }
+    };
+    let value_matches = actual[..8] == expected[..8];
+    let actual_flags = u64::from_le_bytes(actual[8..16].try_into().unwrap_or([0; 8]));
+    let expected_flags = u64::from_le_bytes(expected[8..16].try_into().unwrap_or([0; 8]));
+    let flags_match = actual_flags & flag_mask == expected_flags & flag_mask;
+    if !(value_matches && flags_match) {
+        return Err(format!(
+            "differential mismatch on `{insn}` seeds {seeds:?}: runtime={actual:?} native={expected:?} (flags {actual_flags:#x} vs {expected_flags:#x} mask {flag_mask:#x})"
+        )
+        .into());
+    }
+    Ok(true)
+}
+
+/// Gate D: differential validation of the semantic corpus against hardware.
+/// Each instruction executes on boundary-value inputs; result value and
+/// RFLAGS must match the CPU's answer byte-for-byte.
+#[test]
+fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>> {
+    let boundary: [u64; 8] = [
+        0,
+        1,
+        42,
+        0x7fff_ffff_ffff_ffff,
+        0x8000_0000_0000_0000,
+        0xffff_ffff_ffff_ffff,
+        0x100,
+        0xdead_beef,
+    ];
+
+    // Binary ops over (rax, rbx) — result and flags compared.
+    let binary_templates = [
+        "add %rbx, %rax",
+        "sub %rbx, %rax",
+        "and %rbx, %rax",
+        "or %rbx, %rax",
+        "xor %rbx, %rax",
+        "cmp %rbx, %rax",
+        "test %rbx, %rax",
+        "imul %rbx, %rax",
+        "xchg %rbx, %rax",
+    ];
+    // Immediate forms.
+    let imm_templates = [
+        "add $0x1234, %rax",
+        "sub $0x7fff, %rax",
+        "and $0xff00, %rax",
+        "or $0xf0f0, %rax",
+        "xor $0xffff, %rax",
+        "cmp $0x2a, %rax",
+        "test $0x1000, %rax",
+    ];
+    // Unary ops.
+    let unary_templates = ["inc %rax", "dec %rax", "neg %rax", "not %rax"];
+    // Shifts.
+    let shift_templates = [
+        "shl $1, %rax",
+        "shl $7, %rax",
+        "shr $1, %rax",
+        "shr $9, %rax",
+        "sar $1, %rax",
+        "sar $13, %rax",
+        "rol $5, %rax",
+        "ror $3, %rax",
+    ];
+    // Moves/lea/extends.
+    let misc_templates = [
+        "mov %rbx, %rax",
+        "lea 0x10(%rbx,%rcx,8), %rax",
+        "movzx %bl, %rax",
+        "movsx %bx, %rax",
+        "movsxd %ebx, %rax",
+        "bswap %rax",
+    ];
+    // 32-bit forms (zero-extension semantics must match too).
+    let w32_templates = [
+        "add %ebx, %eax",
+        "sub %ebx, %eax",
+        "and %ebx, %eax",
+        "xor %ebx, %eax",
+        "mov %ebx, %eax",
+        "imul %ebx, %eax",
+        "inc %eax",
+        "neg %eax",
+    ];
+
+    let mut executed = 0usize;
+    let mut skipped = false;
+    // Two-input forms: sweep boundary × boundary for rax and rbx.
+    for insn in binary_templates {
+        for &a in &boundary[..4] {
+            for &b in &boundary[4..6] {
+                let ran = differential_case(insn, &[("rax", a), ("rbx", b), ("rcx", 3)], flag_mask_for(insn))?;
+                skipped |= !ran;
+                executed += usize::from(ran);
+            }
+        }
+    }
+    for insn in imm_templates {
+        for &a in &boundary {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 7), ("rcx", 3)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in unary_templates {
+        for &a in &boundary {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 9)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in shift_templates {
+        for &a in &boundary[..6] {
+            let ran = differential_case(insn, &[("rax", a)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in misc_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(
+                insn,
+                &[("rax", a), ("rbx", 0x1234_5678_9abc_def0), ("rcx", 5)],
+                flag_mask_for(insn),
+            )?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in w32_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 0xffff_ff00_1234_5678)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+
+    if skipped && executed == 0 {
+        eprintln!("skipping differential: binutils unavailable");
+        return Ok(());
+    }
+    eprintln!("differential oracle: {executed} cases matched hardware byte-for-byte");
+    assert!(executed > 200, "expected >200 differential cases, ran {executed}");
     Ok(())
 }

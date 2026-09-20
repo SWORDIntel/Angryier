@@ -882,6 +882,10 @@ pub mod forms {
     pub const PUSH_MEM16: u32 = 0x0258;
     pub const POP_MEM64: u32 = 0x0259;
 
+    // pushf/popf (64-bit operand size in 64-bit mode)
+    pub const PUSHF: u32 = 0x025A;
+    pub const POPF: u32 = 0x025B;
+
     // Unsigned divide (rdx:rax / operand -> rax=quot, rdx=rem)
     pub const DIV_R64: u32 = 0x01D4;
     pub const DIV_R32: u32 = 0x01D5;
@@ -903,7 +907,10 @@ pub mod rflags {
     pub const OF_BIT: u8 = 11;
 
     /// Mask with all corpus-computed flag bits cleared (preserves reserved/other bits).
-    pub const CORPUS_FLAG_MASK: u64 = !((1 << CF_BIT) | (1 << ZF_BIT) | (1 << SF_BIT) | (1 << OF_BIT));
+    /// Flags the corpus recomputes on every flag-writing instruction:
+    /// CF, PF, AF, ZF, SF, OF.
+    pub const CORPUS_FLAG_MASK: u64 =
+        !((1 << CF_BIT) | (1 << PF_BIT) | (1 << AF_BIT) | (1 << ZF_BIT) | (1 << SF_BIT) | (1 << OF_BIT));
 }
 
 /// Starting rule ID for corpus providers. Each provider gets a sequential ID.

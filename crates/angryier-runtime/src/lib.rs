@@ -621,9 +621,10 @@ impl<D: Decoder> Runtime<D> {
             .write(register_id::GPR_BASE + 4, &stack_pointer.to_le_bytes()) // RSP = GPR 4
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
 
-        // Zero RFLAGS.
+        // Initial RFLAGS: reserved bit 1 and IF set, matching a real
+        // userspace entry state (0x202).
         registers = registers
-            .write(register_id::RFLAGS.0, &0u64.to_le_bytes())
+            .write(register_id::RFLAGS.0, &0x202u64.to_le_bytes())
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
 
         let state = ExecutionState {

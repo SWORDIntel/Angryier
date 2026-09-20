@@ -59,21 +59,13 @@ fn fall_through(out: &mut dyn SemanticBuilder, insn: &dyn DecodedInstructionView
     Ok(())
 }
 
-/// Computes ZF, SF, and CF for an addition and writes the new RFLAGS.
-/// `result = left + right` (wrapping). CF = carry out = `result < left` (unsigned).
-pub(crate) fn write_add_flags(
-    out: &mut dyn SemanticBuilder,
-    result: ValueId,
-    left: ValueId,
-    width_bits: u16,
-) -> Result<(), SemanticError> {
-    let result = widen_to_u64(out, result, width_bits)?;
-    let left = widen_to_u64(out, left, width_bits)?;
-    let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
+/// ZF and SF shifted flag values shared by every flag-writing helper.
+/// `sign_bit` is the operand's sign position (63 for r64, 31 for r32, ...).
+fn zf_sf(out: &mut dyn SemanticBuilder, result: ValueId, sign_bit: u16) -> Result<(ValueId, ValueId), SemanticError> {
     let zero = out.constant(U64, &0u64.to_le_bytes())?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
     let sf_bit = const_u64(out, u64::from(rflags::SF_BIT))?;
-    let sixty_three = const_u64(out, 63)?;
+    let sixty_three = const_u64(out, u64::from(sign_bit))?;
     let one = const_u64(out, 1)?;
 
     let zf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[result, zero])?;
@@ -87,22 +79,398 @@ pub(crate) fn write_add_flags(
     )?;
     let sf_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[sf_raw, one])?;
     let sf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[sf_masked, sf_bit])?;
+    Ok((zf_shifted, sf_shifted))
+}
 
-    let cf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Ult), U1, &[result, left])?;
-    let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
+/// PF shifted flag value: PF = 1 when the low byte of `result` has even
+/// parity (`pf = !lsb(result8 ^ result8>>4 ^ >>2 ^ >>1)`).
+fn pf_flag(out: &mut dyn SemanticBuilder, result: ValueId) -> Result<ValueId, SemanticError> {
+    let ff = const_u64(out, 0xff)?;
+    let four = const_u64(out, 4)?;
+    let two = const_u64(out, 2)?;
+    let one = const_u64(out, 1)?;
+    let pf_bit = const_u64(out, u64::from(rflags::PF_BIT))?;
 
-    let mask = out.constant(U64, &rflags::CORPUS_FLAG_MASK.to_le_bytes())?;
-    let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
-    let with_zf = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[cleared, zf_shifted])?;
-    let with_sf = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[with_zf, sf_shifted])?;
-    let new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[with_sf, cf_64])?;
+    let low = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[result, ff])?;
+    let a = out.emit(SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight), U64, &[low, four])?;
+    let b = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[low, a])?;
+    let c = out.emit(SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight), U64, &[b, two])?;
+    let d = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[b, c])?;
+    let e = out.emit(SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight), U64, &[d, one])?;
+    let f = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[d, e])?;
+    let g = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U64, &[f])?;
+    let pf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[g, one])?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[pf, pf_bit])
+}
 
+/// AF shifted flag value: AF = bit 4 of `left ^ right ^ result` (carry or
+/// borrow out of bit 3 for both addition and subtraction).
+fn af_flag(
+    out: &mut dyn SemanticBuilder,
+    left: ValueId,
+    right: ValueId,
+    result: ValueId,
+) -> Result<ValueId, SemanticError> {
+    let four = const_u64(out, 4)?;
+    let one = const_u64(out, 1)?;
+    let af_bit = const_u64(out, u64::from(rflags::AF_BIT))?;
+
+    let a = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[left, right])?;
+    let b = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[a, result])?;
+    let c = out.emit(SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight), U64, &[b, four])?;
+    let af = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[c, one])?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[af, af_bit])
+}
+
+/// OF shifted flag value for addition:
+/// `OF = ((left ^ result) & ~(left ^ right)) >> 63` on the widened u64 view.
+fn of_add_flag(
+    out: &mut dyn SemanticBuilder,
+    left: ValueId,
+    right: ValueId,
+    result: ValueId,
+    sign_bit: u16,
+) -> Result<ValueId, SemanticError> {
+    let sixty_three = const_u64(out, u64::from(sign_bit))?;
+    let one = const_u64(out, 1)?;
+    let of_bit = const_u64(out, u64::from(rflags::OF_BIT))?;
+
+    let a = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[left, result])?;
+    let b = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[left, right])?;
+    let nb = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U64, &[b])?;
+    let c = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[a, nb])?;
+    let d = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U64,
+        &[c, sixty_three],
+    )?;
+    let of = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[d, one])?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[of, of_bit])
+}
+
+/// OF shifted flag value for subtraction:
+/// `OF = ((left ^ right) & (left ^ result)) >> 63` on the widened u64 view.
+fn of_sub_flag(
+    out: &mut dyn SemanticBuilder,
+    left: ValueId,
+    right: ValueId,
+    result: ValueId,
+    sign_bit: u16,
+) -> Result<ValueId, SemanticError> {
+    let sixty_three = const_u64(out, u64::from(sign_bit))?;
+    let one = const_u64(out, 1)?;
+    let of_bit = const_u64(out, u64::from(rflags::OF_BIT))?;
+
+    let a = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[left, right])?;
+    let b = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[left, result])?;
+    let c = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[a, b])?;
+    let d = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U64,
+        &[c, sixty_three],
+    )?;
+    let of = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[d, one])?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[of, of_bit])
+}
+
+/// Folds shifted flag values into RFLAGS using an explicit clear mask —
+/// for instructions where only a subset of the corpus flags are defined
+/// (imul defines only CF/OF; undefined bits keep their incoming values).
+fn compose_rflags_masked(
+    out: &mut dyn SemanticBuilder,
+    flags: &[ValueId],
+    clear_mask: u64,
+) -> Result<(), SemanticError> {
+    let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
+    let mask = out.constant(U64, &clear_mask.to_le_bytes())?;
+    let mut new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
+    for flag in flags {
+        new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[new_rflags, *flag])?;
+    }
     out.write_register(register_id::RFLAGS, new_rflags)?;
     Ok(())
 }
 
-/// Computes ZF, SF, and CF for a subtraction and writes the new RFLAGS.
-/// `result = left - right` (wrapping). CF = borrow = `left < right` (unsigned).
+/// Folds shifted flag values into RFLAGS, preserving the non-corpus bits.
+/// `preserve_cf` keeps the incoming CF (INC/DEC semantics).
+fn compose_rflags(out: &mut dyn SemanticBuilder, flags: &[ValueId], preserve_cf: bool) -> Result<(), SemanticError> {
+    let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
+    let mask_value = if preserve_cf {
+        rflags::CORPUS_FLAG_MASK | (1 << rflags::CF_BIT)
+    } else {
+        rflags::CORPUS_FLAG_MASK
+    };
+    let mask = out.constant(U64, &mask_value.to_le_bytes())?;
+    let mut new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
+    for flag in flags {
+        new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[new_rflags, *flag])?;
+    }
+    out.write_register(register_id::RFLAGS, new_rflags)?;
+    Ok(())
+}
+
+fn add_flag_values(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    right: ValueId,
+    width_bits: u16,
+) -> Result<Vec<ValueId>, SemanticError> {
+    let sign_bit = width_bits - 1;
+    let (zf, sf) = zf_sf(out, result, sign_bit)?;
+    let pf = pf_flag(out, result)?;
+    let af = af_flag(out, left, right, result)?;
+    let of = of_add_flag(out, left, right, result, sign_bit)?;
+    let cf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Ult), U1, &[result, left])?;
+    let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
+    Ok(vec![zf, sf, pf, af, of, cf])
+}
+
+/// CF and OF for a signed multiply: set when the full-width product's high
+/// half is not the sign extension of the low half (result doesn't fit in
+/// `width_bits`). Only CF/OF are architecturally defined for `imul`.
+pub(crate) fn write_mul_flags(
+    out: &mut dyn SemanticBuilder,
+    left: ValueId,
+    right: ValueId,
+    width_bits: u16,
+) -> Result<(), SemanticError> {
+    let double_ty = SemanticType::Scalar(ScalarType::BitVec(width_bits * 2));
+    let single_ty = SemanticType::Scalar(ScalarType::BitVec(width_bits));
+    let left2 = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), double_ty, &[left])?;
+    let right2 = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), double_ty, &[right])?;
+    let product = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), double_ty, &[left2, right2])?;
+    let zero_off = const_u64(out, 0)?;
+    let width_off = const_u64(out, u64::from(width_bits))?;
+    let lo = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::Extract),
+        single_ty,
+        &[product, zero_off],
+    )?;
+    let hi = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::Extract),
+        single_ty,
+        &[product, width_off],
+    )?;
+
+    // expected_hi = sign-extension of lo's top bit: 0 or all-ones.
+    let sign_off = const_u64(out, u64::from(width_bits - 1))?;
+    let sign = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        single_ty,
+        &[lo, sign_off],
+    )?;
+    let zero = out.constant(single_ty, &0u64.to_le_bytes()[..usize::from(width_bits / 8)])?;
+    let expected_hi = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), single_ty, &[zero, sign])?;
+
+    // cf/of = hi != expected_hi
+    let eq = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[hi, expected_hi])?;
+    let not_eq = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U1, &[eq])?;
+    let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[not_eq])?;
+    let of_bit = const_u64(out, u64::from(rflags::OF_BIT))?;
+    let of = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[cf, of_bit])?;
+
+    compose_rflags_masked(out, &[cf, of], !((1 << rflags::CF_BIT) | (1 << rflags::OF_BIT)))
+}
+
+/// Shift family for flag computation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ShiftKind {
+    Left,
+    RightLogical,
+    RightArith,
+    RotateLeft,
+    RotateRight,
+}
+
+/// Flags for shift/rotate instructions. CF = last bit out; OF = the
+/// count-one formula (masked out by the caller's oracle when count > 1);
+/// ZF/SF/PF on the result; AF left as the corpus's choice (undefined).
+fn write_shift_flags(
+    out: &mut dyn SemanticBuilder,
+    operand: ValueId,
+    count: ValueId,
+    result: ValueId,
+    kind: ShiftKind,
+) -> Result<(), SemanticError> {
+    let operand = widen_to_u64(out, operand, 64)?;
+    let count = widen_to_u64(out, count, 64)?;
+    let result = widen_to_u64(out, result, 64)?;
+
+    let one = const_u64(out, 1)?;
+    let sixty_three = const_u64(out, 63)?;
+    let sixty_four = const_u64(out, 64)?;
+    let zero = out.constant(U64, &0u64.to_le_bytes())?;
+
+    // CF = last bit shifted out (dynamic count).
+    let cf = match kind {
+        ShiftKind::Left => {
+            let shift = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[sixty_four, count])?;
+            let raw = out.emit(
+                SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+                U64,
+                &[operand, shift],
+            )?;
+            out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[raw, one])?
+        }
+        ShiftKind::RightLogical | ShiftKind::RightArith => {
+            let shift = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[count, one])?;
+            let raw = out.emit(
+                SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+                U64,
+                &[operand, shift],
+            )?;
+            out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[raw, one])?
+        }
+        ShiftKind::RotateLeft => out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[result, one])?,
+        ShiftKind::RotateRight => out.emit(
+            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+            U64,
+            &[result, sixty_three],
+        )?,
+    };
+
+    // OF (count==1 semantics; masked by the oracle for count>1).
+    let result_sign = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U64,
+        &[result, sixty_three],
+    )?;
+    let of = match kind {
+        ShiftKind::Left | ShiftKind::RotateLeft => {
+            let raw = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[result_sign, cf])?;
+            out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[raw, one])?
+        }
+        ShiftKind::RightLogical => out.emit(
+            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+            U64,
+            &[operand, sixty_three],
+        )?,
+        ShiftKind::RightArith => zero,
+        ShiftKind::RotateRight => {
+            let bit62_off = const_u64(out, 62)?;
+            let bit62 = out.emit(
+                SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+                U64,
+                &[result, bit62_off],
+            )?;
+            let bit62 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[bit62, one])?;
+            let raw = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[result_sign, bit62])?;
+            out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[raw, one])?
+        }
+    };
+    let of_bit = const_u64(out, u64::from(rflags::OF_BIT))?;
+    let of = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[of, of_bit])?;
+
+    let (zf, sf) = zf_sf(out, result, 63)?;
+    let pf = pf_flag(out, result)?;
+    compose_rflags_masked(
+        out,
+        &[zf, sf, pf, of, cf],
+        !((1 << rflags::CF_BIT)
+            | (1 << rflags::PF_BIT)
+            | (1 << rflags::ZF_BIT)
+            | (1 << rflags::SF_BIT)
+            | (1 << rflags::OF_BIT)),
+    )
+}
+
+/// CF and OF for rotate instructions (the only architecturally defined
+/// flags for rol/ror; count-one OF formula).
+fn write_rotate_flags(out: &mut dyn SemanticBuilder, result: ValueId, kind: ShiftKind) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, 64)?;
+    let one = const_u64(out, 1)?;
+    let sixty_three = const_u64(out, 63)?;
+    let result_sign = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U64,
+        &[result, sixty_three],
+    )?;
+    let (cf, of) = match kind {
+        ShiftKind::RotateLeft => {
+            let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[result, one])?;
+            let of = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[result_sign, cf])?;
+            (cf, of)
+        }
+        ShiftKind::RotateRight => {
+            let cf = result_sign;
+            let bit62_off = const_u64(out, 62)?;
+            let bit62 = out.emit(
+                SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+                U64,
+                &[result, bit62_off],
+            )?;
+            let bit62 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[bit62, one])?;
+            let of = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[cf, bit62])?;
+            (cf, of)
+        }
+        _ => return Err(SemanticError::InvalidOperand),
+    };
+    let of_bit = const_u64(out, u64::from(rflags::OF_BIT))?;
+    let of = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[of, of_bit])?;
+    compose_rflags_masked(out, &[cf, of], !((1 << rflags::CF_BIT) | (1 << rflags::OF_BIT)))
+}
+
+fn sub_flag_values(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    right: ValueId,
+    width_bits: u16,
+) -> Result<Vec<ValueId>, SemanticError> {
+    let sign_bit = width_bits - 1;
+    let (zf, sf) = zf_sf(out, result, sign_bit)?;
+    let pf = pf_flag(out, result)?;
+    let af = af_flag(out, left, right, result)?;
+    let of = of_sub_flag(out, left, right, result, sign_bit)?;
+    let cf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Ult), U1, &[left, right])?;
+    let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
+    Ok(vec![zf, sf, pf, af, of, cf])
+}
+
+/// Computes ZF, SF, PF, AF, OF, and CF for an addition and writes RFLAGS.
+/// `result = left + right` (wrapping). CF = carry out = `result < left`.
+pub(crate) fn write_add_flags(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    right: ValueId,
+    width_bits: u16,
+) -> Result<(), SemanticError> {
+    write_add_flags_impl(out, result, left, right, width_bits, false)
+}
+
+/// `write_add_flags` preserving the incoming CF — INC semantics.
+pub(crate) fn write_add_flags_preserve_cf(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    right: ValueId,
+    width_bits: u16,
+) -> Result<(), SemanticError> {
+    write_add_flags_impl(out, result, left, right, width_bits, true)
+}
+
+fn write_add_flags_impl(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    right: ValueId,
+    width_bits: u16,
+    preserve_cf: bool,
+) -> Result<(), SemanticError> {
+    let result = widen_to_u64(out, result, width_bits)?;
+    let left = widen_to_u64(out, left, width_bits)?;
+    let right = widen_to_u64(out, right, width_bits)?;
+    let mut flags = add_flag_values(out, result, left, right, width_bits)?;
+    if preserve_cf {
+        flags.pop(); // computed CF is not applied for INC/DEC
+    }
+    compose_rflags(out, &flags, preserve_cf)
+}
+
+/// Computes ZF, SF, PF, AF, OF, and CF for a subtraction and writes RFLAGS.
+/// `result = left - right` (wrapping). CF = borrow = `left < right`.
 pub(crate) fn write_sub_flags(
     out: &mut dyn SemanticBuilder,
     result: ValueId,
@@ -110,74 +478,49 @@ pub(crate) fn write_sub_flags(
     right: ValueId,
     width_bits: u16,
 ) -> Result<(), SemanticError> {
+    write_sub_flags_impl(out, result, left, right, width_bits, false)
+}
+
+/// `write_sub_flags` preserving the incoming CF — DEC semantics.
+pub(crate) fn write_sub_flags_preserve_cf(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    right: ValueId,
+    width_bits: u16,
+) -> Result<(), SemanticError> {
+    write_sub_flags_impl(out, result, left, right, width_bits, true)
+}
+
+fn write_sub_flags_impl(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    right: ValueId,
+    width_bits: u16,
+    preserve_cf: bool,
+) -> Result<(), SemanticError> {
     let result = widen_to_u64(out, result, width_bits)?;
     let left = widen_to_u64(out, left, width_bits)?;
     let right = widen_to_u64(out, right, width_bits)?;
-    let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
-    let zero = out.constant(U64, &0u64.to_le_bytes())?;
-    let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
-    let sf_bit = const_u64(out, u64::from(rflags::SF_BIT))?;
-    let sixty_three = const_u64(out, 63)?;
-    let one = const_u64(out, 1)?;
-
-    let zf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[result, zero])?;
-    let zf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[zf_1])?;
-    let zf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[zf_64, zf_bit])?;
-
-    let sf_raw = out.emit(
-        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-        U64,
-        &[result, sixty_three],
-    )?;
-    let sf_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[sf_raw, one])?;
-    let sf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[sf_masked, sf_bit])?;
-
-    let cf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Ult), U1, &[left, right])?;
-    let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
-
-    let mask = out.constant(U64, &rflags::CORPUS_FLAG_MASK.to_le_bytes())?;
-    let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
-    let with_zf = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[cleared, zf_shifted])?;
-    let with_sf = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[with_zf, sf_shifted])?;
-    let new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[with_sf, cf_64])?;
-
-    out.write_register(register_id::RFLAGS, new_rflags)?;
-    Ok(())
+    let mut flags = sub_flag_values(out, result, left, right, width_bits)?;
+    if preserve_cf {
+        flags.pop(); // computed CF is not applied for INC/DEC
+    }
+    compose_rflags(out, &flags, preserve_cf)
 }
 
-/// Computes ZF and SF for a logical operation (CF=0, OF=0) and writes RFLAGS.
+/// Computes ZF, SF, and PF for a logical operation (CF=0, OF=0, AF=0) and
+/// writes RFLAGS.
 pub(crate) fn write_logical_flags(
     out: &mut dyn SemanticBuilder,
     result: ValueId,
     width_bits: u16,
 ) -> Result<(), SemanticError> {
     let result = widen_to_u64(out, result, width_bits)?;
-    let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
-    let zero = out.constant(U64, &0u64.to_le_bytes())?;
-    let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
-    let sf_bit = const_u64(out, u64::from(rflags::SF_BIT))?;
-    let sixty_three = const_u64(out, 63)?;
-    let one = const_u64(out, 1)?;
-
-    let zf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[result, zero])?;
-    let zf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[zf_1])?;
-    let zf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[zf_64, zf_bit])?;
-
-    let sf_raw = out.emit(
-        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-        U64,
-        &[result, sixty_three],
-    )?;
-    let sf_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[sf_raw, one])?;
-    let sf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[sf_masked, sf_bit])?;
-
-    let mask = out.constant(U64, &rflags::CORPUS_FLAG_MASK.to_le_bytes())?;
-    let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
-    let with_zf = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[cleared, zf_shifted])?;
-    let new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[with_zf, sf_shifted])?;
-
-    out.write_register(register_id::RFLAGS, new_rflags)?;
-    Ok(())
+    let (zf, sf) = zf_sf(out, result, width_bits - 1)?;
+    let pf = pf_flag(out, result)?;
+    compose_rflags(out, &[zf, sf, pf], false)
 }
 
 /// Extracts ZF from RFLAGS. Returns a 1-bit value: 1 if ZF=0 (not set), 0 if ZF=1 (set).
@@ -213,43 +556,6 @@ fn read_flag_not_set(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, 
     let flag_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[shifted, mask])?;
     let zero = out.constant(U64, &0u64.to_le_bytes())?;
     out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[flag_64, zero])
-}
-
-/// Computes ZF and SF for an INC/DEC operation, preserving CF (and clearing OF).
-fn write_zf_sf_preserve_cf(
-    out: &mut dyn SemanticBuilder,
-    result: ValueId,
-    width_bits: u16,
-) -> Result<(), SemanticError> {
-    let result = widen_to_u64(out, result, width_bits)?;
-    let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
-    let zero = out.constant(U64, &0u64.to_le_bytes())?;
-    let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
-    let sf_bit = const_u64(out, u64::from(rflags::SF_BIT))?;
-    let sixty_three = const_u64(out, 63)?;
-    let one = const_u64(out, 1)?;
-
-    let zf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[result, zero])?;
-    let zf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[zf_1])?;
-    let zf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[zf_64, zf_bit])?;
-
-    let sf_raw = out.emit(
-        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-        U64,
-        &[result, sixty_three],
-    )?;
-    let sf_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[sf_raw, one])?;
-    let sf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[sf_masked, sf_bit])?;
-
-    // Mask clears ZF, SF, OF but preserves CF.
-    let preserve_cf_mask = rflags::CORPUS_FLAG_MASK | (1u64 << rflags::CF_BIT);
-    let mask = out.constant(U64, &preserve_cf_mask.to_le_bytes())?;
-    let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
-    let with_zf = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[cleared, zf_shifted])?;
-    let new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[with_zf, sf_shifted])?;
-
-    out.write_register(register_id::RFLAGS, new_rflags)?;
-    Ok(())
 }
 
 fn receipt(offset: u64, context: &SemanticContext) -> SemanticReceipt {
@@ -347,7 +653,7 @@ impl SemanticProvider for AddR64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
-        write_add_flags(out, result, left, 64)?;
+        write_add_flags(out, result, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(1, context))
@@ -512,7 +818,7 @@ impl SemanticProvider for ShlR64Imm8 {
         let left = out.read_operand(0, U64)?;
         let count = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[left, count])?;
-        write_logical_flags(out, result, 64)?;
+        write_shift_flags(out, left, count, result, ShiftKind::Left)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(6, context))
@@ -549,7 +855,7 @@ impl SemanticProvider for ShrR64Imm8 {
             U64,
             &[left, count],
         )?;
-        write_logical_flags(out, result, 64)?;
+        write_shift_flags(out, left, count, result, ShiftKind::RightLogical)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(7, context))
@@ -586,7 +892,7 @@ impl SemanticProvider for SarR64Imm8 {
             U64,
             &[left, count],
         )?;
-        write_logical_flags(out, result, 64)?;
+        write_shift_flags(out, left, count, result, ShiftKind::RightArith)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(8, context))
@@ -779,7 +1085,7 @@ impl SemanticProvider for AddR64Imm32 {
         let imm32 = out.read_operand(1, U32)?;
         let right = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[imm32])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
-        write_add_flags(out, result, left, 64)?;
+        write_add_flags(out, result, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(14, context))
@@ -1184,7 +1490,7 @@ impl SemanticProvider for IncR64 {
         let left = out.read_operand(0, U64)?;
         let one = const_u64(out, 1)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, one])?;
-        write_zf_sf_preserve_cf(out, result, 64)?;
+        write_add_flags_preserve_cf(out, result, left, one, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(26, context))
@@ -1217,7 +1523,7 @@ impl SemanticProvider for DecR64 {
         let left = out.read_operand(0, U64)?;
         let one = const_u64(out, 1)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, one])?;
-        write_zf_sf_preserve_cf(out, result, 64)?;
+        write_sub_flags_preserve_cf(out, result, left, one, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(27, context))
@@ -1408,7 +1714,7 @@ impl SemanticProvider for AddR64Mem64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
-        write_add_flags(out, result, left, 64)?;
+        write_add_flags(out, result, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(33, context))
@@ -1473,8 +1779,7 @@ impl SemanticProvider for ImulR64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[left, right])?;
-        // Simplified: CF is cleared (no overflow detected in 64-bit IR).
-        write_logical_flags(out, result, 64)?;
+        write_mul_flags(out, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(35, context))
@@ -1633,9 +1938,7 @@ impl SemanticProvider for RolR64Imm8 {
             U64,
             &[shifted_left, shifted_right],
         )?;
-        let one = const_u64(out, 1)?;
-        let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[shifted_right, one])?;
-        write_cf_only(out, cf)?;
+        write_rotate_flags(out, result, ShiftKind::RotateLeft)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(39, context))
@@ -1686,15 +1989,7 @@ impl SemanticProvider for RorR64Imm8 {
             U64,
             &[shifted_right, shifted_left],
         )?;
-        let one = const_u64(out, 1)?;
-        let count_minus_one = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[count_masked, one])?;
-        let cf_raw = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-            U64,
-            &[value, count_minus_one],
-        )?;
-        let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[cf_raw, one])?;
-        write_cf_only(out, cf)?;
+        write_rotate_flags(out, result, ShiftKind::RotateRight)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(40, context))
@@ -1921,6 +2216,76 @@ impl SemanticProvider for PopR64 {
 }
 
 // ---------------------------------------------------------------------------
+// PUSHF / POPF (push/pop the 64-bit RFLAGS image in 64-bit mode)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct PushF;
+
+impl SemanticProvider for PushF {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x166)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::PUSHF
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
+        // Operand 0 is the suppressed RFLAGS read; operand 1 is the
+        // suppressed stack write. Unlike PUSH r64, XED reports the pushf
+        // stack operand at [rsp+0] — writing RSP first makes the store's
+        // evaluated address land at [rsp-8].
+        let value = out.read_operand(0, U64)?;
+        let eight = const_u64(out, 8)?;
+        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
+        out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
+        out.write_operand(1, value)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x166, context))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PopF;
+
+impl SemanticProvider for PopF {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x167)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::POPF
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        // Operand 1 is the suppressed stack read; operand 0 is the
+        // suppressed RFLAGS destination (XED models it ReadWrite).
+        let value = out.read_operand(1, U64)?;
+        let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
+        let eight = const_u64(out, 8)?;
+        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsp, eight])?;
+        out.write_operand(0, value)?;
+        out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x167, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LEA r64, [m] (compute effective address, no memory access)
 // ---------------------------------------------------------------------------
 
@@ -2040,7 +2405,7 @@ impl SemanticProvider for XaddR64R64 {
         let dest = out.read_operand(0, U64)?;
         let src = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[dest, src])?;
-        write_add_flags(out, result, dest, 64)?;
+        write_add_flags(out, result, dest, src, 64)?;
         out.write_operand(0, result)?;
         out.write_operand(1, dest)?;
         fall_through(out, insn)?;
@@ -3077,7 +3442,7 @@ impl SemanticProvider for AdcR64R64 {
         let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
         let sum = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[sum, cf_64])?;
-        write_add_flags(out, result, left, 64)?;
+        write_add_flags(out, result, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(74, context))
@@ -3832,7 +4197,7 @@ impl SemanticProvider for AddMem64R64 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
-        write_add_flags(out, result, left, 64)?;
+        write_add_flags(out, result, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(0x203, context))
@@ -3865,7 +4230,7 @@ impl SemanticProvider for AddMem64Imm32 {
         let left = out.read_operand(0, U64)?;
         let right = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[left, right])?;
-        write_add_flags(out, result, left, 64)?;
+        write_add_flags(out, result, left, right, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(0x204, context))

@@ -401,6 +401,14 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_REP_MOVSW => Some(REP_MOVSW_FORM_ID),
         iclass::XED_ICLASS_REP_MOVSD => Some(REP_MOVSD_FORM_ID),
         iclass::XED_ICLASS_REP_MOVSQ => Some(REP_MOVSQ_FORM_ID),
+        iclass::XED_ICLASS_PUSHF | iclass::XED_ICLASS_PUSHFQ => match shapes {
+            [] => Some(forms::PUSHF),
+            _ => None,
+        },
+        iclass::XED_ICLASS_POPF | iclass::XED_ICLASS_POPFQ => match shapes {
+            [] => Some(forms::POPF),
+            _ => None,
+        },
         iclass::XED_ICLASS_PUSH => match shapes {
             [Shape::Reg64] => Some(forms::PUSH_R64),
             [Shape::Reg32] => Some(forms::PUSH_R32),

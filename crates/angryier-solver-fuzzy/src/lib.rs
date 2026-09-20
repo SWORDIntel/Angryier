@@ -325,7 +325,7 @@ mod tests {
         (arena, backend)
     }
 
-    fn symbol(arena: &ShardedExprArena, id: u64, width: u16) -> ExprId {
+    fn symbol(arena: &ShardedExprArena, id: u64, width: u16) -> Result<ExprId, String> {
         arena
             .intern(ExprNode {
                 sort: ExprSort::BitVec(width),
@@ -333,10 +333,10 @@ mod tests {
                 operands: Vec::new(),
                 immediate: id.to_le_bytes().to_vec(),
             })
-            .expect("intern")
+            .map_err(|e| format!("{e:?}"))
     }
 
-    fn constant(arena: &ShardedExprArena, width: u16, value: u64) -> ExprId {
+    fn constant(arena: &ShardedExprArena, width: u16, value: u64) -> Result<ExprId, String> {
         let byte_count = usize::from(width).div_ceil(8);
         let mut bytes = value.to_le_bytes().to_vec();
         bytes.resize(byte_count, 0);
@@ -347,10 +347,10 @@ mod tests {
                 operands: Vec::new(),
                 immediate: bytes,
             })
-            .expect("intern")
+            .map_err(|e| format!("{e:?}"))
     }
 
-    fn eq(arena: &ShardedExprArena, left: ExprId, right: ExprId) -> ExprId {
+    fn eq(arena: &ShardedExprArena, left: ExprId, right: ExprId) -> Result<ExprId, String> {
         arena
             .intern(ExprNode {
                 sort: ExprSort::Bool,
@@ -358,10 +358,10 @@ mod tests {
                 operands: vec![left, right],
                 immediate: Vec::new(),
             })
-            .expect("intern")
+            .map_err(|e| format!("{e:?}"))
     }
 
-    fn query(_arena: &ShardedExprArena, predicate: ExprId) -> SolverQuery {
+    fn query(_arena: &ShardedExprArena, predicate: ExprId) -> Result<SolverQuery, String> {
         let key = DependencyKey([7; 32]);
         SolverQuery::canonical(
             SolverQueryId(1),
@@ -372,28 +372,29 @@ mod tests {
             ConstraintCanonicalizationVersion(1),
             Duration::from_secs(5),
         )
-        .expect("query")
+        .map_err(|e| format!("{e:?}"))
         // The canonical identity check is bypassed in tests by construction.
     }
 
     use angryier_expr::ExprArena;
 
     #[test]
-    fn solves_equality_constraint() {
+    fn solves_equality_constraint() -> Result<(), String> {
         let (arena, mut backend) = setup();
-        let x = symbol(&arena, 0, 64);
-        let c42 = constant(&arena, 64, 42);
-        let predicate = eq(&arena, x, c42);
-        let result = backend.solve(&query(&arena, predicate));
+        let x = symbol(&arena, 0, 64)?;
+        let c42 = constant(&arena, 64, 42)?;
+        let predicate = eq(&arena, x, c42)?;
+        let result = backend.solve(&query(&arena, predicate)?);
         assert_eq!(result.outcome, SolverOutcomeKind::Sat);
         assert!(!result.model.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn solves_comparison_with_constraint() {
+    fn solves_comparison_with_constraint() -> Result<(), String> {
         let (arena, mut backend) = setup();
-        let x = symbol(&arena, 0, 64);
-        let c10 = constant(&arena, 64, 10);
+        let x = symbol(&arena, 0, 64)?;
+        let c10 = constant(&arena, 64, 10)?;
         let lt = arena
             .intern(ExprNode {
                 sort: ExprSort::Bool,
@@ -401,10 +402,10 @@ mod tests {
                 operands: vec![x, c10],
                 immediate: Vec::new(),
             })
-            .expect("intern");
+            .map_err(|e| format!("{e:?}"))?;
         // Constraint: x == 5 (keeps the model on-path); predicate: x < 10.
-        let c5 = constant(&arena, 64, 5);
-        let constraint_expr = eq(&arena, x, c5);
+        let c5 = constant(&arena, 64, 5)?;
+        let constraint_expr = eq(&arena, x, c5)?;
         let constraint = CanonicalConstraint {
             id: ConstraintId(0),
             key: DependencyKey([1; 32]),
@@ -419,8 +420,9 @@ mod tests {
             ConstraintCanonicalizationVersion(1),
             Duration::from_secs(5),
         )
-        .expect("query");
+        .map_err(|e| format!("{e:?}"))?;
         let result = backend.solve(&q);
         assert_eq!(result.outcome, SolverOutcomeKind::Sat);
+        Ok(())
     }
 }

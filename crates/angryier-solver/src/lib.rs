@@ -1517,7 +1517,7 @@ mod tests {
     /// Exact query reuse: the second identical query is a cache hit — the
     /// inner backend is invoked once.
     #[test]
-    fn caching_backend_reuses_exact_queries() {
+    fn caching_backend_reuses_exact_queries() -> Result<(), Box<dyn std::error::Error>> {
         let cache = Arc::new(InMemorySolverCache::default());
         let calls = Arc::new(AtomicU64::new(0));
         let inner = CountingBackend {
@@ -1525,20 +1525,21 @@ mod tests {
             calls: Arc::clone(&calls),
         };
         let mut backend = CachingSolverBackend::new(Box::new(inner), Arc::clone(&cache));
-        let query = query_with_key([1; 32], [2; 32]);
+        let query = query_with_key([1; 32], [2; 32])?;
         let first = backend.solve(&query);
         let second = backend.solve(&query);
         assert_eq!(first.outcome, SolverOutcomeKind::Sat);
         assert_eq!(second.outcome, SolverOutcomeKind::Sat);
         assert_eq!(calls.load(Ordering::Relaxed), 1, "second query hit the cache");
-        let stats = cache.stats().expect("stats");
+        let stats = cache.stats()?;
         assert_eq!(stats.hits, 1);
+        Ok(())
     }
 
     /// UNSAT-core reuse: a query whose constraint keys contain a recorded
     /// core returns Unsat without invoking the backend.
     #[test]
-    fn caching_backend_reuses_unsat_cores() {
+    fn caching_backend_reuses_unsat_cores() -> Result<(), Box<dyn std::error::Error>> {
         let cache = Arc::new(InMemorySolverCache::default());
         let calls = Arc::new(AtomicU64::new(0));
         let inner = CoreReportingBackend {
@@ -1547,7 +1548,7 @@ mod tests {
         let mut backend = CachingSolverBackend::new(Box::new(inner), Arc::clone(&cache));
 
         // First query: backend reports Unsat with core {ConstraintId(0)}.
-        let first = backend.solve(&query_with_key([7; 32], [8; 32]));
+        let first = backend.solve(&query_with_key([7; 32], [8; 32])?);
         assert_eq!(first.outcome, SolverOutcomeKind::Unsat);
         assert_eq!(backend.indexed_core_count(), 1);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -1556,9 +1557,10 @@ mod tests {
         // Unsat from the index, no backend call. NOTE: the canonical key
         // differs (different predicate key), so this is not an exact-reuse
         // hit — it exercises the core-subset path.
-        let second = backend.solve(&query_with_key([7; 32], [9; 32]));
+        let second = backend.solve(&query_with_key([7; 32], [9; 32])?);
         assert_eq!(second.outcome, SolverOutcomeKind::Unsat);
         assert_eq!(calls.load(Ordering::Relaxed), 1, "core reuse skipped the backend");
+        Ok(())
     }
 
     struct CountingBackend {
@@ -1606,7 +1608,10 @@ mod tests {
         }
     }
 
-    fn query_with_key(constraint_key: [u8; 32], predicate_key: [u8; 32]) -> SolverQuery {
+    fn query_with_key(
+        constraint_key: [u8; 32],
+        predicate_key: [u8; 32],
+    ) -> Result<SolverQuery, Box<dyn std::error::Error>> {
         let constraint = CanonicalConstraint {
             id: ConstraintId(0),
             key: DependencyKey(constraint_key),
@@ -1621,6 +1626,6 @@ mod tests {
             ConstraintCanonicalizationVersion(1),
             Duration::from_secs(5),
         )
-        .expect("canonical query")
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("{e:?}").into() })
     }
 }
