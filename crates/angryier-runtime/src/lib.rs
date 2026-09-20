@@ -1003,7 +1003,7 @@ impl<D: Decoder> Runtime<D> {
         find: &[Address],
         steps: u64,
         timeout: std::time::Duration,
-    ) -> Result<Vec<(Vec<u8>, Vec<Address>)>, RuntimeError> {
+    ) -> Result<Vec<FuzzedInput>, RuntimeError> {
         let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
             angryier_types::ExpressionNormalizationVersion(1),
         ));
@@ -2161,6 +2161,9 @@ fn read_cstr_va(image: &LoadedImage, va: u64) -> Option<String> {
         .unwrap_or(seg.bytes.len());
     Some(String::from_utf8_lossy(&seg.bytes[off..end]).to_string())
 }
+
+/// A generated input together with the concrete coverage it reaches.
+pub type FuzzedInput = (Vec<u8>, Vec<Address>);
 
 fn read_concrete_bytes(process: &Process, address: Address, len: u64) -> Result<Vec<u8>, RuntimeError> {
     let len = usize::try_from(len).map_err(|_| RuntimeError::Memory("syscall buffer too large".into()))?;
