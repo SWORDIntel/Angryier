@@ -1127,3 +1127,54 @@ fn parallel_explore_scales_states_on_real_binary() -> Result<(), Box<dyn std::er
     assert!(report.coverage.len() > 20, "exploration covers real startup code");
     Ok(())
 }
+
+/// Gate C: exact reuse measured on a real trace — two different concrete
+/// inputs reaching the same branch produce the same sliced canonical query,
+/// so the second inversion is a cache hit with zero solver calls.
+#[cfg(feature = "z3")]
+#[test]
+fn sliced_queries_reuse_across_inputs() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use angryier_expr::{ExprReader, ShardedExprArena};
+    use angryier_ir::IrType;
+    use angryier_solver::{CachingSolverBackend, InMemorySolverCache};
+    use angryier_solver_z3::Z3Backend;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    let Some(_) = fixture() else {
+        eprintln!("skipping: binutils (as/ld) unavailable");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+    let cache = Arc::new(InMemorySolverCache::default());
+    let reader: Arc<dyn ExprReader> = arena.clone();
+    let z3 = Z3Backend::native_ffi(reader)?;
+    let mut backend = CachingSolverBackend::new(Box::new(z3), Arc::clone(&cache));
+
+    // Two inputs that reach the same final branch — the path is identical,
+    // so slicing yields the identical canonical query.
+    for input in [6u64, 7] {
+        let (process, _ok, _fail) = loaded_process(&runtime, input)?;
+        let mut session = runtime.concolic(process, arena.as_ref());
+        session.mark_input_register(register_id::GPR_BASE, IrType::Bits(64))?;
+        while !session.process.terminated && session.process.step_count < 64 {
+            match session.step()? {
+                StepOutcome::SimProcedure { .. } => break,
+                _ => {}
+            }
+        }
+        let solution = session.solve_last_branch(&mut backend, Duration::from_secs(10))?;
+        assert!(solution.is_sat());
+    }
+    let stats = cache.stats()?;
+    eprintln!(
+        "Gate C reuse: {} hits / {} misses / {} entries",
+        stats.hits, stats.misses, stats.entries
+    );
+    assert_eq!(stats.hits, 1, "second identical sliced query must hit");
+    assert_eq!(stats.entries, 1, "one unique canonical query");
+    Ok(())
+}

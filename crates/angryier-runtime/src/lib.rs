@@ -1766,9 +1766,42 @@ impl<'a, D: Decoder> ConcolicSession<'a, D> {
             .map(|summary| summary.key)
             .ok_or_else(|| RuntimeError::Symbolic("missing predicate dependency summary".into()))?;
 
+        // Constraint slicing: only constraints in the predicate's symbolic
+        // dependency cone are sent. Two queries differing only in
+        // unrelated constraints canonicalize to the same key — slicing
+        // both speeds the solver and raises the exact-reuse hit rate.
+        let mut relevant: BTreeSet<u64> = self
+            .arena
+            .dependency_summary(predicate)
+            .map(|summary| summary.symbolic_sources.iter().copied().collect())
+            .unwrap_or_default();
+        let mut keep = vec![false; constraints.len()];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (index, constraint) in constraints.iter().enumerate() {
+                if keep[index] {
+                    continue;
+                }
+                let Some(summary) = self.arena.dependency_summary(constraint.expr) else {
+                    continue;
+                };
+                if summary.symbolic_sources.iter().any(|source| relevant.contains(source)) {
+                    keep[index] = true;
+                    relevant.extend(summary.symbolic_sources.iter().copied());
+                    changed = true;
+                }
+            }
+        }
+        let sliced: Vec<CanonicalConstraint> = constraints
+            .into_iter()
+            .zip(keep.iter())
+            .filter_map(|(constraint, keep)| keep.then_some(constraint))
+            .collect();
+
         let query = SolverQuery::canonical(
             SolverQueryId(self.process.step_count),
-            &constraints,
+            &sliced,
             predicate,
             predicate_key,
             self.process.target_profile,

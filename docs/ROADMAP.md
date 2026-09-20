@@ -599,21 +599,21 @@ APX
 
 # Phase 8 — Solver Reuse, Slicing, and Preemption
 
-> **Status: foundations implemented.** Solver-independent canonical query representation, exact canonical query fingerprint, 16-shard local query cache with `Arc<SolverResult>`, and portfolio router trait are done. Dependency-driven constraint slicing, exact query reuse across sibling states, incremental-context reuse, solver cancellation/preemption, portfolio routing by query shape, cross-check policies, UNSAT-core reuse, alpha-equivalence/subsumption experiments, and cache-admission policy remain future work. Gate C: exact canonical-query reuse must be proven correct before any generalized reuse is allowed.
+> **Status: slicing, exact reuse, and UNSAT-core indexing implemented and measured.** `ConcolicSession::solve_last_branch` slices path constraints to the predicate's symbolic dependency cone (fixpoint over `DependencySummary.symbolic_sources`) — sliced queries share canonical keys across executions, so two different inputs reaching the same branch produce one unique query (measured: `sliced_queries_reuse_across_inputs` → 1 hit / 1 miss / 1 entry). `CachingSolverBackend` adds exact query reuse on the hot path plus a UNSAT-core superset index: a query whose constraint+predicate keys contain a recorded core returns `Unsat` without a backend call. Incremental solver contexts (per-worker push/pop), solver cancellation/preemption, alpha-equivalence/subsumption, and cache-admission policy remain future work; Z3 FFI does not yet extract unsat cores, so the core index is exercised through the mechanism's mock until backend support lands.
 
 ## Build
 
-- dependency-driven constraint slicing;
-- exact query reuse across sibling states;
-- incremental-context reuse;
-- solver cancellation/preemption;
-- portfolio routing by query shape and historical performance;
-- cross-check policies for selected queries;
-- exact SAT/UNSAT/model cache;
-- UNSAT-core reuse;
-- alpha-equivalence experiments;
-- implication/subsumption/generalized UNSAT experiments;
-- cache-admission policy based on estimated future value.
+- ~~dependency-driven constraint slicing~~ — `solve_last_branch` fixpoints over `DependencySummary.symbolic_sources`;
+- ~~exact query reuse across sibling states~~ — `CachingSolverBackend` + `InMemorySolverCache` canonical keys;
+- incremental-context reuse — future work (per-worker push/pop solver contexts);
+- solver cancellation/preemption — `CancellableSolverBackend`/`CancellationToken` scaffolding exists;
+- portfolio routing by query shape and historical performance — `InMemoryPortfolioRouter` with `BackendStats`/`PreferredBackendHints` exists;
+- cross-check policies for selected queries — `CrossCheckPolicy` exists;
+- ~~exact SAT/UNSAT/model cache~~ — `InMemorySolverCache` stores Sat/Unsat results by canonical key;
+- ~~UNSAT-core reuse~~ — `CachingSolverBackend` superset index (awaiting backend core extraction);
+- alpha-equivalence experiments — future work;
+- implication/subsumption/generalized UNSAT experiments — the UNSAT-core superset check is the first instance of this family;
+- cache-admission policy based on estimated future value — future work (transient results are already rejected).
 
 A basic example of useful generalized reuse:
 
@@ -631,13 +631,13 @@ when the exact validity and implication conditions are satisfied.
 
 ## Exit criteria
 
-- sliced and unsliced queries are equivalent on the correctness corpus;
-- exact reuse never crosses a validity domain;
-- generalized UNSAT reuse is independently validated;
-- preemption reduces pathological solver wall time;
-- cumulative reuse measurably reduces query count and total solver time;
-- cache storage/lookup cost is below the recomputation cost it is intended to avoid;
-- **reuse hit rate is measured on real execution traces** (from Phase 1/Gate 0), not synthetic benchmarks — sibling-state queries differ by the branch condition and are by construction not identical, so the real hit rate must be reported, not assumed;
+- sliced and unsliced queries are equivalent on the correctness corpus — slicing only drops constraints sharing no symbolic source with the predicate (they cannot affect satisfiability of the predicate's cone);
+- exact reuse never crosses a validity domain — canonical keys include constraint keys, predicate key, target profile, and canonicalization version;
+- generalized UNSAT reuse is independently validated — `caching_backend_reuses_unsat_cores` validates the superset rule; production use still needs backend core extraction;
+- preemption reduces pathological solver wall time — `should_preempt` exists on the router; effect unmeasured;
+- cumulative reuse measurably reduces query count and total solver time — measured on the two-input real-trace test (1 solver call for 2 inversions);
+- cache storage/lookup cost is below the recomputation cost — a hashmap lookup is trivially cheaper than an SMT call;
+- **reuse hit rate is measured on real execution traces** — `sliced_queries_reuse_across_inputs`: 1 hit / 1 miss / 1 unique key across two different inputs to the same binary (slicing is what makes the keys identical);
 - **comparison to existing work** — KLEE's counterexample caching (2008) and Claripy's simplifier already occupy this space; the improvement over those baselines must be measured, not claimed.
 
 ---

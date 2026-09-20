@@ -1037,6 +1037,120 @@ impl SolverBackend for BatchSolver {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Caching backend wrapper with UNSAT-core reuse
+// ---------------------------------------------------------------------------
+
+/// A [`SolverBackend`] wrapper adding exact query reuse and UNSAT-core reuse.
+///
+/// Exact reuse: a solved query's canonical key maps to its `Sat`/`Unsat`
+/// result in the shared [`InMemorySolverCache`] — identical queries (same
+/// constraint slice, predicate, profile, canonicalization version) hit
+/// without a solver call.
+///
+/// UNSAT-core reuse: when a backend reports an unsatisfiable core — the
+/// minimal conflicting constraint set — its key-set is indexed. A later
+/// query whose constraint+predicate keys *contain* a recorded core is
+/// unsatisfiable by superset and returns `Unsat` without a solver call.
+/// (Backends that don't extract cores simply never populate the index; the
+/// Z3 FFI's core extraction is future work.)
+pub struct CachingSolverBackend {
+    inner: Box<dyn SolverBackend>,
+    cache: Arc<InMemorySolverCache>,
+    unsat_cores: Mutex<Vec<BTreeSet<DependencyKey>>>,
+}
+
+impl CachingSolverBackend {
+    /// Wraps `inner` with the shared `cache`.
+    pub fn new(inner: Box<dyn SolverBackend>, cache: Arc<InMemorySolverCache>) -> Self {
+        Self {
+            inner,
+            cache,
+            unsat_cores: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Number of UNSAT cores indexed so far (instrumentation).
+    pub fn indexed_core_count(&self) -> usize {
+        self.unsat_cores.lock().map(|cores| cores.len()).unwrap_or(0)
+    }
+
+    /// The query's dependency-key set: constraint keys plus the predicate key.
+    fn query_keys(query: &SolverQuery) -> BTreeSet<DependencyKey> {
+        let mut keys: BTreeSet<DependencyKey> = query.constraint_keys().iter().copied().collect();
+        keys.insert(query.predicate_key());
+        keys
+    }
+
+    /// Result borrowed from the cache/core index (avoids double lookup).
+    fn cached_result(&self, query: &SolverQuery) -> Option<SolverResult> {
+        if let Ok(Some(result)) = self.cache.lookup(query) {
+            return Some(SolverResult {
+                outcome: result.outcome,
+                model: result.model.clone(),
+                unsat_core: result.unsat_core.clone(),
+                elapsed: Duration::ZERO,
+            });
+        }
+        let keys = Self::query_keys(query);
+        let cores = self.unsat_cores.lock().ok()?;
+        for core in cores.iter() {
+            if core.is_subset(&keys) {
+                return Some(SolverResult {
+                    outcome: SolverOutcomeKind::Unsat,
+                    model: Vec::new(),
+                    unsat_core: Vec::new(),
+                    elapsed: Duration::ZERO,
+                });
+            }
+        }
+        None
+    }
+}
+
+impl SolverBackend for CachingSolverBackend {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn solve(&mut self, query: &SolverQuery) -> SolverResult {
+        if let Some(result) = self.cached_result(query) {
+            return result;
+        }
+        let result = self.inner.solve(query);
+        // Index the core for superset reuse before caching the full result.
+        if result.outcome == SolverOutcomeKind::Unsat && !result.unsat_core.is_empty() {
+            let core_keys: Option<BTreeSet<DependencyKey>> = result
+                .unsat_core
+                .iter()
+                .map(|id| {
+                    query
+                        .constraint_expressions()
+                        .iter()
+                        .find(|(constraint_id, _)| constraint_id == id)
+                        .and_then(|_| {
+                            query
+                                .constraint_keys()
+                                .get(query.constraint_expressions().iter().position(|(cid, _)| cid == id)?)
+                        })
+                        .copied()
+                })
+                .collect();
+            if let Some(core_keys) = core_keys
+                && let Ok(mut cores) = self.unsat_cores.lock()
+            {
+                cores.push(core_keys);
+            }
+        }
+        let _ = self.cache.insert(query, result.clone());
+        result
+    }
+
+    fn solve_batch(&mut self, _shared: &[ConstraintId], predicates: &[SolverQuery]) -> Vec<SolverResult> {
+        predicates.iter().map(|query| self.solve(query)).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1398,5 +1512,115 @@ mod tests {
         let summed: u64 = lens.iter().sum();
         assert_eq!(summed, total_entries);
         Ok(())
+    }
+
+    /// Exact query reuse: the second identical query is a cache hit — the
+    /// inner backend is invoked once.
+    #[test]
+    fn caching_backend_reuses_exact_queries() {
+        let cache = Arc::new(InMemorySolverCache::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let inner = CountingBackend {
+            outcome: SolverOutcomeKind::Sat,
+            calls: Arc::clone(&calls),
+        };
+        let mut backend = CachingSolverBackend::new(Box::new(inner), Arc::clone(&cache));
+        let query = query_with_key([1; 32], [2; 32]);
+        let first = backend.solve(&query);
+        let second = backend.solve(&query);
+        assert_eq!(first.outcome, SolverOutcomeKind::Sat);
+        assert_eq!(second.outcome, SolverOutcomeKind::Sat);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "second query hit the cache");
+        let stats = cache.stats().expect("stats");
+        assert_eq!(stats.hits, 1);
+    }
+
+    /// UNSAT-core reuse: a query whose constraint keys contain a recorded
+    /// core returns Unsat without invoking the backend.
+    #[test]
+    fn caching_backend_reuses_unsat_cores() {
+        let cache = Arc::new(InMemorySolverCache::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let inner = CoreReportingBackend {
+            calls: Arc::clone(&calls),
+        };
+        let mut backend = CachingSolverBackend::new(Box::new(inner), Arc::clone(&cache));
+
+        // First query: backend reports Unsat with core {ConstraintId(0)}.
+        let first = backend.solve(&query_with_key([7; 32], [8; 32]));
+        assert_eq!(first.outcome, SolverOutcomeKind::Unsat);
+        assert_eq!(backend.indexed_core_count(), 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        // Second query: same constraint set (superset of the core) — early
+        // Unsat from the index, no backend call. NOTE: the canonical key
+        // differs (different predicate key), so this is not an exact-reuse
+        // hit — it exercises the core-subset path.
+        let second = backend.solve(&query_with_key([7; 32], [9; 32]));
+        assert_eq!(second.outcome, SolverOutcomeKind::Unsat);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "core reuse skipped the backend");
+    }
+
+    struct CountingBackend {
+        outcome: SolverOutcomeKind,
+        calls: Arc<AtomicU64>,
+    }
+
+    impl SolverBackend for CountingBackend {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+        fn solve(&mut self, _query: &SolverQuery) -> SolverResult {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            SolverResult {
+                outcome: self.outcome,
+                model: Vec::new(),
+                unsat_core: Vec::new(),
+                elapsed: Duration::ZERO,
+            }
+        }
+        fn solve_batch(&mut self, _shared: &[ConstraintId], predicates: &[SolverQuery]) -> Vec<SolverResult> {
+            predicates.iter().map(|q| self.solve(q)).collect()
+        }
+    }
+
+    struct CoreReportingBackend {
+        calls: Arc<AtomicU64>,
+    }
+
+    impl SolverBackend for CoreReportingBackend {
+        fn name(&self) -> &'static str {
+            "core-reporter"
+        }
+        fn solve(&mut self, _query: &SolverQuery) -> SolverResult {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            SolverResult {
+                outcome: SolverOutcomeKind::Unsat,
+                model: Vec::new(),
+                unsat_core: vec![ConstraintId(0)],
+                elapsed: Duration::ZERO,
+            }
+        }
+        fn solve_batch(&mut self, _shared: &[ConstraintId], predicates: &[SolverQuery]) -> Vec<SolverResult> {
+            predicates.iter().map(|q| self.solve(q)).collect()
+        }
+    }
+
+    fn query_with_key(constraint_key: [u8; 32], predicate_key: [u8; 32]) -> SolverQuery {
+        let constraint = CanonicalConstraint {
+            id: ConstraintId(0),
+            key: DependencyKey(constraint_key),
+            expr: ExprId(0),
+        };
+        SolverQuery::canonical(
+            SolverQueryId(1),
+            &[constraint],
+            ExprId(0),
+            DependencyKey(predicate_key),
+            TargetProfileId(1),
+            ConstraintCanonicalizationVersion(1),
+            Duration::from_secs(5),
+        )
+        .expect("canonical query")
     }
 }
