@@ -457,13 +457,59 @@ impl<D: Decoder> Runtime<D> {
         decoded: &DecodedInstruction,
     ) -> Result<Option<StepOutcome>, RuntimeError> {
         use crate::form_map::{
-            MOVSB_FORM_ID, MOVSD_FORM_ID, MOVSQ_FORM_ID, MOVSW_FORM_ID, REP_MOVSB_FORM_ID, REP_MOVSD_FORM_ID,
-            REP_MOVSQ_FORM_ID, REP_MOVSW_FORM_ID, REP_STOSB_FORM_ID, REP_STOSD_FORM_ID, REP_STOSQ_FORM_ID,
-            REP_STOSW_FORM_ID, STOSB_FORM_ID, STOSD_FORM_ID, STOSQ_FORM_ID, STOSW_FORM_ID,
+            LODSB_FORM_ID, LODSD_FORM_ID, LODSQ_FORM_ID, LODSW_FORM_ID, MOVSB_FORM_ID, MOVSD_FORM_ID, MOVSQ_FORM_ID,
+            MOVSW_FORM_ID, REP_MOVSB_FORM_ID, REP_MOVSD_FORM_ID, REP_MOVSQ_FORM_ID, REP_MOVSW_FORM_ID,
+            REP_STOSB_FORM_ID, REP_STOSD_FORM_ID, REP_STOSQ_FORM_ID, REP_STOSW_FORM_ID, STOSB_FORM_ID, STOSD_FORM_ID,
+            STOSQ_FORM_ID, STOSW_FORM_ID,
         };
 
         // The REP_/plain iclasses encode whether the prefix is present, so the
         // sentinel determines the count loop.
+        // LODSB family: load [RSI] into AL/AX/EAX/RAX, advance RSI.
+        let lod_size = match decoded.form_id {
+            LODSB_FORM_ID => 1usize,
+            LODSW_FORM_ID => 2,
+            LODSD_FORM_ID => 4,
+            LODSQ_FORM_ID => 8,
+            _ => 0,
+        };
+        if lod_size > 0 {
+            let rsi = process.read_register(register_id::GPR_BASE + 6)?;
+            let data = process
+                .state
+                .memory
+                .read(rsi, lod_size)
+                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+            let mut value = 0u64;
+            for (i, byte) in data.iter().enumerate() {
+                let b = match byte {
+                    ByteValue::Concrete(b) => *b,
+                    ByteValue::Symbolic(_) => 0,
+                };
+                value |= u64::from(b) << (i * 8);
+            }
+            let rax = process.read_register(register_id::GPR_BASE)?;
+            // LODSB replaces AL, LODSW replaces AX, LODSD zero-extends into
+            // RAX like every 32-bit register write, LODSQ writes all of RAX.
+            let preserved = match lod_size {
+                8 => 0,
+                4 => 0,
+                2 => rax & !0xFFFF,
+                _ => rax & !0xFF,
+            };
+            process.write_register(register_id::GPR_BASE, preserved | value)?;
+            process.write_register(register_id::GPR_BASE + 6, rsi.wrapping_add(lod_size as u64))?;
+            let next_pc = pc.wrapping_add(u64::from(decoded.length));
+            process.write_pc(next_pc)?;
+            process.step_count += 1;
+            return Ok(Some(StepOutcome::Stepped {
+                pc,
+                form_id: decoded.form_id,
+                next_pc,
+                length: decoded.length,
+            }));
+        }
+
         let (is_move, size, rep) = match decoded.form_id {
             STOSB_FORM_ID | REP_STOSB_FORM_ID => (false, 1usize, decoded.form_id == REP_STOSB_FORM_ID),
             STOSW_FORM_ID | REP_STOSW_FORM_ID => (false, 2, decoded.form_id == REP_STOSW_FORM_ID),

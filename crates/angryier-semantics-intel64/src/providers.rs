@@ -2027,10 +2027,16 @@ impl SemanticProvider for RclR64Imm8 {
         let cf_1 = read_flag_set(out, rflags::CF_BIT)?;
         let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
         let sixty_four = const_u64(out, 64)?;
+        let sixty_five = const_u64(out, 65)?;
         let complement = out.emit(
             SemanticOp::Primitive(PrimitiveOp::Sub),
             U64,
             &[sixty_four, count_masked],
+        )?;
+        let complement_plus_one = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::Sub),
+            U64,
+            &[sixty_five, count_masked],
         )?;
         let one = const_u64(out, 1)?;
         let count_minus_one = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[count_masked, one])?;
@@ -2039,22 +2045,14 @@ impl SemanticProvider for RclR64Imm8 {
             U64,
             &[value, count_masked],
         )?;
+        // Through-carry rotate: the top (count-1) value bits land at
+        // positions count-1..1 (value >> 65-count), with CF at position 0
+        // shifted up to count-1... specifically:
+        //   result = (value<<count) | (value>>(65-count)) | (CF<<(count-1))
         let shifted_right = out.emit(
             SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
             U64,
-            &[value, complement],
-        )?;
-        // CF goes to position (count - 1); mask out that bit from shifted_right first.
-        let bit_mask = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
-            U64,
-            &[one, count_minus_one],
-        )?;
-        let inv_bit_mask = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U64, &[bit_mask])?;
-        let shifted_right_masked = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::And),
-            U64,
-            &[shifted_right, inv_bit_mask],
+            &[value, complement_plus_one],
         )?;
         let cf_shifted = out.emit(
             SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
@@ -2064,10 +2062,16 @@ impl SemanticProvider for RclR64Imm8 {
         let partial = out.emit(
             SemanticOp::Primitive(PrimitiveOp::Or),
             U64,
-            &[shifted_left, shifted_right_masked],
+            &[shifted_left, shifted_right],
         )?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[partial, cf_shifted])?;
-        let new_cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[shifted_right, one])?;
+        // New CF = the last bit rotated out = value's bit (64-count).
+        let new_cf_raw = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+            U64,
+            &[value, complement],
+        )?;
+        let new_cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[new_cf_raw, one])?;
         write_cf_only(out, new_cf)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
@@ -2105,10 +2109,16 @@ impl SemanticProvider for RcrR64Imm8 {
         let cf_1 = read_flag_set(out, rflags::CF_BIT)?;
         let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
         let sixty_four = const_u64(out, 64)?;
+        let sixty_five = const_u64(out, 65)?;
         let complement = out.emit(
             SemanticOp::Primitive(PrimitiveOp::Sub),
             U64,
             &[sixty_four, count_masked],
+        )?;
+        let complement_plus_one = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::Sub),
+            U64,
+            &[sixty_five, count_masked],
         )?;
         let one = const_u64(out, 1)?;
         let shifted_right = out.emit(
@@ -2116,20 +2126,17 @@ impl SemanticProvider for RcrR64Imm8 {
             U64,
             &[value, count_masked],
         )?;
-        let shifted_left = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[value, complement])?;
-        // CF goes to position (64 - count); mask out that bit from shifted_left first.
-        let bit_mask = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[one, complement])?;
-        let inv_bit_mask = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U64, &[bit_mask])?;
-        let shifted_left_masked = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::And),
+        // result = (value>>count) | (CF<<(64-count)) | (value<<(65-count))
+        let shifted_left = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
             U64,
-            &[shifted_left, inv_bit_mask],
+            &[value, complement_plus_one],
         )?;
         let cf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[cf_64, complement])?;
         let partial = out.emit(
             SemanticOp::Primitive(PrimitiveOp::Or),
             U64,
-            &[shifted_right, shifted_left_masked],
+            &[shifted_right, shifted_left],
         )?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[partial, cf_shifted])?;
         let count_minus_one = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[count_masked, one])?;

@@ -32,6 +32,10 @@ pub const STOSW_FORM_ID: u32 = 0xFFFF_0001;
 pub const STOSD_FORM_ID: u32 = 0xFFFF_0002;
 pub const STOSQ_FORM_ID: u32 = 0xFFFF_0003;
 pub const MOVSB_FORM_ID: u32 = 0xFFFF_0004;
+pub const LODSB_FORM_ID: u32 = 0xFFFF_0010;
+pub const LODSW_FORM_ID: u32 = 0xFFFF_0011;
+pub const LODSD_FORM_ID: u32 = 0xFFFF_0012;
+pub const LODSQ_FORM_ID: u32 = 0xFFFF_0013;
 pub const MOVSW_FORM_ID: u32 = 0xFFFF_0005;
 pub const MOVSD_FORM_ID: u32 = 0xFFFF_0006;
 pub const MOVSQ_FORM_ID: u32 = 0xFFFF_0007;
@@ -398,6 +402,10 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_STOSD => Some(STOSD_FORM_ID),
         iclass::XED_ICLASS_STOSQ => Some(STOSQ_FORM_ID),
         iclass::XED_ICLASS_MOVSB => Some(MOVSB_FORM_ID),
+        iclass::XED_ICLASS_LODSB => Some(LODSB_FORM_ID),
+        iclass::XED_ICLASS_LODSW => Some(LODSW_FORM_ID),
+        iclass::XED_ICLASS_LODSD => Some(LODSD_FORM_ID),
+        iclass::XED_ICLASS_LODSQ => Some(LODSQ_FORM_ID),
         iclass::XED_ICLASS_MOVSW => Some(MOVSW_FORM_ID),
         iclass::XED_ICLASS_MOVSD => Some(MOVSD_FORM_ID),
         iclass::XED_ICLASS_MOVSQ => Some(MOVSQ_FORM_ID),
@@ -776,6 +784,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         iclass::XED_ICLASS_BSWAP => match shapes {
             [Shape::Reg64] => Some(forms::BSWAP_R64),
+            [Shape::Reg32] => Some(forms::BSWAP_R32),
             _ => None,
         },
         iclass::XED_ICLASS_CLC => Some(forms::CLC),

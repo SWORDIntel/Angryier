@@ -934,6 +934,46 @@ jcc_rel32!(JpoRel32, forms::JPO_REL32, 0x87, |out: &mut dyn SemanticBuilder| {
 
 // BSWAP r64 — byte-swap, expressible as a series of shifts and masks
 #[derive(Clone, Copy, Debug)]
+pub struct BswapR32;
+
+impl SemanticProvider for BswapR32 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x30A)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::BSWAP_R32
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let val = out.read_operand(0, U32)?;
+        let mask_ff = const_typed(out, U32, 0xFF)?;
+        let mut result = const_typed(out, U32, 0)?;
+
+        for i in 0..4u64 {
+            let src_shift = i * 8;
+            let dst_shift = (3 - i) * 8;
+            let bs = const_typed(out, U32, src_shift)?;
+            let byte = out.emit(SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight), U32, &[val, bs])?;
+            let masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U32, &[byte, mask_ff])?;
+            let ds = const_typed(out, U32, dst_shift)?;
+            let shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U32, &[masked, ds])?;
+            result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U32, &[result, shifted])?;
+        }
+
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x30A, context))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct BswapR64;
 
 impl SemanticProvider for BswapR64 {

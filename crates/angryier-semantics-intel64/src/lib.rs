@@ -625,6 +625,7 @@ pub mod forms {
     pub const NEG_R8: u32 = 0x0264;
     pub const NOT_R8: u32 = 0x0265;
     pub const SHL_R8_IMM8: u32 = 0x0266;
+    pub const BSWAP_R32: u32 = 0x0267;
     pub const MOVSX_R32_MEM8: u32 = 0x0173;
     pub const MOVSX_R32_MEM16: u32 = 0x0174;
 

@@ -1201,7 +1201,7 @@ fn differential_harness(insn: &str, seeds: &[(&str, u64)]) -> String {
         setup.push_str(&format!("    mov ${value}, %{register}\n"));
     }
     format!(
-        "        .global _start\n        .text\n_start:\n{setup}    {insn}\n    mov %rax, out(%rip)\n    pushfq\n    pop %rbx\n    mov %rbx, out+8(%rip)\n    mov $1, %rax\n    mov $1, %rdi\n    mov $out, %rsi\n    mov $16, %rdx\n    syscall\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall\n        .data\nout:    .quad 0, 0\n"
+        "        .global _start\n        .text\n_start:\n{setup}    {insn}\n    mov %rax, out(%rip)\n    pushfq\n    pop %rbx\n    mov %rbx, out+8(%rip)\n    mov $1, %rax\n    mov $1, %rdi\n    mov $out, %rsi\n    mov $16, %rdx\n    syscall\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall\n        .data\nout:    .quad 0, 0, 0, 0\n"
     )
 }
 
@@ -1504,6 +1504,28 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         "setz %bl",
         "movzx %ah, %eax",
     ];
+    // Memory-immediate RMW: seed out+16, mutate, read back into rax. The
+    // scratch qword lives after the captured out/out+8 pair.
+    let memimm_templates = [
+        "movq $0x100, out+16(%rip)\n    addq $0x50, out+16(%rip)\n    mov out+16(%rip), %rax",
+        "movq $0x100, out+16(%rip)\n    subq $0x50, out+16(%rip)\n    mov out+16(%rip), %rax",
+        "movq $0x100, out+16(%rip)\n    andq $0xff0, out+16(%rip)\n    mov out+16(%rip), %rax",
+        "movq $0x100, out+16(%rip)\n    orq $0x33, out+16(%rip)\n    mov out+16(%rip), %rax",
+        "movq $0x100, out+16(%rip)\n    xorq $0x1f0, out+16(%rip)\n    mov out+16(%rip), %rax",
+    ];
+    // Rotate-through-carry (CF flows in/out), and single-step string ops.
+    let misc4_templates = [
+        "stc\n    rcl $3, %rax",
+        "clc\n    rcl $3, %rax",
+        "stc\n    rcr $3, %rax",
+        "clc\n    rcr $3, %rax",
+        "rcl $1, %rax",
+        "rcr $1, %rax",
+        "bswap %eax",
+        "movq %rbx, out+16(%rip)\n    lea out+16(%rip), %rsi\n    lodsb",
+        "movq %rbx, out+16(%rip)\n    lea out+24(%rip), %rdi\n    stosb\n    mov out+24(%rip), %rax",
+        "movq %rbx, out+16(%rip)\n    lea out+16(%rip), %rsi\n    lea out+24(%rip), %rdi\n    movsb\n    mov out+24(%rip), %rax",
+    ];
     // 32-bit forms (zero-extension semantics must match too).
     let w32_templates = [
         "add %ebx, %eax",
@@ -1647,6 +1669,20 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
     for insn in w8_templates {
         for &a in &boundary[..4] {
             let ran = differential_case(insn, &[("rax", a), ("rbx", 0xa5)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in memimm_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 0x1234_5678_9abc_def0)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in misc4_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 0x1234_5678_9abc_def0)], flag_mask_for(insn))?;
             skipped |= !ran;
             executed += usize::from(ran);
         }
