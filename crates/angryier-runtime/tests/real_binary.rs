@@ -2368,7 +2368,6 @@ end:
 #[cfg(all(feature = "xed", target_arch = "x86_64"))]
 #[test]
 fn symbolic_session_cfg_merge() -> Result<(), Box<dyn std::error::Error>> {
-    use angryier_arch::Decoder;
     use angryier_memory::LayeredMemory;
     use angryier_runtime::SymbolicSession;
 
@@ -2433,5 +2432,154 @@ end:
     let report = session.run(512, 16, None, std::time::Duration::from_secs(5), false)?;
     assert_eq!(report.forks, 1);
     assert!(report.merges >= 1, "CFG-scheduled merge must fire");
+    Ok(())
+}
+
+/// Loop path explosion vs solver gating: `for rcx in 0..3` with rcx
+/// symbolic but pinned `rcx==0` at entry — each `jl loop` checks feasible
+/// until rcx>=3 makes it UNSAT. The checked run should terminate with a
+/// bounded state count rather than exploding.
+#[cfg(all(feature = "xed", feature = "z3", target_arch = "x86_64"))]
+#[test]
+fn symbolic_session_loop_solver_bounded() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::{ExprArena, ExprReader, ShardedExprArena};
+    use angryier_runtime::SymbolicSession;
+    use angryier_solver_z3::Z3Backend;
+    use std::sync::Arc;
+
+    let source = r#"
+        .global _start
+        .text
+_start:
+    xor %rcx, %rcx
+    xor %rax, %rax
+loop:
+    inc %rax
+    inc %rcx
+    cmp $3, %rcx
+    jl loop
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-symbolic-loop").ok_or("no tempdir")?;
+    let path_s = dir.join("loop.s");
+    let path_o = dir.join("loop.o");
+    let path_bin = dir.join("loop");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = Arc::new(ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1)));
+    let mut session = SymbolicSession::new(&runtime, arena.as_ref(), process);
+
+    // rcx symbolic + pinned to 0 — the loop bound is symbolic-derivable.
+    session.mark_symbolic(0, register_id::GPR_BASE + 1, angryier_ir::IrType::Bits(64))?;
+    {
+        let sym = session.states[0]
+            .registers
+            .get(&(register_id::GPR_BASE + 1))
+            .map(|(e, _)| *e)
+            .ok_or("rcx")?;
+        let zero = arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::BitVec(64),
+                op: angryier_expr::ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: 0u64.to_le_bytes().to_vec(),
+            })
+            .map_err(|e| format!("{e:?}"))?;
+        let eq = arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::Bool,
+                op: angryier_expr::ExprOp::Eq,
+                operands: vec![sym, zero],
+                immediate: Vec::new(),
+            })
+            .map_err(|e| format!("{e:?}"))?;
+        session.states[0].constraints.push(eq);
+    }
+
+    let reader: Arc<dyn ExprReader> = arena.clone();
+    let mut backend = Z3Backend::native_ffi(reader)?;
+    // Solver-gated run: each `jl loop` direction is checked — the
+    // loop-back direction is UNSAT once rcx>=3.
+    let report = session.run_with_policy(
+        256,
+        64,
+        Some(&mut backend),
+        std::time::Duration::from_secs(10),
+        false,
+        &angryier_runtime::ExplorationPolicy::default(),
+    )?;
+    eprintln!("loop report: {report:?}");
+    // The loop must terminate — solver-gating prunes the UNSAT back-edge.
+    assert!(report.terminated >= 1, "loop should terminate via UNSAT back-edge");
+    assert!(report.forks <= 8, "state count should stay bounded, got {}", report.forks);
+    Ok(())
+}
+
+/// Function identification: a binary with `main` + `helper` should recover
+/// two functions — main's call target owns helper's blocks.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn cfg_functions_partition() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_memory::LayeredMemory;
+
+    let source = r#"
+        .global _start
+        .text
+_start:
+    call helper
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+helper:
+    mov $7, %rax
+    ret
+"#;
+    let dir = temp_dir("angryier-cfg-fns").ok_or("no tempdir")?;
+    let path_s = dir.join("fns.s");
+    let path_o = dir.join("fns.o");
+    let path_bin = dir.join("fns");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let text_region = process
+        .state
+        .memory
+        .regions()
+        .iter()
+        .find(|r| r.executable)
+        .ok_or("no exec region")?;
+    let base = text_region.base;
+    let text = process.state.memory.read(base, text_region.size as usize)
+        .map_err(|e| format!("text read: {e:?}"))?;
+    let bytes: Vec<u8> = text.iter().map(|b| match b { angryier_memory::ByteValue::Concrete(v) => *v, _ => 0 }).collect();
+    let cfg = angryier_cfg::recover_multi(
+        &runtime.decoder,
+        base,
+        &bytes,
+        [process.entry],
+        |d| d.form_id,
+    )
+    .map_err(|e| format!("cfg: {e:?}"))?;
+
+    let functions = cfg.functions();
+    assert_eq!(functions.len(), 2, "main + helper");
+    // helper owns exactly its own blocks; main owns _start's.
+    let helper = functions.iter().find(|f| f.entry != process.entry).ok_or("helper")?;
+    assert_eq!(helper.returns.len(), 1, "helper ends in ret");
     Ok(())
 }

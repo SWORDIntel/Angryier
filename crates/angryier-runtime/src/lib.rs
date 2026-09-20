@@ -2783,9 +2783,39 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 break;
             }
             if self.states.len() > max_states {
-                // Cheapest pruning: drop the newest states past the cap.
-                while self.states.len() > max_states {
-                    let state = self.states.remove(self.states.len() - 1);
+                // State economics: drop the lowest-scoring state — score =
+                // constraint count (deep states are expensive to solve and
+                // well-explored) minus coverage novelty. Keeps the states
+                // that are cheap to continue and reach new code.
+                let mut scored: Vec<(usize, u64)> = self
+                    .states
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let novelty = self
+                            .states
+                            .iter()
+                            .filter(|o| o.process.pc().ok() == s.process.pc().ok())
+                            .count() as u64;
+                        // Fewer constraints + fewer same-pc siblings = higher
+                        // priority — score is the drop-cost (highest drops).
+                        let cost = s.constraints.len() as u64 * 16 + novelty * 4;
+                        (i, cost)
+                    })
+                    .collect();
+                // Highest cost drops first.
+                scored.sort_by_key(|(_, cost)| std::cmp::Reverse(*cost));
+                let drop_count = self.states.len() - max_states;
+                // Remove highest-index first so indices stay valid.
+                let mut drop_indices: Vec<usize> = scored
+                    .iter()
+                    .take(drop_count)
+                    .map(|(i, _)| *i)
+                    .collect();
+                drop_indices.sort_unstable_by_key(|i| std::cmp::Reverse(*i));
+                drop_indices.dedup();
+                for idx in drop_indices {
+                    let state = self.states.remove(idx);
                     self.dead.push(state);
                     report.pruned_states += 1;
                 }
@@ -3081,8 +3111,8 @@ where
         let arena = self.arena;
         let runtime = self.runtime;
         let cfg = self.cfg;
-        let results: Vec<Result<(SymbolicRunReport, Vec<SymbolicState>, Vec<SymbolicState>), RuntimeError>> =
-            std::thread::scope(|scope| {
+        type ShardResult = Result<(SymbolicRunReport, Vec<SymbolicState>, Vec<SymbolicState>), RuntimeError>;
+        let results: Vec<ShardResult> = std::thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(workers);
                 for shard in shards {
                     if shard.is_empty() {

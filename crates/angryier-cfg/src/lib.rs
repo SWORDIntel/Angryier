@@ -130,7 +130,7 @@ impl Cfg {
                 *front = next;
             }
             // A block reachable from all successors is a merge candidate.
-            'candidates: for (pc, _) in visited[0].iter() {
+            'candidates: for pc in visited[0].keys() {
                 for other in visited.iter().skip(1) {
                     if !other.contains_key(pc) {
                         continue 'candidates;
@@ -149,6 +149,91 @@ impl Cfg {
         }
         best.map(|(pc, _)| pc)
     }
+    /// Partitions the recovered blocks into functions: every `Call`-edge
+    /// target is a function entry (plus the first block = program entry),
+    /// and each function owns the blocks it reaches via non-call edges
+    /// before hitting another function's entry or a `Return`.
+    ///
+    /// This is the fast identification pass — it doesn't do calling-
+    /// convention analysis or alignment padding splitting, just the
+    /// block-level partition a scheduler or summary pass needs.
+    pub fn functions(&self) -> Vec<Function> {
+        let mut entries: BTreeSet<Address> = BTreeSet::new();
+        if let Some((&first, _)) = self.blocks.first_key_value() {
+            entries.insert(first);
+        }
+        for edge in &self.edges {
+            if matches!(edge.kind, EdgeKind::Call | EdgeKind::IndirectCall)
+                && let Some(target) = edge.to
+                && self.blocks.contains_key(&target)
+            {
+                entries.insert(target);
+            }
+        }
+        let mut functions = Vec::new();
+        let mut owned: BTreeMap<Address, Address> = BTreeMap::new();
+        for &entry in &entries {
+            let mut block_list = Vec::new();
+            let mut returns = Vec::new();
+            let mut frontier = vec![entry];
+            while let Some(pc) = frontier.pop() {
+                if owned.contains_key(&pc) {
+                    continue;
+                }
+                let Some(block) = self.blocks.get(&pc) else {
+                    continue;
+                };
+                owned.insert(pc, entry);
+                block_list.push(pc);
+                let last_pc = block.instructions.last().map(|i| i.address).unwrap_or(pc);
+                if self
+                    .edges
+                    .iter()
+                    .any(|e| e.from == last_pc && e.kind == EdgeKind::Return)
+                {
+                    returns.push(pc);
+                    continue;
+                }
+                for edge in self.edges.iter().filter(|e| {
+                    e.from == last_pc
+                        && !matches!(
+                            e.kind,
+                            EdgeKind::Call | EdgeKind::IndirectCall | EdgeKind::Return
+                        )
+                }) {
+                    if let Some(to) = edge.to
+                        && !entries.contains(&to)
+                        && !owned.contains_key(&to)
+                    {
+                        frontier.push(to);
+                    }
+                }
+            }
+            functions.push(Function {
+                entry,
+                blocks: block_list,
+                returns,
+            });
+        }
+        functions
+    }
+}
+
+/// A recovered function: an entry block plus the blocks it owns.
+///
+/// Ownership is assigned by reachability: a block belongs to the function
+/// whose entry reaches it via non-call edges without crossing another
+/// function's entry. Blocks reached only through calls stay with the
+/// callee; blocks reachable from no entry are unowned (dead code, thunk
+/// tails).
+#[derive(Clone, Debug)]
+pub struct Function {
+    /// The entry block's address.
+    pub entry: Address,
+    /// Blocks owned by this function (entry first).
+    pub blocks: Vec<Address>,
+    /// `ret`/`retf` sites — the function's exits.
+    pub returns: Vec<Address>,
 }
 
 /// Errors from CFG recovery.
