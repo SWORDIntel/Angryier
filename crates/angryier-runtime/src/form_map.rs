@@ -457,6 +457,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Reg8] => Some(forms::MOVZX_R32_R8),
             [Shape::Reg32, Shape::Mem8] => Some(forms::MOVZX_R32_MEM8),
             [Shape::Reg32, Shape::Mem16] => Some(forms::MOVZX_R32_MEM16),
+            [Shape::Reg64, Shape::Reg16] => Some(forms::MOVZX_R64_R16),
             _ => None,
         },
         iclass::XED_ICLASS_ENDBR32 | iclass::XED_ICLASS_ENDBR64 => Some(forms::NOP2),
@@ -684,6 +685,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_MOVSX => match shapes {
             [Shape::Reg64, Shape::Reg32] => Some(forms::MOVSX_R64_R32),
             [Shape::Reg64, Shape::Reg8] => Some(forms::MOVSX_R64_R8),
+            [Shape::Reg64, Shape::Reg16] => Some(forms::MOVSX_R64_R16),
             [Shape::Reg64, Shape::Mem8] => Some(forms::MOVSX_R64_MEM8),
             [Shape::Reg64, Shape::Mem16] => Some(forms::MOVSX_R64_MEM16),
             [Shape::Reg32, Shape::Reg16] => Some(forms::MOVSX_R32_R16),

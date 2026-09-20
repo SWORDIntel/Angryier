@@ -604,6 +604,8 @@ impl Intel64CorpusRegistry {
             Arc::new(PushMem64),
             Arc::new(PushMem16),
             Arc::new(PopMem64),
+            Arc::new(MovsxR64R16),
+            Arc::new(MovzxR64R16),
             Arc::new(PushF),
             Arc::new(PopF),
         ];
@@ -656,7 +658,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 583] = [
+const ALL_FORMS: [u32; 585] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -1239,6 +1241,8 @@ const ALL_FORMS: [u32; 583] = [
     crate::forms::PUSH_MEM64,
     crate::forms::PUSH_MEM16,
     crate::forms::POP_MEM64,
+    crate::forms::MOVSX_R64_R16,
+    crate::forms::MOVZX_R64_R16,
     crate::forms::PUSHF,
     crate::forms::POPF,
 ];

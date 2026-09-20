@@ -1361,6 +1361,36 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         "movsxd %ebx, %rax",
         "bswap %rax",
     ];
+    // Memory operand forms: `out` doubles as the scratch memory cell.
+    let mem_templates = [
+        "add out(%rip), %rax",
+        "sub out(%rip), %rax",
+        "and out(%rip), %rax",
+        "or out(%rip), %rax",
+        "xor out(%rip), %rax",
+        "cmp out(%rip), %rax",
+        "mov out(%rip), %rax",
+        "add %rbx, out(%rip)",
+        "mov %rbx, out+8(%rip)",
+    ];
+    // cmovcc / setcc / bt / sign-extension forms.
+    let misc2_templates = [
+        "cmovz %rbx, %rax",
+        "cmovnz %rbx, %rax",
+        "setz %al",
+        "setnz %al",
+        "movzx %bx, %rax",
+        "movsx %bx, %rax",
+        "movsxd %ebx, %rax",
+        "bswap %rax",
+        "not %rax",
+        "neg %rax",
+        "xchg %rbx, %rax",
+        "imul %rbx, %rax, $7",
+        "lea (%rbx,%rcx,4), %rax",
+        "shl %cl, %rax",
+        "shr %cl, %rax",
+    ];
     // 32-bit forms (zero-extension semantics must match too).
     let w32_templates = [
         "add %ebx, %eax",
@@ -1407,6 +1437,28 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         }
     }
     for insn in misc_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(
+                insn,
+                &[("rax", a), ("rbx", 0x1234_5678_9abc_def0), ("rcx", 5)],
+                flag_mask_for(insn),
+            )?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in mem_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(
+                insn,
+                &[("rax", a), ("rbx", 0x1234_5678_9abc_def0), ("rcx", 5)],
+                flag_mask_for(insn),
+            )?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in misc2_templates {
         for &a in &boundary[..4] {
             let ran = differential_case(
                 insn,

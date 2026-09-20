@@ -1187,7 +1187,7 @@ impl SemanticProvider for ShlR64Cl {
         let mask = const_u64(out, 0x3F)?;
         let count = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[cl, mask])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[left, count])?;
-        write_logical_flags(out, result, 64)?;
+        write_shift_flags(out, left, count, result, ShiftKind::Left)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(17, context))
@@ -1226,7 +1226,7 @@ impl SemanticProvider for ShrR64Cl {
             U64,
             &[left, count],
         )?;
-        write_logical_flags(out, result, 64)?;
+        write_shift_flags(out, left, count, result, ShiftKind::RightLogical)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(18, context))
@@ -1265,7 +1265,7 @@ impl SemanticProvider for SarR64Cl {
             U64,
             &[left, count],
         )?;
-        write_logical_flags(out, result, 64)?;
+        write_shift_flags(out, left, count, result, ShiftKind::RightArith)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(19, context))

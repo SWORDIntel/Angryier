@@ -401,6 +401,8 @@ movzx!(MovzxR64Mem16, forms::MOVZX_R64_MEM16, U16, U64, 0x20E);
 movzx!(MovzxR32Mem8, forms::MOVZX_R32_MEM8, U8, U32, 0x20F);
 movzx!(MovzxR32Mem16, forms::MOVZX_R32_MEM16, U16, U32, 0x210);
 movsx!(MovsxR32R16, forms::MOVSX_R32_R16, U16, U32, 0x60);
+movsx!(MovsxR64R16, forms::MOVSX_R64_R16, U16, U64, 0x230);
+movzx!(MovzxR64R16, forms::MOVZX_R64_R16, U16, U64, 0x300);
 movsx!(MovsxR32R8, forms::MOVSX_R32_R8, U8, U32, 0x62);
 
 // ---------------------------------------------------------------------------
@@ -599,39 +601,9 @@ impl SemanticProvider for NegR32 {
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
         let operand = out.read_operand(0, U32)?;
-        let zero = const_u64(out, 0)?;
+        let zero = const_u32(out, 0)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U32, &[zero, operand])?;
-        // CF = (operand != 0)
-        let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
-        let cf_bit = const_u64(out, u64::from(rflags::CF_BIT))?;
-        let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
-        let sf_bit = const_u64(out, u64::from(rflags::SF_BIT))?;
-        let thirty_one = const_u64(out, 31)?;
-        let one = const_u64(out, 1)?;
-
-        let zf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[result, zero])?;
-        let zf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[zf_1])?;
-        let zf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[zf_64, zf_bit])?;
-
-        let sf_raw = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-            U64,
-            &[result, thirty_one],
-        )?;
-        let sf_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[sf_raw, one])?;
-        let sf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[sf_masked, sf_bit])?;
-
-        let cf_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Ult), U1, &[zero, operand])?;
-        let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
-        let cf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[cf_64, cf_bit])?;
-
-        let mask = const_u64(out, rflags::CORPUS_FLAG_MASK)?;
-        let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
-        let with_zf = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[cleared, zf_shifted])?;
-        let with_sf = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[with_zf, sf_shifted])?;
-        let new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[with_sf, cf_shifted])?;
-        out.write_register(register_id::RFLAGS, new_rflags)?;
-
+        write_sub_flags_32(out, result, zero, operand)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(0x6E, context))
