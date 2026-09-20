@@ -1526,6 +1526,22 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         "movq %rbx, out+16(%rip)\n    lea out+24(%rip), %rdi\n    stosb\n    mov out+24(%rip), %rax",
         "movq %rbx, out+16(%rip)\n    lea out+16(%rip), %rsi\n    lea out+24(%rip), %rdi\n    movsb\n    mov out+24(%rip), %rax",
     ];
+    // Scalar SSE float — movq carries the f64 bit pattern into xmm.
+    let float_templates = [
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    addsd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    subsd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    mulsd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    divsd %xmm1, %xmm0\n    movq %xmm0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    ucomisd %xmm1, %xmm0\n    mov $0, %rax",
+        "movq %rbx, %xmm0\n    movq %rcx, %xmm1\n    movsd %xmm1, %xmm0\n    movq %xmm0, %rax",
+    ];
+    // f64 bit patterns: 1.5, -2.25, 100.0, -0.0
+    const F64_SEEDS: [u64; 4] = [
+        0x3FF8_0000_0000_0000,
+        0xC002_0000_0000_0000,
+        0x4059_0000_0000_0000,
+        0x8000_0000_0000_0000,
+    ];
     // 32-bit forms (zero-extension semantics must match too).
     let w32_templates = [
         "add %ebx, %eax",
@@ -1683,6 +1699,13 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
     for insn in misc4_templates {
         for &a in &boundary[..4] {
             let ran = differential_case(insn, &[("rax", a), ("rbx", 0x1234_5678_9abc_def0)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in float_templates {
+        for &a in &F64_SEEDS {
+            let ran = differential_case(insn, &[("rbx", a), ("rcx", 0x4004_0000_0000_0000)], flag_mask_for(insn))?;
             skipped |= !ran;
             executed += usize::from(ran);
         }

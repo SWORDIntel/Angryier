@@ -715,6 +715,11 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Xmm, Shape::Xmm] => Some(forms::MOVSS_XMM_XMM),
             _ => None,
         },
+        iclass::XED_ICLASS_ADDSD => Some(forms::ADDSD_XMM_XMM),
+        iclass::XED_ICLASS_SUBSD => Some(forms::SUBSD_XMM_XMM),
+        iclass::XED_ICLASS_MULSD => Some(forms::MULSD_XMM_XMM),
+        iclass::XED_ICLASS_DIVSD => Some(forms::DIVSD_XMM_XMM),
+        iclass::XED_ICLASS_UCOMISD => Some(forms::UCOMISD_XMM_XMM),
         iclass::XED_ICLASS_MOVSD_XMM => match shapes {
             [Shape::Xmm, Shape::Mem64] => Some(forms::MOVSD_XMM_MEM64),
             [Shape::Mem64, Shape::Xmm] => Some(forms::MOVSD_MEM64_XMM),
