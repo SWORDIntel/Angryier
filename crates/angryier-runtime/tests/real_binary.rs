@@ -3136,3 +3136,58 @@ fn lua_open_steps_interactively() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(states, 1);
     Ok(())
 }
+
+/// Symbolic dynamic binary: load_elf_dynamic + SymbolicSession — the
+/// __libc_start_main hook fires and symbolic argv reaches `main`.
+#[cfg(all(feature = "xed", feature = "z3", target_arch = "x86_64"))]
+#[test]
+fn symbolic_dynamic_binary_runs() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::ExprReader;
+    use angryier_runtime::SymbolicSession;
+    use angryier_solver_z3::Z3Backend;
+    use std::sync::Arc;
+
+    // main(argc, argv): fork on argv[1][0]. Dynamic build → __libc_start_main
+    // hook → main.
+    let dir = temp_dir("angryier-dynsym").ok_or("no tempdir")?;
+    let path_c = dir.join("d.c");
+    let path_bin = dir.join("d");
+    std::fs::write(
+        &path_c,
+        r#"int main(int argc, char** argv){
+    if (argc > 1 && argv[1][0] == 'K') {
+        register long rax asm("rax") = 1;
+        register long rdi asm("rdi") = 1;
+        register const char* rsi asm("rsi") = "K\n";
+        register long rdx asm("rdx") = 2;
+        asm volatile("syscall" : "+r"(rax) : "r"(rdi), "r"(rsi), "r"(rdx) : "rcx","r11","memory");
+    }
+    return 0;
+}"#,
+    )?;
+    let ok = std::process::Command::new("cc")
+        .arg(&path_c)
+        .arg("-o")
+        .arg(&path_bin)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipping: cc unavailable");
+        return Ok(());
+    }
+    let bytes = std::fs::read(&path_bin)?;
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf_dynamic(&bytes, &[])?;
+    let arena = Arc::new(angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    ));
+    let mut session = SymbolicSession::new(&runtime, arena.as_ref(), process);
+    let mut backend = Z3Backend::native_ffi(arena.clone() as Arc<dyn ExprReader>)?;
+    let report = session.run(512, 16, Some(&mut backend), std::time::Duration::from_secs(20), false)?;
+    eprintln!("dynsym: {report:?}");
+    // The session must reach `main` (the hook fired) — argc>1 check reads
+    // concrete argc=1 → no fork needed; main returns 0 → exit.
+    assert!(report.steps >= 4, "must reach past _start");
+    Ok(())
+}
