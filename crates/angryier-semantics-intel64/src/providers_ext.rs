@@ -12,8 +12,8 @@
 //! end-to-end through the full pipeline.
 
 use crate::providers::{
-    widen_to_u64, write_add_flags, write_add_flags_preserve_cf, write_logical_flags, write_mul_flags, write_sub_flags,
-    write_sub_flags_preserve_cf,
+    widen_to_u64, write_add_flags, write_add_flags_preserve_cf, write_logical_flags, write_mul_flags,
+    write_shift_flags, write_sub_flags, write_sub_flags_preserve_cf,
 };
 use crate::{forms, rflags, rule_id};
 use angryier_arch::OperandKind;
@@ -8263,3 +8263,175 @@ macro_rules! pop_mem {
 }
 
 pop_mem!(PopMem64, forms::POP_MEM64, U64, 8, 0x2EB);
+
+// ---------------------------------------------------------------------------
+// ADD r16, r16
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct AddR16R16;
+
+impl SemanticProvider for AddR16R16 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x304)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::ADD_R16_R16
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let left = out.read_operand(0, U16)?;
+        let right = out.read_operand(1, U16)?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U16, &[left, right])?;
+        write_add_flags(out, result, left, right, 16)?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x304, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// INC/DEC r8 — CF preserved, other arithmetic flags at 8-bit width
+// ---------------------------------------------------------------------------
+
+macro_rules! incdec_r8 {
+    ($name:ident, $form:expr, $op:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let operand = out.read_operand(0, U8)?;
+                let one = const_typed(out, U8, 1)?;
+                let result = out.emit(SemanticOp::Primitive($op), U8, &[operand, one])?;
+                if $op == PrimitiveOp::Add {
+                    write_add_flags_preserve_cf(out, result, operand, one, 8)?;
+                } else {
+                    write_sub_flags_preserve_cf(out, result, operand, one, 8)?;
+                }
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+incdec_r8!(IncR8, forms::INC_R8, PrimitiveOp::Add, 0x305);
+incdec_r8!(DecR8, forms::DEC_R8, PrimitiveOp::Sub, 0x306);
+
+// ---------------------------------------------------------------------------
+// NEG/NOT r8
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct NegR8;
+
+impl SemanticProvider for NegR8 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x307)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::NEG_R8
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let operand = out.read_operand(0, U8)?;
+        let zero = const_typed(out, U8, 0)?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U8, &[zero, operand])?;
+        write_sub_flags(out, result, zero, operand, 8)?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x307, context))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct NotR8;
+
+impl SemanticProvider for NotR8 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x308)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::NOT_R8
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let operand = out.read_operand(0, U8)?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U8, &[operand])?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x308, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SHL r8, imm8
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct ShlR8Imm8;
+
+impl SemanticProvider for ShlR8Imm8 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x309)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::SHL_R8_IMM8
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let left = out.read_operand(0, U8)?;
+        let count = out.read_operand(1, U8)?;
+        let mask = const_typed(out, U8, 0x1F)?;
+        let count_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U8, &[count, mask])?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U8, &[left, count_masked])?;
+        write_shift_flags(out, left, count_masked, result, crate::providers::ShiftKind::Left, 8)?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x309, context))
+    }
+}

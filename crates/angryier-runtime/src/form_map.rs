@@ -176,6 +176,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem64, Shape::Imm] => Some(forms::ADD_MEM64_IMM32),
             [Shape::Mem32, Shape::Imm] => Some(forms::ADD_MEM32_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::ADD_R32_R32),
+            [Shape::Reg16, Shape::Reg16] => Some(forms::ADD_R16_R16),
             [Shape::Reg32, Shape::Imm] => Some(forms::ADD_R32_IMM8),
             [Shape::Reg32, Shape::Mem32] => Some(forms::ADD_R32_MEM32),
             [Shape::Reg8, Shape::Mem8] => Some(forms::ADD_R8_MEM8),
@@ -306,6 +307,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             // `D1` encodings carry an implicit immediate operand of 1.
             [Shape::Reg64] => Some(forms::SHL_R64_IMM8),
             [Shape::Reg32, Shape::Imm] => Some(forms::SHL_R32_IMM8),
+            [Shape::Reg8, Shape::Imm] => Some(forms::SHL_R8_IMM8),
             [Shape::Reg32] if has_cl => Some(forms::SHL_R32_CL),
             [Shape::Reg32] => Some(forms::SHL_R32_IMM8),
             _ => None,
@@ -359,21 +361,25 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_INC => match shapes {
             [Shape::Reg64] => Some(forms::INC_R64),
             [Shape::Reg32] => Some(forms::INC_R32),
+            [Shape::Reg8] => Some(forms::INC_R8),
             _ => None,
         },
         iclass::XED_ICLASS_DEC => match shapes {
             [Shape::Reg64] => Some(forms::DEC_R64),
             [Shape::Reg32] => Some(forms::DEC_R32),
+            [Shape::Reg8] => Some(forms::DEC_R8),
             _ => None,
         },
         iclass::XED_ICLASS_NEG => match shapes {
             [Shape::Reg64] => Some(forms::NEG_R64),
             [Shape::Reg32] => Some(forms::NEG_R32),
+            [Shape::Reg8] => Some(forms::NEG_R8),
             _ => None,
         },
         iclass::XED_ICLASS_NOT => match shapes {
             [Shape::Reg64] => Some(forms::NOT_R64),
             [Shape::Reg32] => Some(forms::NOT_R32),
+            [Shape::Reg8] => Some(forms::NOT_R8),
             _ => None,
         },
         iclass::XED_ICLASS_IMUL => match shapes {

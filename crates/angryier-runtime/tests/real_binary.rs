@@ -1479,6 +1479,31 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         "movabs $0x1122334455667788, %r8\n    mov %r8, %rax",
         "mov %rbx, %rdx\n    mov $0x1234, %rbx\n    cmpxchg %rbx, %rdx",
     ];
+    // 8/16-bit partial-register writes (al/bl/ax/bx keep the rest of the
+    // parent register; AH/BH are high-byte views).
+    let w8_templates = [
+        "add %bl, %al",
+        "sub %bl, %al",
+        "and %bl, %al",
+        "or %bl, %al",
+        "xor %bl, %al",
+        "cmp %bl, %al",
+        "test %bl, %al",
+        "mov %bl, %al",
+        "mov %bl, %ah",
+        "mov %ah, %al",
+        "add %bx, %ax",
+        "mov %bx, %ax",
+        "inc %al",
+        "dec %al",
+        "neg %al",
+        "not %al",
+        "shl $3, %al",
+        "movzx %bl, %eax",
+        "movsx %bl, %eax",
+        "setz %bl",
+        "movzx %ah, %eax",
+    ];
     // 32-bit forms (zero-extension semantics must match too).
     let w32_templates = [
         "add %ebx, %eax",
@@ -1615,6 +1640,13 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
     for insn in misc3_templates {
         for &a in &boundary[..4] {
             let ran = differential_case(insn, &[("rax", a), ("rbx", 9), ("rcx", 0x1234)], flag_mask_for(insn))?;
+            skipped |= !ran;
+            executed += usize::from(ran);
+        }
+    }
+    for insn in w8_templates {
+        for &a in &boundary[..4] {
+            let ran = differential_case(insn, &[("rax", a), ("rbx", 0xa5)], flag_mask_for(insn))?;
             skipped |= !ran;
             executed += usize::from(ran);
         }

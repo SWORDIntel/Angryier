@@ -286,20 +286,21 @@ pub(crate) enum ShiftKind {
 /// Flags for shift/rotate instructions. CF = last bit out; OF = the
 /// count-one formula (masked out by the caller's oracle when count > 1);
 /// ZF/SF/PF on the result; AF left as the corpus's choice (undefined).
-fn write_shift_flags(
+pub(crate) fn write_shift_flags(
     out: &mut dyn SemanticBuilder,
     operand: ValueId,
     count: ValueId,
     result: ValueId,
     kind: ShiftKind,
+    width_bits: u16,
 ) -> Result<(), SemanticError> {
-    let operand = widen_to_u64(out, operand, 64)?;
-    let count = widen_to_u64(out, count, 64)?;
-    let result = widen_to_u64(out, result, 64)?;
+    let operand = widen_to_u64(out, operand, width_bits)?;
+    let count = widen_to_u64(out, count, width_bits)?;
+    let result = widen_to_u64(out, result, width_bits)?;
 
     let one = const_u64(out, 1)?;
-    let sixty_three = const_u64(out, 63)?;
-    let sixty_four = const_u64(out, 64)?;
+    let sixty_three = const_u64(out, u64::from(width_bits - 1))?;
+    let sixty_four = const_u64(out, u64::from(width_bits))?;
     let zero = out.constant(U64, &0u64.to_le_bytes())?;
 
     // CF = last bit shifted out (dynamic count).
@@ -362,7 +363,7 @@ fn write_shift_flags(
     let of_bit = const_u64(out, u64::from(rflags::OF_BIT))?;
     let of = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[of, of_bit])?;
 
-    let (zf, sf) = zf_sf(out, result, 63)?;
+    let (zf, sf) = zf_sf(out, result, width_bits - 1)?;
     let pf = pf_flag(out, result)?;
     compose_rflags_masked(
         out,
@@ -818,7 +819,7 @@ impl SemanticProvider for ShlR64Imm8 {
         let left = out.read_operand(0, U64)?;
         let count = out.read_operand(1, U64)?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[left, count])?;
-        write_shift_flags(out, left, count, result, ShiftKind::Left)?;
+        write_shift_flags(out, left, count, result, ShiftKind::Left, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(6, context))
@@ -855,7 +856,7 @@ impl SemanticProvider for ShrR64Imm8 {
             U64,
             &[left, count],
         )?;
-        write_shift_flags(out, left, count, result, ShiftKind::RightLogical)?;
+        write_shift_flags(out, left, count, result, ShiftKind::RightLogical, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(7, context))
@@ -892,7 +893,7 @@ impl SemanticProvider for SarR64Imm8 {
             U64,
             &[left, count],
         )?;
-        write_shift_flags(out, left, count, result, ShiftKind::RightArith)?;
+        write_shift_flags(out, left, count, result, ShiftKind::RightArith, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(8, context))
@@ -1187,7 +1188,7 @@ impl SemanticProvider for ShlR64Cl {
         let mask = const_u64(out, 0x3F)?;
         let count = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[cl, mask])?;
         let result = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[left, count])?;
-        write_shift_flags(out, left, count, result, ShiftKind::Left)?;
+        write_shift_flags(out, left, count, result, ShiftKind::Left, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(17, context))
@@ -1226,7 +1227,7 @@ impl SemanticProvider for ShrR64Cl {
             U64,
             &[left, count],
         )?;
-        write_shift_flags(out, left, count, result, ShiftKind::RightLogical)?;
+        write_shift_flags(out, left, count, result, ShiftKind::RightLogical, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(18, context))
@@ -1265,7 +1266,7 @@ impl SemanticProvider for SarR64Cl {
             U64,
             &[left, count],
         )?;
-        write_shift_flags(out, left, count, result, ShiftKind::RightArith)?;
+        write_shift_flags(out, left, count, result, ShiftKind::RightArith, 64)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
         Ok(receipt(19, context))
