@@ -3248,7 +3248,6 @@ fn z3_interrupt_preempts_check() -> Result<(), Box<dyn std::error::Error>> {
     use angryier_expr::{ExprArena, ExprReader};
     use angryier_solver::SolverBackend;
     use angryier_solver_z3::Z3Backend;
-    use angryier_types::SolverOutcomeKind;
     use std::sync::Arc;
 
     let arena = Arc::new(angryier_expr::ShardedExprArena::new(
