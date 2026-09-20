@@ -1327,7 +1327,10 @@ mod pe32_tests {
     #[test]
     fn pe32_loads_entry_and_section() {
         let loader = Pe32Loader::new();
-        let image = loader.load(&fixture()).unwrap();
+        let image = match loader.load(&fixture()) {
+            Ok(img) => img,
+            Err(e) => return assert_eq!(format!("{e:?}"), ""),
+        };
         assert_eq!(image.entry, 0x140001000);
         assert_eq!(image.segments.len(), 1);
         let text = &image.segments[0];
