@@ -582,6 +582,14 @@ impl<D: Decoder> Runtime<D> {
         self.load_image(image)
     }
 
+    /// Loads a PE32+ image (statically-linked x86-64 PE — sections become
+    /// segments, entry = image_base + AddressOfEntryPoint).
+    pub fn load_pe(&self, bytes: &[u8]) -> Result<Process, RuntimeError> {
+        let loader = angryier_loader::Pe32Loader::new();
+        let image = loader.load(bytes).map_err(RuntimeError::Loader)?;
+        self.load_image(image)
+    }
+
     /// Creates a Process from an already-loaded image.
     pub fn load_image(&self, image: LoadedImage) -> Result<Process, RuntimeError> {
         if image.target_profile != self.target_profile {

@@ -2731,3 +2731,39 @@ fn lua_script_drives_session() -> Result<(), Box<dyn std::error::Error>> {
     assert!(forks >= 1, "symbolic rdi should fork the cmp");
     Ok(())
 }
+
+/// PE32+ loading: a hand-built PE executes `mov eax, 0x2a; ret`
+/// concretely through the runtime.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn pe32_loads_and_executes() -> Result<(), Box<dyn std::error::Error>> {
+    // Minimal PE32+: .text at image_base+0x1000 with `mov eax,0x2a; ret`.
+    let mut pe = vec![0u8; 0x400];
+    pe[0] = 0x4D;
+    pe[1] = 0x5A;
+    pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    pe[0x80..0x84].copy_from_slice(&[0x50, 0x45, 0, 0]);
+    pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+    pe[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+    pe[0x94..0x96].copy_from_slice(&0xF0u16.to_le_bytes());
+    pe[0x98..0x9A].copy_from_slice(&0x20Bu16.to_le_bytes());
+    pe[0xA8..0xAC].copy_from_slice(&0x1000u32.to_le_bytes());
+    pe[0xB0..0xB8].copy_from_slice(&0x140000000u64.to_le_bytes());
+    pe[0x188..0x190].copy_from_slice(b".text\0\0\0");
+    pe[0x190..0x194].copy_from_slice(&0x100u32.to_le_bytes());
+    pe[0x194..0x198].copy_from_slice(&0x1000u32.to_le_bytes());
+    pe[0x198..0x19C].copy_from_slice(&6u32.to_le_bytes());
+    pe[0x19C..0x1A0].copy_from_slice(&0x200u32.to_le_bytes());
+    pe[0x1AC..0x1B0].copy_from_slice(&0x60000000u32.to_le_bytes()); // exec|read
+    pe.resize(0x206, 0);
+    pe[0x200..0x205].copy_from_slice(&[0xB8, 0x2A, 0, 0, 0]);
+    pe[0x205] = 0xC3;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_pe(&pe)?;
+    assert_eq!(process.pc()?, 0x140001000);
+    let outcome = runtime.step(&mut process)?;
+    assert_eq!(process.read_register(register_id::GPR_BASE)?, 0x2a);
+    let _ = outcome;
+    Ok(())
+}

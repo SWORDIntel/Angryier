@@ -597,6 +597,120 @@ impl ImageLoader for Elf64Loader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PE32+ (x86-64 Portable Executable) loader
+// ---------------------------------------------------------------------------
+
+const PE_MACHINE_AMD64: u16 = 0x8664;
+const PE32PLUS_MAGIC: u16 = 0x20B;
+const SECTION_EXEC: u32 = 0x2000_0000;
+const SECTION_READ: u32 = 0x4000_0000;
+const SECTION_WRITE: u32 = 0x8000_0000;
+
+/// PE32+ image loader: maps each section at `image_base + VirtualAddress`
+/// and resolves the entry point from the optional header. Import-table
+/// linking (dynamic PE) is out of scope — statically-linked images only.
+pub struct Pe32Loader {
+    next_id: Mutex<u64>,
+}
+
+impl Pe32Loader {
+    pub fn new() -> Self {
+        Self { next_id: Mutex::new(1) }
+    }
+}
+
+impl Default for Pe32Loader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ImageLoader for Pe32Loader {
+    type Error = LoaderError;
+
+    fn load(&self, bytes: &[u8]) -> Result<LoadedImage, Self::Error> {
+        if bytes.is_empty() {
+            return Err(LoaderError::EmptyInput);
+        }
+        // DOS header: 'MZ', e_lfanew at 0x3C.
+        if bytes.len() < 0x40 || bytes[0] != 0x4D || bytes[1] != 0x5A {
+            return Err(LoaderError::InvalidFormat);
+        }
+        let e_lfanew = read_u32_le(bytes, 0x3C)? as usize;
+        if e_lfanew + 24 > bytes.len() {
+            return Err(LoaderError::TruncatedHeader);
+        }
+        if bytes[e_lfanew..e_lfanew + 4] != [0x50, 0x45, 0, 0] {
+            return Err(LoaderError::InvalidFormat);
+        }
+        let coff = e_lfanew + 4;
+        let machine = read_u16_le(bytes, coff)?;
+        if machine != PE_MACHINE_AMD64 {
+            return Err(LoaderError::InvalidMachine);
+        }
+        let num_sections = read_u16_le(bytes, coff + 2)? as usize;
+        let opt_size = read_u16_le(bytes, coff + 16)? as usize;
+        let opt = coff + 20;
+        if opt + opt_size > bytes.len() {
+            return Err(LoaderError::TruncatedHeader);
+        }
+        let magic = read_u16_le(bytes, opt)?;
+        if magic != PE32PLUS_MAGIC {
+            return Err(LoaderError::InvalidFormat); // PE32 (32-bit) unsupported
+        }
+        let entry_rva = read_u32_le(bytes, opt + 16)? as u64;
+        let image_base = read_u64_le_at(bytes, opt + 24)?;
+
+        // Sections start right after the optional header.
+        let sec_base = opt + opt_size;
+        let mut segments = Vec::with_capacity(num_sections);
+        for i in 0..num_sections {
+            let off = sec_base + i * 40;
+            if off + 40 > bytes.len() {
+                return Err(LoaderError::TruncatedHeader);
+            }
+            let virtual_size = read_u32_le(bytes, off + 8)? as u64;
+            let va = read_u32_le(bytes, off + 12)? as u64;
+            let raw_size = read_u32_le(bytes, off + 16)? as usize;
+            let raw_ptr = read_u32_le(bytes, off + 20)? as usize;
+            let characteristics = read_u32_le(bytes, off + 36)?;
+            if raw_ptr + raw_size > bytes.len() {
+                return Err(LoaderError::SegmentOutOfRange);
+            }
+            // Section data is raw_size bytes on disk, virtual_size in memory
+            // (bss-style tail zero-fills).
+            let mut data = bytes[raw_ptr..raw_ptr + raw_size].to_vec();
+            let vsize =
+                usize::try_from(virtual_size.max(raw_size as u64)).map_err(|_| LoaderError::SegmentOutOfRange)?;
+            data.resize(vsize, 0);
+            segments.push(Segment {
+                address: image_base + va,
+                bytes: data,
+                readable: characteristics & SECTION_READ != 0,
+                writable: characteristics & SECTION_WRITE != 0,
+                executable: characteristics & SECTION_EXEC != 0,
+            });
+        }
+        if segments.is_empty() {
+            return Err(LoaderError::NoProgramHeaders);
+        }
+        Ok(LoadedImage {
+            id: {
+                let mut g = self.next_id.lock().unwrap_or_else(|e| e.into_inner());
+                let id = ImageId(*g);
+                *g = g.checked_add(1).ok_or(LoaderError::Poisoned)?;
+                id
+            },
+            entry: image_base + entry_rva,
+            target_profile: TargetProfileId(1),
+            segments,
+            symbols: Vec::new(),
+            program_headers: None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,5 +1286,64 @@ mod tests {
         let id2 = loader.load(&elf).ok().map(|i| i.id);
         assert_eq!(id1, Some(ImageId(1)));
         assert_eq!(id2, Some(ImageId(2)));
+    }
+}
+
+#[cfg(test)]
+mod pe32_tests {
+    use super::*;
+
+    /// Hand-build a minimal PE32+ with one .text section containing
+    /// `mov eax, 0x2a; ret`.
+    fn fixture() -> Vec<u8> {
+        let mut pe = vec![0u8; 0x400];
+        // DOS header.
+        pe[0] = 0x4D;
+        pe[1] = 0x5A;
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        // PE signature + COFF header at 0x80.
+        pe[0x80..0x84].copy_from_slice(&[0x50, 0x45, 0, 0]);
+        pe[0x84..0x86].copy_from_slice(&PE_MACHINE_AMD64.to_le_bytes());
+        pe[0x86..0x88].copy_from_slice(&1u16.to_le_bytes()); // 1 section
+        pe[0x94..0x96].copy_from_slice(&0xF0u16.to_le_bytes()); // opt size 240
+        // Optional header at 0x98.
+        pe[0x98..0x9A].copy_from_slice(&PE32PLUS_MAGIC.to_le_bytes());
+        pe[0xA8..0xAC].copy_from_slice(&0x1000u32.to_le_bytes()); // entry RVA
+        pe[0xB0..0xB8].copy_from_slice(&0x140000000u64.to_le_bytes()); // image base
+        // .text section header at 0x98+0xF0 = 0x188.
+        pe[0x188..0x190].copy_from_slice(b".text\0\0\0");
+        pe[0x190..0x194].copy_from_slice(&0x100u32.to_le_bytes()); // virtual size
+        pe[0x194..0x198].copy_from_slice(&0x1000u32.to_le_bytes()); // va
+        pe[0x198..0x19C].copy_from_slice(&6u32.to_le_bytes()); // raw size
+        pe[0x19C..0x1A0].copy_from_slice(&0x200u32.to_le_bytes()); // raw ptr
+        pe[0x1AC..0x1B0].copy_from_slice(&(SECTION_EXEC | SECTION_READ).to_le_bytes());
+        // Code at file offset 0x200: mov eax,0x2a ; ret.
+        pe.resize(0x206, 0);
+        pe[0x200..0x205].copy_from_slice(&[0xB8, 0x2A, 0, 0, 0]);
+        pe[0x205] = 0xC3;
+        pe
+    }
+
+    #[test]
+    fn pe32_loads_entry_and_section() {
+        let loader = Pe32Loader::new();
+        let image = loader.load(&fixture()).unwrap();
+        assert_eq!(image.entry, 0x140001000);
+        assert_eq!(image.segments.len(), 1);
+        let text = &image.segments[0];
+        assert_eq!(text.address, 0x140001000);
+        assert!(text.executable);
+        assert_eq!(&text.bytes[..6], &[0xB8, 0x2A, 0, 0, 0, 0xC3]);
+    }
+
+    #[test]
+    fn pe32_rejects_pe32_and_non_amd64() {
+        let loader = Pe32Loader::new();
+        let mut bad = fixture();
+        bad[0x98..0x9A].copy_from_slice(&0x10Bu16.to_le_bytes()); // PE32 magic
+        assert!(loader.load(&bad).is_err());
+        let mut bad2 = fixture();
+        bad2[0x84..0x86].copy_from_slice(&0x14Cu16.to_le_bytes()); // i386
+        assert!(loader.load(&bad2).is_err());
     }
 }
