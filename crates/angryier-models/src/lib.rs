@@ -688,6 +688,20 @@ pub mod syscall {
     /// `exit` syscall number.
     pub const EXIT: u64 = 60;
 
+    pub const OPENAT: u64 = 257;
+    pub const CLOSE: u64 = 3;
+    pub const FSTAT: u64 = 5;
+    pub const ACCESS: u64 = 21;
+    pub const MMAP: u64 = 9;
+    pub const MUNMAP: u64 = 11;
+    pub const IOCTL: u64 = 16;
+    pub const WRITEV: u64 = 20;
+    pub const GETUID: u64 = 102;
+    pub const GETEUID: u64 = 107;
+    pub const GETGID: u64 = 104;
+    pub const GETEGID: u64 = 108;
+    pub const FUTEX: u64 = 202;
+
     /// `arch_prctl` operation codes.
     pub mod arch_prctl_op {
         /// Set the FS segment base.

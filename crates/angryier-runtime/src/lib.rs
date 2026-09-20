@@ -63,6 +63,8 @@ const STACK_SIZE: u64 = 0x1_0000;
 const STACK_BASE: Address = 0x7fff_0000_0000;
 /// Default heap base when the image has no segments.
 const HEAP_BASE: u64 = 0x5000_0000;
+/// Anonymous mmap arena starts here and grows downward (Linux-style).
+const MMAP_BASE: u64 = 0x7f00_0000_0000;
 /// Size of the mapped heap region managed by `brk`.
 const HEAP_SIZE: u64 = 0x40_0000;
 
@@ -238,6 +240,8 @@ pub struct Process {
     pub program_break: u64,
     /// End of the mapped heap region; `brk` requests beyond it fail.
     pub heap_end: u64,
+    /// Next anonymous `mmap` base — grows downward from [`MMAP_BASE`].
+    pub mmap_next: u64,
     pub next_block_id: u64,
     pub step_count: u64,
     pub simproc_dispatches: u64,
@@ -695,6 +699,7 @@ impl<D: Decoder> Runtime<D> {
             syscalls: SyscallModel::new(),
             program_break: brk_base,
             heap_end: brk_base + HEAP_SIZE,
+            mmap_next: MMAP_BASE,
             next_block_id: 0,
             step_count: 0,
             simproc_dispatches: 0,
@@ -1229,6 +1234,123 @@ impl<D: Decoder> Runtime<D> {
                     .write(arg0, &data)
                     .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
                 process.write_register(register_id::GPR_BASE, arg1)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::MMAP => {
+                // mmap(addr=rdi, len=rsi, prot=rdx, flags=r10, fd=r8,
+                // off=r9) — anonymous maps bump-allocate downward from
+                // MMAP_BASE; file-backed mmap is unmodeled (-ENOSYS).
+                let (addr, flags) = (arg0, arg3);
+                const MAP_ANONYMOUS: u64 = 0x20;
+                let result = if flags & MAP_ANONYMOUS != 0 {
+                    let len = (arg1 + 0xFFF) & !0xFFF;
+                    let base = if addr == 0 {
+                        let base = process.mmap_next.wrapping_sub(len);
+                        process.mmap_next = base;
+                        base
+                    } else {
+                        addr
+                    };
+                    let region = MemoryRegion {
+                        object: angryier_types::ObjectId(3),
+                        base,
+                        size: len,
+                        readable: true,
+                        writable: true,
+                        executable: false,
+                    };
+                    match process.state.memory.with_region(region) {
+                        Ok(m) => {
+                            process.state.memory = m;
+                            base
+                        }
+                        Err(_) => 0u64.wrapping_sub(12), // -ENOMEM
+                    }
+                } else {
+                    0u64.wrapping_sub(38) // -ENOSYS: file-backed unmodeled
+                };
+                process.write_register(register_id::GPR_BASE, result)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::MUNMAP => {
+                // Keep the region mapped — freeing pages is a refinement.
+                process.write_register(register_id::GPR_BASE, 0)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::OPENAT => {
+                // Report -ENOENT: file contents aren't modeled. (Phase 14's
+                // named-file layer is a later refinement.)
+                process.write_register(register_id::GPR_BASE, 0u64.wrapping_sub(2))?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::CLOSE => {
+                process.write_register(register_id::GPR_BASE, 0)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::FSTAT => {
+                // Zeroed struct stat with S_IFREG — enough for size/mode
+                // checks in callers that tolerate an empty file.
+                let stat: Vec<ByteValue> = vec![ByteValue::Concrete(0); 144];
+                process.state.memory = process
+                    .state
+                    .memory
+                    .write(arg1, &stat)
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                process.write_register(register_id::GPR_BASE, 0)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::ACCESS => {
+                // Report -ENOENT for paths the model doesn't carry.
+                process.write_register(register_id::GPR_BASE, 0u64.wrapping_sub(2))?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::IOCTL => {
+                // -ENOTTY: callers treat the fd as a plain file.
+                process.write_register(register_id::GPR_BASE, 0u64.wrapping_sub(25))?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::WRITEV => {
+                // writev(fd, iov, iovcnt): consume the iovec lengths.
+                let mut total = 0u64;
+                for i in 0..arg2.min(16) {
+                    let base = arg1.wrapping_add(i * 16);
+                    let len_bytes = read_concrete_bytes(process, base + 8, 8)?;
+                    let len = u64::from_le_bytes(len_bytes[..8].try_into().unwrap_or([0; 8]));
+                    let buf_bytes = read_concrete_bytes(process, base, 8)?;
+                    let buf = u64::from_le_bytes(buf_bytes[..8].try_into().unwrap_or([0; 8]));
+                    let data = read_concrete_bytes(process, buf, len)?;
+                    total = total.wrapping_add(process.syscalls.record_write(&data));
+                }
+                process.write_register(register_id::GPR_BASE, total)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::GETUID | syscall::GETEUID | syscall::GETGID | syscall::GETEGID => {
+                process.write_register(register_id::GPR_BASE, 1000)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::FUTEX => {
+                // Single-threaded model: futex wakes are no-ops.
+                process.write_register(register_id::GPR_BASE, 0)?;
                 process.write_pc(next_pc)?;
                 process.step_count += 1;
                 Ok(StepOutcome::Syscall { pc, number })
@@ -2729,11 +2851,11 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     .model
                     .iter()
                     .find(|(k, _)| *k == u64::from(free.0))
-                    .and_then(|(_, b)| {
+                    .map(|(_, b)| {
                         let mut buf = [0u8; 8];
                         let n = b.len().min(8);
                         buf[..n].copy_from_slice(&b[..n]);
-                        Some(u64::from_le_bytes(buf))
+                        u64::from_le_bytes(buf)
                     });
                 let Some(value) = value else { break };
                 self.states[index].expr_concrete.insert(expr, value);

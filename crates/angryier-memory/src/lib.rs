@@ -295,6 +295,46 @@ impl PersistentMemory {
         })
     }
 
+    /// Returns a memory map with `region` added — pages (the actual bytes)
+    /// are shared unchanged; only the region index and code-version guards
+    /// are rebuilt. Used by `mmap`/`mprotect` models to grow the map at
+    /// runtime.
+    pub fn with_region(&self, region: MemoryRegion) -> Result<Self, MemoryError> {
+        let mut regions: Vec<MemoryRegion> = self.regions.iter().cloned().collect();
+        regions.push(region);
+        regions.sort_by_key(|r| r.base);
+        let mut region_index = BTreeMap::new();
+        let mut code_versions: BTreeMap<CodePageId, CodePageVersion> =
+            self.code_versions.iter().map(|(k, v)| (*k, *v)).collect();
+        let mut previous_end = None;
+        for (index, r) in regions.iter().enumerate() {
+            if r.size == 0 {
+                return Err(MemoryError::InvalidRegion);
+            }
+            let end = r.base.checked_add(r.size).ok_or(MemoryError::AddressOverflow)?;
+            if let Some(pe) = previous_end
+                && r.base < pe
+            {
+                return Err(MemoryError::RegionOverlap);
+            }
+            previous_end = Some(end);
+            region_index.insert(r.base, index);
+            if r.executable {
+                let first = Self::page_number(r.base);
+                let last = Self::page_number(end - 1);
+                for page in first..=last {
+                    code_versions.insert(CodePageId(page), CodePageVersion(0));
+                }
+            }
+        }
+        Ok(Self {
+            regions: Arc::new(regions),
+            region_index: Arc::new(region_index),
+            pages: self.pages.clone(),
+            code_versions: Arc::new(code_versions),
+        })
+    }
+
     /// Loads initial image bytes without applying runtime write permissions or
     /// advancing executable-page versions. This is for loader construction only.
     pub fn load_concrete(&self, address: Address, bytes: &[u8]) -> Result<Self, MemoryError> {
