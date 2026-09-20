@@ -2090,3 +2090,55 @@ end:
     assert!(!branched, "checked step should prune the UNSAT not-taken direction");
     Ok(())
 }
+
+/// The exploration driver: symbolic session runs to completion, forks once
+/// at `je`, merges at the reconvergence point, and terminates with one
+/// final state carrying the Ite.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn symbolic_session_run_merges_reconverged() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_runtime::SymbolicSession;
+
+    let source = r#"
+        .global _start
+        .text
+_start:
+    cmp $5, %rbx
+    je target
+    mov $1, %rax
+    jmp end
+target:
+    mov $2, %rax
+end:
+    mov %rax, out(%rip)
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+        .data
+out:    .quad 0
+"#;
+    let dir = temp_dir("angryier-symbolic-run").ok_or("no tempdir")?;
+    let path_s = dir.join("fork.s");
+    let path_o = dir.join("fork.o");
+    let path_bin = dir.join("fork");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
+    let mut session = SymbolicSession::new(&runtime, &arena, process);
+    session.mark_symbolic(0, register_id::GPR_BASE + 3, angryier_ir::IrType::Bits(64))?;
+
+    let report = session.run(512, 16, None, std::time::Duration::from_secs(5), true)?;
+    eprintln!("report: {report:?}");
+    assert_eq!(report.forks, 1, "expected exactly one fork");
+    assert!(report.merges >= 1, "expected a reconvergence merge");
+    assert!(report.terminated >= 1);
+    assert!(report.live_states <= 1, "merged states should leave one live");
+    Ok(())
+}

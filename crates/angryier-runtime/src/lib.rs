@@ -2647,3 +2647,94 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Ok(merged)
     }
 }
+
+impl<'a, D: Decoder> SymbolicSession<'a, D> {
+    /// Explores until all live states terminate, `max_steps` total steps are
+    /// taken, or `max_states` live states are in flight — the angr-style
+    /// simulation loop. States that error are moved to `dead` rather than
+    /// aborting the exploration. When `backend` is provided, fork directions
+    /// are feasibility-checked; when `merge_each_step` is set, same-PC states
+    /// merge after every round (Veritesting-lite reconvergence).
+    pub fn run(
+        &mut self,
+        max_steps: u64,
+        max_states: usize,
+        mut backend: Option<&mut dyn SolverBackend>,
+        timeout: Duration,
+        merge_each_step: bool,
+    ) -> Result<SymbolicRunReport, RuntimeError> {
+        let mut report = SymbolicRunReport::default();
+        let mut steps = 0u64;
+        while steps < max_steps && !self.states.is_empty() {
+            if self.states.len() > max_states {
+                // Cheapest pruning: drop the newest states past the cap.
+                while self.states.len() > max_states {
+                    let state = self.states.remove(self.states.len() - 1);
+                    self.dead.push(state);
+                    report.pruned_states += 1;
+                }
+            }
+            // Round-robin: one state steps per iteration so a state that
+            // reaches a pc where a sibling is parked merges before either
+            // advances past the reconvergence point.
+            let index = (steps as usize) % self.states.len();
+            let outcome = match backend.as_deref_mut() {
+                Some(backend) => self.step_state_checked(index, backend, timeout),
+                None => self.step_state(index),
+            };
+            steps += 1;
+            match outcome {
+                Ok(SymbolicStepOutcome::Terminated) => {
+                    if index < self.states.len() {
+                        let state = self.states.remove(index);
+                        self.dead.push(state);
+                        report.terminated += 1;
+                    }
+                }
+                Ok(SymbolicStepOutcome::Branched { .. }) => {
+                    report.forks += 1;
+                }
+                Ok(SymbolicStepOutcome::Stepped { .. }) => {}
+                Err(error) => {
+                    eprintln!("symbolic state {index} failed: {error}");
+                    if index < self.states.len() {
+                        let state = self.states.remove(index);
+                        self.dead.push(state);
+                        report.failed += 1;
+                    }
+                }
+            }
+            if merge_each_step {
+                report.merges += self.merge_at().unwrap_or(0);
+            }
+            report.peak_states = report.peak_states.max(self.states.len() as u64);
+        }
+        report.steps = steps;
+        report.live_states = self.states.len() as u64;
+        report.dead_states = self.dead.len() as u64;
+        Ok(report)
+    }
+}
+
+/// Aggregate report for [`SymbolicSession::run`].
+#[derive(Clone, Debug, Default)]
+pub struct SymbolicRunReport {
+    /// Total symbolic steps taken.
+    pub steps: u64,
+    /// Forks produced.
+    pub forks: u64,
+    /// States merged by `merge_at`.
+    pub merges: u64,
+    /// States that terminated cleanly.
+    pub terminated: u64,
+    /// States dropped by the max_states cap.
+    pub pruned_states: u64,
+    /// States that failed and were moved to `dead`.
+    pub failed: u64,
+    /// Live states at return.
+    pub live_states: u64,
+    /// Dead/terminated states accumulated.
+    pub dead_states: u64,
+    /// Peak live-state count.
+    pub peak_states: u64,
+}
