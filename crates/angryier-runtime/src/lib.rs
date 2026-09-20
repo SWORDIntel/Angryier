@@ -602,6 +602,384 @@ impl<D: Decoder> Runtime<D> {
         self.load_image(image)
     }
 
+    /// Loads a dynamically-linked ELF: maps the main image plus every
+    /// `DT_NEEDED` library found under `lib_dirs` (or the default system
+    /// paths), applies `R_X86_64_RELATIVE`/`GLOB_DAT`/`JUMP_SLOT`/`64`
+    /// relocations eagerly (BIND_NOW), and starts at the main image's
+    /// entry — an angr-style static linker, no `ld.so` process.
+    pub fn load_elf_dynamic(&self, bytes: &[u8], lib_dirs: &[&str]) -> Result<Process, RuntimeError> {
+        let loader = Elf64Loader::new();
+        let main = loader.load(bytes).map_err(RuntimeError::Loader)?;
+        const DYN_BASE: u64 = 0x400000;
+        const LIB_BASE: u64 = 0x7f00_0000_0000;
+        // Main image bias: ET_EXEC keeps its VAs; ET_DYN slides to DYN_BASE.
+        let is_dyn = main.dynamic.is_some();
+        let main_bias = if is_dyn { DYN_BASE } else { 0 };
+        let mut images: Vec<(LoadedImage, u64)> = Vec::new();
+        // Resolve needed libs breadth-first (name → file under lib_dirs).
+        let mut needed: Vec<String> = main.dynamic.as_ref().map(|d| d.needed.clone()).unwrap_or_default();
+        let mut seen: std::collections::BTreeSet<String> = needed.iter().cloned().collect();
+        let mut lib_next = LIB_BASE;
+        while let Some(name) = needed.pop() {
+            let path = lib_dirs
+                .iter()
+                .map(|d| format!("{d}/{name}"))
+                .chain([
+                    format!("/lib/x86_64-linux-gnu/{name}"),
+                    format!("/usr/lib/x86_64-linux-gnu/{name}"),
+                    format!("/lib64/{name}"),
+                ])
+                .find_map(|p| std::fs::read(&p).ok());
+            let Some(lib_bytes) = path else { continue };
+            let lib = match loader.load(&lib_bytes) {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            // Newly-needed libs (transitive deps).
+            if let Some(dyn_) = &lib.dynamic {
+                for n in &dyn_.needed {
+                    if seen.insert(n.clone()) {
+                        needed.push(n.clone());
+                    }
+                }
+            }
+            let bias = lib_next;
+            let top = lib
+                .segments
+                .iter()
+                .map(|s| s.address + s.bytes.len() as u64)
+                .max()
+                .unwrap_or(0);
+            lib_next = lib_next.wrapping_sub(top + 0x1000);
+            images.push((lib, bias));
+        }
+        images.insert(0, (main, main_bias));
+
+        // Merge all images' segments (biased) into one memory, apply relocs.
+        let mut all_segments: Vec<MemoryRegion> = Vec::new();
+        let mut loaded: Vec<(u64, u64, Vec<u8>, bool, bool, bool)> = Vec::new(); // (base, len, bytes, rwx)
+        for (image, bias) in &images {
+            for seg in &image.segments {
+                let base = seg.address + bias;
+                let size = seg.bytes.len() as u64;
+                if size == 0 {
+                    continue;
+                }
+                all_segments.push(MemoryRegion {
+                    object: angryier_types::ObjectId(0),
+                    base,
+                    size,
+                    readable: seg.readable,
+                    writable: seg.writable,
+                    executable: seg.executable,
+                });
+                loaded.push((
+                    base,
+                    size,
+                    seg.bytes.clone(),
+                    seg.readable,
+                    seg.writable,
+                    seg.executable,
+                ));
+            }
+        }
+        all_segments.push(MemoryRegion {
+            object: angryier_types::ObjectId(2),
+            base: HEAP_BASE,
+            size: HEAP_SIZE,
+            readable: true,
+            writable: true,
+            executable: false,
+        });
+        all_segments.push(MemoryRegion {
+            object: angryier_types::ObjectId(1),
+            base: STACK_BASE - STACK_SIZE,
+            size: STACK_SIZE,
+            readable: true,
+            writable: true,
+            executable: false,
+        });
+        all_segments.sort_by_key(|r| r.base);
+        let mut memory = PersistentMemory::new(all_segments).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        for (base, _, bytes, _, _, _) in &loaded {
+            memory = memory
+                .load_concrete(*base, bytes)
+                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        }
+
+        // Apply relocations across all images.
+        for (image, bias) in &images {
+            let Some(dyn_) = &image.dynamic else { continue };
+            let rela = dyn_.rela.iter().chain(dyn_.jmprel.iter());
+            for r in rela {
+                let addr = r.offset + bias;
+                let value: u64 = match r.r#type {
+                    8 => bias.wrapping_add(r.addend as u64), // R_X86_64_RELATIVE
+                    37 => {
+                        // IRELATIVE: call the resolver (bias+addend) with a
+                        // sentinel return address; its rax is the GOT value.
+                        match self.run_resolver(&memory, bias.wrapping_add(r.addend as u64)) {
+                            Some(v) => v,
+                            None => bias.wrapping_add(r.addend as u64), // resolver itself
+                        }
+                    }
+                    6 | 7 | 1 => {
+                        // GLOB_DAT / JUMP_SLOT / 64 — resolve the symbol
+                        // across every image's dynamic symtab.
+                        self.resolve_dyn_symbol(&images, dyn_, r.symbol).unwrap_or(0)
+                    }
+                    _ => continue,
+                };
+                memory = memory
+                    .load_concrete(addr, &value.to_le_bytes())
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+            }
+        }
+
+        // Seed a minimal TLS block (ld.so would normally do this): the
+        // TCB's first qword is its own address; fs base points at it so
+        // TPOFF64 slots resolve to mapped memory.
+        const TLS_BASE: u64 = 0x7f00_1000_0000;
+        memory = memory
+            .with_region(MemoryRegion {
+                object: angryier_types::ObjectId(4),
+                base: TLS_BASE,
+                size: 0x1000,
+                readable: true,
+                writable: true,
+                executable: false,
+            })
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        memory = memory
+            .load_concrete(TLS_BASE, &TLS_BASE.to_le_bytes())
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        let main_entry = images[0].0.entry + images[0].1;
+        let mut process = self.load_image_with_memory(images.remove(0).0, memory, main_entry, main_bias)?;
+        process.write_register(register_id::FS_BASE.0, TLS_BASE)?;
+        // Hook libc entry glue: `__libc_start_main` tail-calls into `main`.
+        if let Some(addr) = self.find_dyn_symbol(&images, "__libc_start_main") {
+            process.hook_simproc(addr, "libc_start_main");
+        }
+        Ok(process)
+    }
+
+    /// Evaluates an IRELATIVE resolver: a leaf function at `resolver` that
+    /// returns the chosen implementation in rax. Runs on a sentinel-framed
+    /// throwaway process over the loaded memory; bounded to 512 steps.
+    fn run_resolver(&self, memory: &PersistentMemory, resolver: u64) -> Option<u64> {
+        const SENTINEL: u64 = 0xdead_0000;
+        let mut memory = memory.clone();
+        // Sentinel stack: a tiny region whose top holds the return address.
+        let sentinel_stack = MemoryRegion {
+            object: angryier_types::ObjectId(9),
+            base: SENTINEL - 0x1000,
+            size: 0x1000,
+            readable: true,
+            writable: true,
+            executable: false,
+        };
+        memory = memory.with_region(sentinel_stack).ok()?;
+        memory = memory.load_concrete(SENTINEL - 8, &SENTINEL.to_le_bytes()).ok()?;
+        let reg_file = Intel64RegisterFile::canonical();
+        let widths: Vec<(u32, usize)> = reg_file
+            .architectural_registers
+            .iter()
+            .map(|(reg, bits)| (reg.0, usize::from(*bits).div_ceil(8)))
+            .collect();
+        let mut registers = PersistentRegisters::from_widths(widths).ok()?;
+        registers = registers.write(register_id::RIP.0, &resolver.to_le_bytes()).ok()?;
+        registers = registers
+            .write(register_id::GPR_BASE + 4, &(SENTINEL - 8).to_le_bytes())
+            .ok()?;
+        registers = registers.write(register_id::RFLAGS.0, &0x202u64.to_le_bytes()).ok()?;
+        let state = ExecutionState {
+            id: StateId(0),
+            parent: None,
+            target_profile: self.target_profile,
+            registers,
+            memory,
+            constraints: PersistentConstraintLineage::new(),
+            ownership: StateOwnership::default(),
+            fidelity: FidelityLedger::new(FidelityProfile::Prove),
+        };
+        let mut process = Process {
+            image_id: angryier_types::ImageId(0),
+            target_profile: self.target_profile,
+            entry: resolver,
+            entry_state: state.clone(),
+            state,
+            block_cache: BTreeMap::new(),
+            simproc_hooks: BTreeMap::new(),
+            symbols: Vec::new(),
+            trace: Vec::new(),
+            syscalls: SyscallModel::new(),
+            program_break: 0,
+            heap_end: 0,
+            mmap_next: MMAP_BASE,
+            files: BTreeMap::new(),
+            open_fds: BTreeMap::new(),
+            symbolic_files: std::collections::BTreeSet::new(),
+            symbolic_fds: std::collections::BTreeSet::new(),
+            argv0_addr: None,
+            next_fd: 3,
+            next_block_id: 0,
+            step_count: 0,
+            simproc_dispatches: 0,
+            terminated: false,
+        };
+        for _ in 0..512 {
+            if process.pc().ok()? == SENTINEL {
+                return process.read_register(register_id::GPR_BASE).ok();
+            }
+            if self.step(&mut process).is_err() {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Finds a dynamic symbol by name across all loaded images.
+    fn find_dyn_symbol(&self, images: &[(LoadedImage, u64)], name: &str) -> Option<u64> {
+        for (lib, lib_bias) in images {
+            let Some(ld) = &lib.dynamic else { continue };
+            for i in 0..4096u64 {
+                let sym_va = ld.symtab + i * 24;
+                let Some(raw) = read_u64_va(lib, sym_va) else { break };
+                let st_name = raw as u32;
+                let st_value = read_u64_va(lib, sym_va + 8).unwrap_or(0);
+                if st_name == 0 && st_value == 0 {
+                    if i == 0 { continue } else { break }
+                }
+                if st_name == 0 {
+                    continue;
+                }
+                let Some(sname) = read_cstr_va(lib, ld.strtab + u64::from(st_name)) else {
+                    continue;
+                };
+                if sname == name && st_value != 0 {
+                    return Some(st_value + lib_bias);
+                }
+            }
+        }
+        None
+    }
+
+    /// Looks up a dynamic symbol by index in `dyn_`'s symtab across all
+    /// loaded images, returning the biased VA.
+    fn resolve_dyn_symbol(
+        &self,
+        images: &[(LoadedImage, u64)],
+        dyn_: &angryier_loader::DynamicInfo,
+        sym_index: u32,
+    ) -> Option<u64> {
+        // Read the symbol's st_name from the defining image's symtab — we
+        // need the image's own memory view; reconstruct via segments.
+        // `sym_index` indexes `dyn_`'s symtab — which belongs to the image
+        // that owns dyn_; caller passes that image's bias implicitly via
+        // the dyn_ slice. Find the owner image:
+        for (owner, _bias) in images {
+            if owner.dynamic.as_ref().map(|d| (d.symtab, d.strtab)) != Some((dyn_.symtab, dyn_.strtab)) {
+                continue;
+            }
+            let sym_entry_va = dyn_.symtab + u64::from(sym_index) * 24;
+            let name_off = read_u64_va(owner, sym_entry_va)? as u32;
+            let name = read_cstr_va(owner, dyn_.strtab + u64::from(name_off))?;
+            // Now find `name` in every image's dynsym.
+            for (lib, lib_bias) in images {
+                let Some(ld) = &lib.dynamic else { continue };
+                let str_base = ld.strtab;
+                // Bounded scan — dynsym[0] is the null entry (st_name==0,
+                // st_value==0), not a terminator; skip it explicitly.
+                for i in 0..4096u64 {
+                    let sym_va = ld.symtab + i * 24;
+                    let Some(raw) = read_u64_va(lib, sym_va) else { break };
+                    let st_name = raw as u32;
+                    let st_value = read_u64_va(lib, sym_va + 8).unwrap_or(0);
+                    if st_name == 0 && st_value == 0 {
+                        if i == 0 { continue } else { break }
+                    }
+                    if st_name == 0 {
+                        continue;
+                    }
+                    let Some(sname) = read_cstr_va(lib, str_base + u64::from(st_name)) else {
+                        continue;
+                    };
+                    if sname == name && st_value != 0 {
+                        return Some(st_value + lib_bias);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Builds a process from a pre-populated memory (multi-image load).
+    fn load_image_with_memory(
+        &self,
+        image: LoadedImage,
+        mut memory: PersistentMemory,
+        entry: u64,
+        bias: u64,
+    ) -> Result<Process, RuntimeError> {
+        // Stack + registers as in load_image, with entry biased.
+        let mut biased = image.clone();
+        biased.entry += bias;
+        let image = biased;
+        let (stack_pointer, argv0_addr) = self.initial_stack_pointer(&image, &mut memory)?;
+        let reg_file = Intel64RegisterFile::canonical();
+        let widths: Vec<(u32, usize)> = reg_file
+            .architectural_registers
+            .iter()
+            .map(|(reg, bits)| (reg.0, usize::from(*bits).div_ceil(8)))
+            .collect();
+        let mut registers =
+            PersistentRegisters::from_widths(widths).map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+        registers = registers
+            .write(register_id::RIP.0, &entry.to_le_bytes())
+            .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+        registers = registers
+            .write(register_id::GPR_BASE + 4, &stack_pointer.to_le_bytes())
+            .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+        registers = registers
+            .write(register_id::RFLAGS.0, &0x202u64.to_le_bytes())
+            .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+        let state = ExecutionState {
+            id: StateId(0),
+            parent: None,
+            target_profile: image.target_profile,
+            registers,
+            memory,
+            constraints: PersistentConstraintLineage::new(),
+            ownership: StateOwnership::default(),
+            fidelity: FidelityLedger::new(FidelityProfile::Prove),
+        };
+        Ok(Process {
+            image_id: image.id,
+            target_profile: image.target_profile,
+            entry,
+            entry_state: state.clone(),
+            state,
+            block_cache: BTreeMap::new(),
+            simproc_hooks: BTreeMap::new(),
+            symbols: image.symbols.clone(),
+            trace: Vec::new(),
+            syscalls: SyscallModel::new(),
+            program_break: HEAP_BASE,
+            heap_end: HEAP_BASE + HEAP_SIZE,
+            mmap_next: MMAP_BASE,
+            files: BTreeMap::new(),
+            open_fds: BTreeMap::new(),
+            symbolic_files: std::collections::BTreeSet::new(),
+            symbolic_fds: std::collections::BTreeSet::new(),
+            argv0_addr: Some(argv0_addr),
+            next_fd: 3,
+            next_block_id: 0,
+            step_count: 0,
+            simproc_dispatches: 0,
+            terminated: false,
+        })
+    }
+
     /// Loads a PE32+ image (statically-linked x86-64 PE — sections become
     /// segments, entry = image_base + AddressOfEntryPoint).
     pub fn load_pe(&self, bytes: &[u8]) -> Result<Process, RuntimeError> {
@@ -1487,6 +1865,38 @@ impl<D: Decoder> Runtime<D> {
         address: Address,
         name: &str,
     ) -> Result<StepOutcome, RuntimeError> {
+        // `__libc_start_main(main, argc, argv, ...)`: model it as a direct
+        // tail-call into `main` with a return address that exits the
+        // process — the angr-style shortcut past ld.so/libc init.
+        if name == "libc_start_main" {
+            let main_fn = process.read_register(register_id::GPR_BASE + 7)?; // rdi = main
+            let argc = process.read_register(register_id::GPR_BASE + 6)?; // rsi
+            let argv = process.read_register(register_id::GPR_BASE + 2)?; // rdx
+            let rsp = process.read_register(register_id::GPR_BASE + 4)?.wrapping_sub(8);
+            // Return address → a synthetic `exit` hook address.
+            const EXIT_HOOK: u64 = 0xdead_beef_0000;
+            let bytes: Vec<ByteValue> = EXIT_HOOK
+                .to_le_bytes()
+                .iter()
+                .map(|b| ByteValue::Concrete(*b))
+                .collect();
+            process.state.memory = process
+                .state
+                .memory
+                .write(rsp, &bytes)
+                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+            process.write_register(register_id::GPR_BASE + 4, rsp)?;
+            process.hook_simproc(EXIT_HOOK, "exit");
+            process.write_register(register_id::GPR_BASE + 7, argc)?; // rdi = argc
+            process.write_register(register_id::GPR_BASE + 6, argv)?; // rsi = argv
+            process.write_pc(main_fn)?;
+            process.simproc_dispatches += 1;
+            return Ok(StepOutcome::SimProcedure {
+                address,
+                name: name.to_string(),
+            });
+        }
+
         // Bridge ExecutionState → SimState.
         let mut sim_state = SimState::new();
 
@@ -1635,6 +2045,32 @@ fn cpuid_model(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
         // Any other leaf: report zeros (feature absent).
         _ => (0, 0, 0, 0),
     }
+}
+
+/// Reads 8 bytes at `va` from an image's loaded segments (VA → the
+/// segment whose `address <= va < address+len`).
+fn read_u64_va(image: &LoadedImage, va: u64) -> Option<u64> {
+    let seg = image
+        .segments
+        .iter()
+        .find(|s| va >= s.address && va + 8 <= s.address + s.bytes.len() as u64)?;
+    let off = usize::try_from(va - seg.address).ok()?;
+    Some(u64::from_le_bytes(seg.bytes[off..off + 8].try_into().ok()?))
+}
+
+/// Reads a NUL-terminated string at `va` from an image's segments.
+fn read_cstr_va(image: &LoadedImage, va: u64) -> Option<String> {
+    let seg = image
+        .segments
+        .iter()
+        .find(|s| va >= s.address && va < s.address + s.bytes.len() as u64)?;
+    let off = usize::try_from(va - seg.address).ok()?;
+    let end = seg.bytes[off..]
+        .iter()
+        .position(|b| *b == 0)
+        .map(|p| off + p)
+        .unwrap_or(seg.bytes.len());
+    Some(String::from_utf8_lossy(&seg.bytes[off..end]).to_string())
 }
 
 fn read_concrete_bytes(process: &Process, address: Address, len: u64) -> Result<Vec<u8>, RuntimeError> {

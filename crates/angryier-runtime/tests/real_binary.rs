@@ -2886,3 +2886,59 @@ target:
     assert_eq!(report.found.len(), 1, "'A' argv path reaches target");
     Ok(())
 }
+
+/// Dynamic linking: a dynamically-linked binary maps libc via DT_NEEDED
+/// and executes — relocations resolve eagerly.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn dynamic_binary_loads_and_runs() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = temp_dir("angryier-dyn").ok_or("no tempdir")?;
+    let path_c = dir.join("d.c");
+    let path_bin = dir.join("dyn");
+    std::fs::write(&path_c, "int main(){__builtin_write(1,\"dyn\\n\",4);return 0;}\n")?;
+    // Fallback: plain write via inline asm to avoid libc header needs.
+    std::fs::write(
+        &path_c,
+        r#"int main(){
+    register long rax asm("rax") = 1;
+    register long rdi asm("rdi") = 1;
+    register const char* rsi asm("rsi") = "dyn\n";
+    register long rdx asm("rdx") = 4;
+    asm volatile("syscall" : "+r"(rax) : "r"(rdi), "r"(rsi), "r"(rdx) : "rcx","r11","memory");
+    return 0;
+}"#,
+    )?;
+    let status = std::process::Command::new("cc")
+        .arg(&path_c)
+        .arg("-o")
+        .arg(&path_bin)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        _ => {
+            eprintln!("skipping: cc unavailable");
+            return Ok(());
+        }
+    }
+    let bytes = std::fs::read(&path_bin)?;
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_elf_dynamic(&bytes, &[])?;
+    // Partial milestone: the dynamic image maps, libc resolves, RELATIVE +
+    // GLOB_DAT slots are patched, and _start executes into libc's init.
+    // glibc's IRELATIVE/TLS relocations and full `__libc_start_main` are
+    // still ahead — the run ends when an unpatched slot is dereferenced.
+    let mut stepped = 0u64;
+    for _ in 0..200_000 {
+        match runtime.step(&mut process) {
+            Ok(StepOutcome::Terminated { .. }) => break,
+            Ok(_) => stepped += 1,
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        process.syscalls.output(),
+        b"dyn\n",
+        "dynamic binary must write to stdout (stepped={stepped})"
+    );
+    Ok(())
+}

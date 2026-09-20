@@ -63,6 +63,40 @@ pub struct LoadedImage {
     /// a loaded segment. Needed for the `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`
     /// auxiliary-vector entries consumed by libc startup code.
     pub program_headers: Option<ProgramHeadersInfo>,
+    /// Parsed `PT_DYNAMIC` tables — present on dynamically-linked images.
+    pub dynamic: Option<DynamicInfo>,
+}
+
+/// A parsed `PT_DYNAMIC` entry of interest — a `(tag, value)` pair where
+/// `value` is a virtual address or a scalar depending on the tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelaEntry {
+    /// Address to relocate (VA).
+    pub offset: u64,
+    /// Relocation type (`R_X86_64_*`).
+    pub r#type: u32,
+    /// Symbol-table index (0 for RELATIVE).
+    pub symbol: u32,
+    /// Signed addend.
+    pub addend: i64,
+}
+
+/// The dynamic-linking tables extracted from `PT_DYNAMIC`: `DT_NEEDED`
+/// names, RELA relocations, PLT relocations, and the dynamic
+/// symbol/string tables. VAs here are as-written in the file — for a
+/// PIE/ET_DYN image add the load bias.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DynamicInfo {
+    /// `DT_NEEDED` shared-object names.
+    pub needed: Vec<String>,
+    /// `DT_RELA` entries (`.rela.dyn`).
+    pub rela: Vec<RelaEntry>,
+    /// `DT_JMPREL` entries (`.rela.plt`).
+    pub jmprel: Vec<RelaEntry>,
+    /// Dynamic symbol-table VA (`DT_SYMTAB`).
+    pub symtab: u64,
+    /// Dynamic string-table VA (`DT_STRTAB`).
+    pub strtab: u64,
 }
 
 /// Location of the loaded ELF program header table.
@@ -147,6 +181,7 @@ const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
 
 const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
@@ -249,6 +284,7 @@ impl ImageLoader for InMemoryImageLoader {
             }],
             symbols: Vec::new(),
             program_headers: None,
+            dynamic: None,
         })
     }
 }
@@ -296,6 +332,102 @@ impl StateImporter for InMemoryStateImporter {
 /// `SHT_SYMTAB` section. All section, symbol, and string-table offsets are
 /// validated against the input buffer; malformed tables are reported as
 /// [`LoaderError::TruncatedHeader`].
+/// Parses `PT_DYNAMIC`: `DT_NEEDED` names, RELA + JMPREL relocation
+/// entries, and the symbol/string table VAs. `load_ranges` maps dynamic
+/// table VAs back to file offsets for string/reloc decoding.
+fn parse_dynamic(
+    bytes: &[u8],
+    dyn_offset: u64,
+    dyn_size: u64,
+    load_ranges: &[(u64, u64, u64)],
+) -> Result<DynamicInfo, LoaderError> {
+    const DT_NEEDED: i64 = 1;
+    const DT_STRTAB: i64 = 5;
+    const DT_SYMTAB: i64 = 6;
+    const DT_RELA: i64 = 7;
+    const DT_RELASZ: i64 = 8;
+    const DT_JMPREL: i64 = 23;
+    const DT_PLTRELSZ: i64 = 2;
+    const DT_NULL: i64 = 0;
+
+    let start = usize::try_from(dyn_offset).map_err(|_| LoaderError::TruncatedHeader)?;
+    let size = usize::try_from(dyn_size).map_err(|_| LoaderError::TruncatedHeader)?;
+    if start + size > bytes.len() {
+        return Err(LoaderError::TruncatedHeader);
+    }
+    // VA → file offset through the PT_LOAD ranges.
+    let va_to_off = |va: u64| -> Option<usize> {
+        load_ranges
+            .iter()
+            .find(|(_, vaddr, filesz)| va >= *vaddr && va < vaddr + filesz)
+            .and_then(|(off, vaddr, _)| usize::try_from(off + (va - *vaddr)).ok())
+    };
+    let mut needed_offs = Vec::new();
+    let (mut strtab, mut symtab, mut rela_va, mut rela_sz, mut jmprel_va, mut jmprel_sz) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    for i in 0..size / 16 {
+        let e = start + i * 16;
+        let tag = i64::from_le_bytes(bytes[e..e + 8].try_into().unwrap_or([0; 8]));
+        let val = u64::from_le_bytes(bytes[e + 8..e + 16].try_into().unwrap_or([0; 8]));
+        match tag {
+            DT_NULL => break,
+            DT_NEEDED => needed_offs.push(val),
+            DT_STRTAB => strtab = val,
+            DT_SYMTAB => symtab = val,
+            DT_RELA => rela_va = val,
+            DT_RELASZ => rela_sz = val,
+            DT_JMPREL => jmprel_va = val,
+            DT_PLTRELSZ => jmprel_sz = val,
+            _ => {}
+        }
+    }
+    // Resolve needed names through strtab.
+    let str_off = va_to_off(strtab);
+    let cstr = |off: usize| -> String {
+        let end = bytes[off..]
+            .iter()
+            .position(|b| *b == 0)
+            .map(|p| off + p)
+            .unwrap_or(off);
+        String::from_utf8_lossy(&bytes[off..end]).to_string()
+    };
+    let needed = needed_offs
+        .iter()
+        .filter_map(|o| str_off.map(|s| cstr(s + *o as usize)))
+        .collect();
+    // RELA entry: r_offset u64, r_info u64, r_addend i64.
+    let read_rela = |va: u64, size: u64| -> Vec<RelaEntry> {
+        let Some(off) = va_to_off(va) else {
+            return Vec::new();
+        };
+        let count = (size / 24) as usize;
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let e = off + i * 24;
+            if e + 24 > bytes.len() {
+                break;
+            }
+            let r_offset = u64::from_le_bytes(bytes[e..e + 8].try_into().unwrap_or([0; 8]));
+            let r_info = u64::from_le_bytes(bytes[e + 8..e + 16].try_into().unwrap_or([0; 8]));
+            let addend = i64::from_le_bytes(bytes[e + 16..e + 24].try_into().unwrap_or([0; 8]));
+            out.push(RelaEntry {
+                offset: r_offset,
+                r#type: (r_info & 0xFFFF_FFFF) as u32,
+                symbol: (r_info >> 32) as u32,
+                addend,
+            });
+        }
+        out
+    };
+    Ok(DynamicInfo {
+        needed,
+        rela: read_rela(rela_va, rela_sz),
+        jmprel: read_rela(jmprel_va, jmprel_sz),
+        symtab,
+        strtab,
+    })
+}
+
 fn parse_symbol_table(bytes: &[u8]) -> Result<Vec<Symbol>, LoaderError> {
     // e_shoff (40..48), e_shentsize (58..60), e_shnum (60..62)
     let shoff = read_u64_le_at(bytes, 40)?;
@@ -526,6 +658,7 @@ impl ImageLoader for Elf64Loader {
 
         let mut segments = Vec::new();
         let mut load_ranges = Vec::new();
+        let mut dynamic_range = None;
 
         for i in 0..phnum {
             let ph_offset = phoff
@@ -538,6 +671,9 @@ impl ImageLoader for Elf64Loader {
             let p_filesz = read_u64_le_at(bytes, ph_offset + 32)?;
             let p_memsz = read_u64_le_at(bytes, ph_offset + 40)?;
 
+            if p_type == PT_DYNAMIC {
+                dynamic_range = Some((p_offset, p_filesz));
+            }
             if p_type == PT_LOAD {
                 load_ranges.push((p_offset, p_vaddr, p_filesz));
                 if p_memsz < p_filesz {
@@ -574,6 +710,8 @@ impl ImageLoader for Elf64Loader {
             return Err(LoaderError::NoProgramHeaders);
         }
 
+        let dynamic = dynamic_range.and_then(|(off, size)| parse_dynamic(bytes, off, size, &load_ranges).ok());
+
         let id = self.allocate_id()?;
 
         let ph_table_end = e_phoff.saturating_add(ph_table_bytes as u64);
@@ -593,6 +731,7 @@ impl ImageLoader for Elf64Loader {
             segments,
             symbols: parse_symbol_table(bytes)?,
             program_headers,
+            dynamic,
         })
     }
 }
@@ -707,6 +846,7 @@ impl ImageLoader for Pe32Loader {
             segments,
             symbols: Vec::new(),
             program_headers: None,
+            dynamic: None,
         })
     }
 }
