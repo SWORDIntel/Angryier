@@ -2002,3 +2002,91 @@ out:    .quad 0
     }
     Ok(())
 }
+
+/// Solver-gated forking: with rbx a concrete 5, `je` (rbx==5) has the
+/// not-taken direction UNSAT — `step_state_checked` must not fork, while
+/// the unchecked path does.
+#[cfg(all(feature = "xed", feature = "z3", target_arch = "x86_64"))]
+#[test]
+fn symbolic_session_checked_prunes_unsat_direction() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_expr::{ExprArena, ExprReader, ShardedExprArena};
+    use angryier_runtime::{SymbolicSession, SymbolicStepOutcome};
+    use angryier_solver_z3::Z3Backend;
+    use std::sync::Arc;
+
+    let source = r#"
+        .global _start
+        .text
+_start:
+    cmp $5, %rbx
+    je target
+    mov $1, %rax
+    jmp end
+target:
+    mov $2, %rax
+end:
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-symbolic-checked").ok_or("no tempdir")?;
+    let path_s = dir.join("fork.s");
+    let path_o = dir.join("fork.o");
+    let path_bin = dir.join("fork");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = Arc::new(ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1)));
+    let mut session = SymbolicSession::new(&runtime, arena.as_ref(), process);
+    // Mark rbx symbolic, then pin it with the constraint rbx == 5 so the
+    // `je`'s not-taken direction is UNSAT and the checked step prunes it.
+    session.mark_symbolic(0, register_id::GPR_BASE + 3, angryier_ir::IrType::Bits(64))?;
+    {
+        let sym = session.states[0]
+            .registers
+            .get(&(register_id::GPR_BASE + 3))
+            .map(|(e, _)| *e)
+            .ok_or("rbx")?;
+        let five = arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::BitVec(64),
+                op: angryier_expr::ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: 5u64.to_le_bytes().to_vec(),
+            })
+            .map_err(|e| format!("{e:?}"))?;
+        let eq = arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::Bool,
+                op: angryier_expr::ExprOp::Eq,
+                operands: vec![sym, five],
+                immediate: Vec::new(),
+            })
+            .map_err(|e| format!("{e:?}"))?;
+        session.states[0].constraints.push(eq);
+    }
+
+    let reader: Arc<dyn ExprReader> = arena.clone();
+    let mut backend = Z3Backend::native_ffi(reader)?;
+
+    // Step to the `je` — the checked step must not fork (not-taken UNSAT).
+    let mut branched = false;
+    for _ in 0..8 {
+        match session.step_state_checked(0, &mut backend, std::time::Duration::from_secs(5))? {
+            SymbolicStepOutcome::Branched { .. } => {
+                branched = true;
+                break;
+            }
+            SymbolicStepOutcome::Terminated => break,
+            _ => {}
+        }
+    }
+    assert!(!branched, "checked step should prune the UNSAT not-taken direction");
+    Ok(())
+}

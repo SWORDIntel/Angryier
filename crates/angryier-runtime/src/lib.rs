@@ -2324,6 +2324,27 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     /// not-taken its negation); unconditional jumps and direct calls follow
     /// their static target.
     pub fn step_state(&mut self, index: usize) -> Result<SymbolicStepOutcome, RuntimeError> {
+        self.step_state_inner(index, None)
+    }
+
+    /// Like [`SymbolicSession::step_state`], but each fork direction is
+    /// feasibility-checked through `backend` first — an UNSAT direction is
+    /// pruned instead of enqueued (the state-space lever Phase 10 requires).
+    /// `Unknown`/`Sat` both keep the direction.
+    pub fn step_state_checked(
+        &mut self,
+        index: usize,
+        backend: &mut dyn SolverBackend,
+        timeout: Duration,
+    ) -> Result<SymbolicStepOutcome, RuntimeError> {
+        self.step_state_inner(index, Some((backend, timeout)))
+    }
+
+    fn step_state_inner(
+        &mut self,
+        index: usize,
+        solver: Option<(&mut dyn SolverBackend, Duration)>,
+    ) -> Result<SymbolicStepOutcome, RuntimeError> {
         let state = self
             .states
             .get(index)
@@ -2437,17 +2458,43 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 })
                 .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
 
-            let state = &mut self.states[index];
-            state.constraints.push(condition);
-            let _ = state.process.write_pc(branch.taken);
+            // Feasibility gates: taken under `condition`, not_taken under
+            // `!condition` — each checked against the state's constraints.
+            let (taken_feasible, other_feasible) = if let Some((backend, timeout)) = solver {
+                let taken = self.direction_feasible(index, condition, backend, timeout)?;
+                let other = self.direction_feasible(index, not_cond, backend, timeout)?;
+                (taken, other)
+            } else {
+                (true, true)
+            };
+            if !taken_feasible && !other_feasible {
+                // Both directions infeasible — the path is dead.
+                let state = self.states.remove(index);
+                self.dead.push(state);
+                return Ok(SymbolicStepOutcome::Terminated);
+            }
 
-            let mut child = state.clone();
-            child.constraints.pop();
-            child.constraints.push(not_cond);
-            let _ = child.process.write_pc(branch.not_taken);
             let child_index = self.states.len();
-            self.states.push(child);
-            return Ok(SymbolicStepOutcome::Branched { child: child_index });
+            let state = &mut self.states[index];
+            if taken_feasible && other_feasible {
+                state.constraints.push(condition);
+                let _ = state.process.write_pc(branch.taken);
+                let mut child = state.clone();
+                child.constraints.pop();
+                child.constraints.push(not_cond);
+                let _ = child.process.write_pc(branch.not_taken);
+                self.states.push(child);
+                return Ok(SymbolicStepOutcome::Branched { child: child_index });
+            }
+            // Exactly one direction is feasible — continue without forking.
+            let (constraint, next_pc) = if taken_feasible {
+                (condition, branch.taken)
+            } else {
+                (not_cond, branch.not_taken)
+            };
+            state.constraints.push(constraint);
+            let _ = state.process.write_pc(next_pc);
+            return Ok(SymbolicStepOutcome::Stepped { next_pc });
         }
 
         // Unconditional / call / fall-through — the block's terminator op
@@ -2495,6 +2542,47 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 Ok(SymbolicStepOutcome::Stepped { next_pc })
             }
         }
+    }
+
+    /// Queries `backend` whether `direction` is satisfiable under the
+    /// state's accumulated path constraints.
+    fn direction_feasible(
+        &self,
+        index: usize,
+        direction: ExprId,
+        backend: &mut dyn SolverBackend,
+        timeout: Duration,
+    ) -> Result<bool, RuntimeError> {
+        let state = &self.states[index];
+        let constraints: Vec<CanonicalConstraint> = state
+            .constraints
+            .iter()
+            .enumerate()
+            .filter_map(|(i, expr)| {
+                self.arena.dependency_summary(*expr).map(|s| CanonicalConstraint {
+                    id: ConstraintId(i as u64),
+                    key: s.key,
+                    expr: *expr,
+                })
+            })
+            .collect();
+        let key = self
+            .arena
+            .dependency_summary(direction)
+            .map(|s| s.key)
+            .ok_or_else(|| RuntimeError::Symbolic("missing direction summary".into()))?;
+        let query = SolverQuery::canonical(
+            SolverQueryId(index as u64),
+            &constraints,
+            direction,
+            key,
+            state.process.target_profile,
+            ConstraintCanonicalizationVersion(1),
+            timeout,
+        )
+        .map_err(|e| RuntimeError::Solver(format!("{e:?}")))?;
+        let result = backend.solve(&query);
+        Ok(!matches!(result.outcome, SolverOutcomeKind::Unsat))
     }
 
     /// Merges every group of live states sharing the same pc via
