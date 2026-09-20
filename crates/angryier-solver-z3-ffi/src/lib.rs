@@ -42,6 +42,12 @@ impl std::error::Error for Z3FfiError {}
 pub struct Z3FfiBridge {
     reader: Arc<dyn ExprReader>,
     context: Z3_context,
+    /// Persistent solver for incremental queries — scopes are pushed one
+    /// per path constraint so consecutive queries sharing a constraint
+    /// prefix reuse the solver's learned state instead of rebuilding.
+    solver: Z3_solver,
+    /// Dependency key per live scope (scope i asserts constraint i).
+    scope_keys: Vec<angryier_types::DependencyKey>,
 }
 
 // SAFETY: The caller must ensure single-threaded access to the Z3 context.
@@ -56,7 +62,131 @@ impl Z3FfiBridge {
             Z3_del_config(config);
             ctx.ok_or(Z3FfiError::NullContext)?
         };
-        Ok(Self { reader, context })
+        let solver = unsafe {
+            let s = Z3_mk_solver(context).ok_or(Z3FfiError::NullContext)?;
+            Z3_solver_inc_ref(context, s);
+            s
+        };
+        Ok(Self {
+            reader,
+            context,
+            solver,
+            scope_keys: Vec::new(),
+        })
+    }
+
+    /// Incremental solve over the persistent solver: pops the scopes past
+    /// the longest shared constraint-key prefix, pushes the suffix, then
+    /// checks the predicate in a transient scope. Returns `None` to signal
+    /// the caller should fall back to a fresh solver (timeout param is
+    /// set per-query and can't be scoped).
+    fn solve_incremental(&mut self, query: &SolverQuery) -> SolverResult {
+        if query.validate_identity().is_err() {
+            return backend_error();
+        }
+        let ctx = self.context;
+        // Per-query timeout on the persistent solver.
+        let timeout_ms = query.timeout().as_millis();
+        if timeout_ms > 0 {
+            unsafe {
+                if let Some(params) = Z3_mk_params(ctx) {
+                    Z3_params_inc_ref(ctx, params);
+                    if let Some(key) = Z3_mk_string_symbol(ctx, c"timeout".as_ptr()) {
+                        Z3_params_set_uint(ctx, params, key, timeout_ms as u32);
+                        Z3_solver_set_params(ctx, self.solver, params);
+                    }
+                    Z3_params_dec_ref(ctx, params);
+                }
+            }
+        }
+        let keys = query.constraint_keys();
+        // Longest common prefix of live scopes and this query's constraints.
+        let shared = self
+            .scope_keys
+            .iter()
+            .zip(keys.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let excess = self.scope_keys.len() - shared;
+        if excess > 0 {
+            unsafe { Z3_solver_pop(ctx, self.solver, excess as u32) };
+            self.scope_keys.truncate(shared);
+        }
+        let mut cache = HashMap::new();
+        let mut symbols = HashMap::new();
+        // Push one scope per new constraint.
+        for ((cid, expr), key) in query.constraint_expressions().iter().zip(keys.iter()).skip(shared) {
+            let _ = cid;
+            match self.translate(*expr, &mut cache, &mut symbols) {
+                Ok(ast) => unsafe {
+                    Z3_solver_push(ctx, self.solver);
+                    Z3_solver_assert(ctx, self.solver, ast);
+                },
+                Err(_) => return backend_error(),
+            }
+            self.scope_keys.push(*key);
+        }
+        // Transient scope for the predicate.
+        unsafe { Z3_solver_push(ctx, self.solver) };
+        let failed = match self.translate(query.predicate(), &mut cache, &mut symbols) {
+            Ok(ast) => {
+                unsafe { Z3_solver_assert(ctx, self.solver, ast) };
+                false
+            }
+            Err(_) => true,
+        };
+        let result = if failed {
+            backend_error()
+        } else {
+            self.check_and_extract(&mut symbols)
+        };
+        unsafe { Z3_solver_pop(ctx, self.solver, 1) };
+        result
+    }
+
+    /// Runs `check` on the persistent solver and extracts the model —
+    /// factored so the incremental path and the fallback share it.
+    fn check_and_extract(&self, symbols: &mut HashMap<ExprId, Z3_ast>) -> SolverResult {
+        let ctx = self.context;
+        unsafe {
+            let result = Z3_solver_check(ctx, self.solver);
+            let outcome = if result == Z3_L_TRUE {
+                SolverOutcomeKind::Sat
+            } else if result == Z3_L_FALSE {
+                SolverOutcomeKind::Unsat
+            } else {
+                SolverOutcomeKind::Unknown
+            };
+            let model = if outcome == SolverOutcomeKind::Sat {
+                match Z3_solver_get_model(ctx, self.solver) {
+                    Some(model) => {
+                        Z3_model_inc_ref(ctx, model);
+                        let mut extracted = Vec::new();
+                        for (sym_id, ast) in symbols.iter() {
+                            let mut eval_result: std::mem::MaybeUninit<Z3_ast> = std::mem::MaybeUninit::zeroed();
+                            let success = Z3_model_eval(ctx, model, *ast, true, eval_result.as_mut_ptr());
+                            if success {
+                                let eval_ast = eval_result.assume_init();
+                                if let Some(bytes) = numeral_to_bytes(ctx, eval_ast) {
+                                    extracted.push((u64::from(sym_id.0), bytes));
+                                }
+                            }
+                        }
+                        Z3_model_dec_ref(ctx, model);
+                        extracted
+                    }
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            SolverResult {
+                outcome,
+                model,
+                unsat_core: Vec::new(),
+                elapsed: Duration::ZERO,
+            }
+        }
     }
 
     fn translate(
@@ -266,109 +396,6 @@ impl Z3FfiBridge {
             }
         }
     }
-
-    fn solve_query(&self, query: &SolverQuery) -> SolverResult {
-        if query.validate_identity().is_err() {
-            return backend_error();
-        }
-
-        let ctx = self.context;
-        unsafe {
-            let solver = match Z3_mk_solver(ctx) {
-                Some(s) => s,
-                None => return backend_error(),
-            };
-            Z3_solver_inc_ref(ctx, solver);
-
-            // Set timeout via params
-            let timeout_ms = query.timeout().as_millis();
-            if timeout_ms > 0
-                && let Some(params) = Z3_mk_params(ctx)
-            {
-                Z3_params_inc_ref(ctx, params);
-                if let Some(key) = Z3_mk_string_symbol(ctx, c"timeout".as_ptr()) {
-                    Z3_params_set_uint(ctx, params, key, timeout_ms as u32);
-                    Z3_solver_set_params(ctx, solver, params);
-                }
-                Z3_params_dec_ref(ctx, params);
-            }
-
-            let mut cache = HashMap::new();
-            let mut symbols = HashMap::new();
-
-            // Assert all path constraints
-            let mut failed = false;
-            for (_constraint_id, expr_id) in query.constraint_expressions() {
-                match self.translate(*expr_id, &mut cache, &mut symbols) {
-                    Ok(ast) => {
-                        Z3_solver_assert(ctx, solver, ast);
-                    }
-                    Err(_) => {
-                        failed = true;
-                        break;
-                    }
-                }
-            }
-
-            if !failed {
-                match self.translate(query.predicate(), &mut cache, &mut symbols) {
-                    Ok(ast) => {
-                        Z3_solver_assert(ctx, solver, ast);
-                    }
-                    Err(_) => {
-                        failed = true;
-                    }
-                }
-            }
-
-            if failed {
-                Z3_solver_dec_ref(ctx, solver);
-                return backend_error();
-            }
-
-            let result = Z3_solver_check(ctx, solver);
-            let outcome = if result == Z3_L_TRUE {
-                SolverOutcomeKind::Sat
-            } else if result == Z3_L_FALSE {
-                SolverOutcomeKind::Unsat
-            } else {
-                SolverOutcomeKind::Unknown
-            };
-
-            let model = if outcome == SolverOutcomeKind::Sat {
-                match Z3_solver_get_model(ctx, solver) {
-                    Some(model) => {
-                        Z3_model_inc_ref(ctx, model);
-                        let mut extracted = Vec::new();
-                        for (sym_id, ast) in &symbols {
-                            let mut eval_result: std::mem::MaybeUninit<Z3_ast> = std::mem::MaybeUninit::zeroed();
-                            let success = Z3_model_eval(ctx, model, *ast, true, eval_result.as_mut_ptr());
-                            if success {
-                                let eval_ast = eval_result.assume_init();
-                                if let Some(bytes) = numeral_to_bytes(ctx, eval_ast) {
-                                    extracted.push((u64::from(sym_id.0), bytes));
-                                }
-                            }
-                        }
-                        Z3_model_dec_ref(ctx, model);
-                        extracted
-                    }
-                    None => Vec::new(),
-                }
-            } else {
-                Vec::new()
-            };
-
-            Z3_solver_dec_ref(ctx, solver);
-
-            SolverResult {
-                outcome,
-                model,
-                unsat_core: Vec::new(),
-                elapsed: Duration::ZERO,
-            }
-        }
-    }
 }
 
 impl SolverBackend for Z3FfiBridge {
@@ -377,11 +404,13 @@ impl SolverBackend for Z3FfiBridge {
     }
 
     fn solve(&mut self, query: &SolverQuery) -> SolverResult {
-        self.solve_query(query)
+        // Incremental path: persistent solver with scoped constraints —
+        // shared constraint prefixes reuse learned state.
+        self.solve_incremental(query)
     }
 
     fn solve_batch(&mut self, _shared: &[ConstraintId], predicates: &[SolverQuery]) -> Vec<SolverResult> {
-        predicates.iter().map(|q| self.solve_query(q)).collect()
+        predicates.iter().map(|q| self.solve_incremental(q)).collect()
     }
 }
 
