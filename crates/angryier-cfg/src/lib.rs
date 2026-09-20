@@ -162,16 +162,20 @@ impl Cfg {
         dom.insert(entry, BTreeSet::from([entry]));
         // Predecessors from edges (edge.from is the terminating insn addr —
         // map it back to its block).
+        // Overlapping blocks are possible (different entry seeds) — pick the
+        // innermost (highest start) block containing the insn.
+        let block_of_insn = |insn: Address| -> Option<Address> {
+            self.blocks
+                .values()
+                .filter(|bl| bl.instructions.iter().any(|i| i.address == insn))
+                .map(|bl| bl.start)
+                .max()
+        };
         let preds = |b: Address| -> Vec<Address> {
             self.edges
                 .iter()
                 .filter_map(|e| (e.to == Some(b)).then_some(e.from))
-                .filter_map(|insn| {
-                    self.blocks
-                        .values()
-                        .find(|bl| bl.instructions.iter().any(|i| i.address == insn))
-                        .map(|bl| bl.start)
-                })
+                .filter_map(block_of_insn)
                 .collect()
         };
         loop {
@@ -236,15 +240,18 @@ impl Cfg {
         let block_of_insn = |insn: Address| -> Option<Address> {
             self.blocks
                 .values()
-                .find(|b| b.instructions.iter().any(|i| i.address == insn))
-                .map(|b| b.start)
+                .filter(|bl| bl.instructions.iter().any(|i| i.address == insn))
+                .map(|bl| bl.start)
+                .max()
         };
+
         let mut loops = Vec::new();
+        let mut seen_edges = BTreeSet::new();
         for edge in &self.edges {
             let (Some(a), Some(b)) = (block_of_insn(edge.from), edge.to) else {
                 continue;
             };
-            if !dominates(b, a) {
+            if !seen_edges.insert((a, b)) || !dominates(b, a) {
                 continue;
             }
             // Natural loop of a→b: {b} ∪ nodes reaching a without b.

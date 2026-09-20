@@ -989,6 +989,146 @@ impl<D: Decoder> Runtime<D> {
         })
     }
 
+    /// Recovers the image CFG and extracts pure induction loops — a
+    /// single-block body whose only side effects are `counter += step` and
+    /// a `cmp counter, bound` feeding the back-edge branch. Summaries let
+    /// the session collapse a concrete trip count in O(1).
+    pub fn loop_summaries(&self, process: &Process) -> Vec<LoopSummary> {
+        use angryier_arch::OperandKind;
+        use angryier_cfg::recover;
+        let mut out = Vec::new();
+        let regions: Vec<(u64, Vec<u8>)> = process
+            .state
+            .memory
+            .regions()
+            .iter()
+            .filter(|r| r.executable)
+            .filter_map(|r| {
+                let bytes = read_concrete_bytes(process, r.base, r.size.min(1 << 22)).ok()?;
+                Some((r.base, bytes))
+            })
+            .collect();
+        for (base, bytes) in &regions {
+            let Ok(cfg) = recover(&self.decoder, *base, bytes, process.entry, |i| i.form_id) else {
+                continue;
+            };
+            for lp in cfg.loops() {
+                if lp.body.len() != 1 {
+                    continue;
+                }
+                let Some(block) = cfg.blocks.get(&lp.header) else {
+                    continue;
+                };
+                let insns = &block.instructions;
+                if insns.len() < 2 || insns.len() > 6 {
+                    continue;
+                }
+                // Last insn must be a conditional branch back to the header;
+                // its fall-through is the loop exit.
+                let Some(term) = insns.last() else { continue };
+                if !is_jcc(term.form_id) {
+                    continue;
+                }
+                let Some(back) = term.operands.iter().find_map(|o| {
+                    if let OperandKind::RelativeBranch(rb) = &o.kind {
+                        Some(term.relative_target(*rb))
+                    } else {
+                        None
+                    }
+                }) else {
+                    continue;
+                };
+                if back != lp.header {
+                    continue;
+                }
+                let exit = term.address + u64::from(term.length);
+                // Find the counter cmp and the counter update.
+                let mut counter: Option<u32> = None;
+                let mut bound = Bound::None;
+                let mut step: i64 = 0;
+                let mut pure = true;
+                for insn in &insns[..insns.len() - 1] {
+                    match insn.form_id {
+                        f if is_cmp_reg(f) => {
+                            let reg = insn.operands.iter().find_map(|o| {
+                                if let OperandKind::Register(rv) = &o.kind {
+                                    Some(rv.parent.0)
+                                } else {
+                                    None
+                                }
+                            });
+                            let imm = insn.operands.iter().find_map(|o| {
+                                if let OperandKind::Immediate(i) = &o.kind {
+                                    Some(i.value)
+                                } else {
+                                    None
+                                }
+                            });
+                            match (reg, imm) {
+                                (Some(r), Some(v)) => {
+                                    counter = Some(r);
+                                    bound = Bound::Imm(v);
+                                }
+                                (Some(r), None) => {
+                                    counter = Some(r);
+                                    if let Some(OperandKind::Register(rv)) = insn.operands.get(1).map(|o| &o.kind) {
+                                        bound = Bound::Reg(rv.parent.0);
+                                    }
+                                }
+                                _ => pure = false,
+                            }
+                        }
+                        f if is_counter_update(f) => {
+                            // add/sub/inc/dec — operand0 register, step imm.
+                            let reg = insn.operands.iter().find_map(|o| {
+                                if let OperandKind::Register(rv) = &o.kind {
+                                    Some(rv.parent.0)
+                                } else {
+                                    None
+                                }
+                            });
+                            let imm = insn.operands.iter().find_map(|o| {
+                                if let OperandKind::Immediate(i) = &o.kind {
+                                    Some(i.value as i64)
+                                } else {
+                                    None
+                                }
+                            });
+                            let s = match (reg, imm, f) {
+                                (Some(_), Some(v), _) if is_sub_form(f) => -v,
+                                (Some(_), Some(v), _) => v,
+                                (Some(_), None, _) if is_sub_form(f) => -1, // dec
+                                (Some(_), None, _) => 1,                    // inc
+                                _ => {
+                                    pure = false;
+                                    0
+                                }
+                            };
+                            step += s;
+                        }
+                        f if is_nop(f) => {}
+                        _ => pure = false,
+                    }
+                }
+                let (Some(counter), Some(cond)) = (counter, jcc_cond(term.form_id)) else {
+                    continue;
+                };
+                if !pure || step == 0 {
+                    continue;
+                }
+                out.push(LoopSummary {
+                    header: lp.header,
+                    exit,
+                    counter,
+                    step,
+                    bound,
+                    cond,
+                });
+            }
+        }
+        out
+    }
+
     /// Coverage-guided input generation: run the symbolic session with the
     /// solver, collect models for `find` states, then replay each input
     /// concretely (stdin = model bytes) — returns `(inputs, coverage)` as
@@ -2165,6 +2305,129 @@ fn read_cstr_va(image: &LoadedImage, va: u64) -> Option<String> {
 /// A generated input together with the concrete coverage it reaches.
 pub type FuzzedInput = (Vec<u8>, Vec<Address>);
 
+/// Trip-count bound for a loop summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bound {
+    /// `cmp counter, imm`.
+    Imm(u64),
+    /// `cmp counter, reg`.
+    Reg(u32),
+    /// Couldn't be determined.
+    None,
+}
+
+/// Exit condition of a summarized loop (how `cmp` maps to the taken edge).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopCond {
+    /// `jcc header` exits when `counter >= bound` (jl/jb back edge).
+    Lt,
+    /// Exits when `counter > bound` (jle/jbe back edge).
+    Le,
+    /// Exits when `counter <= bound` (jg/ja back edge).
+    Gt,
+    /// Exits when `counter < bound` (jge/jae back edge).
+    Ge,
+    /// Exits when `counter != bound` (je back edge).
+    Eq,
+    /// Exits when `counter == bound` (jne back edge).
+    Ne,
+}
+
+/// A pure single-block induction loop — the session can collapse its
+/// remaining iterations into one counter write when the trip count is
+/// concrete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoopSummary {
+    /// Loop header (and back-edge target).
+    pub header: Address,
+    /// Fall-through past the back-edge branch.
+    pub exit: Address,
+    /// The induction register (canonical parent id).
+    pub counter: u32,
+    /// Signed per-iteration change.
+    pub step: i64,
+    /// Compare bound.
+    pub bound: Bound,
+    /// Exit condition.
+    pub cond: LoopCond,
+}
+
+fn is_jcc(form: u32) -> bool {
+    use angryier_semantics_intel64::forms as f;
+    matches!(
+        form,
+        f::JZ_REL32
+            | f::JNZ_REL32
+            | f::JC_REL32
+            | f::JNC_REL32
+            | f::JS_REL32
+            | f::JNS_REL32
+            | f::JL_REL32
+            | f::JGE_REL32
+            | f::JLE_REL32
+            | f::JG_REL32
+            | f::JA_REL32
+            | f::JB_REL32
+            | f::JBE_REL32
+            | f::JAE_REL32
+            | f::JO_REL32
+            | f::JNO_REL32
+            | f::JPE_REL32
+            | f::JPO_REL32
+    )
+}
+
+fn jcc_cond(form: u32) -> Option<LoopCond> {
+    use angryier_semantics_intel64::forms as f;
+    Some(match form {
+        f::JL_REL32 | f::JB_REL32 => LoopCond::Lt,
+        f::JLE_REL32 | f::JBE_REL32 => LoopCond::Le,
+        f::JG_REL32 | f::JA_REL32 => LoopCond::Gt,
+        f::JGE_REL32 | f::JAE_REL32 => LoopCond::Ge,
+        f::JZ_REL32 | f::JPE_REL32 => LoopCond::Eq,
+        f::JNZ_REL32 | f::JPO_REL32 => LoopCond::Ne,
+        _ => return None,
+    })
+}
+
+fn is_cmp_reg(form: u32) -> bool {
+    use angryier_semantics_intel64::forms as f;
+    matches!(
+        form,
+        f::CMP_R64_IMM32 | f::CMP_R32_IMM8 | f::CMP_R8_IMM8 | f::CMP_R64_R64 | f::CMP_R32_R32
+    )
+}
+
+fn is_counter_update(form: u32) -> bool {
+    use angryier_semantics_intel64::forms as f;
+    matches!(
+        form,
+        f::ADD_R64_IMM32
+            | f::ADD_R32_IMM8
+            | f::SUB_R64_IMM32
+            | f::SUB_R32_IMM8
+            | f::INC_R64
+            | f::INC_R32
+            | f::DEC_R64
+            | f::DEC_R32
+            | f::ADD_R64_R64
+            | f::SUB_R64_R64
+    )
+}
+
+fn is_sub_form(form: u32) -> bool {
+    use angryier_semantics_intel64::forms as f;
+    matches!(
+        form,
+        f::SUB_R64_IMM32 | f::SUB_R32_IMM8 | f::DEC_R64 | f::DEC_R32 | f::SUB_R64_R64
+    )
+}
+
+fn is_nop(form: u32) -> bool {
+    use angryier_semantics_intel64::forms as f;
+    form == f::NOP
+}
+
 fn read_concrete_bytes(process: &Process, address: Address, len: u64) -> Result<Vec<u8>, RuntimeError> {
     let len = usize::try_from(len).map_err(|_| RuntimeError::Memory("syscall buffer too large".into()))?;
     if len == 0 {
@@ -3118,6 +3381,11 @@ pub struct SymbolicSession<'a, D: Decoder> {
     pub recorder: angryier_provenance::FlightRecorder,
     /// Next provenance node id.
     next_prov_node: u64,
+    /// Loop summaries keyed by header — populated by
+    /// [`Self::enable_loop_summaries`]; a state landing on a summarized
+    /// header with a concrete counter/bound collapses the remaining
+    /// iterations into one step.
+    loop_summaries: BTreeMap<Address, LoopSummary>,
 }
 
 impl<'a, D: Decoder> SymbolicSession<'a, D> {
@@ -3158,6 +3426,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             pending_merges: Vec::new(),
             recorder: angryier_provenance::FlightRecorder::new(4096),
             next_prov_node: 0,
+            loop_summaries: BTreeMap::new(),
         }
     }
 
@@ -3189,6 +3458,87 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     pub fn with_cfg(mut self, cfg: &'a angryier_cfg::Cfg) -> Self {
         self.cfg = Some(cfg);
         self
+    }
+
+    /// Computes loop summaries for the loaded image and enables collapsing
+    /// — pure induction loops with concrete counters then run in O(1).
+    pub fn enable_loop_summaries(&mut self) {
+        if let Some(state) = self.states.first() {
+            self.loop_summaries = self
+                .runtime
+                .loop_summaries(&state.process)
+                .into_iter()
+                .map(|s| (s.header, s))
+                .collect();
+        }
+    }
+
+    /// Collapses a summarized loop when the state's counter and bound are
+    /// concrete: computes the remaining trip count in closed form, writes
+    /// the exit counter value, and jumps to the exit address. Returns the
+    /// outcome on success, `None` when the state must execute normally
+    /// (symbolic counter/bound or an unhandled condition).
+    fn try_loop_summary(&mut self, index: usize, summary: LoopSummary) -> Option<SymbolicStepOutcome> {
+        let state = &mut self.states[index];
+        // Counter: symbolic expr folds to a constant, else the concrete map.
+        let counter = state
+            .registers
+            .get(&summary.counter)
+            .and_then(|(e, _)| angryier_execution::constant_value(self.arena, *e).ok())
+            .or_else(|| state.concrete_registers.get(&summary.counter).copied())
+            .or_else(|| state.process.read_register(summary.counter).ok());
+        let bound = match summary.bound {
+            Bound::Imm(v) => Some(v),
+            Bound::Reg(r) => state
+                .concrete_registers
+                .get(&r)
+                .copied()
+                .or_else(|| state.process.read_register(r).ok()),
+            Bound::None => None,
+        };
+        let (counter, bound) = (counter?, bound?);
+        let step = summary.step;
+        // Remaining iterations until the exit condition holds after the
+        // update — closed forms for the four inequality directions.
+        let c = counter as i128;
+        let b = bound as i128;
+        let s = step as i128;
+        let n: i128 = match (summary.cond, s.signum()) {
+            // jl/jb back edge: loop while c < b; n = ceil((b-c)/s), s>0.
+            (LoopCond::Lt, 1) if c < b => (b - c + s - 1) / s,
+            (LoopCond::Le, 1) if c <= b => (b + 1 - c + s - 1) / s,
+            // jg/ja: loop while c > b; s<0 → n = ceil((c-b)/|s|).
+            (LoopCond::Gt, -1) if c > b => (c - b - s - 1) / (-s),
+            (LoopCond::Ge, -1) if c >= b => (c + 1 - b - s - 1) / (-s),
+            _ => return None, // Eq/Ne or mismatched sign — not summarized.
+        };
+        if n <= 0 || n > (1 << 40) {
+            return None;
+        }
+        let final_counter = counter.wrapping_add((n as u64).wrapping_mul(step as u64));
+        // Write the exit counter into symbolic + concrete + process regs.
+        let width = state
+            .registers
+            .get(&summary.counter)
+            .map(|(_, ty)| match ty {
+                angryier_ir::IrType::Bits(w) => *w,
+                _ => 64,
+            })
+            .unwrap_or(64);
+        if let Ok(expr) = self.arena.intern(angryier_expr::ExprNode {
+            sort: angryier_expr::ExprSort::BitVec(width),
+            op: angryier_expr::ExprOp::Constant,
+            operands: Vec::new(),
+            immediate: final_counter.to_le_bytes().to_vec(),
+        }) {
+            state
+                .registers
+                .insert(summary.counter, (expr, angryier_ir::IrType::Bits(width)));
+        }
+        state.concrete_registers.insert(summary.counter, final_counter);
+        let _ = state.process.write_register(summary.counter, final_counter);
+        let _ = state.process.write_pc(summary.exit);
+        Some(SymbolicStepOutcome::Stepped { next_pc: summary.exit })
     }
 
     /// Marks `register` symbolic with `ty` in state `index` — the input
@@ -3289,17 +3639,31 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         index: usize,
         mut solver: Option<(&mut dyn SolverBackend, Duration)>,
     ) -> Result<SymbolicStepOutcome, RuntimeError> {
-        let state = self
-            .states
-            .get(index)
-            .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
-        if state.process.terminated {
+        let (terminated, pc) = {
+            let state = self
+                .states
+                .get(index)
+                .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
+            (
+                state.process.terminated,
+                state
+                    .process
+                    .pc()
+                    .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?,
+            )
+        };
+        if terminated {
             return Ok(SymbolicStepOutcome::Terminated);
         }
-        let pc = state
-            .process
-            .pc()
-            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+
+        // Loop summarization: a summarized header with concrete inputs
+        // collapses its remaining iterations into one step.
+        if let Some(&summary) = self.loop_summaries.get(&pc)
+            && let Some(outcome) = self.try_loop_summary(index, summary)
+        {
+            return Ok(outcome);
+        }
+        let state = &mut self.states[index];
 
         // SimProcedure hooks dispatch like they do in concrete mode.
         if state.process.simproc_hooks.contains_key(&pc) {
@@ -4433,6 +4797,7 @@ where
                         pending_merges: Vec::new(),
                         recorder: angryier_provenance::FlightRecorder::new(4096),
                         next_prov_node: 0,
+                        loop_summaries: BTreeMap::new(),
                     };
                     let report = sub.run(max_steps, max_states, None, timeout, false)?;
                     Ok((report, sub.states, sub.dead))

@@ -363,7 +363,9 @@ fn run_subcommand(args: &[String]) -> i32 {
         i += 1;
     }
     let Some(path) = path else {
-        eprintln!("usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find 0xADDR] [--argv N] [--dynamic]");
+        eprintln!(
+            "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find 0xADDR] [--argv N] [--dynamic]"
+        );
         return 1;
     };
 

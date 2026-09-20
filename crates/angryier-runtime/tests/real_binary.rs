@@ -3191,3 +3191,51 @@ fn symbolic_dynamic_binary_runs() -> Result<(), Box<dyn std::error::Error>> {
     assert!(report.steps >= 4, "must reach past _start");
     Ok(())
 }
+
+/// Loop summarization: a 100-iteration counter loop collapses into a
+/// single symbolic step.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn loop_summary_collapses_counter_loop() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_runtime::SymbolicSession;
+    use std::sync::Arc;
+
+    // i: 0..100 counter loop — `add $1,%rcx; cmp $100,%rcx; jl loop`.
+    let source = r#"
+        .global _start
+        .text
+_start:
+    xor %rcx, %rcx
+loop:
+    add $1, %rcx
+    cmp $100, %rcx
+    jl loop
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-loop").ok_or("no tempdir")?;
+    let path_s = dir.join("l.s");
+    let path_o = dir.join("l.o");
+    let path_bin = dir.join("l");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    let arena = Arc::new(angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    ));
+    let mut session = SymbolicSession::new(&runtime, arena.as_ref(), process);
+    session.enable_loop_summaries();
+    let report = session.run(256, 8, None, std::time::Duration::from_secs(10), false)?;
+    eprintln!("loop report: {report:?}");
+    // Unsummarized: 100 iters × 3 insns = 300+ steps; summarized: ~6.
+    assert!(report.steps < 20, "loop must collapse: steps={}", report.steps);
+    let rcx = session.dead[0].process.read_register(register_id::GPR_BASE + 1)?;
+    assert_eq!(rcx, 100, "counter must land on the bound");
+    Ok(())
+}
