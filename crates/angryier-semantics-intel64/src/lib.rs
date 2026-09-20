@@ -603,6 +603,294 @@ pub mod forms {
 
     // IMUL r64, [m64]
     pub const IMUL_R64_MEM64: u32 = 0x016B;
+
+    // MOVSXD r64, [m32]
+    pub const MOVSX_R64_MEM32: u32 = 0x016C;
+
+    // MOVZX/MOVSX with memory sources
+    pub const MOVZX_R64_MEM8: u32 = 0x016D;
+    pub const MOVZX_R64_MEM16: u32 = 0x016E;
+    pub const MOVZX_R32_MEM8: u32 = 0x016F;
+    pub const MOVZX_R32_MEM16: u32 = 0x0170;
+    pub const MOVSX_R64_MEM8: u32 = 0x0171;
+    pub const MOVSX_R64_MEM16: u32 = 0x0172;
+    pub const MOVSX_R32_MEM8: u32 = 0x0173;
+    pub const MOVSX_R32_MEM16: u32 = 0x0174;
+
+    // 8-bit TEST/CMP forms (used heavily by libc string code)
+    pub const TEST_R8_R8: u32 = 0x0175;
+    pub const TEST_R8_IMM8: u32 = 0x0176;
+    pub const TEST_MEM8_R8: u32 = 0x0177;
+    pub const CMP_R8_IMM8: u32 = 0x0178;
+    pub const CMP_R8_R8: u32 = 0x0179;
+    pub const CMP_MEM8_IMM8: u32 = 0x017A;
+    pub const TEST_R32_R32: u32 = 0x017B;
+
+    // GPR/vector and memory transfer forms (libc TLS init, memcpy/memset)
+    pub const MOVQ_XMM_R64: u32 = 0x017C;
+    pub const MOVQ_XMM_MEM64: u32 = 0x017D;
+    pub const MOVQ_R64_XMM: u32 = 0x017E;
+    pub const MOVQ_MEM64_XMM: u32 = 0x017F;
+    pub const MOVD_XMM_R32: u32 = 0x0180;
+    pub const MOVD_XMM_MEM32: u32 = 0x0181;
+    pub const MOVD_R32_XMM: u32 = 0x0182;
+    pub const MOVAPS_MEM_XMM: u32 = 0x0183;
+    pub const MOVAPS_XMM_MEM: u32 = 0x0184;
+    pub const MOVDQA_MEM_XMM: u32 = 0x0185;
+    pub const MOVDQA_XMM_MEM: u32 = 0x0186;
+    pub const MOVUPS_MEM_XMM: u32 = 0x0187;
+    pub const MOVUPS_XMM_MEM: u32 = 0x0188;
+    pub const MOVQ_XMM_MEM: u32 = 0x0189;
+
+    // MOV [m8/m16/m32], imm forms
+    pub const MOV_MEM8_IMM8: u32 = 0x018A;
+    pub const MOV_MEM16_IMM16: u32 = 0x018B;
+    pub const MOV_MEM32_IMM32: u32 = 0x018C;
+
+    // CMP [mN], rN — memory-minus-register compare
+    pub const CMP_MEM64_R64: u32 = 0x018D;
+    pub const CMP_MEM32_R32: u32 = 0x018E;
+    pub const CMP_MEM8_R8: u32 = 0x018F;
+
+    // Indirect jump through a register (`jmp *%rax`).
+    pub const JMP_INDIRECT_R64: u32 = 0x0190;
+    // Indirect call through a register (`call *%rax`).
+    pub const CALL_INDIRECT_R64: u32 = 0x0191;
+    // Indirect jump through memory (`jmp *(%rax)`).
+    pub const JMP_INDIRECT_MEM64: u32 = 0x0192;
+    // Indirect call through memory (`call *(%rax)`).
+    pub const CALL_INDIRECT_MEM64: u32 = 0x0193;
+
+    // 16-bit memory moves (`mov r16, r16`/`imm16` already exist at 0x5E/0x64).
+    pub const MOV_MEM16_R16: u32 = 0x0194;
+    pub const MOV_R16_MEM16: u32 = 0x0195;
+
+    // Read-modify-write [mN], imm forms
+    pub const OR_MEM32_IMM32: u32 = 0x0198;
+    pub const OR_MEM64_IMM32: u32 = 0x0199;
+    pub const AND_MEM32_IMM32: u32 = 0x019A;
+    pub const AND_MEM64_IMM32: u32 = 0x019B;
+    pub const ADD_MEM32_IMM32: u32 = 0x019C;
+    pub const SUB_MEM32_IMM32: u32 = 0x019E;
+    pub const SUB_MEM64_IMM32: u32 = 0x019F;
+    pub const XOR_MEM32_IMM32: u32 = 0x01A0;
+    pub const XOR_MEM64_IMM32: u32 = 0x01A1;
+
+    // CMP [mN], immN
+    pub const CMP_MEM32_IMM32: u32 = 0x01A2;
+    pub const CMP_MEM16_IMM16: u32 = 0x01A3;
+
+    // TEST [mN], immN
+    pub const TEST_MEM8_IMM8: u32 = 0x01A5;
+    pub const TEST_MEM16_IMM16: u32 = 0x01A6;
+    pub const TEST_MEM32_IMM32: u32 = 0x01A7;
+    pub const TEST_MEM64_IMM32: u32 = 0x01A8;
+
+    // Register-minus/logic-with-memory forms
+    pub const OR_R32_MEM32: u32 = 0x01A9;
+    pub const OR_R64_MEM64: u32 = 0x01AA;
+    pub const AND_R32_MEM32: u32 = 0x01AB;
+    pub const AND_R64_MEM64: u32 = 0x01AC;
+    pub const XOR_R32_MEM32: u32 = 0x01AD;
+    pub const XOR_R64_MEM64: u32 = 0x01AE;
+    pub const OR_R8_MEM8: u32 = 0x01AF;
+    pub const AND_R8_MEM8: u32 = 0x01B0;
+    pub const XOR_R8_MEM8: u32 = 0x01B1;
+
+    // Read-modify-write [mN], rN forms
+    pub const OR_MEM32_R32: u32 = 0x01B2;
+    pub const OR_MEM64_R64: u32 = 0x01B3;
+    pub const AND_MEM32_R32: u32 = 0x01B4;
+    pub const AND_MEM64_R64: u32 = 0x01B5;
+    pub const XOR_MEM32_R32: u32 = 0x01B6;
+    pub const XOR_MEM64_R64: u32 = 0x01B7;
+    pub const OR_MEM8_R8: u32 = 0x01B8;
+    pub const AND_MEM8_R8: u32 = 0x01B9;
+    pub const XOR_MEM8_R8: u32 = 0x01BA;
+    pub const ADD_MEM8_R8: u32 = 0x01BB;
+    pub const SUB_MEM8_R8: u32 = 0x01BC;
+
+    // 32-bit conditional moves
+    pub const CMOVZ_R32_R32: u32 = 0x01BD;
+    pub const CMOVNZ_R32_R32: u32 = 0x01BE;
+    pub const CMOVL_R32_R32: u32 = 0x01BF;
+    pub const CMOVGE_R32_R32: u32 = 0x01C0;
+    pub const CMOVLE_R32_R32: u32 = 0x01C1;
+    pub const CMOVG_R32_R32: u32 = 0x01C2;
+    pub const CMOVA_R32_R32: u32 = 0x01C3;
+    pub const CMOVB_R32_R32: u32 = 0x01C4;
+    pub const CMOVBE_R32_R32: u32 = 0x01C5;
+    pub const CMOVAE_R32_R32: u32 = 0x01C6;
+    pub const CMOVS_R32_R32: u32 = 0x01C7;
+    pub const CMOVNS_R32_R32: u32 = 0x01C8;
+    pub const CMOVC_R32_R32: u32 = 0x01C9;
+    pub const CMOVNC_R32_R32: u32 = 0x01CA;
+    pub const CMOVNP_R32_R32: u32 = 0x01CB;
+    pub const CMOVP_R32_R32: u32 = 0x01CC;
+    pub const CMOVNO_R32_R32: u32 = 0x01CD;
+    pub const CMOVO_R32_R32: u32 = 0x01CE;
+
+    // r8, imm8 read-modify-write forms
+    pub const AND_R8_IMM8: u32 = 0x01CF;
+    pub const OR_R8_IMM8: u32 = 0x01D0;
+    pub const XOR_R8_IMM8: u32 = 0x01D1;
+    pub const ADD_R8_IMM8: u32 = 0x01D2;
+    pub const SUB_R8_IMM8: u32 = 0x01D3;
+
+    // MOVDQU unaligned loads/stores
+    pub const MOVDQU_XMM_MEM: u32 = 0x01E2;
+    pub const MOVDQU_MEM_XMM: u32 = 0x01E3;
+    pub const MOVDQU_XMM_XMM: u32 = 0x01E4;
+
+    // [m8], imm8 read-modify-write forms
+    pub const OR_MEM8_IMM8: u32 = 0x01E5;
+    pub const AND_MEM8_IMM8: u32 = 0x01E6;
+    pub const XOR_MEM8_IMM8: u32 = 0x01E7;
+    pub const ADD_MEM8_IMM8: u32 = 0x01E8;
+    pub const SUB_MEM8_IMM8: u32 = 0x01E9;
+    // [m16], imm16 / [m64], imm8 variants
+    pub const OR_MEM16_IMM16: u32 = 0x01EA;
+    pub const AND_MEM16_IMM16: u32 = 0x01EB;
+    pub const XOR_MEM16_IMM16: u32 = 0x01EC;
+    pub const ADD_MEM16_IMM16: u32 = 0x01ED;
+    pub const SUB_MEM16_IMM16: u32 = 0x01EE;
+    pub const CMP_MEM16_R16: u32 = 0x01EF;
+
+    // r8, r8 forms
+    pub const XOR_R8_R8: u32 = 0x01F0;
+    pub const OR_R8_R8: u32 = 0x01F1;
+    pub const AND_R8_R8: u32 = 0x01F2;
+    pub const ADD_R8_R8: u32 = 0x01F3;
+    pub const SUB_R8_R8: u32 = 0x01F4;
+
+    // SUB memory/register forms
+    pub const SUB_R64_MEM64: u32 = 0x01F5;
+    pub const SUB_MEM64_R64: u32 = 0x01F6;
+    pub const SUB_MEM32_R32: u32 = 0x01F7;
+
+    // Compare-and-exchange
+    pub const CMPXCHG_MEM32_R32: u32 = 0x01F8;
+    pub const CMPXCHG_MEM64_R64: u32 = 0x01F9;
+    pub const CMPXCHG_MEM8_R8: u32 = 0x01FA;
+    pub const ADD_MEM32_R32: u32 = 0x01FD;
+
+    // Exchange
+    pub const XCHG_MEM32_R32: u32 = 0x01FE;
+    pub const XCHG_MEM64_R64: u32 = 0x01FF;
+    pub const XCHG_MEM8_R8: u32 = 0x0200;
+    pub const XCHG_R32_R32: u32 = 0x0201;
+
+    // 16-bit test
+    pub const TEST_R16_R16: u32 = 0x0203;
+    pub const TEST_R16_IMM16: u32 = 0x0204;
+    pub const TEST_MEM16_R16: u32 = 0x0205;
+
+    // 32-bit bit scans / counts
+    pub const BSF_R32_R32: u32 = 0x0206;
+    pub const BSR_R32_R32: u32 = 0x0207;
+    pub const TZCNT_R32_R32: u32 = 0x0208;
+    pub const LZCNT_R32_R32: u32 = 0x0209;
+    pub const POPCNT_R32_R32: u32 = 0x020A;
+    pub const BSF_R64_MEM64: u32 = 0x020B;
+    pub const BSF_R32_MEM32: u32 = 0x020C;
+
+    // High/low-half packed moves
+    pub const MOVHPS_XMM_MEM64: u32 = 0x020D;
+    pub const MOVHPD_XMM_MEM64: u32 = 0x020E;
+    pub const MOVLPS_XMM_MEM64: u32 = 0x020F;
+    pub const MOVLPD_XMM_MEM64: u32 = 0x0210;
+    pub const MOVHPS_MEM64_XMM: u32 = 0x0211;
+    pub const MOVLPS_MEM64_XMM: u32 = 0x0212;
+    // movss/movsd scalar moves
+    pub const MOVSS_XMM_MEM32: u32 = 0x0213;
+    pub const MOVSS_MEM32_XMM: u32 = 0x0214;
+    pub const MOVSD_XMM_MEM64: u32 = 0x0215;
+    pub const MOVSD_MEM64_XMM: u32 = 0x0216;
+
+    // YMM (VEX.256) moves and lane-wise ops
+    pub const VMOVDQA_YMM_MEM: u32 = 0x0219;
+    pub const VMOVDQA_MEM_YMM: u32 = 0x021A;
+    pub const VMOVDQA_YMM_YMM: u32 = 0x021B;
+    pub const VMOVDQU_YMM_MEM: u32 = 0x021C;
+    pub const VMOVDQU_MEM_YMM: u32 = 0x021D;
+    pub const VMOVDQU_YMM_YMM: u32 = 0x021E;
+    pub const VMOVAPS_YMM_MEM: u32 = 0x021F;
+    pub const VMOVAPS_MEM_YMM: u32 = 0x0220;
+    pub const VMOVUPS_YMM_MEM: u32 = 0x0221;
+    pub const VMOVUPS_MEM_YMM: u32 = 0x0222;
+    pub const VPXOR_YMM_YMM_YMM: u32 = 0x0223;
+    pub const VPOR_YMM_YMM_YMM: u32 = 0x0224;
+    pub const VPAND_YMM_YMM_YMM: u32 = 0x0225;
+    pub const VPCMPEQB_YMM_YMM_YMM: u32 = 0x0226;
+    pub const VPMOVMSKB_R32_YMM: u32 = 0x0227;
+    pub const VPBROADCASTB_YMM_XMM: u32 = 0x0228;
+    pub const VPBROADCASTQ_YMM_XMM: u32 = 0x0229;
+    pub const VPBROADCASTB_YMM_MEM8: u32 = 0x022A;
+    pub const VPSHUFD_YMM_YMM_IMM8: u32 = 0x022B;
+    pub const VXORPS_YMM_YMM_YMM: u32 = 0x022C;
+    pub const VZEROUPPER: u32 = 0x022D;
+    pub const VMOVD_YMM_R32: u32 = 0x022E;
+    pub const VMOVD_R32_YMM: u32 = 0x022F;
+    pub const VMOVQ_YMM_R64: u32 = 0x0230;
+    pub const VMOVQ_R64_YMM: u32 = 0x0231;
+
+    // VEX.128 3-operand forms
+    pub const VPXOR_XMM_XMM_XMM: u32 = 0x0232;
+    pub const VPOR_XMM_XMM_XMM: u32 = 0x0233;
+    pub const VPAND_XMM_XMM_XMM: u32 = 0x0234;
+    pub const VXORPS_XMM_XMM_XMM: u32 = 0x0235;
+    pub const VPCMPEQB_XMM_XMM_XMM: u32 = 0x0236;
+    pub const VPINSRB_XMM_XMM_R8_IMM8: u32 = 0x0237;
+    pub const VPINSRW_XMM_XMM_R16_IMM8: u32 = 0x0238;
+    pub const VPINSRD_XMM_XMM_R32_IMM8: u32 = 0x0239;
+    pub const VPINSRQ_XMM_XMM_R64_IMM8: u32 = 0x023A;
+    pub const VINSERTI128_YMM_YMM_XMM_IMM8: u32 = 0x023B;
+    pub const VINSERTF128_YMM_YMM_XMM_IMM8: u32 = 0x023C;
+    pub const VEXTRACTI128_XMM_YMM_IMM8: u32 = 0x023D;
+    pub const VEXTRACTF128_XMM_YMM_IMM8: u32 = 0x023E;
+    pub const VPINSRB_XMM_XMM_MEM8_IMM8: u32 = 0x023F;
+    pub const VPINSRW_XMM_XMM_MEM16_IMM8: u32 = 0x0240;
+    pub const VPINSRD_XMM_XMM_MEM32_IMM8: u32 = 0x0241;
+    pub const VPINSRQ_XMM_XMM_MEM64_IMM8: u32 = 0x0242;
+
+    // VEX.128 move forms
+    pub const VMOVDQA_XMM_MEM: u32 = 0x0243;
+    pub const VMOVDQA_MEM_XMM: u32 = 0x0244;
+    pub const VMOVDQA_XMM_XMM: u32 = 0x0245;
+    pub const VMOVDQU_XMM_MEM: u32 = 0x0246;
+    pub const VMOVDQU_MEM_XMM: u32 = 0x0247;
+    pub const VMOVDQU_XMM_XMM: u32 = 0x0248;
+    pub const VMOVAPS_XMM_MEM: u32 = 0x0249;
+    pub const VMOVAPS_MEM_XMM: u32 = 0x024A;
+    pub const VMOVUPS_XMM_MEM: u32 = 0x024B;
+    pub const VMOVUPS_MEM_XMM: u32 = 0x024C;
+    pub const VEXTRACTI128_MEM128_YMM_IMM8: u32 = 0x024D;
+    pub const VEXTRACTF128_MEM128_YMM_IMM8: u32 = 0x024E;
+
+    // VEX movd/movq
+    pub const VMOVD_XMM_R32: u32 = 0x024F;
+    pub const VMOVD_R32_XMM: u32 = 0x0250;
+    pub const VMOVD_XMM_MEM32: u32 = 0x0251;
+    pub const VMOVD_MEM32_XMM: u32 = 0x0252;
+    pub const VMOVQ_XMM_R64: u32 = 0x0253;
+    pub const VMOVQ_R64_XMM: u32 = 0x0254;
+    pub const VMOVQ_XMM_MEM64: u32 = 0x0255;
+    pub const VMOVQ_MEM64_XMM: u32 = 0x0256;
+
+    // push/pop memory operand
+    pub const PUSH_MEM64: u32 = 0x0257;
+    pub const PUSH_MEM16: u32 = 0x0258;
+    pub const POP_MEM64: u32 = 0x0259;
+
+    // Unsigned divide (rdx:rax / operand -> rax=quot, rdx=rem)
+    pub const DIV_R64: u32 = 0x01D4;
+    pub const DIV_R32: u32 = 0x01D5;
+    pub const DIV_MEM64: u32 = 0x01D6;
+    pub const DIV_MEM32: u32 = 0x01D7;
+    pub const MUL_R64: u32 = 0x01D9;
+    pub const MUL_MEM64: u32 = 0x01DA;
+    pub const MUL_R32: u32 = 0x01DB;
+    pub const MUL_MEM32: u32 = 0x01DC;
 }
 
 /// RFLAGS bit positions used by the corpus.

@@ -663,8 +663,42 @@ pub mod syscall {
     pub const READ: u64 = 0;
     /// `write` syscall number.
     pub const WRITE: u64 = 1;
+    /// `mprotect` syscall number.
+    pub const MPROTECT: u64 = 10;
+    /// `brk` syscall number.
+    pub const BRK: u64 = 12;
+    pub const READLINKAT: u64 = 267;
+    pub const PRLIMIT64: u64 = 302;
+    /// `getpid` syscall number.
+    pub const GETPID: u64 = 39;
+    /// `arch_prctl` syscall number (segment-base setup for TLS).
+    pub const ARCH_PRCTL: u64 = 158;
+    /// `gettid` syscall number.
+    pub const GETTID: u64 = 186;
+    /// `set_tid_address` syscall number.
+    pub const SET_TID_ADDRESS: u64 = 218;
+    /// `exit_group` syscall number.
+    pub const EXIT_GROUP: u64 = 231;
+    /// `set_robust_list` syscall number.
+    pub const SET_ROBUST_LIST: u64 = 273;
+    /// `getrandom` syscall number.
+    pub const GETRANDOM: u64 = 318;
+    /// `rseq` syscall number.
+    pub const RSEQ: u64 = 334;
     /// `exit` syscall number.
     pub const EXIT: u64 = 60;
+
+    /// `arch_prctl` operation codes.
+    pub mod arch_prctl_op {
+        /// Set the FS segment base.
+        pub const SET_FS: u64 = 0x1002;
+        /// Get the FS segment base.
+        pub const GET_FS: u64 = 0x1003;
+        /// Set the GS segment base.
+        pub const SET_GS: u64 = 0x1001;
+        /// Get the GS segment base.
+        pub const GET_GS: u64 = 0x1004;
+    }
 
     /// Outcome of a modeled syscall.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

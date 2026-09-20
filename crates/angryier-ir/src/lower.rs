@@ -346,6 +346,23 @@ fn lower_memory_address(
         });
     }
 
+    // Segment overrides (FS/GS on Intel 64) add the decoded segment-base
+    // register to the effective address.
+    if let Some(segment_base_register) = memory.segment_base {
+        let segment_base = emitter.produce(IrOp::ReadRegister {
+            register: segment_base_register.0,
+            ty: pointer_type,
+        });
+        address = Some(match address {
+            Some(base) => emitter.produce(IrOp::Primitive {
+                op: IrPrimitive::Add,
+                ty: pointer_type,
+                inputs: vec![base, segment_base],
+            }),
+            None => segment_base,
+        });
+    }
+
     address.ok_or(IrLoweringError::UnsupportedValue("memory operand without an address"))
 }
 
@@ -365,7 +382,10 @@ fn lower_operand_read(
 ) -> Result<OperandRead, IrLoweringError> {
     let decoded = decoded.ok_or(IrLoweringError::UnsupportedValue("decoded operand binding"))?;
     let operand = decoded.operand(index).ok_or(IrLoweringError::MissingOperand(index))?;
-    if !operand.read {
+    // Registers are readable architectural state even when the decoder marks
+    // the operand write-only (for example `cmov`'s destination is read on the
+    // not-taken path). Non-register write-only operands are still rejected.
+    if !operand.read && !matches!(operand.kind, OperandKind::Register(_)) {
         return Err(IrLoweringError::UnsupportedValue("read from write-only operand"));
     }
     let ir_type = lower_type(ty)?;
@@ -380,18 +400,53 @@ fn lower_operand_read(
     let is_narrow_immediate = matches!(operand.kind, OperandKind::Immediate(_)) && operand.width_bits <= bit_width;
     // A memory operand's width is the width of the loaded value.
     let is_memory = matches!(operand.kind, OperandKind::Memory(_));
-    if !is_relative_branch && !is_narrow_immediate && !is_memory && operand.width_bits != bit_width {
+    // A provider may read fewer bits than a decoded register view exposes;
+    // the read is narrowed to the parent's low bits.
+    let is_narrow_register_read = matches!(
+        operand.kind,
+        OperandKind::Register(view) if view.bit_offset == 0 && view.width_bits >= bit_width
+    );
+    if !is_relative_branch
+        && !is_narrow_immediate
+        && !is_memory
+        && !is_narrow_register_read
+        && operand.width_bits != bit_width
+    {
         return Err(IrLoweringError::OperandTypeMismatch(index));
     }
 
     match operand.kind {
         // Reads do not care about the operand's write behavior; a zero-offset
-        // view of the requested width is read from its parent register (narrow
-        // views read the parent's low bits).
-        OperandKind::Register(view) if view.bit_offset == 0 && view.width_bits == bit_width => {
+        // view of the requested width is read from its parent register. A
+        // narrower request reads the parent's low bits (narrow-register reads
+        // are supported by the interpreter), which covers both real decoded
+        // views and providers that ask for fewer bits than the view exposes.
+        OperandKind::Register(view) if view.bit_offset == 0 && view.width_bits >= bit_width => {
             Ok(OperandRead::Op(IrOp::ReadRegister {
                 register: view.parent.0,
                 ty: ir_type,
+            }))
+        }
+        // A view with a nonzero bit offset (for example `%ch`/`%dh`) reads the
+        // span of parent bits covering the view, then extracts the view's bits.
+        OperandKind::Register(view)
+            if view.bit_offset > 0
+                && view.bit_offset + view.width_bits >= bit_width
+                && bit_width == view.width_bits =>
+        {
+            let span = view.bit_offset + view.width_bits;
+            let parent = emitter.produce(IrOp::ReadRegister {
+                register: view.parent.0,
+                ty: IrType::Bits(span),
+            });
+            let start = emitter.produce(IrOp::Constant {
+                ty: IrType::Bits(64),
+                bytes_le: u64::from(view.bit_offset).to_le_bytes().to_vec(),
+            });
+            Ok(OperandRead::Op(IrOp::Primitive {
+                op: IrPrimitive::Extract,
+                ty: ir_type,
+                inputs: vec![parent, start],
             }))
         }
         OperandKind::Immediate(immediate)
@@ -415,7 +470,7 @@ fn lower_operand_read(
                     .to_vec(),
             }))
         }
-        OperandKind::Memory(memory) if bit_width <= 64 => {
+        OperandKind::Memory(memory) if bit_width <= 512 => {
             let address = lower_memory_address(decoded, &memory, emitter)?;
             Ok(OperandRead::Op(IrOp::Load { address, ty: ir_type }))
         }
@@ -445,6 +500,28 @@ fn lower_operand_write(
     if !operand.written {
         return Err(IrLoweringError::UnsupportedEffect("write to read-only operand"));
     }
+    // A provider may produce a value wider than the decoded operand's write
+    // view (for example a `mov r32` provider emits the full-width value). For
+    // register destinations, narrow the value to the operand's width; the
+    // register write kind then applies the correct parent behavior.
+    let mut value = value;
+    let mut value_type = value_type;
+    if let OperandKind::Register(_) = operand.kind
+        && let (Some(value_bits), Some(operand_bits)) = (scalar_bit_width(value_type), Some(operand.width_bits))
+        && value_bits > operand_bits
+    {
+        let narrow_ty = IrType::Bits(operand_bits);
+        let zero = emitter.produce(IrOp::Constant {
+            ty: IrType::Bits(64),
+            bytes_le: 0u64.to_le_bytes().to_vec(),
+        });
+        value = emitter.produce(IrOp::Primitive {
+            op: IrPrimitive::Extract,
+            ty: narrow_ty,
+            inputs: vec![value, zero],
+        });
+        value_type = SemanticType::Scalar(angryier_semantics::ScalarType::BitVec(operand_bits));
+    }
     if scalar_bit_width(value_type) != Some(operand.width_bits) {
         return Err(IrLoweringError::OperandTypeMismatch(index));
     }
@@ -453,9 +530,13 @@ fn lower_operand_write(
             let kind = match view.write_behavior {
                 RegisterWriteBehavior::ReplaceParent => RegisterWriteKind::ReplaceParent,
                 RegisterWriteBehavior::ZeroExtendParent => RegisterWriteKind::ZeroExtendParent,
-                // Vector and other wide views rely on instruction semantics for
-                // the parent-register effect; they are full-width writes here.
-                RegisterWriteBehavior::SemanticDefined => RegisterWriteKind::ReplaceParent,
+                // Vector views carry their own bit offset/width; a partial view
+                // writes only its bits of the parent and preserves the rest,
+                // matching non-VEX SSE semantics (xmm writes do not clear zmm).
+                RegisterWriteBehavior::SemanticDefined => RegisterWriteKind::PreserveParent {
+                    bit_offset: view.bit_offset,
+                    width_bits: view.width_bits,
+                },
                 RegisterWriteBehavior::PreserveParent => RegisterWriteKind::PreserveParent {
                     bit_offset: view.bit_offset,
                     width_bits: view.width_bits,

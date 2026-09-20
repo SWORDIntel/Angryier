@@ -18,6 +18,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+#[cfg(feature = "xed")]
+use angryier_arch::DecodedInstruction;
 use angryier_arch::Decoder;
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 use angryier_execution::{
@@ -54,6 +56,10 @@ const STACK_SIZE: u64 = 0x1_0000;
 
 /// Default stack base address (grows down from here).
 const STACK_BASE: Address = 0x7fff_0000_0000;
+/// Default heap base when the image has no segments.
+const HEAP_BASE: u64 = 0x5000_0000;
+/// Size of the mapped heap region managed by `brk`.
+const HEAP_SIZE: u64 = 0x40_0000;
 
 /// Maximum x86-64 instruction length in bytes.
 const MAX_INSN_LEN: usize = 15;
@@ -64,6 +70,9 @@ const MAX_TRACE: usize = 4096;
 /// Form id reserved for instructions executed by the environment model rather
 /// than the semantic corpus (`syscall`). No corpus form uses this id.
 pub const SYSCALL_FORM_ID: u32 = 0xFFFF_0001;
+/// Reserved form id for `cpuid`, which is modeled as a direct register
+/// assignment rather than straight-line corpus semantics.
+pub const CPUID_FORM_ID: u32 = 0xFFFF_0002;
 
 /// Errors produced by the runtime pipeline.
 #[derive(Debug)]
@@ -216,6 +225,10 @@ pub struct Process {
     pub trace: Vec<Address>,
     /// Observable effects of modeled syscalls (captured output, exit code).
     pub syscalls: SyscallModel,
+    /// Current program break for `brk` (initialized at the image end).
+    pub program_break: u64,
+    /// End of the mapped heap region; `brk` requests beyond it fail.
+    pub heap_end: u64,
     pub next_block_id: u64,
     pub step_count: u64,
     pub simproc_dispatches: u64,
@@ -335,6 +348,171 @@ impl<D: Decoder> Runtime<D> {
         }
     }
 
+    /// Writes the initial process stack image (argc/argv/envp/auxv) below the
+    /// top of the stack region and returns the resulting stack pointer.
+    ///
+    /// The layout mirrors what the Linux kernel builds for a real exec: a
+    /// small argv string and `AT_RANDOM` data above an argv/envp/auxv slot
+    /// array, with `argc` at the new stack pointer.
+    fn initial_stack_pointer(&self, image: &LoadedImage, memory: &mut PersistentMemory) -> Result<u64, RuntimeError> {
+        const AT_NULL: u64 = 0;
+        const AT_PHDR: u64 = 3;
+        const AT_PHENT: u64 = 4;
+        const AT_PHNUM: u64 = 5;
+        const AT_PAGESZ: u64 = 6;
+        const AT_ENTRY: u64 = 9;
+        const AT_UID: u64 = 11;
+        const AT_EUID: u64 = 12;
+        const AT_GID: u64 = 13;
+        const AT_EGID: u64 = 14;
+        const AT_HWCAP: u64 = 16;
+        const AT_CLKTCK: u64 = 17;
+        const AT_SECURE: u64 = 23;
+        const AT_RANDOM: u64 = 25;
+
+        let mut cursor = STACK_BASE - 16;
+        let argv0: &[u8] = b"angryier\0";
+        cursor -= argv0.len() as u64;
+        let argv0_addr = cursor;
+        cursor -= 16; // AT_RANDOM data
+        let random_addr = cursor;
+        cursor &= !0xF;
+
+        let mut auxv: Vec<(u64, u64)> = vec![(AT_PAGESZ, 4096), (AT_CLKTCK, 100), (AT_HWCAP, 0)];
+        if let Some(headers) = &image.program_headers {
+            auxv.push((AT_PHDR, headers.address));
+            auxv.push((AT_PHENT, u64::from(headers.entry_size)));
+            auxv.push((AT_PHNUM, u64::from(headers.count)));
+        }
+        auxv.extend_from_slice(&[
+            (AT_ENTRY, image.entry),
+            (AT_UID, 0),
+            (AT_EUID, 0),
+            (AT_GID, 0),
+            (AT_EGID, 0),
+            (AT_SECURE, 0),
+            (AT_RANDOM, random_addr),
+            (AT_NULL, 0),
+        ]);
+
+        // Slot array below the cursor: argc, argv[0], argv NULL, envp NULL, auxv.
+        let mut slots = vec![1u64, argv0_addr, 0, 0];
+        for (key, value) in &auxv {
+            slots.push(*key);
+            slots.push(*value);
+        }
+        let rsp = cursor
+            .saturating_sub((slots.len() as u64) * 8)
+            .saturating_sub((slots.len() as u64) * 8 % 16)
+            & !0xF;
+
+        let span = usize::try_from(STACK_BASE - rsp).map_err(|_| RuntimeError::Memory("stack span overflow".into()))?;
+        let mut bytes = vec![ByteValue::Concrete(0u8); span];
+        let put = |bytes: &mut [ByteValue], address: u64, data: &[u8]| {
+            let start = usize::try_from(address - rsp).map_err(|_| ())?;
+            let end = start.checked_add(data.len()).ok_or(())?;
+            if end > bytes.len() {
+                return Err(());
+            }
+            for (index, byte) in data.iter().enumerate() {
+                bytes[start + index] = ByteValue::Concrete(*byte);
+            }
+            Ok::<(), ()>(())
+        };
+        for (index, slot) in slots.iter().enumerate() {
+            put(&mut bytes, rsp + (index as u64) * 8, &slot.to_le_bytes())
+                .map_err(|_| RuntimeError::Memory("stack image overflow".into()))?;
+        }
+        put(&mut bytes, argv0_addr, argv0).map_err(|_| RuntimeError::Memory("stack image overflow".into()))?;
+        put(&mut bytes, random_addr, &[0xA5; 16]).map_err(|_| RuntimeError::Memory("stack image overflow".into()))?;
+
+        *memory = memory
+            .write(rsp, &bytes)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        Ok(rsp)
+    }
+
+    /// Executes a `rep`-prefixed string instruction directly against the
+    /// process state.
+    ///
+    /// String instructions encode an internal loop, so they cannot be
+    /// straight-line corpus semantics. Concrete and symbolic bytes propagate
+    /// through `rep movs` unchanged; `rep stos` writes concrete bytes.
+    #[cfg(feature = "xed")]
+    fn execute_string_instruction(
+        &self,
+        process: &mut Process,
+        pc: Address,
+        decoded: &DecodedInstruction,
+    ) -> Result<Option<StepOutcome>, RuntimeError> {
+        use crate::form_map::{
+            MOVSB_FORM_ID, MOVSD_FORM_ID, MOVSQ_FORM_ID, MOVSW_FORM_ID, REP_MOVSB_FORM_ID, REP_MOVSD_FORM_ID,
+            REP_MOVSQ_FORM_ID, REP_MOVSW_FORM_ID, REP_STOSB_FORM_ID, REP_STOSD_FORM_ID, REP_STOSQ_FORM_ID,
+            REP_STOSW_FORM_ID, STOSB_FORM_ID, STOSD_FORM_ID, STOSQ_FORM_ID, STOSW_FORM_ID,
+        };
+
+        // The REP_/plain iclasses encode whether the prefix is present, so the
+        // sentinel determines the count loop.
+        let (is_move, size, rep) = match decoded.form_id {
+            STOSB_FORM_ID | REP_STOSB_FORM_ID => (false, 1usize, decoded.form_id == REP_STOSB_FORM_ID),
+            STOSW_FORM_ID | REP_STOSW_FORM_ID => (false, 2, decoded.form_id == REP_STOSW_FORM_ID),
+            STOSD_FORM_ID | REP_STOSD_FORM_ID => (false, 4, decoded.form_id == REP_STOSD_FORM_ID),
+            STOSQ_FORM_ID | REP_STOSQ_FORM_ID => (false, 8, decoded.form_id == REP_STOSQ_FORM_ID),
+            MOVSB_FORM_ID | REP_MOVSB_FORM_ID => (true, 1, decoded.form_id == REP_MOVSB_FORM_ID),
+            MOVSW_FORM_ID | REP_MOVSW_FORM_ID => (true, 2, decoded.form_id == REP_MOVSW_FORM_ID),
+            MOVSD_FORM_ID | REP_MOVSD_FORM_ID => (true, 4, decoded.form_id == REP_MOVSD_FORM_ID),
+            MOVSQ_FORM_ID | REP_MOVSQ_FORM_ID => (true, 8, decoded.form_id == REP_MOVSQ_FORM_ID),
+            _ => return Ok(None),
+        };
+
+        let mut rcx = process.read_register(register_id::GPR_BASE + 1)?; // RCX
+        let mut rsi = process.read_register(register_id::GPR_BASE + 6)?; // RSI
+        let mut rdi = process.read_register(register_id::GPR_BASE + 7)?; // RDI
+        let rax = process.read_register(register_id::GPR_BASE)?; // RAX
+        let store_bytes = rax.to_le_bytes();
+
+        let mut count = if rep { rcx } else { 1 };
+        while count > 0 {
+            let data: Vec<ByteValue> = if is_move {
+                process
+                    .state
+                    .memory
+                    .read(rsi, size)
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?
+                    .to_vec()
+            } else {
+                store_bytes[..size].iter().map(|b| ByteValue::Concrete(*b)).collect()
+            };
+            process.state.memory = process
+                .state
+                .memory
+                .write(rdi, &data)
+                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+            rdi = rdi.wrapping_add(size as u64);
+            if is_move {
+                rsi = rsi.wrapping_add(size as u64);
+            }
+            count -= 1;
+        }
+        process.write_register(register_id::GPR_BASE + 7, rdi)?;
+        if is_move {
+            process.write_register(register_id::GPR_BASE + 6, rsi)?;
+        }
+        if rep {
+            rcx = 0;
+            process.write_register(register_id::GPR_BASE + 1, rcx)?;
+        }
+        let next_pc = pc.wrapping_add(u64::from(decoded.length));
+        process.write_pc(next_pc)?;
+        process.step_count += 1;
+        Ok(Some(StepOutcome::Stepped {
+            pc,
+            form_id: decoded.form_id,
+            next_pc,
+            length: decoded.length,
+        }))
+    }
+
     /// Loads an ELF64 image from raw bytes and creates a Process.
     pub fn load_elf(&self, bytes: &[u8]) -> Result<Process, RuntimeError> {
         let loader = Elf64Loader::new();
@@ -363,6 +541,24 @@ impl<D: Decoder> Runtime<D> {
             });
         }
 
+        // Add a heap region immediately after the highest mapped image
+        // segment; `brk` manages the program break inside it.
+        let brk_base = image
+            .segments
+            .iter()
+            .map(|seg| seg.address.wrapping_add(u64::try_from(seg.bytes.len()).unwrap_or(0)))
+            .max()
+            .map(|end| end.wrapping_add(0xFFF) & !0xFFF)
+            .unwrap_or(HEAP_BASE);
+        regions.push(MemoryRegion {
+            object: angryier_types::ObjectId(2),
+            base: brk_base,
+            size: HEAP_SIZE,
+            readable: true,
+            writable: true,
+            executable: false,
+        });
+
         // Add a stack region.
         regions.push(MemoryRegion {
             object: angryier_types::ObjectId(1),
@@ -385,6 +581,12 @@ impl<D: Decoder> Runtime<D> {
                 .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
         }
 
+        // Lay out the initial process stack the way the Linux kernel does for
+        // a real exec: argc/argv/envp/auxv. libc `_start` code reads argc from
+        // `[rsp]`, so the stack pointer must land on a populated image rather
+        // than the top of the mapped region.
+        let stack_pointer = self.initial_stack_pointer(&image, &mut memory)?;
+
         // Initialize registers with Intel64 canonical widths.
         let reg_file = Intel64RegisterFile::canonical();
         let widths: Vec<(u32, usize)> = reg_file
@@ -403,10 +605,9 @@ impl<D: Decoder> Runtime<D> {
             .write(register_id::RIP.0, &image.entry.to_le_bytes())
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
 
-        // Set RSP to top of stack region (aligned to 16 bytes).
-        let stack_top = STACK_BASE & !0xF;
+        // Set RSP to the initial process stack image.
         registers = registers
-            .write(register_id::GPR_BASE + 4, &stack_top.to_le_bytes()) // RSP = GPR 4
+            .write(register_id::GPR_BASE + 4, &stack_pointer.to_le_bytes()) // RSP = GPR 4
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
 
         // Zero RFLAGS.
@@ -436,6 +637,8 @@ impl<D: Decoder> Runtime<D> {
             symbols: image.symbols,
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
+            program_break: brk_base,
+            heap_end: brk_base + HEAP_SIZE,
             next_block_id: 0,
             step_count: 0,
             simproc_dispatches: 0,
@@ -493,6 +696,20 @@ impl<D: Decoder> Runtime<D> {
         // Modeled syscalls are environment interactions, not corpus semantics.
         if decoded.form_id == SYSCALL_FORM_ID {
             return self.dispatch_syscall(process, pc, decoded.length);
+        }
+
+        // `cpuid` queries the environment's processor model; it is executed
+        // directly like a syscall since it has no corpus semantic provider.
+        if decoded.form_id == CPUID_FORM_ID {
+            return self.execute_cpuid(process, pc, decoded.length);
+        }
+
+        // String instructions encode an internal loop, so they run directly
+        // against the process state rather than through straight-line corpus
+        // semantics.
+        #[cfg(feature = "xed")]
+        if let Some(outcome) = self.execute_string_instruction(process, pc, &decoded)? {
+            return Ok(outcome);
         }
 
         // Resolve semantic provider.
@@ -563,9 +780,10 @@ impl<D: Decoder> Runtime<D> {
         match outcome {
             ExecutionOutcome::Continue { next_pc, .. } => {
                 process.write_pc(next_pc)?;
-                if process.trace.len() < MAX_TRACE {
-                    process.trace.push(pc);
+                if process.trace.len() >= MAX_TRACE {
+                    process.trace.remove(0);
                 }
+                process.trace.push(pc);
                 Ok(StepOutcome::Stepped {
                     pc,
                     next_pc,
@@ -719,9 +937,10 @@ impl<D: Decoder> Runtime<D> {
         let arg0 = process.read_register(register_id::GPR_BASE + 7)?; // RDI
         let arg1 = process.read_register(register_id::GPR_BASE + 6)?; // RSI
         let arg2 = process.read_register(register_id::GPR_BASE + 2)?; // RDX
+        let arg3 = process.read_register(register_id::GPR_BASE + 10)?; // R10
         let next_pc = pc.wrapping_add(u64::from(length));
 
-        match number {
+        let outcome: Result<StepOutcome, RuntimeError> = match number {
             syscall::EXIT => {
                 process.syscalls.record_exit(arg0);
                 process.terminated = true;
@@ -736,8 +955,185 @@ impl<D: Decoder> Runtime<D> {
                 process.step_count += 1;
                 Ok(StepOutcome::Syscall { pc, number })
             }
+            syscall::ARCH_PRCTL => {
+                use angryier_models::syscall::arch_prctl_op;
+                let value = match arg0 {
+                    arch_prctl_op::SET_FS => {
+                        process.write_register(register_id::FS_BASE.0, arg1)?;
+                        0
+                    }
+                    arch_prctl_op::SET_GS => {
+                        process.write_register(register_id::GS_BASE.0, arg1)?;
+                        0
+                    }
+                    arch_prctl_op::GET_FS => {
+                        let base = process.read_register(register_id::FS_BASE.0)?;
+                        let bytes: Vec<ByteValue> =
+                            base.to_le_bytes().iter().map(|b| ByteValue::Concrete(*b)).collect();
+                        process.state.memory = process
+                            .state
+                            .memory
+                            .write(arg1, &bytes)
+                            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                        0
+                    }
+                    arch_prctl_op::GET_GS => {
+                        let base = process.read_register(register_id::GS_BASE.0)?;
+                        let bytes: Vec<ByteValue> =
+                            base.to_le_bytes().iter().map(|b| ByteValue::Concrete(*b)).collect();
+                        process.state.memory = process
+                            .state
+                            .memory
+                            .write(arg1, &bytes)
+                            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                        0
+                    }
+                    // Unknown arch_prctl op: report -EINVAL like Linux does.
+                    _ => 0u64.wrapping_sub(22),
+                };
+                process.write_register(register_id::GPR_BASE, value)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::BRK => {
+                // Linux brk semantics: `brk(0)` returns the current break;
+                // a request inside the heap region moves the break and
+                // returns the new value, anything else returns the old break.
+                let result = if arg0 == 0 || arg0 < process.program_break || arg0 > process.heap_end {
+                    process.program_break
+                } else {
+                    process.program_break = arg0;
+                    arg0
+                };
+                process.write_register(register_id::GPR_BASE, result)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::PRLIMIT64 => {
+                // prlimit64(pid, resource, new, old): report a plausible
+                // rlimit (8 MiB soft, infinite hard) when `old` is non-null.
+                if arg3 != 0 {
+                    let rlim: Vec<ByteValue> = 0x80_0000u64
+                        .to_le_bytes()
+                        .iter()
+                        .chain(u64::MAX.to_le_bytes().iter())
+                        .map(|b| ByteValue::Concrete(*b))
+                        .collect();
+                    process.state.memory = process
+                        .state
+                        .memory
+                        .write(arg3, &rlim)
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                }
+                process.write_register(register_id::GPR_BASE, 0)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::READLINKAT => {
+                // readlinkat(dirfd, path, buf, bufsiz): report a fixed
+                // executable path so glibc's /proc/self/exe resolution
+                // produces a name; -ENOENT would abort some startup paths.
+                let path = b"/angryier";
+                let n = (path.len() as u64).min(arg3);
+                let bytes: Vec<ByteValue> = path[..usize::try_from(n).unwrap_or(0)]
+                    .iter()
+                    .map(|b| ByteValue::Concrete(*b))
+                    .collect();
+                process.state.memory = process
+                    .state
+                    .memory
+                    .write(arg2, &bytes)
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                process.write_register(register_id::GPR_BASE, n)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::SET_TID_ADDRESS | syscall::GETTID | syscall::GETPID => {
+                // Single-threaded process: report a fixed, nonzero tid/pid.
+                process.write_register(register_id::GPR_BASE, 1)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::SET_ROBUST_LIST | syscall::MPROTECT => {
+                // No-op models: robust lists and permission changes are not
+                // observable in the current single-process model.
+                process.write_register(register_id::GPR_BASE, 0)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::RSEQ => {
+                // Report -ENOSYS: callers treat rseq as absent.
+                process.write_register(register_id::GPR_BASE, 0u64.wrapping_sub(38))?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::GETRANDOM => {
+                // Deterministic pseudo-random fill (repeatable by seed 0xa5).
+                // getrandom(buf=rdi, buflen=rsi, flags=rdx).
+                let mut byte = 0xa5u8;
+                let data: Vec<ByteValue> = (0..arg1)
+                    .map(|i| {
+                        byte = byte.wrapping_mul(31).wrapping_add(i as u8);
+                        ByteValue::Concrete(byte)
+                    })
+                    .collect();
+                process.state.memory = process
+                    .state
+                    .memory
+                    .write(arg0, &data)
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                process.write_register(register_id::GPR_BASE, arg1)?;
+                process.write_pc(next_pc)?;
+                process.step_count += 1;
+                Ok(StepOutcome::Syscall { pc, number })
+            }
+            syscall::EXIT_GROUP => {
+                process.syscalls.record_exit(arg0);
+                process.terminated = true;
+                process.step_count += 1;
+                Ok(StepOutcome::Terminated { pc })
+            }
             other => Err(RuntimeError::UnsupportedSyscall(other)),
+        };
+        outcome.map_err(|e| match e {
+            // Attach syscall-argument context to memory/access faults; typed
+            // errors like UnsupportedSyscall keep their variant for callers.
+            RuntimeError::Memory(inner) => RuntimeError::Memory(format!(
+                "syscall {number} rdi={arg0:#x} rsi={arg1:#x} rdx={arg2:#x} r10={arg3:#x}: {inner}"
+            )),
+            other => other,
+        })
+    }
+
+    /// Executes `cpuid` by writing a conservative modern x86-64 feature model
+    /// into RAX/RBX/RCX/RDX based on the leaf in EAX and subleaf in ECX.
+    fn execute_cpuid(&self, process: &mut Process, pc: Address, length: u8) -> Result<StepOutcome, RuntimeError> {
+        let leaf = process.read_register(register_id::GPR_BASE)? as u32; // EAX
+        let subleaf = process.read_register(register_id::GPR_BASE + 1)? as u32; // ECX
+        let (a, b, c, d) = cpuid_model(leaf, subleaf);
+        for (reg, value) in [
+            (register_id::GPR_BASE, a),     // RAX
+            (register_id::GPR_BASE + 3, b), // RBX
+            (register_id::GPR_BASE + 1, c), // RCX
+            (register_id::GPR_BASE + 2, d), // RDX
+        ] {
+            process.write_register(reg, u64::from(value))?;
         }
+        process.write_pc(pc.wrapping_add(u64::from(length)))?;
+        process.step_count += 1;
+        Ok(StepOutcome::Stepped {
+            pc,
+            next_pc: pc.wrapping_add(u64::from(length)),
+            length,
+            form_id: CPUID_FORM_ID,
+        })
     }
 
     /// Dispatches a SimProcedure at the given address.
@@ -855,6 +1251,48 @@ pub fn load_elf_file(path: &str) -> Result<Vec<u8>, RuntimeError> {
 }
 
 /// Reads `len` concrete bytes from process memory for a syscall buffer.
+/// A conservative CPUID model reporting a modern x86-64 baseline: SSE/SSE2
+/// through AVX2 plus the features a generic 2015-era Skylake-class processor
+/// exposes. Feature bits drive glibc/musl hardware-capability dispatch; the
+/// model keeps them deterministic and replay-stable.
+fn cpuid_model(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    match (leaf, subleaf) {
+        // Leaf 0: maximum basic leaf + "GenuineIntel" vendor string.
+        (0, _) => (0x16, 0x756e6547, 0x6c65746e, 0x49656e69),
+        // Leaf 1: signature (Skylake 06_5E), APIC id, ECX/EDX feature bits.
+        //   ECX: SSE3 SSSE3 SSE4.1 SSE4.2 MOVBE POPCNT RDRND — the model
+        //   deliberately omits AVX/AVX512/XSAVE so hardware dispatch picks
+        //   the 128-bit SSE code paths the concrete interpreter supports.
+        //   EDX: FPU TSC MSR MTRR CMOV MMX FXSR SSE SSE2 HTT CLFSH SEP
+        (1, _) => (0x506e3, 0, 0b0100_0000_1101_1000_0000_0010_0000_0001, 0x1f8bfbff),
+        // Leaf 7 subleaf 0: EBX feature bits — FSGSBASE ERMS INVPCID RDSEED
+        // only; BMI/AVX2/AVX512 are omitted for the same reason.
+        (7, 0) => (0, 0b0000_0000_0000_0100_0000_0110_0000_0001, 0, 0),
+        // Extended leaf 0x80000000: max extended leaf + vendor.
+        (0x8000_0000, _) => (0x8000_0008, 0, 0, 0),
+        // Extended leaf 0x80000001: NX + LM in EDX.
+        (0x8000_0001, _) => (0, 0, 0, 0x2010_0000),
+        // Brand string "Generic x86-64 CPU    " across leaves 0x80000002-4.
+        (0x8000_0002, _) => (
+            u32::from_le_bytes(*b"Gene"),
+            u32::from_le_bytes(*b"ric "),
+            u32::from_le_bytes(*b"x86-"),
+            u32::from_le_bytes(*b"64 C"),
+        ),
+        (0x8000_0003, _) => (
+            u32::from_le_bytes(*b"PU  "),
+            u32::from_le_bytes(*b"    "),
+            u32::from_le_bytes(*b"    "),
+            u32::from_le_bytes(*b"    "),
+        ),
+        (0x8000_0004, _) => (0, 0, 0, 0),
+        // Physical/virtual address width: 48-bit linear, 48-bit physical.
+        (0x8000_0008, _) => (0x3030, 0, 0, 0),
+        // Any other leaf: report zeros (feature absent).
+        _ => (0, 0, 0, 0),
+    }
+}
+
 fn read_concrete_bytes(process: &Process, address: Address, len: u64) -> Result<Vec<u8>, RuntimeError> {
     let len = usize::try_from(len).map_err(|_| RuntimeError::Memory("syscall buffer too large".into()))?;
     if len == 0 {
@@ -957,6 +1395,7 @@ mod tests {
                     memory_index: 0,
                     address_width_bits: 64,
                     segment: None,
+                    segment_base: None,
                     base: Some(MemoryBase::Register(RegisterView::full(RegisterId(4), 64))),
                     index: None,
                     scale: 1,

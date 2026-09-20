@@ -59,6 +59,21 @@ pub struct LoadedImage {
     /// Symbols parsed from the static symbol table; empty when the image has
     /// no section headers or no `.symtab`.
     pub symbols: Vec<Symbol>,
+    /// Where the program header table landed in memory, when it is covered by
+    /// a loaded segment. Needed for the `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`
+    /// auxiliary-vector entries consumed by libc startup code.
+    pub program_headers: Option<ProgramHeadersInfo>,
+}
+
+/// Location of the loaded ELF program header table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramHeadersInfo {
+    /// Virtual address of the table in the process image.
+    pub address: Address,
+    /// Size of one entry in bytes (`e_phentsize`).
+    pub entry_size: u16,
+    /// Number of entries (`e_phnum`).
+    pub count: u16,
 }
 
 impl LoadedImage {
@@ -233,6 +248,7 @@ impl ImageLoader for InMemoryImageLoader {
                 executable: true,
             }],
             symbols: Vec::new(),
+            program_headers: None,
         })
     }
 }
@@ -509,6 +525,7 @@ impl ImageLoader for Elf64Loader {
         }
 
         let mut segments = Vec::new();
+        let mut load_ranges = Vec::new();
 
         for i in 0..phnum {
             let ph_offset = phoff
@@ -522,6 +539,7 @@ impl ImageLoader for Elf64Loader {
             let p_memsz = read_u64_le_at(bytes, ph_offset + 40)?;
 
             if p_type == PT_LOAD {
+                load_ranges.push((p_offset, p_vaddr, p_filesz));
                 if p_memsz < p_filesz {
                     return Err(LoaderError::SegmentOutOfRange);
                 }
@@ -558,12 +576,23 @@ impl ImageLoader for Elf64Loader {
 
         let id = self.allocate_id()?;
 
+        let ph_table_end = e_phoff.saturating_add(ph_table_bytes as u64);
+        let program_headers = load_ranges
+            .iter()
+            .find(|(offset, _, filesz)| *offset <= e_phoff && ph_table_end <= offset.saturating_add(*filesz))
+            .map(|(offset, vaddr, _)| ProgramHeadersInfo {
+                address: vaddr + (e_phoff - *offset),
+                entry_size: e_phentsize,
+                count: e_phnum,
+            });
+
         Ok(LoadedImage {
             id,
             entry: e_entry,
             target_profile: INTEL64_TARGET_PROFILE,
             segments,
             symbols: parse_symbol_table(bytes)?,
+            program_headers,
         })
     }
 }

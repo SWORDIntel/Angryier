@@ -19,7 +19,7 @@ use crate::{forms, rflags, rule_id};
 use angryier_arch_intel64::register_id;
 use angryier_semantics::{
     DecodedInstructionView, PrimitiveOp, RegisterId, ScalarType, SemanticBuilder, SemanticContext, SemanticError,
-    SemanticOp, SemanticOrigin, SemanticProvider, SemanticReceipt, SemanticType, SideEffect, ValueId,
+    SemanticOp, SemanticOrigin, SemanticProvider, SemanticReceipt, SemanticType, ValueId,
 };
 use angryier_types::SemanticRuleId;
 
@@ -61,7 +61,7 @@ fn fall_through(out: &mut dyn SemanticBuilder, insn: &dyn DecodedInstructionView
 
 /// Computes ZF, SF, and CF for an addition and writes the new RFLAGS.
 /// `result = left + right` (wrapping). CF = carry out = `result < left` (unsigned).
-fn write_add_flags(
+pub(crate) fn write_add_flags(
     out: &mut dyn SemanticBuilder,
     result: ValueId,
     left: ValueId,
@@ -103,7 +103,7 @@ fn write_add_flags(
 
 /// Computes ZF, SF, and CF for a subtraction and writes the new RFLAGS.
 /// `result = left - right` (wrapping). CF = borrow = `left < right` (unsigned).
-fn write_sub_flags(
+pub(crate) fn write_sub_flags(
     out: &mut dyn SemanticBuilder,
     result: ValueId,
     left: ValueId,
@@ -146,7 +146,11 @@ fn write_sub_flags(
 }
 
 /// Computes ZF and SF for a logical operation (CF=0, OF=0) and writes RFLAGS.
-fn write_logical_flags(out: &mut dyn SemanticBuilder, result: ValueId, width_bits: u16) -> Result<(), SemanticError> {
+pub(crate) fn write_logical_flags(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    width_bits: u16,
+) -> Result<(), SemanticError> {
     let result = widen_to_u64(out, result, width_bits)?;
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
     let zero = out.constant(U64, &0u64.to_le_bytes())?;
@@ -2618,23 +2622,23 @@ fn read_zero_extend(
     operand_index: u8,
     src_ty: SemanticType,
 ) -> Result<ValueId, SemanticError> {
-    let src = out.read_operand(operand_index, U64)?;
-    let start = const_u64(out, 0)?;
-    let extracted = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), src_ty, &[src, start])?;
-    out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[extracted])
+    // Read the operand at its declared width; the lowering narrows register
+    // views when the decoded operand exposes more bits than requested.
+    let src = out.read_operand(operand_index, src_ty)?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[src])
 }
 
-/// Reads the full 64-bit source register from `operand_index`, extracts the
-/// lower `src_ty` bits, and sign-extends the result to 64 bits.
+/// Reads the operand at `src_ty` width and sign-extends the result to 64 bits.
 fn read_sign_extend(
     out: &mut dyn SemanticBuilder,
     operand_index: u8,
     src_ty: SemanticType,
 ) -> Result<ValueId, SemanticError> {
-    let src = out.read_operand(operand_index, U64)?;
-    let start = const_u64(out, 0)?;
-    let extracted = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), src_ty, &[src, start])?;
-    out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[extracted])
+    // Read the operand at its declared width and sign-extend to 64 bits. A
+    // decoded operand may expose a narrower view than its parent register; the
+    // lowering reads the parent's low bits for register operands.
+    let src = out.read_operand(operand_index, src_ty)?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[src])
 }
 
 // ---------------------------------------------------------------------------
@@ -3394,7 +3398,7 @@ impl SemanticProvider for PushImm8 {
         let value = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[imm8])?;
         let eight = const_u64(out, 8)?;
         let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
-        out.side_effect(SideEffect::MemoryWrite, &[new_rsp, value])?;
+        out.write_operand(1, value)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         fall_through(out, insn)?;
         Ok(receipt(83, context))
@@ -3430,7 +3434,7 @@ impl SemanticProvider for PushImm32 {
         let value = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[imm32])?;
         let eight = const_u64(out, 8)?;
         let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
-        out.side_effect(SideEffect::MemoryWrite, &[new_rsp, value])?;
+        out.write_operand(1, value)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         fall_through(out, insn)?;
         Ok(receipt(84, context))

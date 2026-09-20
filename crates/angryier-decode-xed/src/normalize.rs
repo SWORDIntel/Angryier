@@ -15,7 +15,7 @@ use angryier_arch::{
 };
 use angryier_arch_intel64::{
     GprViewKind, IntelFeature, VectorViewKind, encoding_class, gpr_view, mmx_view, opmask_view, register_id,
-    segment_id, tile_view, vector_view, x87_view,
+    segment_base_register, segment_id, tile_view, vector_view, x87_view,
 };
 use angryier_types::Address;
 use std::collections::BTreeSet;
@@ -232,10 +232,13 @@ fn normalize_memory(memory: XedMemoryOperand) -> Result<MemoryOperand, XedAdapte
         Some(_) => return Err(XedAdapterError::InvalidMemoryScale(memory.scale)),
     };
 
+    let segment = memory.segment.map(normalize_segment);
+    let segment_base = segment.and_then(segment_base_register);
     Ok(MemoryOperand {
         memory_index: memory.memory_index,
         address_width_bits: memory.address_width_bits,
-        segment: memory.segment.map(normalize_segment),
+        segment,
+        segment_base,
         base,
         index,
         scale,

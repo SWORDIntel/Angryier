@@ -590,3 +590,104 @@ fn solved_input_reaches_target_state_natively() -> Result<(), Box<dyn std::error
     assert_eq!(native_code, 0, "solved input RAX = {rax} must reach ok_path natively");
     Ok(())
 }
+
+#[cfg(test)]
+mod debug_glibc {
+    use super::*;
+    use angryier_runtime::{Runtime, StepOutcome};
+
+    /// A statically linked musl hello-world should execute from the ELF entry
+    /// all the way through `__libc_start_main`, TLS setup, and `main` to a
+    /// `write` + `exit_group`, producing the expected output.
+    #[test]
+    fn trace_static_musl() {
+        let Ok(bytes) = std::fs::read("/tmp/hello_musl") else {
+            eprintln!("no fixture");
+            return;
+        };
+        let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+        let mut process = runtime.load_elf(&bytes).expect("musl ELF loads");
+
+        let mut terminated = false;
+        for _ in 0..200_000 {
+            match runtime.step(&mut process) {
+                Ok(StepOutcome::Stepped { .. }) | Ok(StepOutcome::Syscall { .. }) => {}
+                Ok(StepOutcome::Terminated { .. }) => {
+                    terminated = true;
+                    break;
+                }
+                Ok(other) => panic!("unexpected outcome {other:?}"),
+                Err(e) => panic!("step failed at pc={:#x}: {e}", process.pc().unwrap_or(0)),
+            }
+        }
+        assert!(terminated, "process did not terminate within the step budget");
+        assert_eq!(
+            String::from_utf8_lossy(&process.syscalls.output()),
+            "hello from glibc\n"
+        );
+        assert_eq!(process.syscalls.exit_code(), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod dbg_glibc2 {
+    use super::*;
+    use angryier_runtime::{Runtime, StepOutcome};
+
+    /// Statically linked glibc binary: runs libc startup, malloc init, and
+    /// printf -> write end-to-end under the XED decoder and the modeled Linux
+    /// environment.
+    #[test]
+    fn runs_static_glibc() {
+        let Ok(bytes) = std::fs::read("/tmp/hello_glibc") else {
+            eprintln!("no fixture");
+            return;
+        };
+        let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+        let mut process = runtime.load_elf(&bytes).expect("load");
+        for i in 0..400_000 {
+            match runtime.step(&mut process) {
+                Ok(StepOutcome::Terminated { .. }) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    let pc = process.pc().unwrap_or(0);
+                    let tail = &process.trace[process.trace.len().saturating_sub(16)..];
+                    panic!("stopped after {i} steps at pc={pc:#x}: {e}\ntail: {tail:#x?}");
+                }
+            }
+        }
+        assert_eq!(process.syscalls.output(), b"hello from glibc\n");
+        assert_eq!(process.syscalls.exit_code(), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod dbg_musl_stuck {
+    use super::*;
+    use angryier_runtime::{Runtime, StepOutcome};
+
+    #[test]
+    fn where_stuck() {
+        let Ok(bytes) = std::fs::read("/tmp/hello_musl") else {
+            return;
+        };
+        let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+        let mut process = runtime.load_elf(&bytes).expect("load");
+        for i in 0..200_000 {
+            match runtime.step(&mut process) {
+                Ok(StepOutcome::Terminated { .. }) => {
+                    eprintln!("terminated at {i}");
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("err at {i} pc={:#x}: {e}", process.pc().unwrap_or(0));
+                    break;
+                }
+            }
+        }
+        let tail = &process.trace[process.trace.len().saturating_sub(30)..];
+        eprintln!("tail: {tail:#x?}");
+        eprintln!("output: {:?}", String::from_utf8_lossy(&process.syscalls.output()));
+    }
+}

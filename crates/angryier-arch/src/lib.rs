@@ -103,6 +103,9 @@ pub struct MemoryOperand {
     pub memory_index: u8,
     pub address_width_bits: u16,
     pub segment: Option<SegmentId>,
+    /// The register holding the segment's base address when one applies
+    /// (for example FS/GS bases on Intel 64); `None` for zero-base segments.
+    pub segment_base: Option<RegisterId>,
     pub base: Option<MemoryBase>,
     pub index: Option<MemoryIndex>,
     pub scale: u8,

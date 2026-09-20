@@ -70,6 +70,18 @@ pub mod segment_id {
     pub const GS: SegmentId = SegmentId(5);
 }
 
+/// Returns the segment-base register for FS/GS overrides, or `None` for
+/// segments whose base is architecturally zero in long mode.
+pub fn segment_base_register(segment: angryier_arch::SegmentId) -> Option<angryier_arch::RegisterId> {
+    if segment == segment_id::FS {
+        Some(register_id::FS_BASE)
+    } else if segment == segment_id::GS {
+        Some(register_id::GS_BASE)
+    } else {
+        None
+    }
+}
+
 /// Stable parent-register identifier ranges. These values are persistence and
 /// replay identifiers and must not be renumbered when new aliases are added.
 pub mod register_id {
@@ -78,6 +90,10 @@ pub mod register_id {
     pub const GPR_BASE: u32 = 0x0000;
     pub const RIP: RegisterId = RegisterId(0x0020);
     pub const RFLAGS: RegisterId = RegisterId(0x0021);
+    /// FS segment base address (TLS pointer under Linux).
+    pub const FS_BASE: RegisterId = RegisterId(0x0022);
+    /// GS segment base address.
+    pub const GS_BASE: RegisterId = RegisterId(0x0023);
     pub const ZMM_BASE: u32 = 0x0100;
     pub const OPMASK_BASE: u32 = 0x0140;
     pub const X87_BASE: u32 = 0x0180;
@@ -92,7 +108,7 @@ pub const OPMASK_COUNT: u8 = 8;
 pub const X87_COUNT: u8 = 8;
 pub const TILE_COUNT: u8 = 8;
 pub const TMM_MAX_BITS: u16 = 8192;
-pub const INTEL64_PARENT_REGISTER_COUNT: usize = 92;
+pub const INTEL64_PARENT_REGISTER_COUNT: usize = 94;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GprViewKind {
@@ -275,6 +291,8 @@ impl Intel64RegisterFile {
         }
         registers.push((register_id::RIP, 64));
         registers.push((register_id::RFLAGS, 64));
+        registers.push((register_id::FS_BASE, 64));
+        registers.push((register_id::GS_BASE, 64));
 
         for index in 0..VECTOR_COUNT {
             registers.push((RegisterId(register_id::ZMM_BASE + u32::from(index)), 512));

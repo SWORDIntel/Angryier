@@ -159,7 +159,7 @@ unsafe fn extract_operands(xedd: *const xed_sys::xed_decoded_inst_t) -> Result<V
         let visibility = map_visibility(xed_operand_operand_visibility(op));
         let access = map_access(xed_operand_rw(op));
 
-        let kind = match operand_kind_for_name(xedd, name)? {
+        let kind = match operand_kind_for_name(xedd, name, access)? {
             Some(kind) => kind,
             None => continue,
         };
@@ -192,6 +192,7 @@ unsafe fn extract_operands(xedd: *const xed_sys::xed_decoded_inst_t) -> Result<V
 unsafe fn operand_kind_for_name(
     xedd: *const xed_sys::xed_decoded_inst_t,
     name: xed_operand_enum_t,
+    access: XedAccess,
 ) -> Result<Option<XedOperandKind>, XedAdapterError> {
     match name {
         XED_OPERAND_REG0 | XED_OPERAND_REG1 | XED_OPERAND_REG2 | XED_OPERAND_REG3 | XED_OPERAND_REG4
@@ -200,8 +201,8 @@ unsafe fn operand_kind_for_name(
             Ok(map_register(reg).map(|mapped| XedOperandKind::Register(mapped.reference)))
         }
         XED_OPERAND_IMM0 | XED_OPERAND_IMM1 => Ok(Some(extract_immediate(xedd))),
-        XED_OPERAND_MEM0 => Ok(extract_memory(xedd, 0, false).map(|kind| adjust_stack_store(xedd, 0, kind))),
-        XED_OPERAND_MEM1 => Ok(extract_memory(xedd, 1, false).map(|kind| adjust_stack_store(xedd, 1, kind))),
+        XED_OPERAND_MEM0 => Ok(extract_memory(xedd, 0, false).map(|kind| adjust_stack_store(xedd, 0, kind, access))),
+        XED_OPERAND_MEM1 => Ok(extract_memory(xedd, 1, false).map(|kind| adjust_stack_store(xedd, 1, kind, access))),
         XED_OPERAND_AGEN => Ok(extract_memory(xedd, 0, true)),
         XED_OPERAND_RELBR => Ok(Some(extract_relative_branch(xedd))),
         XED_OPERAND_ABSBR => Ok(Some(extract_absolute_branch(xedd))),
@@ -223,10 +224,17 @@ unsafe fn adjust_stack_store(
     xedd: *const xed_sys::xed_decoded_inst_t,
     mem_idx: c_uint,
     kind: XedOperandKind,
+    access: XedAccess,
 ) -> XedOperandKind {
     let XedOperandKind::Memory(mut memory) = kind else {
         return kind;
     };
+    // Only the stack-store operand (a write) is re-expressed relative to the
+    // pre-instruction stack pointer; an explicit `push [rsp+disp]` source is
+    // a read and must keep its encoded displacement.
+    if !matches!(access, XedAccess::Write | XedAccess::ReadWrite) {
+        return kind;
+    }
     let iclass = xed_decoded_inst_get_iclass(xedd);
     let is_stack_write = matches!(iclass, xed_sys::XED_ICLASS_PUSH | xed_sys::XED_ICLASS_CALL_NEAR);
     let base_is_stack_pointer = xed_decoded_inst_get_base_reg(xedd, mem_idx) == xed_sys::XED_REG_RSP;

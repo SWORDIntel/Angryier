@@ -117,7 +117,7 @@ impl<R, M> Default for ConcreteInterpreter<R, M> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConcreteValue {
     ty: IrType,
-    bytes: [u8; 16],
+    bytes: [u8; 64],
     len: u8,
 }
 
@@ -127,24 +127,24 @@ impl ConcreteValue {
     }
 
     fn from_bytes_le(ty: IrType, bytes: &[u8]) -> Self {
-        let mut buf = [0u8; 16];
-        let len = bytes.len().min(16);
+        let mut buf = [0u8; 64];
+        let len = bytes.len().min(64);
         buf[..len].copy_from_slice(&bytes[..len]);
         ConcreteValue {
             ty,
             bytes: buf,
-            len: u8::try_from(len).unwrap_or(16),
+            len: u8::try_from(len).unwrap_or(64),
         }
     }
 
     fn from_u128(ty: IrType, value: u128, bits: u16) -> Self {
-        let len = usize::from(bits).div_ceil(8);
-        let mut buf = [0u8; 16];
+        let len = usize::from(bits).div_ceil(8).min(64);
+        let mut buf = [0u8; 64];
         buf[..len].copy_from_slice(&value.to_le_bytes()[..len]);
         ConcreteValue {
             ty,
             bytes: buf,
-            len: u8::try_from(len).unwrap_or(16),
+            len: u8::try_from(len).unwrap_or(64),
         }
     }
 }
@@ -284,12 +284,12 @@ where
                 .memory
                 .read(address, width)
                 .map_err(ConcreteExecutionError::Memory)?;
-            let mut concrete = [0u8; 16];
+            let mut concrete = [0u8; 64];
             let mut len = 0usize;
             for (offset, byte) in bytes.into_iter().enumerate() {
                 match byte {
                     ByteValue::Concrete(byte) => {
-                        if len < 16 {
+                        if len < 64 {
                             concrete[len] = byte;
                             len += 1;
                         }
@@ -380,7 +380,7 @@ fn type_bytes<R, M>(ty: IrType) -> Result<usize, ConcreteExecutionError<R, M>> {
     usize::from(bits)
         .checked_add(7)
         .and_then(|bits| bits.checked_div(8))
-        .filter(|bytes| *bytes > 0 && *bytes <= 16)
+        .filter(|bytes| *bytes > 0 && *bytes <= 64)
         .ok_or(ConcreteExecutionError::UnsupportedType(ty))
 }
 
@@ -437,6 +437,17 @@ fn evaluate_primitive<R, M>(
         | IrPrimitive::Xor => {
             require_arity(operation, &resolved, 2)?;
             require_types(&resolved, ty)?;
+            if output_bits > 128 {
+                let left = resolved[0].bytes_le();
+                let right = resolved[1].bytes_le();
+                let result = match operation {
+                    IrPrimitive::And => bytes_and(left, right),
+                    IrPrimitive::Or => bytes_or(left, right),
+                    IrPrimitive::Xor => bytes_xor(left, right),
+                    _ => return Err(ConcreteExecutionError::UnsupportedOperation(operation)),
+                };
+                return Ok(ConcreteValue::from_bytes_le(ty, &result));
+            }
             let left = as_u128(resolved[0]);
             let right = as_u128(resolved[1]);
             match operation {
@@ -459,12 +470,61 @@ fn evaluate_primitive<R, M>(
         IrPrimitive::Not => {
             require_arity(operation, &resolved, 1)?;
             require_types(&resolved, ty)?;
+            if output_bits > 128 {
+                let result = bytes_not(resolved[0].bytes_le());
+                return Ok(ConcreteValue::from_bytes_le(ty, &result));
+            }
             !as_u128(resolved[0])
         }
         IrPrimitive::Shl | IrPrimitive::LShr | IrPrimitive::AShr => {
             require_arity(operation, &resolved, 2)?;
             if resolved[0].ty != ty || !matches!(resolved[1].ty, IrType::Bits(_)) {
                 return Err(ConcreteExecutionError::TypeMismatch);
+            }
+            if output_bits > 128 {
+                // Byte-level shift for ymm/zmm operands.
+                let shift = as_u128(resolved[1]);
+                let total = usize::from(output_bits) / 8;
+                let mut out = vec![0u8; total];
+                let src = resolved[0].bytes_le();
+                let byte_shift = usize::try_from(shift / 8).unwrap_or(usize::MAX);
+                let bit_shift = (shift % 8) as u32;
+                match operation {
+                    IrPrimitive::Shl => {
+                        if byte_shift < total {
+                            out[byte_shift..total].copy_from_slice(&src[..total - byte_shift]);
+                            if bit_shift > 0 {
+                                let mut carry = 0u8;
+                                for item in out.iter_mut().skip(byte_shift) {
+                                    let next = *item >> (8 - bit_shift);
+                                    *item = (*item << bit_shift) | carry;
+                                    carry = next;
+                                }
+                            }
+                        }
+                    }
+                    IrPrimitive::LShr | IrPrimitive::AShr => {
+                        if byte_shift < total {
+                            out[..total - byte_shift].copy_from_slice(&src[byte_shift..total]);
+                            if bit_shift > 0 {
+                                let mut carry = 0u8;
+                                for item in out.iter_mut().take(total - byte_shift) {
+                                    let next = *item & ((1u8 << bit_shift) - 1);
+                                    *item = (*item >> bit_shift) | (carry << (8 - bit_shift));
+                                    carry = next;
+                                }
+                            }
+                        }
+                        if operation == IrPrimitive::AShr && !src.is_empty() && src[src.len() - 1] & 0x80 != 0 {
+                            let fill_bits = shift.min(u128::from(output_bits)) as usize;
+                            for i in 0..fill_bits / 8 {
+                                out[total - 1 - i] = 0xFF;
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                return Ok(ConcreteValue::from_bytes_le(ty, &out));
             }
             let input = as_u128(resolved[0]);
             let shift = as_u128(resolved[1]);
@@ -506,6 +566,14 @@ fn evaluate_primitive<R, M>(
             if resolved[0].ty != IrType::Bits(1) || resolved[1].ty != ty || resolved[2].ty != ty {
                 return Err(ConcreteExecutionError::TypeMismatch);
             }
+            if output_bits > 128 {
+                let pick = if as_u128(resolved[0]) == 0 {
+                    resolved[2]
+                } else {
+                    resolved[1]
+                };
+                return Ok(ConcreteValue::from_bytes_le(ty, pick.bytes_le()));
+            }
             if as_u128(resolved[0]) == 0 {
                 as_u128(resolved[2])
             } else {
@@ -518,6 +586,11 @@ fn evaluate_primitive<R, M>(
             if input_bits >= output_bits {
                 return Err(ConcreteExecutionError::TypeMismatch);
             }
+            if output_bits > 128 {
+                let mut result = resolved[0].bytes_le().to_vec();
+                result.resize(usize::from(output_bits) / 8, 0);
+                return Ok(ConcreteValue::from_bytes_le(ty, &result));
+            }
             as_u128(resolved[0]) & bit_mask(output_bits)
         }
         IrPrimitive::SExt => {
@@ -525,6 +598,12 @@ fn evaluate_primitive<R, M>(
             let input_bits = scalar_bits(resolved[0].ty)?;
             if input_bits >= output_bits {
                 return Err(ConcreteExecutionError::TypeMismatch);
+            }
+            if output_bits > 128 {
+                let mut result = resolved[0].bytes_le().to_vec();
+                let sign = input_bits % 8 == 0 && !result.is_empty() && result[input_bits as usize / 8 - 1] & 0x80 != 0;
+                result.resize(usize::from(output_bits) / 8, if sign { 0xFF } else { 0 });
+                return Ok(ConcreteValue::from_bytes_le(ty, &result));
             }
             let input = as_u128(resolved[0]);
             if sign_bit(input, input_bits) {
@@ -540,6 +619,11 @@ fn evaluate_primitive<R, M>(
             if low_bits + high_bits != output_bits {
                 return Err(ConcreteExecutionError::TypeMismatch);
             }
+            if output_bits > 128 {
+                let mut result = resolved[0].bytes_le().to_vec();
+                result.extend_from_slice(resolved[1].bytes_le());
+                return Ok(ConcreteValue::from_bytes_le(ty, &result));
+            }
             (as_u128(resolved[1]) << low_bits) | (as_u128(resolved[0]) & bit_mask(low_bits))
         }
         IrPrimitive::Extract => {
@@ -551,6 +635,17 @@ fn evaluate_primitive<R, M>(
             let start = as_u128(resolved[1]);
             if start >= u128::from(input_bits) {
                 return Ok(ConcreteValue::from_u128(ty, 0, output_bits));
+            }
+            if input_bits > 128 {
+                if !start.is_multiple_of(8) || !output_bits.is_multiple_of(8) {
+                    return Err(ConcreteExecutionError::UnsupportedOperation(operation));
+                }
+                let result = bytes_extract(
+                    resolved[0].bytes_le(),
+                    u64::try_from(start).unwrap_or(u64::MAX),
+                    output_bits,
+                );
+                return Ok(ConcreteValue::from_bytes_le(ty, &result));
             }
             let start = u32::try_from(start).map_err(|_| ConcreteExecutionError::TypeMismatch)?;
             (as_u128(resolved[0]) >> start) & bit_mask(output_bits)
@@ -760,6 +855,52 @@ fn evaluate_primitive<R, M>(
                 return Err(ConcreteExecutionError::UnsupportedType(ty));
             }
             let lanes = width_bits / lane_bits;
+            if width_bits > 128 {
+                // Byte-level path for >128-bit vectors (ymm/zmm).
+                let lane_bytes = usize::try_from(lane_bits / 8).unwrap_or(0);
+                if lane_bytes == 0 || lane_bits % 8 != 0 {
+                    return Err(ConcreteExecutionError::UnsupportedType(ty));
+                }
+                let lb = resolved[0].bytes_le();
+                let rb = resolved[1].bytes_le();
+                let mut out = vec![0u8; width_bits as usize / 8];
+                for lane in 0..usize::try_from(lanes).unwrap_or(0) {
+                    let lo = lane * lane_bytes;
+                    let eq = lb[lo..lo + lane_bytes] == rb[lo..lo + lane_bytes];
+                    let set = match operation {
+                        IrPrimitive::VecLaneMaskEq => eq,
+                        IrPrimitive::VecLaneMaskSgt => {
+                            // signed lane comparison
+                            let a = &lb[lo..lo + lane_bytes];
+                            let b = &rb[lo..lo + lane_bytes];
+                            let sign = 0x80u8 << ((lane_bytes - 1) * 8);
+                            let sa = a[a.len() - 1] & sign != 0;
+                            let sb = b[b.len() - 1] & sign != 0;
+                            // compare magnitudes via byte-wise u64s where possible
+                            let mut va: i128 = 0;
+                            let mut vb: i128 = 0;
+                            for i in (0..lane_bytes).rev() {
+                                va = (va << 8) | i128::from(a[i]);
+                                vb = (vb << 8) | i128::from(b[i]);
+                            }
+                            if sa {
+                                va -= 1i128 << (lane_bits as i32);
+                            }
+                            if sb {
+                                vb -= 1i128 << (lane_bits as i32);
+                            }
+                            va > vb
+                        }
+                        _ => unreachable!(),
+                    };
+                    if set {
+                        for k in 0..lane_bytes {
+                            out[lo + k] = 0xFF;
+                        }
+                    }
+                }
+                return Ok(ConcreteValue::from_bytes_le(ty, &out));
+            }
             let mask = bit_mask(lane_bits as u16);
             let left = as_u128(resolved[0]);
             let right = as_u128(resolved[1]);
@@ -2039,6 +2180,19 @@ fn evaluate_primitive<R, M>(
                 return Err(ConcreteExecutionError::UnsupportedType(ty));
             }
             let lanes = width_bits / lane_bits;
+            if width_bits > 128 {
+                let lane_bytes = usize::try_from(lane_bits / 8).unwrap_or(0);
+                if lane_bytes == 0 || lane_bits % 8 != 0 || lanes > 64 {
+                    return Err(ConcreteExecutionError::UnsupportedType(ty));
+                }
+                let bytes = resolved[0].bytes_le();
+                let mut result: u64 = 0;
+                for lane in 0..usize::try_from(lanes).unwrap_or(0) {
+                    let top = bytes[lane * lane_bytes + lane_bytes - 1];
+                    result |= u64::from(top >> 7) << lane;
+                }
+                return Ok(ConcreteValue::from_u128(ty, result as u128, 64));
+            }
             let src = as_u128(resolved[0]);
             let mut result: u64 = 0;
             for lane_idx in 0..lanes {
@@ -2152,14 +2306,14 @@ fn evaluate_primitive<R, M>(
 
 fn scalar_bits<R, M>(ty: IrType) -> Result<u16, ConcreteExecutionError<R, M>> {
     match ty {
-        IrType::Bits(bits) if bits > 0 && bits <= 128 => Ok(bits),
+        IrType::Bits(bits) if bits > 0 && bits <= 512 => Ok(bits),
         IrType::Float16 => Ok(16),
         IrType::BFloat16 => Ok(16),
         IrType::Float32 => Ok(32),
         IrType::Float64 => Ok(64),
         IrType::Float80 => Ok(80),
-        IrType::Vector { width_bits, .. } if width_bits > 0 && width_bits <= 128 => Ok(width_bits),
-        IrType::Opmask { width_bits } if width_bits > 0 && width_bits <= 128 => Ok(width_bits),
+        IrType::Vector { width_bits, .. } if width_bits > 0 && width_bits <= 512 => Ok(width_bits),
+        IrType::Opmask { width_bits } if width_bits > 0 && width_bits <= 512 => Ok(width_bits),
         _ => Err(ConcreteExecutionError::UnsupportedType(ty)),
     }
 }
@@ -2254,7 +2408,36 @@ fn require_types<R, M>(values: &[&ConcreteValue], expected: IrType) -> Result<()
 }
 
 fn as_u128(value: &ConcreteValue) -> u128 {
-    u128::from_le_bytes(value.bytes)
+    let mut buf = [0u8; 16];
+    let n = usize::from(value.len).min(16);
+    buf[..n].copy_from_slice(&value.bytes[..n]);
+    u128::from_le_bytes(buf)
+}
+
+/// Byte-level helpers for values wider than 128 bits (YMM/ZMM operands): the
+/// ops below all compose on bytes without needing 256-bit scalar arithmetic.
+fn bytes_and(a: &[u8], b: &[u8]) -> Vec<u8> {
+    a.iter().zip(b).map(|(x, y)| x & y).collect()
+}
+fn bytes_or(a: &[u8], b: &[u8]) -> Vec<u8> {
+    a.iter().zip(b).map(|(x, y)| x | y).collect()
+}
+fn bytes_xor(a: &[u8], b: &[u8]) -> Vec<u8> {
+    a.iter().zip(b).map(|(x, y)| x ^ y).collect()
+}
+fn bytes_not(a: &[u8]) -> Vec<u8> {
+    a.iter().map(|x| !x).collect()
+}
+fn bytes_extract(a: &[u8], start_bit: u64, out_bits: u16) -> Vec<u8> {
+    // Byte-aligned extraction; ymm ops always extract whole bytes.
+    let start_byte = usize::try_from(start_bit / 8).unwrap_or(usize::MAX);
+    let out_bytes = usize::from(out_bits) / 8;
+    let mut result = vec![0u8; out_bytes];
+    if start_byte < a.len() {
+        let n = (a.len() - start_byte).min(out_bytes);
+        result[..n].copy_from_slice(&a[start_byte..start_byte + n]);
+    }
+    result
 }
 
 fn bit_mask(bits: u16) -> u128 {
@@ -2786,13 +2969,12 @@ mod tests {
 
     #[test]
     fn inline_value_no_heap_allocation() {
-        // The ConcreteValue struct uses a fixed-size [u8; 16] array,
-        // so constructing small values never allocates on the heap.
+        // The ConcreteValue struct uses a fixed-size [u8; 64] array so
+        // constructing small values never allocates on the heap.
         // This test verifies the struct size is bounded.
         let size = core::mem::size_of::<ConcreteValue>();
-        // IrType (1 byte discriminant + payload) + [u8; 16] + u8 + padding
-        // Should be well under 64 bytes.
-        assert!(size <= 64, "ConcreteValue is {size} bytes, expected <= 64");
+        // IrType (1 byte discriminant + payload) + [u8; 64] + u8 + padding.
+        assert!(size <= 80, "ConcreteValue is {size} bytes, expected <= 80");
     }
 
     #[test]
