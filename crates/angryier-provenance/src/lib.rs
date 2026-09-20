@@ -666,13 +666,19 @@ mod flight_recorder_tests {
     #[test]
     fn recorder_evicts_tier0_before_tier1() {
         let mut rec = FlightRecorder::new(2);
-        rec.record(event(ProvenanceTier::Tier0, ProvenanceEventKind::Branch, 0))
-            .unwrap();
-        rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 1))
-            .unwrap();
+        assert!(
+            rec.record(event(ProvenanceTier::Tier0, ProvenanceEventKind::Branch, 0))
+                .is_ok()
+        );
+        assert!(
+            rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 1))
+                .is_ok()
+        );
         // Third event: evicts the Tier-0, keeps the Tier-1.
-        rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 2))
-            .unwrap();
+        assert!(
+            rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 2))
+                .is_ok()
+        );
         let ids: Vec<u64> = rec.events().map(|e| e.id.0).collect();
         assert_eq!(ids, vec![1, 2], "tier-0 evicted, tier-1s retained");
         assert_eq!(rec.dropped(), (1, 0));
@@ -681,11 +687,11 @@ mod flight_recorder_tests {
     #[test]
     fn recorder_full_of_tier1_reports_full() {
         let mut rec = FlightRecorder::new(1);
-        rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 0))
-            .unwrap();
-        let err = rec
-            .record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 1))
-            .unwrap_err();
-        assert_eq!(err, ProvenanceError::Full);
+        assert!(
+            rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 0))
+                .is_ok()
+        );
+        let result = rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 1));
+        assert_eq!(result, Err(ProvenanceError::Full));
     }
 }

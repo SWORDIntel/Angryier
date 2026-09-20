@@ -2210,7 +2210,6 @@ fn symbolic_session_real_binary() -> Result<(), Box<dyn std::error::Error>> {
     use angryier_expr::ExprReader;
     use angryier_runtime::SymbolicSession;
     use angryier_solver_z3::Z3Backend;
-    use std::sync::Arc;
 
     let Ok(bytes) = std::fs::read("/tmp/hello_glibc") else {
         eprintln!("skipping: hello_glibc not present");
