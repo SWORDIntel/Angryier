@@ -258,6 +258,11 @@ pub struct Process {
     /// Where `argv[0]`'s NUL-terminated string landed on the stack —
     /// `symbolize_argv0` overwrites it with symbolic bytes.
     pub argv0_addr: Option<u64>,
+    /// Concrete stdin the `read(0)` model serves — seeded for input
+    /// replay/fuzzing.
+    pub stdin: Vec<u8>,
+    /// stdin read position.
+    pub stdin_pos: usize,
     /// Next fd to allocate (3+ — 0/1/2 are std streams).
     pub next_fd: u64,
     pub next_block_id: u64,
@@ -821,6 +826,8 @@ impl<D: Decoder> Runtime<D> {
             symbolic_files: std::collections::BTreeSet::new(),
             symbolic_fds: std::collections::BTreeSet::new(),
             argv0_addr: None,
+            stdin: Vec::new(),
+            stdin_pos: 0,
             next_fd: 3,
             next_block_id: 0,
             step_count: 0,
@@ -972,12 +979,80 @@ impl<D: Decoder> Runtime<D> {
             symbolic_files: std::collections::BTreeSet::new(),
             symbolic_fds: std::collections::BTreeSet::new(),
             argv0_addr: Some(argv0_addr),
+            stdin: Vec::new(),
+            stdin_pos: 0,
             next_fd: 3,
             next_block_id: 0,
             step_count: 0,
             simproc_dispatches: 0,
             terminated: false,
         })
+    }
+
+    /// Coverage-guided input generation: run the symbolic session with the
+    /// solver, collect models for `find` states, then replay each input
+    /// concretely (stdin = model bytes) — returns `(inputs, coverage)` as
+    /// the set of block addresses each input reaches.
+    ///
+    /// The returned inputs satisfy the *symbolic* path; the replayed
+    /// coverage is ground truth for what the input actually executes.
+    #[cfg(feature = "z3")]
+    pub fn fuzz_generate(
+        &self,
+        bytes: &[u8],
+        find: &[Address],
+        steps: u64,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<(Vec<u8>, Vec<Address>)>, RuntimeError> {
+        let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
+            angryier_types::ExpressionNormalizationVersion(1),
+        ));
+        let process = self.load_elf(bytes)?;
+        let mut session = SymbolicSession::new(self, arena.as_ref(), process);
+        let mut backend =
+            angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>)
+                .map_err(|e| RuntimeError::Solver(format!("{e:?}")))?;
+        let policy = ExplorationPolicy {
+            find: find.to_vec(),
+            ..Default::default()
+        };
+        let report = session.run_with_policy(steps, 16, Some(&mut backend), timeout, true, &policy)?;
+        let mut out = Vec::new();
+        for found in report.found.iter() {
+            session.states.push(found.clone());
+            let idx = session.states.len() - 1;
+            let Ok(model) = session.solve_state_symbols(idx, &mut backend, timeout) else {
+                session.states.pop();
+                continue;
+            };
+            session.states.pop();
+            // Model bytes are keyed by ExprId — for stdin models the byte
+            // vectors ARE the input. Concatenate sorted by id for a stable
+            // seed (the session's stdin materialization assigns sequential
+            // ids).
+            let mut sorted: Vec<(u64, Vec<u8>)> = model.clone();
+            sorted.sort_by_key(|(k, _)| *k);
+            let input: Vec<u8> = sorted.iter().flat_map(|(_, b)| b.clone()).collect();
+            // Replay: concrete run with stdin=input, collect coverage.
+            let mut proc = self.load_elf(bytes)?;
+            proc.stdin = input.clone();
+            let mut coverage = Vec::new();
+            for _ in 0..steps.min(10_000) {
+                match self.step(&mut proc) {
+                    Ok(o) => {
+                        if let Some(pc) = stepped_next_pc(&o) {
+                            coverage.push(pc);
+                        }
+                        if matches!(o, StepOutcome::Terminated { .. }) {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            out.push((input, coverage));
+        }
+        Ok(out)
     }
 
     /// Loads a PE32+ image (statically-linked x86-64 PE — sections become
@@ -1114,6 +1189,8 @@ impl<D: Decoder> Runtime<D> {
             symbolic_files: std::collections::BTreeSet::new(),
             symbolic_fds: std::collections::BTreeSet::new(),
             argv0_addr: Some(argv0_addr),
+            stdin: Vec::new(),
+            stdin_pos: 0,
             next_fd: 3,
             next_block_id: 0,
             step_count: 0,
@@ -1499,10 +1576,22 @@ impl<D: Decoder> Runtime<D> {
                 Ok(StepOutcome::Terminated { pc })
             }
             syscall::READ => {
-                // stdin: EOF. Open file descriptors serve their bytes.
-                // Unknown fds: -EBADF.
+                // stdin serves `process.stdin` (EOF at exhaustion). Open
+                // file descriptors serve their bytes. Unknown fds: -EBADF.
                 let ret = if arg0 == 0 {
-                    0
+                    let avail = process.stdin.len().saturating_sub(process.stdin_pos);
+                    let n = (arg2 as usize).min(avail);
+                    if n > 0 {
+                        let slice = process.stdin[process.stdin_pos..process.stdin_pos + n].to_vec();
+                        process.stdin_pos += n;
+                        let bytes: Vec<ByteValue> = slice.iter().map(|b| ByteValue::Concrete(*b)).collect();
+                        process.state.memory = process
+                            .state
+                            .memory
+                            .write(arg1, &bytes)
+                            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                    }
+                    n as u64
                 } else if let Some((data, pos)) = process.open_fds.get_mut(&arg0) {
                     let n = (*pos + arg2 as usize).min(data.len()) - *pos;
                     let slice = data[*pos..*pos + n].to_vec();

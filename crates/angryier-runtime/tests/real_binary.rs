@@ -3052,3 +3052,51 @@ fn lua_solve_returns_input_bytes() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(found, 1);
     Ok(())
 }
+
+/// Fuzz loop: symbolic solve generates an input, concrete replay with
+/// that stdin reaches the same target — coverage validated.
+#[cfg(all(feature = "xed", feature = "z3", target_arch = "x86_64"))]
+#[test]
+fn fuzz_generate_produces_reaching_inputs() -> Result<(), Box<dyn std::error::Error>> {
+    let source = r#"
+        .global _start
+        .text
+_start:
+    sub $16, %rsp
+    xor %rax, %rax
+    xor %rdi, %rdi
+    mov %rsp, %rsi
+    mov $4, %rdx
+    syscall
+    cmpb $0x41, (%rsp)
+    je target
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+target:
+    mov $60, %rax
+    mov $7, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-fuzz").ok_or("no tempdir")?;
+    let path_s = dir.join("f.s");
+    let path_o = dir.join("f.o");
+    let path_bin = dir.join("f");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    // `target:` is at entry+0x28 (see fixture disassembly).
+    let proc = runtime.load_elf(&elf_bytes)?;
+    let entry = proc.pc()?;
+    let target_va = entry + 0x28;
+    let results = runtime.fuzz_generate(&elf_bytes, &[target_va], 128, std::time::Duration::from_secs(15))?;
+    assert!(!results.is_empty(), "must generate an input");
+    let (input, coverage) = &results[0];
+    assert_eq!(input.first().copied(), Some(0x41), "stdin[0] must be 'A'");
+    assert!(coverage.contains(&target_va), "replayed input must reach target");
+    Ok(())
+}
