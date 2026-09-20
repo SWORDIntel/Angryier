@@ -69,6 +69,33 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
     }
 
+    // Symbolic argv: `argv = 8` materializes 8 bytes (7 + NUL) into
+    // argv[0]'s stack string.
+    if let Ok(argv_len) = opts.get::<u64>("argv") {
+        session
+            .symbolize_argv0(0, argv_len)
+            .map_err(|e| mlua::Error::external(format!("symbolize_argv0: {e:?}")))?;
+    }
+
+    // Symbolic files: `files = { "flag.txt" = true }` — openat on those
+    // paths returns a fd whose reads materialize symbolic bytes.
+    if let Ok(files) = opts.get::<Table>("files") {
+        for pair in files.pairs::<Value, Value>() {
+            if let (Value::String(name), Value::Boolean(true)) = pair?
+                && let Ok(p) = name.to_str()
+            {
+                session.states[0].process.symbolic_files.insert(p.to_string());
+            }
+        }
+    }
+    // Concrete files: `contents = { "flag.txt" = "bytes" }`.
+    if let Ok(files) = opts.get::<Table>("contents") {
+        for pair in files.pairs::<String, String>() {
+            let (name, data) = pair?;
+            session.states[0].process.files.insert(name, data.into_bytes());
+        }
+    }
+
     let find: Vec<u64> = opts
         .get::<Table>("find")
         .map(|t| t.sequence_values::<u64>().flatten().collect())
