@@ -98,6 +98,57 @@ impl Cfg {
             .filter_map(|edge| (edge.from == last).then_some(edge.to).flatten())
             .collect()
     }
+
+    /// The nearest static address reachable from BOTH successors of a
+    /// conditional block — the reconvergence target Veritesting merges at.
+    /// Bounded BFS intersection: returns the closest common reachable block
+    /// within `max_depth` edges, or `None` when the paths diverge past the
+    /// bound (loops, disjoint tails, exits).
+    pub fn reconvergence_target(&self, branch: &BasicBlock, max_depth: usize) -> Option<Address> {
+        let successors = self.successors(branch);
+        if successors.len() < 2 {
+            return None;
+        }
+        // Forward reachability from each successor, tracking depth.
+        let mut visited: Vec<BTreeMap<Address, usize>> = successors.iter().map(|_| BTreeMap::new()).collect();
+        let mut frontier: Vec<Vec<Address>> = successors.clone().into_iter().map(|s| vec![s]).collect();
+        for (i, s) in successors.iter().enumerate() {
+            visited[i].insert(*s, 0);
+        }
+        let mut best: Option<(Address, usize)> = None;
+        for depth in 0..max_depth {
+            for (i, front) in frontier.iter_mut().enumerate() {
+                let mut next = Vec::new();
+                for pc in front.drain(..) {
+                    let Some(block) = self.blocks.get(&pc) else { continue };
+                    for succ in self.successors(block) {
+                        if visited[i].entry(succ).or_insert(depth + 1) == &(depth + 1) {
+                            next.push(succ);
+                        }
+                    }
+                }
+                *front = next;
+            }
+            // A block reachable from all successors is a merge candidate.
+            'candidates: for (pc, _) in visited[0].iter() {
+                for other in visited.iter().skip(1) {
+                    if !other.contains_key(pc) {
+                        continue 'candidates;
+                    }
+                }
+                // Deepest arrival = merge cost; keep the earliest common pc.
+                let arrival = visited.iter().map(|v| v[pc]).max().unwrap_or(0);
+                best = match best {
+                    Some((_, d)) if arrival >= d => best,
+                    _ => Some((*pc, arrival)),
+                };
+            }
+            if let Some((pc, _)) = best {
+                return Some(pc);
+            }
+        }
+        best.map(|(pc, _)| pc)
+    }
 }
 
 /// Errors from CFG recovery.
@@ -201,6 +252,21 @@ pub fn recover_multi<D: Decoder>(
         let terminator;
 
         loop {
+            // A jump target or existing block start inside the block splits
+            // it — fall through to that boundary so blocks never overlap.
+            if cursor != head && (blocks.contains_key(&cursor) || worklist.contains(&cursor)) {
+                edges.push(CfgEdge {
+                    from: instructions
+                        .last()
+                        .map(|i: &DecodedInstruction| i.address)
+                        .unwrap_or(head),
+                    to: Some(cursor),
+                    kind: EdgeKind::FallThrough,
+                });
+                worklist.push(cursor);
+                terminator = EdgeKind::FallThrough;
+                break;
+            }
             let offset = match cursor.checked_sub(base) {
                 Some(offset) => usize::try_from(offset).ok(),
                 None => None,
@@ -213,9 +279,16 @@ pub fn recover_multi<D: Decoder>(
                 terminator = EdgeKind::IndirectJump;
                 break;
             };
-            let mut decoded = decoder
-                .decode(cursor, bytes)
-                .map_err(|_| CfgError::Decode { address: cursor })?;
+            // Undecodable bytes (padding, embedded data, ISA gaps) end the
+            // block rather than the recovery — real binaries interleave
+            // non-code inside executable regions.
+            let mut decoded = match decoder.decode(cursor, bytes) {
+                Ok(decoded) => decoded,
+                Err(_) => {
+                    terminator = EdgeKind::IndirectJump;
+                    break;
+                }
+            };
             decoded.form_id = map_form(&decoded);
             let next = cursor.wrapping_add(u64::from(decoded.length));
             instructions.push(decoded.clone());

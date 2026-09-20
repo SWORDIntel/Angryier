@@ -201,6 +201,7 @@ dependencies = [
  "angryier-arch",
  "angryier-arch-intel64",
  "angryier-arch-xed-ffi",
+ "angryier-cfg",
  "angryier-execution",
  "angryier-expr",
  "angryier-ir",

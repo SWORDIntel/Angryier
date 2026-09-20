@@ -2252,6 +2252,9 @@ pub struct SymbolicState {
     /// auto-symboling; a register that was *written* symbolically has a
     /// `registers` entry which shadows this.
     pub concrete_registers: BTreeMap<u32, u64>,
+    /// Stable identity — indices shift as states are added/removed, so
+    /// merge schedules and external bookkeeping key on `id`.
+    pub id: u64,
 }
 
 /// What one symbolic step did to a state.
@@ -2285,6 +2288,14 @@ pub struct SymbolicSession<'a, D: Decoder> {
     pub states: Vec<SymbolicState>,
     /// States that terminated or errored, kept for inspection.
     pub dead: Vec<SymbolicState>,
+    /// Optional CFG for reconvergence-aware merging.
+    cfg: Option<&'a angryier_cfg::Cfg>,
+    /// Next state id (monotonic).
+    next_state_id: u64,
+    /// Pairs scheduled to merge at a reconvergence pc: (state_a_id,
+    /// state_b_id, target_pc). A state parked at `target_pc` while its sibling hasn't
+    /// arrived is held rather than stepped — the CFG-scheduled merge.
+    pub pending_merges: Vec<(u64, u64, Address)>,
 }
 
 impl<'a, D: Decoder> SymbolicSession<'a, D> {
@@ -2312,13 +2323,25 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             memory,
             symbols: Vec::new(),
             concrete_registers,
+            id: 0,
         };
         Self {
             runtime,
             arena,
             states: vec![state],
             dead: Vec::new(),
+            cfg: None,
+            next_state_id: 1,
+            pending_merges: Vec::new(),
         }
+    }
+
+    /// Attaches a CFG so `run_with_policy` merges reconverging states at
+    /// static merge points (Veritesting-style) rather than only when two
+    /// states happen to park at the same pc.
+    pub fn with_cfg(mut self, cfg: &'a angryier_cfg::Cfg) -> Self {
+        self.cfg = Some(cfg);
+        self
     }
 
     /// Marks `register` symbolic with `ty` in state `index` — the input
@@ -2514,7 +2537,23 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 child.constraints.pop();
                 child.constraints.push(not_cond);
                 let _ = child.process.write_pc(branch.not_taken);
+                child.id = self.next_state_id;
+                self.next_state_id += 1;
                 self.states.push(child);
+                // Veritesting schedule: if the CFG knows where these two
+                // reconverge, park the first arrival until its sibling gets
+                // there instead of letting it run ahead.
+                if let Some(cfg) = self.cfg
+                    // blocks are keyed by start address — the branch's pc is
+                    // the *terminating instruction*, so find the containing
+                    // block (greatest start <= pc).
+                    && let Some((_, block)) = cfg.blocks.range(..=pc).next_back()
+                    && block.instructions.iter().any(|i| i.address == pc)
+                    && let Some(target) = cfg.reconvergence_target(block, 16)
+                {
+                    let (a_id, b_id) = (self.states[index].id, self.states[child_index].id);
+                    self.pending_merges.push((a_id, b_id, target));
+                }
                 return Ok(SymbolicStepOutcome::Branched { child: child_index });
             }
             // Exactly one direction is feasible — continue without forking.
@@ -2666,6 +2705,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     memory: left.memory,
                     symbols: snapshot.symbols,
                     concrete_registers: left.concrete_registers.clone(),
+                    id: left.id,
                 };
                 self.states.insert(a, merged_state);
                 merged += 1;
@@ -2750,6 +2790,69 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     report.pruned_states += 1;
                 }
             }
+            // CFG-scheduled merges: pairs whose pcs both reached the
+            // reconvergence target merge now; a state parked there while its
+            // sibling is in flight is held (skipped) rather than stepped.
+            let mut held: BTreeMap<usize, ()> = BTreeMap::new();
+            if !self.pending_merges.is_empty() {
+                self.pending_merges.retain(|(a, b, _)| {
+                    self.states.iter().any(|s| s.id == *a) && self.states.iter().any(|s| s.id == *b)
+                });
+                let mut completed = Vec::new();
+                for (pi, &(a, b, target)) in self.pending_merges.iter().enumerate() {
+                    let a_idx = self.states.iter().position(|s| s.id == a);
+                    let b_idx = self.states.iter().position(|s| s.id == b);
+                    let (Some(a_idx), Some(b_idx)) = (a_idx, b_idx) else {
+                        continue;
+                    };
+                    let a_at = self.states[a_idx].process.pc().ok() == Some(target);
+                    let b_at = self.states[b_idx].process.pc().ok() == Some(target);
+                    if a_at && b_at {
+                        completed.push((pi, a_idx, b_idx));
+                    } else if a_at {
+                        held.insert(a_idx, ());
+                    } else if b_at {
+                        held.insert(b_idx, ());
+                    }
+                }
+                for (pi, a_idx, b_idx) in completed.into_iter().rev() {
+                    self.pending_merges.remove(pi);
+                    let (lo, hi) = if a_idx < b_idx { (a_idx, b_idx) } else { (b_idx, a_idx) };
+                    let right = self.states.remove(hi);
+                    let left = self.states.remove(lo);
+                    let empty_parent = angryier_execution::SymbolicStateSnapshot::default();
+                    let snapshot = angryier_execution::merge_snapshots(
+                        self.arena,
+                        &empty_parent,
+                        &angryier_execution::SymbolicStateSnapshot {
+                            registers: left.registers.clone(),
+                            concrete_registers: left.concrete_registers.clone(),
+                            constraints: left.constraints.clone(),
+                            symbols: left.symbols.clone(),
+                        },
+                        &angryier_execution::SymbolicStateSnapshot {
+                            registers: right.registers.clone(),
+                            concrete_registers: right.concrete_registers.clone(),
+                            constraints: right.constraints.clone(),
+                            symbols: right.symbols.clone(),
+                        },
+                    )
+                    .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                    self.states.insert(
+                        lo,
+                        SymbolicState {
+                            process: left.process,
+                            registers: snapshot.registers,
+                            constraints: snapshot.constraints,
+                            memory: left.memory,
+                            symbols: snapshot.symbols,
+                            concrete_registers: left.concrete_registers,
+                            id: left.id,
+                        },
+                    );
+                    report.merges += 1;
+                }
+            }
             // Round-robin: one state steps per iteration so a state that
             // reaches a pc where a sibling is parked merges before either
             // advances past the reconvergence point. Under
@@ -2759,12 +2862,24 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 self.states
                     .iter()
                     .enumerate()
+                    .filter(|(i, _)| !held.contains_key(i))
                     .min_by_key(|(_, s)| pc_visits.get(&s.process.pc().unwrap_or(0)).copied().unwrap_or(0))
                     .map(|(i, _)| i)
                     .unwrap_or(0)
             } else {
-                (steps as usize) % self.states.len()
+                // Round-robin over non-held states — a state parked at its
+                // merge target waits for its sibling.
+                let mut pick = (steps as usize) % self.states.len();
+                if held.contains_key(&pick) {
+                    pick = (0..self.states.len()).find(|i| !held.contains_key(i)).unwrap_or(pick);
+                }
+                pick
             };
+            if held.contains_key(&index) && held.len() == self.states.len() {
+                // Deadlock: every state is parked on a sibling that never
+                // arrives — release the holds.
+                held.clear();
+            }
             let pc = self.states.get(index).and_then(|s| s.process.pc().ok()).unwrap_or(0);
             *pc_visits.entry(pc).or_default() += 1;
             let outcome = match backend.as_deref_mut() {
@@ -2965,6 +3080,7 @@ where
 
         let arena = self.arena;
         let runtime = self.runtime;
+        let cfg = self.cfg;
         let results: Vec<Result<(SymbolicRunReport, Vec<SymbolicState>, Vec<SymbolicState>), RuntimeError>> =
             std::thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(workers);
@@ -2978,6 +3094,9 @@ where
                             arena,
                             states: shard,
                             dead: Vec::new(),
+                            cfg,
+                            next_state_id: 1,
+                            pending_merges: Vec::new(),
                         };
                         let report = sub.run(max_steps, max_states, None, timeout, false)?;
                         Ok((report, sub.states, sub.dead))

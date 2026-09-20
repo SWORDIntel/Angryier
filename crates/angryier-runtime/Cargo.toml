@@ -8,6 +8,7 @@ description = "Pipeline glue wiring loader, decoder, semantics, IR, interpreter,
 [dependencies]
 angryier-arch = { path = "../angryier-arch" }
 angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
+angryier-cfg = { path = "../angryier-cfg" }
 angryier-execution = { path = "../angryier-execution" }
 angryier-expr = { path = "../angryier-expr" }
 angryier-ir = { path = "../angryier-ir" }

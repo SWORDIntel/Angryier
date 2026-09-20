@@ -2135,7 +2135,6 @@ out:    .quad 0
     session.mark_symbolic(0, register_id::GPR_BASE + 3, angryier_ir::IrType::Bits(64))?;
 
     let report = session.run(512, 16, None, std::time::Duration::from_secs(5), true)?;
-    eprintln!("report: {report:?}");
     assert_eq!(report.forks, 1, "expected exactly one fork");
     assert!(report.merges >= 1, "expected a reconvergence merge");
     assert!(report.terminated >= 1);
@@ -2219,7 +2218,6 @@ fn symbolic_session_real_binary() -> Result<(), Box<dyn std::error::Error>> {
     session.mark_symbolic(0, register_id::GPR_BASE + 7, angryier_ir::IrType::Bits(64))?;
 
     let report = session.run(512, 32, None, std::time::Duration::from_secs(10), true)?;
-    eprintln!("symbolic run on hello_glibc: {report:?}");
     // The session must have stepped deep into real startup code — rdi
     // symbolic forks the aux-vector scan, and the engine ran ~200 real
     // instructions symbolically before the pointer-chase depth exceeded
@@ -2362,5 +2360,78 @@ end:
     assert_eq!(total_terminated, 4, "all four leaf paths should terminate");
     assert_eq!(total_failed, 0);
     assert!(reports.len() > 1, "the deal must reach more than one worker");
+    Ok(())
+}
+
+/// CFG-scheduled merge: recover the binary's CFG, attach it to the session,
+/// and the fork pair is parked/merged at the reconvergence target.
+#[cfg(all(feature = "xed", target_arch = "x86_64"))]
+#[test]
+fn symbolic_session_cfg_merge() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_arch::Decoder;
+    use angryier_memory::LayeredMemory;
+    use angryier_runtime::SymbolicSession;
+
+    let source = r#"
+        .global _start
+        .text
+_start:
+    cmp $5, %rbx
+    je target
+    mov $1, %rax
+    jmp end
+target:
+    mov $2, %rax
+end:
+    mov $60, %rax
+    xor %rdi, %rdi
+    syscall
+"#;
+    let dir = temp_dir("angryier-symbolic-cfg").ok_or("no tempdir")?;
+    let path_s = dir.join("fork.s");
+    let path_o = dir.join("fork.o");
+    let path_bin = dir.join("fork");
+    std::fs::write(&path_s, source)?;
+    if assemble(&path_s, &path_o).is_none() || link(&path_bin, &[&path_o]).is_none() {
+        eprintln!("skipping: assembler unavailable");
+        return Ok(());
+    }
+    let elf_bytes = std::fs::read(&path_bin)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_elf(&elf_bytes)?;
+    // Recover the CFG over the executable text region.
+    let text_region = process
+        .state
+        .memory
+        .regions()
+        .iter()
+        .find(|r| r.executable)
+        .ok_or("no exec region")?;
+    let base = text_region.base;
+    let text = process
+        .state
+        .memory
+        .read(base, text_region.size as usize)
+        .map_err(|e| format!("text read: {e:?}"))?;
+    let bytes: Vec<u8> = text
+        .iter()
+        .map(|b| match b {
+            angryier_memory::ByteValue::Concrete(v) => *v,
+            _ => 0,
+        })
+        .collect();
+    // The runtime decoder already maps iclass → form id; the CFG's
+    // map_form hook is the identity here.
+    let cfg = angryier_cfg::recover_multi(&runtime.decoder, base, &bytes, [process.entry], |d| d.form_id)
+        .map_err(|e| format!("cfg: {e:?}"))?;
+
+    let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
+    let mut session = SymbolicSession::new(&runtime, &arena, process).with_cfg(&cfg);
+    session.mark_symbolic(0, register_id::GPR_BASE + 3, angryier_ir::IrType::Bits(64))?;
+
+    let report = session.run(512, 16, None, std::time::Duration::from_secs(5), false)?;
+    assert_eq!(report.forks, 1);
+    assert!(report.merges >= 1, "CFG-scheduled merge must fire");
     Ok(())
 }
