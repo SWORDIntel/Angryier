@@ -356,11 +356,14 @@ mod run_cmd {
         pub symbolic: Vec<String>,
         pub find: Vec<u64>,
         pub argv: Option<u64>,
+        /// Instruction-step budget threaded into the synthesized driver.
+        /// Defaults to the Lua API's own default so the two cannot drift.
+        pub steps: u64,
         pub dynamic: bool,
     }
 
     pub fn usage() -> String {
-        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--dynamic]\n\
+        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--steps N] [--dynamic]\n\
          note: --find ADDR is hexadecimal, 0x prefix optional"
             .to_string()
     }
@@ -384,12 +387,18 @@ mod run_cmd {
         let mut symbolic = Vec::new();
         let mut find = Vec::new();
         let mut argv = None;
+        let mut steps: Option<u64> = None;
         let mut dynamic = false;
         let mut i = 0;
         while i < args.len() {
             let arg = args[i].as_str();
             if arg == "--script" {
-                script = Some(value(args, &mut i, arg)?.to_string());
+                let raw = value(args, &mut i, arg)?;
+                if script.replace(raw.to_string()).is_some() {
+                    return Err(format!(
+                        "duplicate --script value '{raw}' (flag may only be given once)"
+                    ));
+                }
             } else if arg == "--symbolic" {
                 let reg = value(args, &mut i, arg)?;
                 if !GPRS.contains(&reg) {
@@ -411,17 +420,42 @@ mod run_cmd {
             } else if arg == "--argv" {
                 let raw = value(args, &mut i, arg)?;
                 match raw.parse::<u64>() {
-                    Ok(n) => argv = Some(n),
+                    Ok(n) => {
+                        if argv.replace(n).is_some() {
+                            return Err(format!("duplicate --argv value '{raw}' (flag may only be given once)"));
+                        }
+                    }
                     Err(_) => {
                         return Err(format!(
                             "invalid --argv value '{raw}' (expected a non-negative integer)"
                         ));
                     }
                 }
+            } else if arg == "--steps" {
+                let raw = value(args, &mut i, arg)?;
+                match raw.parse::<u64>() {
+                    Ok(n) => {
+                        if steps.replace(n).is_some() {
+                            return Err(format!("duplicate --steps value '{raw}' (flag may only be given once)"));
+                        }
+                    }
+                    Err(_) => {
+                        return Err(format!(
+                            "invalid --steps value '{raw}' (expected a non-negative integer)"
+                        ));
+                    }
+                }
             } else if arg == "--dynamic" {
+                if dynamic {
+                    return Err("duplicate --dynamic flag (may only be given once)".to_string());
+                }
                 dynamic = true;
             } else if !arg.starts_with('-') {
-                path = Some(arg.to_string());
+                if path.replace(arg.to_string()).is_some() {
+                    return Err(format!(
+                        "duplicate <binary> operand '{arg}' (only one binary path may be given)"
+                    ));
+                }
             } else {
                 return Err(format!("unknown flag '{arg}'"));
             }
@@ -434,8 +468,32 @@ mod run_cmd {
             symbolic,
             find,
             argv,
+            // Default shared with the Lua API (`angry.run` opts.steps).
+            steps: steps.unwrap_or(angryier_runtime::script::DEFAULT_STEPS),
             dynamic,
         })
+    }
+
+    /// The synthesized driver evaluated when `--script` is absent: the
+    /// parsed flags mapped onto one `angry.run` call. Extracted from
+    /// `execute` so the generated Lua is unit-testable.
+    fn default_driver_lua(config: &RunConfig) -> String {
+        let sym_table = config
+            .symbolic
+            .iter()
+            .map(|r| format!("{r} = {}", angryier_runtime::script::SYMBOLIC_GPR_WIDTH))
+            .collect::<Vec<_>>()
+            .join(",");
+        let find_table = config.find.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        let argv_opt = config.argv.map(|n| format!("argv = {n},")).unwrap_or_default();
+        let dyn_opt = if config.dynamic { "dynamic = true," } else { "" };
+        format!(
+            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = {steps}, states = {states} }})
+print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.steps, r.forks, r.merges, r.terminated, r.found))"#,
+            path = config.path,
+            steps = config.steps,
+            states = angryier_runtime::script::DEFAULT_MAX_STATES
+        )
     }
 
     pub fn execute(config: &RunConfig) -> i32 {
@@ -444,15 +502,6 @@ mod run_cmd {
             eprintln!("script init: {e}");
             return 1;
         }
-        let sym_table = config
-            .symbolic
-            .iter()
-            .map(|r| format!("{r} = 64"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let find_table = config.find.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
-        let argv_opt = config.argv.map(|n| format!("argv = {n},")).unwrap_or_default();
-        let dyn_opt = if config.dynamic { "dynamic = true," } else { "" };
         let driver = if let Some(script) = &config.script {
             match std::fs::read_to_string(script) {
                 Ok(s) => s,
@@ -462,11 +511,7 @@ mod run_cmd {
                 }
             }
         } else {
-            format!(
-                r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = 1024, states = 16 }})
-print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.steps, r.forks, r.merges, r.terminated, r.found))"#,
-                path = config.path
-            )
+            default_driver_lua(config)
         };
         match lua.load(&driver).eval::<mlua::Value>() {
             Ok(_) => 0,
@@ -491,6 +536,7 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
             symbolic: &[&str],
             find: &[u64],
             argv: Option<u64>,
+            steps: u64,
             dynamic: bool,
         ) -> RunConfig {
             RunConfig {
@@ -499,6 +545,7 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
                 symbolic: symbolic.iter().map(|s| s.to_string()).collect(),
                 find: find.to_vec(),
                 argv,
+                steps,
                 dynamic,
             }
         }
@@ -507,7 +554,7 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
         fn parses_minimal_invocation() {
             assert_eq!(
                 parse(&args(&["./bin"])),
-                Ok(config("./bin", None, &[], &[], None, false))
+                Ok(config("./bin", None, &[], &[], None, 256, false))
             );
         }
 
@@ -526,6 +573,8 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
                     "0x40102a",
                     "--argv",
                     "8",
+                    "--steps",
+                    "512",
                     "--dynamic"
                 ])),
                 Ok(config(
@@ -534,16 +583,120 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
                     &["rdi", "rsi"],
                     &[0x40102a],
                     Some(8),
+                    512,
                     true
                 ))
             );
         }
 
         #[test]
+        fn steps_default_matches_lua_api_default() {
+            // The CLI default must equal the Lua `angry.run` opts.steps
+            // default so the synthesized driver cannot drift from scripts.
+            assert_eq!(
+                parse(&args(&["./bin"])),
+                Ok(config(
+                    "./bin",
+                    None,
+                    &[],
+                    &[],
+                    None,
+                    angryier_runtime::script::DEFAULT_STEPS,
+                    false
+                ))
+            );
+            assert_eq!(angryier_runtime::script::DEFAULT_STEPS, 256);
+        }
+
+        #[test]
+        fn steps_flag_overrides_default() {
+            assert_eq!(
+                parse(&args(&["./bin", "--steps", "4096"])),
+                Ok(config("./bin", None, &[], &[], None, 4096, false))
+            );
+        }
+
+        #[test]
+        fn repeated_steps_flag_errors() {
+            assert_eq!(
+                parse(&args(&["./bin", "--steps", "64", "--steps", "128"])),
+                Err("duplicate --steps value '128' (flag may only be given once)".to_string())
+            );
+        }
+
+        #[test]
+        fn repeated_dynamic_flag_errors() {
+            assert_eq!(
+                parse(&args(&["./bin", "--dynamic", "--dynamic"])),
+                Err("duplicate --dynamic flag (may only be given once)".to_string())
+            );
+        }
+
+        #[test]
+        fn non_numeric_steps_errors() {
+            assert_eq!(
+                parse(&args(&["./bin", "--steps", "many"])),
+                Err("invalid --steps value 'many' (expected a non-negative integer)".to_string())
+            );
+        }
+
+        #[test]
+        fn default_driver_threads_steps_and_shared_constants() {
+            let mut cfg = config("./bin", None, &[], &[], None, 256, false);
+            let lua = default_driver_lua(&cfg);
+            assert!(
+                lua.contains(&format!("steps = {}", angryier_runtime::script::DEFAULT_STEPS)),
+                "driver must default to the Lua API default, got: {lua}"
+            );
+            assert!(
+                lua.contains(&format!("states = {}", angryier_runtime::script::DEFAULT_MAX_STATES)),
+                "driver must keep the Lua API states default, got: {lua}"
+            );
+            assert!(!lua.contains("steps = 1024"), "stale 1024 default: {lua}");
+            cfg.steps = 512;
+            assert!(default_driver_lua(&cfg).contains("steps = 512"));
+        }
+
+        #[test]
+        fn default_driver_marks_symbolic_registers() {
+            let cfg = config("./bin", None, &["rdi", "rsi"], &[0x10], None, 256, false);
+            let lua = default_driver_lua(&cfg);
+            assert!(lua.contains(&format!("rdi = {}", angryier_runtime::script::SYMBOLIC_GPR_WIDTH)));
+            assert!(lua.contains(&format!("rsi = {}", angryier_runtime::script::SYMBOLIC_GPR_WIDTH)));
+            assert!(lua.contains("find = { 16 }"));
+        }
+
+        #[test]
         fn find_accepts_hex_without_prefix() {
             assert_eq!(
                 parse(&args(&["./bin", "--find", "0x40102a", "--find", "40102a"])),
-                Ok(config("./bin", None, &[], &[0x40102a, 0x40102a], None, false))
+                Ok(config("./bin", None, &[], &[0x40102a, 0x40102a], None, 256, false))
+            );
+        }
+
+        #[test]
+        fn repeated_binary_operand_errors() {
+            // Strict parsing: a second positional is a usage error, not a
+            // silent last-wins override.
+            assert_eq!(
+                parse(&args(&["./a", "./b"])),
+                Err("duplicate <binary> operand './b' (only one binary path may be given)".to_string())
+            );
+        }
+
+        #[test]
+        fn repeated_script_flag_errors() {
+            assert_eq!(
+                parse(&args(&["./bin", "--script", "a.lua", "--script", "b.lua"])),
+                Err("duplicate --script value 'b.lua' (flag may only be given once)".to_string())
+            );
+        }
+
+        #[test]
+        fn repeated_argv_flag_errors() {
+            assert_eq!(
+                parse(&args(&["./bin", "--argv", "8", "--argv", "9"])),
+                Err("duplicate --argv value '9' (flag may only be given once)".to_string())
             );
         }
 
@@ -567,7 +720,7 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
 
         #[test]
         fn missing_flag_value_errors() {
-            for flag in ["--script", "--symbolic", "--find", "--argv"] {
+            for flag in ["--script", "--symbolic", "--find", "--argv", "--steps"] {
                 assert_eq!(parse(&args(&["./bin", flag])), Err(format!("missing value for {flag}")));
             }
         }

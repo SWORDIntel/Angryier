@@ -60,7 +60,7 @@ Note: `help` always lists `run`. In builds without the feature its line reads `N
 ## `angryier run` — execute a binary symbolically
 
 ```
-usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--dynamic]
+usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--steps N] [--dynamic]
 note: --find ADDR is hexadecimal, 0x prefix optional
 ```
 
@@ -70,12 +70,15 @@ Loads an ELF64 image into the engine and runs it concretely/symbolically. The bi
 
 | Flag | Repeatable | Meaning |
 |---|---|---|
-| `<binary>` (positional) | — | Path to the ELF64 image to execute. Required, even when `--script` is given (the script chooses whether to reference it). |
+| `<binary>` (positional) | — | Path to the ELF64 image to execute. Required, even when `--script` is given (the script chooses whether to reference it). A second positional operand exits 1 with an error. |
 | `--script f.lua` | no | Lua driver script (see the Lua API below). When set, the script has full control; the other flags are still validated but their values are unused. |
 | `--symbolic REG` | yes | Mark a general-purpose register symbolic before execution. `REG` is one of `rax rcx rdx rbx rsp rbp rsi rdi r8`–`r15`; other names exit 1 with an error. Always marked 64 bits wide. |
 | `--find ADDR` | yes | Add a target address (hexadecimal, `0x` prefix optional) to the exploration policy's find set. Non-hex values exit 1 with an error. |
 | `--argv N` | no | Symbolize `argv[0]` as `N` bytes (the model materializes `N` bytes, NUL-terminated, on the initial stack). Non-numeric values exit 1 with an error. |
+| `--steps N` | no | Instruction-step budget for the synthesized driver. Defaults to `256` — the same value as the Lua API's `opts.steps` default (the two share one constant, `angryier_runtime::script::DEFAULT_STEPS`, so they cannot drift). Non-numeric values exit 1 with an error. |
 | `--dynamic` | no | Load via the dynamic-linking path (`__libc_start_main` hook, `main(argc, argv)` entry) instead of static `_start`. |
+
+"Repeatable: no" is enforced: a repeated `<binary>` positional, `--script`, `--argv`, `--steps`, or `--dynamic` exits 1 with a `duplicate ...` error naming the second value instead of silently taking the last one.
 
 Address parsing for `--find` is hexadecimal with an optional `0x` prefix: `--find 0x40102a` and `--find 40102a` are equivalent, and `--find 1234` means address `0x1234`.
 
@@ -87,19 +90,19 @@ Without `--script`, the CLI synthesizes this Lua driver and evaluates it:
 local r = angry.run("<binary>", { symbolic = { <regs marked 64-bit> },
                                   find = { <find addresses> },
                                   [argv = N,] [dynamic = true,]
-                                  steps = 1024, states = 16 })
+                                  steps = <steps>, states = 16 })
 print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d",
                     r.steps, r.forks, r.merges, r.terminated, r.found))
 ```
 
-So the CLI-flag defaults are `steps = 1024`, `states = 16`, solver off (found targets are counted, not solved — use `--script` with `solve = true` to get models). Note these defaults differ from the Lua API's own defaults (`steps = 256`).
+`steps` is the `--steps` value (default `256`, shared with the Lua API's own `opts.steps` default — previously the CLI hardcoded `1024`, silently overshooting scripts by 4×). `states = 16` likewise matches the Lua API default (`angryier_runtime::script::DEFAULT_MAX_STATES`). Solver stays off (found targets are counted, not solved — use `--script` with `solve = true` to get models).
 
 ### Exit codes
 
 | Code | Cause |
 |---|---|
 | 0 | Driver/script evaluated successfully. |
-| 1 | Missing `<binary>` positional; unknown flag (e.g. a typo); a flag missing its value; invalid `--symbolic` register; non-numeric `--argv`; non-hex `--find`; `--script` file unreadable; Lua init/eval error; or the binary was built without the `run` feature. |
+| 1 | Missing or duplicate `<binary>` positional; unknown flag (e.g. a typo); a flag missing its value; invalid `--symbolic` register; non-numeric `--argv`; non-numeric `--steps`; non-hex `--find`; a repeated non-repeatable flag (`--script`, `--argv`, `--steps`, `--dynamic`); `--script` file unreadable; Lua init/eval error (including an unsupported symbolic width in the opts table); or the binary was built without the `run` feature. |
 
 Argument errors are prefixed `error:` followed by the `usage:` text on stderr; the remaining errors are prefixed `script init:`, `read <path>:`, or `script:`.
 
@@ -117,11 +120,11 @@ Options table (all fields optional):
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `symbolic` | table | `{}` | Registers to mark symbolic. Either `{ rdi = 64 }` or `{ "rdi" }`. Values are accepted for documentation but the mark is always 64-bit. Valid names: the 16 GPRs listed above. |
+| `symbolic` | table | `{}` | Registers to mark symbolic. Either `{ rdi = 64 }` or `{ "rdi" }`. The width value is validated: 64 (or omitted) is accepted, any other integer aborts the script with `symbolic register '<name>' width must be 64 bits (got N)` — narrower/wider GPR symbols would read as width-mismatched expressions. Unknown register names error (`bad reg <name>`) instead of being skipped. Valid names: the 16 GPRs listed above. |
 | `find` | array of integer | `{}` | Target PCs; reaching one records a found state. |
 | `avoid` | array of integer | `{}` | Avoid PCs for the exploration policy. |
-| `steps` | integer | `256` | Instruction-step budget. |
-| `states` | integer | `16` | Maximum live states. |
+| `steps` | integer | `256` | Instruction-step budget. The default is the shared constant `angryier_runtime::script::DEFAULT_STEPS`, which the CLI's `--steps` flag also uses. |
+| `states` | integer | `16` | Maximum live states (`DEFAULT_MAX_STATES`). |
 | `solve` | boolean | `false` | Solve each found state with the native Z3 backend and populate `inputs`. |
 | `dynamic` | boolean | `false` | Dynamic-linking load path instead of static. |
 | `argv` | integer | — | Symbolize `argv[0]` as this many bytes. |
@@ -148,7 +151,7 @@ REPL-style handle to a live symbolic session (static load). Methods:
 | `s:pc()` | Current program counter of state 0. |
 | `s:reg("rdi")` | Concrete register value, or `nil` when the register is symbolic. |
 | `s:states()` | Number of live states. |
-| `s:symbolic("rdi")` | Marks the register symbolic on state 0 (64-bit). |
+| `s:symbolic("rdi")` | Marks the register symbolic on state 0 (64-bit). An optional second argument sets the width — `s:symbolic("rdi", 64)` is accepted; any other width errors (`width must be 64 bits`), since GPR symbols are 64-bit only. |
 
 ### `angry.version()`
 
@@ -175,9 +178,11 @@ Tests: 585 tests across 78 suites (0 failures, historical count)
 
 ```bash
 cargo run -p angryier-cli --features run -- run ./crackme \
-    --symbolic rdi --find 0x40102a --argv 8
+    --symbolic rdi --find 0x40102a --argv 8 --steps 1024
 # steps=... forks=... merges=... terminated=... found=1
 ```
+
+(`--steps` defaults to 256, the same default a bare `angry.run` opts table gets.)
 
 **Lua-scripted run with solving** — `find.lua`:
 
@@ -214,8 +219,8 @@ end
 
 ## Known quirks
 
-- The `run` parser is strict: anything not listed in the usage line (including mistyped flags and flags without a value) exits 1 instead of being dropped. The one exception is a repeated `<binary>` positional, where the last path wins.
-- `--symbolic` width is fixed at 64 bits from the CLI; the Lua opts table's width values are likewise accepted but not used.
+- The `run` parser is strict: anything not listed in the usage line (including mistyped flags, flags without a value, repeated non-repeatable flags, and a second `<binary>` positional) exits 1 instead of being dropped or silently overridden.
+- `--symbolic` width is 64 bits — from the CLI and from Lua alike. This is now enforced rather than silently ignored: the Lua opts table's width value is validated (`64` or omitted only) and `s:symbolic` takes an optional width with the same constraint. Supporting other GPR widths needs evaluator work (width-mismatched reads), not just a parser change.
 - The CLI `version` string and Lua `angry.version()` both derive from the workspace package version (`version.workspace = true`), so they move together; they are only as granular as that single version.
 - The `status` test figures are a historical snapshot from the 2026-09 documentation pass, not a live count.
 - `regs` in the `angry.run` result is keyed by numeric register ID, not by name.

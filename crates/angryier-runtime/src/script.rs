@@ -4,8 +4,8 @@
 //!
 //! ```lua
 //! local r = angry.run("/tmp/hello", {
-//!     symbolic = { rdi = 64 },          -- register name -> bit width
-//!     find = { 0x40102a },              -- target pcs
+//!     symbolic = { rdi = 64 },          -- register name -> bit width (64 only)
+//!     find = { 0x40102a },
 //!     avoid = { 0x40103b },
 //!     steps = 512, states = 32,
 //!     solve = true,                     -- solve found states
@@ -16,6 +16,49 @@
 
 use angryier_expr::ExprArena;
 use mlua::{Lua, Table, Value};
+
+/// Default instruction-step budget for `angry.run` (`opts.steps`). Shared
+/// with the `angryier run --steps` CLI default so the two cannot drift.
+pub const DEFAULT_STEPS: u64 = 256;
+/// Default maximum live states for `angry.run` (`opts.states`). Shared with
+/// the states value the CLI's synthesized driver passes explicitly.
+pub const DEFAULT_MAX_STATES: usize = 16;
+/// Bit width of GPR symbolic marks. Intel 64 GPR storage is 64-bit and the
+/// evaluator returns a register's stored expression regardless of the read
+/// width, so sub-64-bit GPR symbols would surface as width-mismatched
+/// expressions. Widths other than this are rejected with an explicit error
+/// instead of being silently coerced or ignored.
+pub const SYMBOLIC_GPR_WIDTH: u16 = 64;
+
+/// Validates a symbolic-register width from the opts table / session
+/// method. `None` (the `{ "rdi" }` list form or `s:symbolic("rdi")`)
+/// defaults to [`SYMBOLIC_GPR_WIDTH`]; 64 is accepted; anything else is an
+/// honest error naming the register and the offending width.
+fn validate_symbolic_width(name: &str, width: Option<i64>) -> Result<u16, mlua::Error> {
+    let requested = width.unwrap_or(i64::from(SYMBOLIC_GPR_WIDTH));
+    if requested == i64::from(SYMBOLIC_GPR_WIDTH) {
+        Ok(SYMBOLIC_GPR_WIDTH)
+    } else {
+        Err(mlua::Error::external(format!(
+            "symbolic register '{name}' width must be {SYMBOLIC_GPR_WIDTH} bits (got {requested}); other GPR widths are not supported yet"
+        )))
+    }
+}
+
+/// Extracts `(register name, bit width)` from one `symbolic` opts-table
+/// pair. Accepts both documented forms — `{ rdi = 64 }` (key form, width
+/// value honored and validated) and `{ "rdi" }` (list form, default
+/// width). Pairs with no string component are skipped (`Ok(None)`).
+fn symbolic_mark_from_pair(k: &Value, v: &Value) -> Result<Option<(String, u16)>, mlua::Error> {
+    let (name, width) = match (k, v) {
+        (Value::String(s), Value::Integer(w)) => (s.to_str()?.to_string(), Some(*w)),
+        (Value::String(s), _) => (s.to_str()?.to_string(), None),
+        (_, Value::String(s)) => (s.to_str()?.to_string(), None),
+        _ => return Ok(None),
+    };
+    let width = validate_symbolic_width(&name, width)?;
+    Ok(Some((name, width)))
+}
 
 /// A live symbolic session exposed to Lua as a userdata handle. The
 /// runtime and arena are `Box::leak`'d so the session's borrows are
@@ -51,11 +94,14 @@ impl mlua::UserData for LuaSession {
             }
         });
         methods.add_method("states", |_, this, ()| Ok(this.session.states.len()));
-        // s:symbolic("rdi") — mark a register symbolic on state 0.
-        methods.add_method_mut("symbolic", |_, this, name: String| {
+        // s:symbolic("rdi") or s:symbolic("rdi", 64) — mark a register
+        // symbolic on state 0. The optional width is validated: only
+        // 64-bit GPR symbols are supported (see SYMBOLIC_GPR_WIDTH).
+        methods.add_method_mut("symbolic", |_, this, (name, width): (String, Option<i64>)| {
             let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
+            let width = validate_symbolic_width(&name, width)?;
             this.session
-                .mark_symbolic(0, reg, angryier_ir::IrType::Bits(64))
+                .mark_symbolic(0, reg, angryier_ir::IrType::Bits(width))
                 .map_err(|e| mlua::Error::external(format!("{e:?}")))
         });
     }
@@ -106,19 +152,19 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     let mut session = crate::SymbolicSession::new(&runtime, arena.as_ref(), process);
 
     // Symbolic register marks: `symbolic = { rdi = 64 }` or `{ "rdi" }`.
+    // The width value is validated — only 64-bit GPR symbols are
+    // supported (see [`SYMBOLIC_GPR_WIDTH`]) — and unknown register names
+    // error instead of being silently skipped.
     if let Ok(sym) = opts.get::<Table>("symbolic") {
         for pair in sym.pairs::<Value, Value>() {
             let (k, v) = pair?;
-            let name = match (&k, &v) {
-                (Value::String(s), _) => s.to_str()?.to_string(),
-                (_, Value::String(s)) => s.to_str()?.to_string(),
-                _ => continue,
+            let Some((name, width)) = symbolic_mark_from_pair(&k, &v)? else {
+                continue;
             };
-            if let Some(reg) = reg_by_name(&name) {
-                session
-                    .mark_symbolic(0, reg, angryier_ir::IrType::Bits(64))
-                    .map_err(|e| mlua::Error::external(format!("mark_symbolic: {e:?}")))?;
-            }
+            let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
+            session
+                .mark_symbolic(0, reg, angryier_ir::IrType::Bits(width))
+                .map_err(|e| mlua::Error::external(format!("mark_symbolic: {e:?}")))?;
         }
     }
     // Symbolic argv: `argv = 8` materializes 8 bytes (7 + NUL) into
@@ -155,8 +201,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         .get::<Table>("avoid")
         .map(|t| t.sequence_values::<u64>().flatten().collect())
         .unwrap_or_default();
-    let steps = opts.get::<u64>("steps").unwrap_or(256);
-    let max_states = opts.get::<usize>("states").unwrap_or(16);
+    let steps = opts.get::<u64>("steps").unwrap_or(DEFAULT_STEPS);
+    let max_states = opts.get::<usize>("states").unwrap_or(DEFAULT_MAX_STATES);
     let use_solver = opts.get::<bool>("solve").unwrap_or(false);
 
     let policy = crate::ExplorationPolicy {
@@ -247,4 +293,102 @@ fn open_session(path: &str) -> mlua::Result<LuaSession> {
     Ok(LuaSession {
         session: crate::SymbolicSession::new(runtime, arena, process),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mlua::Lua;
+
+    /// The shared defaults must stay equal to the values documented in
+    /// `docs/CLI.md` (and historically hardcoded in the CLI's synthesized
+    /// driver — 1024 was the drift this pinned shut).
+    #[test]
+    fn shared_defaults_have_the_documented_values() {
+        assert_eq!(DEFAULT_STEPS, 256);
+        assert_eq!(DEFAULT_MAX_STATES, 16);
+        assert_eq!(SYMBOLIC_GPR_WIDTH, 64);
+    }
+
+    #[test]
+    fn width_implicit_or_explicit_64_is_accepted() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(validate_symbolic_width("rdi", None)?, 64);
+        assert_eq!(validate_symbolic_width("rdi", Some(64))?, 64);
+        Ok(())
+    }
+
+    #[test]
+    fn width_other_than_64_is_an_honest_error() {
+        for bad in [32, 16, 8, 128, 0, -1] {
+            let msg = match validate_symbolic_width("rdi", Some(bad)) {
+                Err(e) => e.to_string(),
+                Ok(_) => String::new(),
+            };
+            assert!(!msg.is_empty(), "width {bad} must be rejected");
+            assert!(msg.contains("'rdi'"), "message must name the register: {msg}");
+            assert!(
+                msg.contains("must be 64 bits"),
+                "message must state the constraint: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("got {bad}")),
+                "message must echo the width: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn symbolic_table_pairs_parse_both_documented_forms() -> Result<(), Box<dyn std::error::Error>> {
+        let lua = Lua::new();
+        // Key form with explicit 64 and list form with implicit width.
+        let table = lua.load(r#"return { rdi = 64, "rsi" }"#).eval::<Table>()?;
+        let mut marks = Vec::new();
+        for pair in table.pairs::<Value, Value>() {
+            let (k, v) = pair?;
+            if let Some(mark) = symbolic_mark_from_pair(&k, &v)? {
+                marks.push(mark);
+            }
+        }
+        assert!(
+            marks.contains(&("rdi".to_string(), SYMBOLIC_GPR_WIDTH)),
+            "marks: {marks:?}"
+        );
+        assert!(
+            marks.contains(&("rsi".to_string(), SYMBOLIC_GPR_WIDTH)),
+            "marks: {marks:?}"
+        );
+        assert_eq!(marks.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn symbolic_table_pair_with_non_64_width_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let lua = Lua::new();
+        let table = lua.load(r#"return { rdi = 32 }"#).eval::<Table>()?;
+        for pair in table.pairs::<Value, Value>() {
+            let (k, v) = pair?;
+            let msg = match symbolic_mark_from_pair(&k, &v) {
+                Err(e) => e.to_string(),
+                Ok(_) => String::new(),
+            };
+            assert!(!msg.is_empty(), "width 32 must be rejected, not silently coerced");
+            assert!(msg.contains("'rdi'") && msg.contains("got 32"), "{msg}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn symbolic_table_pairs_without_strings_are_skipped() -> Result<(), Box<dyn std::error::Error>> {
+        let (k, v) = (Value::Integer(1), Value::Boolean(true));
+        assert_eq!(symbolic_mark_from_pair(&k, &v)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn registers_resolve_by_gpr_name() {
+        let base = angryier_arch_intel64::register_id::GPR_BASE;
+        assert_eq!(reg_by_name("rdi"), Some(base + 7));
+        assert_eq!(reg_by_name("r15"), Some(base + 15));
+        assert_eq!(reg_by_name("xmm0"), None);
+    }
 }
