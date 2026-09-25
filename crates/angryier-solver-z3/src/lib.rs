@@ -91,7 +91,15 @@ use std::sync::Arc;
 #[cfg(feature = "ffi")]
 impl Z3NativeBridge for Z3FfiBridge {
     fn solve_z3(&mut self, query: &SolverQuery) -> Result<SolverResult, Z3AdapterError> {
-        let result = angryier_solver::SolverBackend::solve(self, query);
+        // Route the query's timeout as a hard wall-clock deadline in
+        // addition to the FFI bridge's soft-limit solver param: the soft
+        // limit stays installed inside the solver as the always-on
+        // backstop, while the bridge's watchdog guarantees cancellation
+        // from outside the search even if the soft limit fires late. The
+        // two mechanisms compose — whichever expires first cancels the
+        // check with `Unknown`; the other is retired without side
+        // effects.
+        let result = self.solve_with_deadline(query, query.timeout());
         if result.outcome == SolverOutcomeKind::BackendError {
             Err(Z3AdapterError::TranslationFailed)
         } else {
@@ -101,19 +109,12 @@ impl Z3NativeBridge for Z3FfiBridge {
 
     fn solve_z3_batch(
         &mut self,
-        shared: &[ConstraintId],
+        _shared: &[ConstraintId],
         queries: &[SolverQuery],
     ) -> Vec<Result<SolverResult, Z3AdapterError>> {
-        angryier_solver::SolverBackend::solve_batch(self, shared, queries)
-            .into_iter()
-            .map(|result| {
-                if result.outcome == SolverOutcomeKind::BackendError {
-                    Err(Z3AdapterError::TranslationFailed)
-                } else {
-                    Ok(result)
-                }
-            })
-            .collect()
+        // Route each query through `solve_z3` so batches get the same
+        // hard-deadline-plus-soft-backstop composition as single solves.
+        queries.iter().map(|query| self.solve_z3(query)).collect()
     }
 }
 
@@ -127,11 +128,24 @@ impl Z3Backend<Z3FfiBridge> {
         Ok(Z3Backend::new(bridge))
     }
 
-    /// Interrupts an in-progress  on the underlying context — the
+    /// Interrupts an in-progress solve on the underlying context — the
     /// driver can cancel a runaway query from another thread; the query
     /// returns UNKNOWN rather than a wrong answer.
     pub fn interrupt(&self) {
         self.bridge.interrupt();
+    }
+
+    /// Solves under an explicit hard wall-clock deadline backed by mid-flight
+    /// Z3 cancellation (the FFI bridge arms a watchdog around the check call
+    /// that fires `Z3_interrupt` when the deadline expires). Composes with
+    /// the query's own soft timeout — the earlier of the two cancels the
+    /// check with `Unknown`; the soft limit remains installed as the
+    /// always-on backstop.
+    pub fn solve_with_deadline(&mut self, query: &SolverQuery, deadline: Duration) -> SolverResult {
+        if query.validate_identity().is_err() {
+            return backend_error();
+        }
+        self.bridge.solve_with_deadline(query, deadline)
     }
 }
 

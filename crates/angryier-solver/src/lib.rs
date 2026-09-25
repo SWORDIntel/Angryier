@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+pub mod alpha;
+
+pub use alpha::{AlphaKey, AlphaReuseConfig, AlphaReuseStats, alpha_key};
+use angryier_expr::ExprReader;
 pub use angryier_types::SolverOutcomeKind;
 use angryier_types::{
     ConstraintCanonicalizationVersion, ConstraintId, DependencyKey, ExprId, SolverQueryId, TargetProfileId,
@@ -202,12 +206,129 @@ pub struct SolverCacheStats {
     pub hits: u64,
     pub misses: u64,
     pub entries: u64,
+    /// Entries evicted to make room for a higher-value admission.
+    pub evictions: u64,
+    /// Inserts refused because the shard was full of higher-value entries.
+    pub rejected_capacity: u64,
+    /// Inserts refused because the byte budget was exhausted.
+    pub rejected_budget: u64,
+    /// Estimated bytes currently stored (sum of per-entry estimates).
+    pub stored_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheAdmission {
     Stored,
     RejectedTransient,
+    RejectedCapacity,
+    RejectedBudget,
+}
+
+/// Bounded, value-aware admission policy for [`InMemorySolverCache`].
+///
+/// Every Sat/Unsat result used to be admitted; under adversarial or simply
+/// long-running workloads that grows without bound. The policy bounds the
+/// cache two ways — per-shard entry caps and a global byte budget — and
+/// admits by *estimated reuse value*: a small count sketch of seen canonical
+/// keys predicts which queries repeat, so under pressure a key seen more
+/// than once is stored (or evicts a lower-value entry) while one-shot keys
+/// are rejected with observable counters. All decisions are deterministic
+/// functions of the observed key sequence (fixed sketch hashes, FIFO among
+/// equal scores) — no time-based input, so admissions replay identically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheAdmissionPolicy {
+    /// Maximum stored entries per shard.
+    pub max_entries_per_shard: usize,
+    /// Total estimated bytes admitted across all shards.
+    pub byte_budget: u64,
+}
+
+impl Default for CacheAdmissionPolicy {
+    fn default() -> Self {
+        Self {
+            max_entries_per_shard: 8192,
+            byte_budget: 1 << 30,
+        }
+    }
+}
+
+/// Estimated heap footprint of one cached result: key + entry overhead,
+/// model bytes and unsat-core ids. Deterministic in the result's contents.
+fn estimate_entry_bytes(result: &SolverResult) -> u64 {
+    let model_bytes: u64 = result
+        .model
+        .iter()
+        .map(|(_, value)| u64::try_from(value.len()).unwrap_or(u64::MAX))
+        .fold(0u64, |sum, len| sum.saturating_add(len.saturating_add(16)));
+    let core_bytes = result.unsat_core.len().saturating_mul(8).try_into().unwrap_or(u64::MAX);
+    // 32-byte key + entry header (Arc, score, bytes, seq) + vec overhead.
+    96u64.saturating_add(model_bytes).saturating_add(core_bytes)
+}
+
+/// Per-shard count sketch over canonical keys: two saturating counters per
+/// key (two independent hash probes, estimate = min). Collisions overcount —
+/// deterministic for a given key sequence, and conservative for admission
+/// (an overcounted one-shot can at worst be admitted like today).
+struct SeenSketch {
+    counters: [u16; SEEN_COUNTERS_PER_SHARD],
+}
+
+impl Default for SeenSketch {
+    fn default() -> Self {
+        Self {
+            counters: [0; SEEN_COUNTERS_PER_SHARD],
+        }
+    }
+}
+
+const SEEN_COUNTERS_PER_SHARD: usize = 4096;
+
+fn fnv1a(key: &DependencyKey, seed: u64) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64 ^ seed;
+    for byte in key.0 {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+impl SeenSketch {
+    fn probes(key: &DependencyKey) -> (usize, usize) {
+        let first = (fnv1a(key, 0) % SEEN_COUNTERS_PER_SHARD as u64) as usize;
+        let second = (fnv1a(key, 0x9e3779b97f4a7c15) % SEEN_COUNTERS_PER_SHARD as u64) as usize;
+        (first, second)
+    }
+
+    fn record(&mut self, key: &DependencyKey) {
+        let (first, second) = Self::probes(key);
+        self.counters[first] = self.counters[first].saturating_add(1);
+        self.counters[second] = self.counters[second].saturating_add(1);
+    }
+
+    fn estimate(&self, key: &DependencyKey) -> u32 {
+        let (first, second) = Self::probes(key);
+        u32::from(self.counters[first]).min(u32::from(self.counters[second]))
+    }
+}
+
+/// One shard: the entry map plus the seen-key sketch guarding it.
+#[derive(Default)]
+struct CacheShard {
+    entries: HashMap<DependencyKey, CacheEntry>,
+    seen: SeenSketch,
+}
+
+#[derive(Clone)]
+struct CacheEntry {
+    result: Arc<SolverResult>,
+    /// Seen-sketch estimate at admission time (reuse-value score).
+    score: u32,
+    /// Estimated byte footprint at admission time.
+    bytes: u64,
+    /// Admission sequence number; strictly increasing, so (score, seq)
+    /// totally orders entries and eviction is deterministic (FIFO among
+    /// equal scores).
+    seq: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,12 +349,27 @@ impl core::fmt::Display for SolverCacheError {
 impl std::error::Error for SolverCacheError {}
 
 const SHARD_COUNT: usize = 16;
+const ALPHA_CANDIDATES_MAX: usize = 8;
+const ALPHA_BUCKETS_MAX: usize = 1 << 16;
 
 #[derive(Default)]
 pub struct InMemorySolverCache {
-    shards: [Mutex<HashMap<DependencyKey, Arc<SolverResult>>>; SHARD_COUNT],
+    shards: [Mutex<CacheShard>; SHARD_COUNT],
+    policy: CacheAdmissionPolicy,
+    seq_counter: AtomicU64,
+    total_bytes: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
+    evictions: AtomicU64,
+    rejected_capacity: AtomicU64,
+    rejected_budget: AtomicU64,
+    /// Alpha key -> exact canonical keys of admitted entries (validation
+    /// tier; see [`alpha`]). Never holds a shard lock while locked.
+    alpha_index: Mutex<HashMap<AlphaKey, Vec<DependencyKey>>>,
+    alpha_proposals: AtomicU64,
+    alpha_confirmations: AtomicU64,
+    alpha_contradictions: AtomicU64,
+    alpha_suppressed_reuses: AtomicU64,
 }
 
 fn shard_index(key: &DependencyKey) -> usize {
@@ -241,15 +377,33 @@ fn shard_index(key: &DependencyKey) -> usize {
 }
 
 impl InMemorySolverCache {
+    /// Cache with the default (generous, effectively unbounded for typical
+    /// workloads) admission policy.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cache with an explicit bounded admission policy.
+    pub fn with_policy(policy: CacheAdmissionPolicy) -> Self {
+        Self {
+            policy,
+            ..Self::default()
+        }
+    }
+
+    pub fn policy(&self) -> CacheAdmissionPolicy {
+        self.policy
+    }
+
     pub fn lookup(&self, query: &SolverQuery) -> Result<Option<Arc<SolverResult>>, SolverCacheError> {
         query.validate_identity().map_err(SolverCacheError::InvalidQuery)?;
         let key = query.canonical_key();
         let index = shard_index(&key);
-        let result = self.shards[index]
-            .lock()
-            .map_err(|_| SolverCacheError::LockPoisoned)?
-            .get(&key)
-            .cloned();
+        let mut shard = self.shards[index].lock().map_err(|_| SolverCacheError::LockPoisoned)?;
+        let result = shard.entries.get(&key).cloned().map(|entry| entry.result);
+        // Every lookup is reuse-predictor evidence, hit or miss.
+        shard.seen.record(&key);
+        drop(shard);
         if result.is_some() {
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -259,29 +413,209 @@ impl InMemorySolverCache {
     }
 
     pub fn insert(&self, query: &SolverQuery, result: SolverResult) -> Result<CacheAdmission, SolverCacheError> {
+        self.insert_with_alpha(query, None, result)
+    }
+
+    /// Inserts with an optional alpha key: on admission the exact key is
+    /// also indexed under the alpha key so later alpha-equivalent queries
+    /// can propose it as a reuse candidate.
+    pub fn insert_with_alpha(
+        &self,
+        query: &SolverQuery,
+        alpha: Option<AlphaKey>,
+        result: SolverResult,
+    ) -> Result<CacheAdmission, SolverCacheError> {
         query.validate_identity().map_err(SolverCacheError::InvalidQuery)?;
         if !matches!(result.outcome, SolverOutcomeKind::Sat | SolverOutcomeKind::Unsat) {
             return Ok(CacheAdmission::RejectedTransient);
         }
         let key = query.canonical_key();
         let index = shard_index(&key);
-        self.shards[index]
+        let admission = {
+            let mut shard = self.shards[index].lock().map_err(|_| SolverCacheError::LockPoisoned)?;
+            self.admit_locked(&key, result, &mut shard)
+        };
+        if admission == Ok(CacheAdmission::Stored)
+            && let Some(alpha) = alpha
+            && let Ok(mut alpha_index) = self.alpha_index.lock()
+        {
+            Self::index_alpha_locked(&mut alpha_index, alpha, key);
+        }
+        admission
+    }
+
+    /// Admission decision under a held shard lock. Value-aware: the
+    /// seen-sketch score decides whether a full shard evicts its minimum
+    /// (score, seq) entry for the newcomer or rejects it; the byte budget
+    /// rejects what does not fit after any eviction.
+    fn admit_locked(
+        &self,
+        key: &DependencyKey,
+        result: SolverResult,
+        shard: &mut CacheShard,
+    ) -> Result<CacheAdmission, SolverCacheError> {
+        let bytes = estimate_entry_bytes(&result);
+        let score = shard.seen.estimate(key);
+        if let Some(entry) = shard.entries.get_mut(key) {
+            // Refresh an admitted key: newest result, best-known score.
+            self.total_bytes.fetch_sub(entry.bytes, Ordering::Relaxed);
+            self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
+            entry.result = Arc::new(result);
+            entry.score = entry.score.max(score);
+            entry.bytes = bytes;
+            entry.seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
+            return Ok(CacheAdmission::Stored);
+        }
+        // The eviction victim: minimum (score, seq) — the least valuable,
+        // oldest among equals. seq is unique, so the choice is deterministic.
+        let minimum = shard
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| (entry.score, entry.seq))
+            .map(|(entry_key, entry)| (*entry_key, entry.score, entry.bytes));
+        if shard.entries.len() >= self.policy.max_entries_per_shard {
+            match minimum {
+                // Strictly more valuable than the victim: evict it. Equal
+                // value does not churn a stable shard — reject instead, so
+                // repeated keys beat one-shots and admission replays.
+                Some((min_key, min_score, min_bytes)) if score > min_score => {
+                    if shard.entries.remove(&min_key).is_some() {
+                        self.total_bytes.fetch_sub(min_bytes, Ordering::Relaxed);
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                // Shard full of equal or more valuable entries (or cap 0).
+                _ => {
+                    self.rejected_capacity.fetch_add(1, Ordering::Relaxed);
+                    return Ok(CacheAdmission::RejectedCapacity);
+                }
+            }
+        }
+        if self.total_bytes.load(Ordering::Relaxed).saturating_add(bytes) > self.policy.byte_budget {
+            // One eviction attempt, same strict rule as the capacity path.
+            if let Some((min_key, min_score, min_bytes)) = minimum
+                && score > min_score
+                && shard.entries.remove(&min_key).is_some()
+            {
+                self.total_bytes.fetch_sub(min_bytes, Ordering::Relaxed);
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+            }
+            if self.total_bytes.load(Ordering::Relaxed).saturating_add(bytes) > self.policy.byte_budget {
+                self.rejected_budget.fetch_add(1, Ordering::Relaxed);
+                return Ok(CacheAdmission::RejectedBudget);
+            }
+        }
+        self.total_bytes.fetch_add(bytes, Ordering::Relaxed);
+        let seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
+        shard.entries.insert(
+            *key,
+            CacheEntry {
+                result: Arc::new(result),
+                score,
+                bytes,
+                seq,
+            },
+        );
+        Ok(CacheAdmission::Stored)
+    }
+
+    fn index_alpha_locked(
+        alpha_index: &mut HashMap<AlphaKey, Vec<DependencyKey>>,
+        alpha: AlphaKey,
+        key: DependencyKey,
+    ) {
+        if let Some(bucket) = alpha_index.get_mut(&alpha) {
+            if !bucket.contains(&key) && bucket.len() < ALPHA_CANDIDATES_MAX {
+                bucket.push(key);
+            }
+            return;
+        }
+        if alpha_index.len() >= ALPHA_BUCKETS_MAX {
+            return;
+        }
+        alpha_index.insert(alpha, vec![key]);
+    }
+
+    /// Proposes reuse candidates for an alpha key: admitted results whose
+    /// queries were alpha-equivalent, ordered by exact key for replayable
+    /// candidate selection. Presence is verified per exact key, so evicted
+    /// entries simply stop being proposed.
+    pub fn propose_alpha(&self, alpha: AlphaKey) -> Result<Vec<(DependencyKey, Arc<SolverResult>)>, SolverCacheError> {
+        self.alpha_proposals.fetch_add(1, Ordering::Relaxed);
+        let candidates: Vec<DependencyKey> = self
+            .alpha_index
             .lock()
             .map_err(|_| SolverCacheError::LockPoisoned)?
-            .insert(key, Arc::new(result));
-        Ok(CacheAdmission::Stored)
+            .get(&alpha)
+            .cloned()
+            .unwrap_or_default();
+        let mut proposals = Vec::with_capacity(candidates.len());
+        for key in candidates {
+            let index = shard_index(&key);
+            if let Ok(shard) = self.shards[index].lock()
+                && let Some(entry) = shard.entries.get(&key)
+            {
+                proposals.push((key, Arc::clone(&entry.result)));
+            }
+        }
+        proposals.sort_by_key(|(left, _)| left.0);
+        Ok(proposals)
+    }
+
+    /// Records that a confirmatory exact solve agreed with an alpha proposal.
+    pub fn record_alpha_confirmation(&self) {
+        self.alpha_confirmations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records that a confirmatory exact solve disagreed with an alpha
+    /// proposal — a would-be poisoning had suppression been enabled.
+    pub fn record_alpha_contradiction(&self) {
+        self.alpha_contradictions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a query answered from an alpha proposal without a
+    /// confirming solve (only possible with the experimental suppression
+    /// flag enabled).
+    pub fn record_alpha_suppressed_reuse(&self) {
+        self.alpha_suppressed_reuses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn alpha_stats(&self) -> Result<AlphaReuseStats, SolverCacheError> {
+        let (indexed_buckets, indexed_candidates) = self
+            .alpha_index
+            .lock()
+            .map_err(|_| SolverCacheError::LockPoisoned)
+            .map(|index| {
+                let buckets = u64::try_from(index.len()).unwrap_or(u64::MAX);
+                let candidates: u64 = index.values().map(Vec::len).fold(0u64, |sum, len| {
+                    sum.saturating_add(u64::try_from(len).unwrap_or(u64::MAX))
+                });
+                (buckets, candidates)
+            })?;
+        Ok(AlphaReuseStats {
+            proposals: self.alpha_proposals.load(Ordering::Relaxed),
+            confirmations: self.alpha_confirmations.load(Ordering::Relaxed),
+            contradictions: self.alpha_contradictions.load(Ordering::Relaxed),
+            suppressed_reuses: self.alpha_suppressed_reuses.load(Ordering::Relaxed),
+            indexed_buckets,
+            indexed_candidates,
+        })
     }
 
     pub fn stats(&self) -> Result<SolverCacheStats, SolverCacheError> {
         let mut entries: u64 = 0;
         for shard in &self.shards {
-            let len = shard.lock().map_err(|_| SolverCacheError::LockPoisoned)?.len();
+            let len = shard.lock().map_err(|_| SolverCacheError::LockPoisoned)?.entries.len();
             entries = entries.saturating_add(u64::try_from(len).unwrap_or(u64::MAX));
         }
         Ok(SolverCacheStats {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             entries,
+            evictions: self.evictions.load(Ordering::Relaxed),
+            rejected_capacity: self.rejected_capacity.load(Ordering::Relaxed),
+            rejected_budget: self.rejected_budget.load(Ordering::Relaxed),
+            stored_bytes: self.total_bytes.load(Ordering::Relaxed),
         })
     }
 
@@ -289,7 +623,7 @@ impl InMemorySolverCache {
     pub fn shard_lens(&self) -> Result<Vec<u64>, SolverCacheError> {
         let mut lens = Vec::with_capacity(SHARD_COUNT);
         for shard in &self.shards {
-            let len = shard.lock().map_err(|_| SolverCacheError::LockPoisoned)?.len();
+            let len = shard.lock().map_err(|_| SolverCacheError::LockPoisoned)?.entries.len();
             lens.push(u64::try_from(len).unwrap_or(u64::MAX));
         }
         Ok(lens)
@@ -1054,10 +1388,26 @@ impl SolverBackend for BatchSolver {
 /// unsatisfiable by superset and returns `Unsat` without a solver call.
 /// (Backends that don't extract cores simply never populate the index; the
 /// Z3 FFI's core extraction is future work.)
+///
+/// Alpha-equivalence reuse (optional, [`Self::with_alpha_reuse`]): the
+/// cache's alpha index proposes results from alpha-equivalent queries —
+/// identical modulo symbol renaming. By default every proposal is confirmed
+/// by an exact backend solve before it is trusted (confirmations and
+/// contradictions are counted on the cache); answering directly from an
+/// unconfirmed proposal requires the experimental
+/// `AlphaReuseConfig::suppress_without_confirmation` flag and stays off by
+/// default.
 pub struct CachingSolverBackend {
     inner: Box<dyn SolverBackend>,
     cache: Arc<InMemorySolverCache>,
     unsat_cores: Mutex<Vec<BTreeSet<DependencyKey>>>,
+    alpha: Option<AlphaReuseEngine>,
+}
+
+/// Reader + policy driving the alpha tier of [`CachingSolverBackend`].
+struct AlphaReuseEngine {
+    reader: Arc<dyn ExprReader>,
+    config: AlphaReuseConfig,
 }
 
 impl CachingSolverBackend {
@@ -1067,7 +1417,27 @@ impl CachingSolverBackend {
             inner,
             cache,
             unsat_cores: Mutex::new(Vec::new()),
+            alpha: None,
         }
+    }
+
+    /// Wraps `inner` with the shared `cache` and the alpha-equivalence
+    /// experiment enabled (see [`AlphaReuseConfig`]).
+    pub fn with_alpha_reuse(
+        inner: Box<dyn SolverBackend>,
+        cache: Arc<InMemorySolverCache>,
+        reader: Arc<dyn ExprReader>,
+        config: AlphaReuseConfig,
+    ) -> Self {
+        Self {
+            alpha: Some(AlphaReuseEngine { reader, config }),
+            ..Self::new(inner, cache)
+        }
+    }
+
+    /// The active alpha configuration, if the tier is enabled.
+    pub fn alpha_config(&self) -> Option<AlphaReuseConfig> {
+        self.alpha.as_ref().map(|engine| engine.config)
     }
 
     /// Number of UNSAT cores indexed so far (instrumentation).
@@ -1106,6 +1476,46 @@ impl CachingSolverBackend {
         }
         None
     }
+
+    /// Indexes a reported UNSAT core for superset reuse.
+    fn index_unsat_core(&self, query: &SolverQuery, result: &SolverResult) {
+        if result.outcome != SolverOutcomeKind::Unsat || result.unsat_core.is_empty() {
+            return;
+        }
+        let core_keys: Option<BTreeSet<DependencyKey>> = result
+            .unsat_core
+            .iter()
+            .map(|id| {
+                query
+                    .constraint_expressions()
+                    .iter()
+                    .find(|(constraint_id, _)| constraint_id == id)
+                    .and_then(|_| {
+                        query
+                            .constraint_keys()
+                            .get(query.constraint_expressions().iter().position(|(cid, _)| cid == id)?)
+                    })
+                    .copied()
+            })
+            .collect();
+        if let Some(core_keys) = core_keys
+            && let Ok(mut cores) = self.unsat_cores.lock()
+        {
+            cores.push(core_keys);
+        }
+    }
+
+    /// Outcome-only view of a result reused across a symbol renaming: the
+    /// model and unsat core are keyed by the *other* query's symbol and
+    /// constraint identities and must not leak.
+    fn renaming_reuse_result(outcome: SolverOutcomeKind) -> SolverResult {
+        SolverResult {
+            outcome,
+            model: Vec::new(),
+            unsat_core: Vec::new(),
+            elapsed: Duration::ZERO,
+        }
+    }
 }
 
 impl SolverBackend for CachingSolverBackend {
@@ -1117,32 +1527,48 @@ impl SolverBackend for CachingSolverBackend {
         if let Some(result) = self.cached_result(query) {
             return result;
         }
-        let result = self.inner.solve(query);
-        // Index the core for superset reuse before caching the full result.
-        if result.outcome == SolverOutcomeKind::Unsat && !result.unsat_core.is_empty() {
-            let core_keys: Option<BTreeSet<DependencyKey>> = result
-                .unsat_core
-                .iter()
-                .map(|id| {
-                    query
-                        .constraint_expressions()
-                        .iter()
-                        .find(|(constraint_id, _)| constraint_id == id)
-                        .and_then(|_| {
-                            query
-                                .constraint_keys()
-                                .get(query.constraint_expressions().iter().position(|(cid, _)| cid == id)?)
-                        })
-                        .copied()
-                })
-                .collect();
-            if let Some(core_keys) = core_keys
-                && let Ok(mut cores) = self.unsat_cores.lock()
+        let query_alpha = self
+            .alpha
+            .as_ref()
+            .filter(|engine| engine.config.enabled)
+            .and_then(|engine| alpha_key(engine.reader.as_ref(), query));
+        if let Some(alpha) = query_alpha
+            && let Ok(candidates) = self.cache.propose_alpha(alpha)
+            && let Some((_, proposed)) = candidates.first()
+        {
+            if self
+                .alpha
+                .as_ref()
+                .is_some_and(|engine| engine.config.suppress_without_confirmation)
             {
-                cores.push(core_keys);
+                // EXPERIMENTAL (flag defaults to off): answer without the
+                // confirming solve. A poisoned index would answer wrongly.
+                self.cache.record_alpha_suppressed_reuse();
+                return Self::renaming_reuse_result(proposed.outcome);
             }
+            // Validation mode: the alpha hit MUST be confirmed by an exact
+            // solve before it is trusted. The exact answer is what callers
+            // see either way; the counters record whether the alpha tier
+            // would have been right.
+            let result = self.inner.solve(query);
+            self.index_unsat_core(query, &result);
+            if result.outcome == proposed.outcome {
+                self.cache.record_alpha_confirmation();
+            } else {
+                self.cache.record_alpha_contradiction();
+                eprintln!(
+                    "[WARN] alpha-reuse contradiction: proposal {:?} != exact {:?} for canonical key {:?}",
+                    proposed.outcome,
+                    result.outcome,
+                    query.canonical_key()
+                );
+            }
+            let _ = self.cache.insert_with_alpha(query, Some(alpha), result.clone());
+            return result;
         }
-        let _ = self.cache.insert(query, result.clone());
+        let result = self.inner.solve(query);
+        self.index_unsat_core(query, &result);
+        let _ = self.cache.insert_with_alpha(query, query_alpha, result.clone());
         result
     }
 
@@ -1154,6 +1580,7 @@ impl SolverBackend for CachingSolverBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use angryier_expr::{ExprArena, ShardedExprArena};
 
     fn constraint(id: u64, byte: u8) -> CanonicalConstraint {
         CanonicalConstraint {
@@ -1219,7 +1646,9 @@ mod tests {
             SolverCacheStats {
                 hits: 1,
                 misses: 2,
-                entries: 1
+                entries: 1,
+                stored_bytes: 96,
+                ..SolverCacheStats::default()
             }
         );
         Ok(())
@@ -1627,5 +2056,727 @@ mod tests {
             Duration::from_secs(5),
         )
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{e:?}").into() })
+    }
+
+    // -----------------------------------------------------------------------
+    // Bounded, value-aware admission
+    // -----------------------------------------------------------------------
+
+    /// Deterministic distinct queries that all land in the same cache shard,
+    /// with pairwise sketch-probe-disjoint canonical keys so admission tests
+    /// reason about exact seen counts (no counter collisions).
+    fn same_shard_probe_disjoint_queries(count: usize) -> Result<Vec<SolverQuery>, Box<dyn std::error::Error>> {
+        let mut buckets: Vec<Vec<SolverQuery>> = vec![Vec::new(); SHARD_COUNT];
+        let mut used_probes: Vec<(usize, usize)> = Vec::new();
+        let mut seed: u64 = 1;
+        while buckets.iter().map(Vec::len).max().unwrap_or(0) < count {
+            if seed > 200_000 {
+                return Err("same-shard query search did not converge".into());
+            }
+            // Full-width constraint keys (a repeated byte gives only 256
+            // distinct canonical keys — not enough for a 44-key shard).
+            let mut hasher = Sha256::new();
+            hasher.update(seed.to_le_bytes());
+            let key: [u8; 32] = hasher.finalize().into();
+            let varied = CanonicalConstraint {
+                id: ConstraintId(seed),
+                key: DependencyKey(key),
+                expr: ExprId(u32::try_from(seed).unwrap_or(0)),
+            };
+            let q = query(&[varied]).map_err(|e| -> Box<dyn std::error::Error> { format!("{e:?}").into() })?;
+            let index = shard_index(&q.canonical_key());
+            let probes = SeenSketch::probes(&q.canonical_key());
+            if !buckets[index]
+                .iter()
+                .any(|other| other.canonical_key() == q.canonical_key())
+                && !used_probes.contains(&probes)
+            {
+                used_probes.push(probes);
+                buckets[index].push(q);
+            }
+            seed += 1;
+        }
+        let fullest = buckets
+            .into_iter()
+            .max_by_key(|bucket| bucket.len())
+            .unwrap_or_default();
+        Ok(fullest)
+    }
+
+    #[test]
+    fn admission_never_admits_transient_outcomes() -> Result<(), SolverCacheError> {
+        let q = query(&[constraint(1, 10)]).map_err(SolverCacheError::InvalidQuery)?;
+        let cache = InMemorySolverCache::default();
+        for outcome in [
+            SolverOutcomeKind::Unknown,
+            SolverOutcomeKind::Timeout,
+            SolverOutcomeKind::ResourceLimit,
+            SolverOutcomeKind::BackendError,
+        ] {
+            assert_eq!(cache.insert(&q, result(outcome))?, CacheAdmission::RejectedTransient);
+            assert_eq!(cache.lookup(&q)?, None, "{outcome:?} must never be cached");
+        }
+        let stats = cache.stats()?;
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.rejected_capacity + stats.rejected_budget, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_keys_win_admission_under_shard_pressure() -> Result<(), Box<dyn std::error::Error>> {
+        let queries = same_shard_probe_disjoint_queries(2)?;
+        let [hot, cold] = [&queries[0], &queries[1]];
+        let cache = InMemorySolverCache::with_policy(CacheAdmissionPolicy {
+            max_entries_per_shard: 1,
+            byte_budget: 1 << 30,
+        });
+
+        // First sighting of `hot`: admitted into the empty shard.
+        assert_eq!(cache.lookup(hot)?, None);
+        assert_eq!(
+            cache.insert(hot, result(SolverOutcomeKind::Sat))?,
+            CacheAdmission::Stored
+        );
+
+        // One-shot `cold`: the shard is full of an equal-score entry, and an
+        // equal score does not justify evicting — rejected, observable.
+        assert_eq!(cache.lookup(cold)?, None);
+        assert_eq!(
+            cache.insert(cold, result(SolverOutcomeKind::Unsat))?,
+            CacheAdmission::RejectedCapacity
+        );
+
+        // Second sighting of `cold`: its estimated reuse value now exceeds
+        // the stored one-shot's, so it is admitted and evicts `hot`.
+        assert_eq!(cache.lookup(cold)?, None);
+        assert_eq!(
+            cache.insert(cold, result(SolverOutcomeKind::Unsat))?,
+            CacheAdmission::Stored
+        );
+
+        let stats = cache.stats()?;
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.rejected_capacity, 1);
+        assert_eq!(stats.evictions, 1);
+        assert_eq!(cache.lookup(hot)?, None, "evicted key must miss");
+        assert!(cache.lookup(cold)?.is_some(), "twice-seen key must hit");
+        Ok(())
+    }
+
+    #[test]
+    fn byte_budget_rejects_what_does_not_fit() -> Result<(), Box<dyn std::error::Error>> {
+        let queries = same_shard_probe_disjoint_queries(2)?;
+        let [valuable, oversized] = [&queries[0], &queries[1]];
+        // Exactly one empty-model entry (estimated at 96 bytes) fits.
+        let cache = InMemorySolverCache::with_policy(CacheAdmissionPolicy {
+            max_entries_per_shard: 8192,
+            byte_budget: 96,
+        });
+
+        // `valuable` is asked for twice before admission (score 2).
+        assert_eq!(cache.lookup(valuable)?, None);
+        assert_eq!(cache.lookup(valuable)?, None);
+        assert_eq!(
+            cache.insert(valuable, result(SolverOutcomeKind::Sat))?,
+            CacheAdmission::Stored
+        );
+
+        // `oversized` is a one-shot (score 1): evicting the more valuable
+        // entry is not allowed, and 96 + 96 > 96 — rejected on budget.
+        assert_eq!(cache.lookup(oversized)?, None);
+        assert_eq!(
+            cache.insert(oversized, result(SolverOutcomeKind::Unsat))?,
+            CacheAdmission::RejectedBudget
+        );
+
+        let stats = cache.stats()?;
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.rejected_budget, 1);
+        assert_eq!(stats.stored_bytes, 96);
+        assert!(cache.lookup(valuable)?.is_some());
+        assert_eq!(cache.lookup(oversized)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn eviction_order_is_deterministic_and_replayable() -> Result<(), Box<dyn std::error::Error>> {
+        let queries = same_shard_probe_disjoint_queries(3)?;
+        let run = |cache: &InMemorySolverCache| -> Result<Vec<bool>, SolverCacheError> {
+            for q in &queries {
+                cache.lookup(q)?;
+            }
+            // The third query is seen twice, so it outranks the one-shot
+            // stored under equal scores and evicts the OLDEST of them.
+            cache.lookup(&queries[2])?;
+            for q in &queries {
+                let admission = cache.insert(q, result(SolverOutcomeKind::Sat))?;
+                let _ = admission;
+            }
+            queries.iter().map(|q| Ok(cache.lookup(q)?.is_some())).collect()
+        };
+        let policy = CacheAdmissionPolicy {
+            max_entries_per_shard: 2,
+            byte_budget: 1 << 30,
+        };
+        let first = InMemorySolverCache::with_policy(policy);
+        let second = InMemorySolverCache::with_policy(policy);
+        let survivors_first = run(&first)?;
+        let survivors_second = run(&second)?;
+        assert_eq!(survivors_first, survivors_second, "admissions must replay identically");
+        assert_eq!(
+            survivors_first,
+            vec![false, true, true],
+            "oldest equal-score entry is evicted"
+        );
+        assert_eq!(first.stats()?, second.stats()?);
+        assert_eq!(first.stats()?.evictions, 1);
+        Ok(())
+    }
+
+    /// Hit-rate on a repeated-key workload before and after bounding: the
+    /// bounded cache must keep the hot keys resident (value-aware admission
+    /// rejects the cold flood) and match the unbounded hit count.
+    #[test]
+    fn value_aware_bounding_preserves_hot_hit_rate() -> Result<(), Box<dyn std::error::Error>> {
+        let queries = same_shard_probe_disjoint_queries(44)?;
+        let (hot, cold) = queries.split_at(4);
+        let workload = |cache: &InMemorySolverCache| -> Result<u64, SolverCacheError> {
+            let hits_before = cache.stats()?.hits;
+            for _round in 0..6 {
+                for q in hot {
+                    if cache.lookup(q)?.is_none() {
+                        cache.insert(q, result(SolverOutcomeKind::Sat))?;
+                    }
+                }
+            }
+            for q in cold {
+                if cache.lookup(q)?.is_none() {
+                    cache.insert(q, result(SolverOutcomeKind::Sat))?;
+                }
+            }
+            for q in hot {
+                let _ = cache.lookup(q)?;
+            }
+            Ok(cache.stats()?.hits - hits_before)
+        };
+        let unbounded = InMemorySolverCache::default();
+        let unbounded_hits = workload(&unbounded)?;
+        let bounded = InMemorySolverCache::with_policy(CacheAdmissionPolicy {
+            max_entries_per_shard: 4,
+            byte_budget: 1 << 30,
+        });
+        let bounded_hits = workload(&bounded)?;
+
+        let bounded_stats = bounded.stats()?;
+        let total: u64 = 4 * 6 + 40 + 4;
+        println!(
+            "admission: hit-rate repeated-key workload unbounded {}/{} = {:.2}, bounded(cap 4/shard) {}/{} = {:.2}, rejected {} cold, evicted {}",
+            unbounded_hits,
+            total,
+            unbounded_hits as f64 / total as f64,
+            bounded_hits,
+            total,
+            bounded_hits as f64 / total as f64,
+            bounded_stats.rejected_capacity,
+            bounded_stats.evictions
+        );
+        assert_eq!(bounded_hits, unbounded_hits, "hot-key hits must survive bounding");
+        assert_eq!(bounded_stats.entries, 4, "cold flood must not be admitted");
+        assert_eq!(bounded_stats.rejected_capacity, 40, "every cold one-shot is rejected");
+        assert_eq!(bounded_stats.evictions, 0, "no hot entry is evicted");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Alpha-equivalence tier (Gate C experiment)
+    // -----------------------------------------------------------------------
+
+    fn expr_arena() -> Arc<ShardedExprArena> {
+        Arc::new(ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1)))
+    }
+
+    fn expr_symbol(arena: &ShardedExprArena, sym_id: u64) -> Result<ExprId, Box<dyn std::error::Error>> {
+        arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::BitVec(64),
+                op: angryier_expr::ExprOp::Symbol,
+                operands: Vec::new(),
+                immediate: sym_id.to_le_bytes().to_vec(),
+            })
+            .map_err(Into::into)
+    }
+
+    fn expr_const(arena: &ShardedExprArena, width: u16, value: u128) -> Result<ExprId, Box<dyn std::error::Error>> {
+        let byte_width = usize::from(width).div_ceil(8);
+        let immediate = value.to_le_bytes()[..byte_width].to_vec();
+        arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::BitVec(width),
+                op: angryier_expr::ExprOp::Constant,
+                operands: Vec::new(),
+                immediate,
+            })
+            .map_err(Into::into)
+    }
+
+    fn expr_binop(
+        arena: &ShardedExprArena,
+        op: angryier_expr::ExprOp,
+        width: u16,
+        left: ExprId,
+        right: ExprId,
+    ) -> Result<ExprId, Box<dyn std::error::Error>> {
+        arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::BitVec(width),
+                op,
+                operands: vec![left, right],
+                immediate: Vec::new(),
+            })
+            .map_err(Into::into)
+    }
+
+    fn expr_bool_op(
+        arena: &ShardedExprArena,
+        op: angryier_expr::ExprOp,
+        left: ExprId,
+        right: ExprId,
+    ) -> Result<ExprId, Box<dyn std::error::Error>> {
+        arena
+            .intern(angryier_expr::ExprNode {
+                sort: angryier_expr::ExprSort::Bool,
+                op,
+                operands: vec![left, right],
+                immediate: Vec::new(),
+            })
+            .map_err(Into::into)
+    }
+
+    fn expr_query(
+        arena: &ShardedExprArena,
+        predicate: ExprId,
+        constraints: &[(u64, ExprId)],
+    ) -> Result<SolverQuery, Box<dyn std::error::Error>> {
+        let canonical: Vec<_> = constraints
+            .iter()
+            .map(|(cid, eid)| CanonicalConstraint {
+                id: ConstraintId(*cid),
+                key: arena
+                    .dependency_summary(*eid)
+                    .map(|s| s.key)
+                    .unwrap_or(DependencyKey([0; 32])),
+                expr: *eid,
+            })
+            .collect();
+        let pred_key = arena
+            .dependency_summary(predicate)
+            .map(|s| s.key)
+            .ok_or("predicate must have a dependency summary")?;
+        Ok(SolverQuery::canonical(
+            SolverQueryId(1),
+            &canonical,
+            predicate,
+            pred_key,
+            TargetProfileId(1),
+            ConstraintCanonicalizationVersion(1),
+            Duration::from_secs(5),
+        )?)
+    }
+
+    /// Family template: `x * y + k == 10` with `x > 2`, `y > 2` — copies
+    /// differ by symbol renaming (`symbol_offset`) and constant (`k`).
+    fn template_query(
+        arena: &ShardedExprArena,
+        symbol_offset: u64,
+        constant: u128,
+    ) -> Result<SolverQuery, Box<dyn std::error::Error>> {
+        let x = expr_symbol(arena, 100 + symbol_offset)?;
+        let y = expr_symbol(arena, 200 + symbol_offset)?;
+        let two = expr_const(arena, 64, 2)?;
+        let bound_x = expr_bool_op(arena, angryier_expr::ExprOp::Ult, two, x)?;
+        let bound_y = expr_bool_op(arena, angryier_expr::ExprOp::Ult, two, y)?;
+        let product = expr_binop(arena, angryier_expr::ExprOp::Mul, 64, x, y)?;
+        let sum = expr_binop(
+            arena,
+            angryier_expr::ExprOp::Add,
+            64,
+            product,
+            expr_const(arena, 64, constant)?,
+        )?;
+        let ten = expr_const(arena, 64, 10)?;
+        let predicate = expr_bool_op(arena, angryier_expr::ExprOp::Eq, sum, ten)?;
+        expr_query(arena, predicate, &[(0, bound_x), (1, bound_y)])
+    }
+
+    #[test]
+    fn alpha_key_ignores_renaming_but_not_structure() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = expr_arena();
+        let reader: Arc<dyn ExprReader> = arena.clone();
+
+        let base = template_query(&arena, 0, 3)?;
+        let renamed = template_query(&arena, 5, 3)?;
+        assert_ne!(base.canonical_key(), renamed.canonical_key(), "exact keys differ");
+        assert_eq!(alpha_key(reader.as_ref(), &base), alpha_key(reader.as_ref(), &renamed));
+
+        // Poisoning cases: constant, operator, symbol multiplicity, width.
+        let poisoned_constant = template_query(&arena, 0, 4)?;
+        assert_ne!(
+            alpha_key(reader.as_ref(), &base),
+            alpha_key(reader.as_ref(), &poisoned_constant),
+            "different constants must not conflate"
+        );
+
+        let x = expr_symbol(&arena, 300)?;
+        let y = expr_symbol(&arena, 301)?;
+        let four = expr_const(&arena, 64, 4)?;
+        let xx = expr_binop(&arena, angryier_expr::ExprOp::Mul, 64, x, x)?;
+        let xy = expr_binop(&arena, angryier_expr::ExprOp::Mul, 64, x, y)?;
+        let x_plus_y = expr_binop(&arena, angryier_expr::ExprOp::Add, 64, x, y)?;
+        let q_xx = expr_query(&arena, expr_bool_op(&arena, angryier_expr::ExprOp::Eq, xx, four)?, &[])?;
+        let q_xy = expr_query(&arena, expr_bool_op(&arena, angryier_expr::ExprOp::Eq, xy, four)?, &[])?;
+        assert_ne!(
+            alpha_key(reader.as_ref(), &q_xx),
+            alpha_key(reader.as_ref(), &q_xy),
+            "x*x and x*y are not alpha-equivalent"
+        );
+
+        let yx = expr_binop(&arena, angryier_expr::ExprOp::Add, 64, y, x)?;
+        let q_xy_eq = expr_query(
+            &arena,
+            expr_bool_op(&arena, angryier_expr::ExprOp::Eq, x_plus_y, four)?,
+            &[],
+        )?;
+        let q_yx_eq = expr_query(&arena, expr_bool_op(&arena, angryier_expr::ExprOp::Eq, yx, four)?, &[])?;
+        assert_eq!(
+            alpha_key(reader.as_ref(), &q_xy_eq),
+            alpha_key(reader.as_ref(), &q_yx_eq),
+            "commutative operand order is canonicalized"
+        );
+
+        let x32 = expr_symbol(&arena, 302)?;
+        // Re-intern as 32-bit by building the same shape with a 32-bit symbol.
+        let sym32 = arena.intern(angryier_expr::ExprNode {
+            sort: angryier_expr::ExprSort::BitVec(32),
+            op: angryier_expr::ExprOp::Symbol,
+            operands: Vec::new(),
+            immediate: 302u64.to_le_bytes().to_vec(),
+        })?;
+        let _ = x32;
+        let four32 = expr_const(&arena, 32, 4)?;
+        let sum32 = expr_binop(&arena, angryier_expr::ExprOp::Add, 32, sym32, sym32)?;
+        let q_32 = expr_query(
+            &arena,
+            expr_bool_op(&arena, angryier_expr::ExprOp::Eq, sum32, four32)?,
+            &[],
+        )?;
+        let sum64 = expr_binop(&arena, angryier_expr::ExprOp::Add, 64, x, x)?;
+        let q_64 = expr_query(
+            &arena,
+            expr_bool_op(&arena, angryier_expr::ExprOp::Eq, sum64, four)?,
+            &[],
+        )?;
+        assert_ne!(
+            alpha_key(reader.as_ref(), &q_32),
+            alpha_key(reader.as_ref(), &q_64),
+            "widths must not conflate"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn alpha_index_proposes_only_admitted_candidates() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = expr_arena();
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let q = template_query(&arena, 0, 3)?;
+        let key = alpha_key(reader.as_ref(), &q).ok_or("alpha key")?;
+        let cache = InMemorySolverCache::default();
+
+        assert!(cache.propose_alpha(key)?.is_empty(), "nothing indexed yet");
+        assert_eq!(
+            cache.insert_with_alpha(&q, Some(key), result(SolverOutcomeKind::Sat))?,
+            CacheAdmission::Stored
+        );
+        let proposals = cache.propose_alpha(key)?;
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].0, q.canonical_key());
+        assert_eq!(proposals[0].1.outcome, SolverOutcomeKind::Sat);
+        let stats = cache.alpha_stats()?;
+        assert_eq!(stats.proposals, 2, "one empty consultation plus one hit");
+        assert_eq!(stats.indexed_buckets, 1);
+        assert_eq!(stats.indexed_candidates, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn caching_backend_confirms_alpha_hits_with_exact_solve() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = expr_arena();
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let cache = Arc::new(InMemorySolverCache::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let inner = CountingBackend {
+            outcome: SolverOutcomeKind::Sat,
+            calls: Arc::clone(&calls),
+        };
+        let mut backend = CachingSolverBackend::with_alpha_reuse(
+            Box::new(inner),
+            Arc::clone(&cache),
+            reader,
+            AlphaReuseConfig {
+                enabled: true,
+                suppress_without_confirmation: false,
+            },
+        );
+
+        let base = template_query(&arena, 0, 3)?;
+        let renamed = template_query(&arena, 9, 3)?;
+        assert_eq!(backend.solve(&base).outcome, SolverOutcomeKind::Sat);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        // The renamed query alpha-hits, but validation mode still confirms
+        // with an exact solve before trusting it.
+        let outcome = backend.solve(&renamed);
+        assert_eq!(outcome.outcome, SolverOutcomeKind::Sat);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "alpha hit was confirmed by an exact solve"
+        );
+
+        let stats = cache.alpha_stats()?;
+        assert_eq!(stats.proposals, 2, "one empty consultation plus one proposal");
+        assert_eq!(stats.confirmations, 1);
+        assert_eq!(stats.contradictions, 0);
+        assert_eq!(stats.suppressed_reuses, 0);
+
+        // The confirmed query is now exactly cached — no further solves.
+        let again = backend.solve(&renamed);
+        assert_eq!(again.outcome, SolverOutcomeKind::Sat);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        Ok(())
+    }
+
+    /// A disagreeing backend (different true answers for the same alpha
+    /// class, i.e. what a poisoned index would look like): the contradiction
+    /// is counted and the exact answer is what callers see.
+    struct OutcomeByQueryBackend {
+        calls: Arc<AtomicU64>,
+    }
+
+    impl SolverBackend for OutcomeByQueryBackend {
+        fn name(&self) -> &'static str {
+            "outcome-by-query"
+        }
+        fn solve(&mut self, query: &SolverQuery) -> SolverResult {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let outcome = if query.canonical_key().0[31].is_multiple_of(2) {
+                SolverOutcomeKind::Sat
+            } else {
+                SolverOutcomeKind::Unsat
+            };
+            SolverResult {
+                outcome,
+                model: Vec::new(),
+                unsat_core: Vec::new(),
+                elapsed: Duration::ZERO,
+            }
+        }
+        fn solve_batch(&mut self, _shared: &[ConstraintId], predicates: &[SolverQuery]) -> Vec<SolverResult> {
+            predicates.iter().map(|q| self.solve(q)).collect()
+        }
+    }
+
+    #[test]
+    fn caching_backend_counts_alpha_contradictions() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = expr_arena();
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let cache = Arc::new(InMemorySolverCache::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let inner = OutcomeByQueryBackend {
+            calls: Arc::clone(&calls),
+        };
+        let mut backend = CachingSolverBackend::with_alpha_reuse(
+            Box::new(inner),
+            Arc::clone(&cache),
+            reader,
+            AlphaReuseConfig {
+                enabled: true,
+                suppress_without_confirmation: false,
+            },
+        );
+
+        let base = template_query(&arena, 0, 3)?;
+        let renamed = template_query(&arena, 9, 3)?;
+        let base_outcome = backend.solve(&base).outcome;
+        let renamed_outcome = backend.solve(&renamed).outcome;
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "both queries solved exactly");
+
+        let stats = cache.alpha_stats()?;
+        assert_eq!(stats.proposals, 2, "one empty consultation plus one proposal");
+        assert_eq!(stats.contradictions, 1, "the disagreeing proposal is recorded");
+        assert_eq!(stats.confirmations, 0);
+        // Callers always see the exact backend answer for each query.
+        let expected_base = if base.canonical_key().0[31].is_multiple_of(2) {
+            SolverOutcomeKind::Sat
+        } else {
+            SolverOutcomeKind::Unsat
+        };
+        let expected_renamed = if renamed.canonical_key().0[31].is_multiple_of(2) {
+            SolverOutcomeKind::Sat
+        } else {
+            SolverOutcomeKind::Unsat
+        };
+        assert_eq!(base_outcome, expected_base);
+        assert_eq!(renamed_outcome, expected_renamed);
+        assert_ne!(base_outcome, renamed_outcome, "the family genuinely disagrees");
+        Ok(())
+    }
+
+    #[test]
+    fn alpha_reuse_defaults_to_no_suppression() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = expr_arena();
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let cache = Arc::new(InMemorySolverCache::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let inner = CountingBackend {
+            outcome: SolverOutcomeKind::Sat,
+            calls: Arc::clone(&calls),
+        };
+
+        // Default construction: no alpha engine at all.
+        let plain = CachingSolverBackend::new(Box::new(inner), Arc::clone(&cache));
+        assert_eq!(plain.alpha_config(), None);
+
+        // Default config: alpha disabled — behavior identical to plain.
+        let disabled = CachingSolverBackend::with_alpha_reuse(
+            Box::new(CountingBackend {
+                outcome: SolverOutcomeKind::Sat,
+                calls: Arc::clone(&calls),
+            }),
+            Arc::clone(&cache),
+            reader,
+            AlphaReuseConfig::default(),
+        );
+        assert_eq!(
+            disabled.alpha_config(),
+            Some(AlphaReuseConfig {
+                enabled: false,
+                suppress_without_confirmation: false
+            })
+        );
+        let base = template_query(&arena, 0, 3)?;
+        let renamed = template_query(&arena, 9, 3)?;
+        let mut disabled = disabled;
+        disabled.solve(&base);
+        disabled.solve(&renamed);
+        // One call from `plain`, zero for the exactly-cached base, one for
+        // the renamed query — the disabled tier consults nothing.
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        let stats = cache.alpha_stats()?;
+        assert_eq!(stats.proposals, 0, "disabled tier never consults the index");
+        assert_eq!(stats.indexed_buckets, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn suppression_flag_answers_without_solving_when_enabled() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = expr_arena();
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let cache = Arc::new(InMemorySolverCache::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let inner = CountingBackend {
+            outcome: SolverOutcomeKind::Sat,
+            calls: Arc::clone(&calls),
+        };
+        let mut backend = CachingSolverBackend::with_alpha_reuse(
+            Box::new(inner),
+            Arc::clone(&cache),
+            reader,
+            AlphaReuseConfig {
+                enabled: true,
+                suppress_without_confirmation: true,
+            },
+        );
+
+        let base = template_query(&arena, 0, 3)?;
+        let renamed = template_query(&arena, 9, 3)?;
+        assert_eq!(backend.solve(&base).outcome, SolverOutcomeKind::Sat);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        // Suppression on: the renamed query is answered from the proposal
+        // alone — no second solve, outcome-only result (model dropped).
+        let outcome = backend.solve(&renamed);
+        assert_eq!(outcome.outcome, SolverOutcomeKind::Sat);
+        assert!(outcome.model.is_empty());
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "no confirmatory solve happened");
+        let stats = cache.alpha_stats()?;
+        assert_eq!(stats.suppressed_reuses, 1);
+        assert_eq!(stats.confirmations, 0);
+        Ok(())
+    }
+
+    /// Gate C alpha-equivalence experiment: renamed families must alpha-hit
+    /// and confirm; poisoned (constant-mutated) families must never conflate.
+    #[test]
+    #[ignore = "Gate C alpha-equivalence experiment — run explicitly with --ignored"]
+    fn alpha_families_validation_experiment() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = expr_arena();
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let cache = Arc::new(InMemorySolverCache::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let inner = CountingBackend {
+            outcome: SolverOutcomeKind::Sat,
+            calls: Arc::clone(&calls),
+        };
+        let mut backend = CachingSolverBackend::with_alpha_reuse(
+            Box::new(inner),
+            Arc::clone(&cache),
+            reader,
+            AlphaReuseConfig {
+                enabled: true,
+                suppress_without_confirmation: false,
+            },
+        );
+
+        // Family R: 8 copies identical up to symbol renaming.
+        let renamed_family: Vec<_> = (0..8u64)
+            .map(|offset| template_query(&arena, offset * 7, 3))
+            .collect::<Result<_, _>>()?;
+        for query in &renamed_family {
+            assert_eq!(backend.solve(query).outcome, SolverOutcomeKind::Sat);
+        }
+        // One solve per family member: the first stores, the rest confirm.
+        assert_eq!(calls.load(Ordering::Relaxed), 8);
+
+        // Family P: same shape, one constant mutated per member — must not
+        // conflate with R or with each other.
+        let poisoned_family: Vec<_> = (0..8u128)
+            .map(|member| template_query(&arena, 1000 + u64::try_from(member)?, member + 20))
+            .collect::<Result<_, _>>()?;
+        let renamed_alpha = alpha_key(arena.as_ref(), renamed_family.first().ok_or("family")?);
+        for query in &poisoned_family {
+            let key = alpha_key(arena.as_ref(), query).ok_or("alpha key")?;
+            assert_ne!(key, renamed_alpha.ok_or("alpha key")?);
+            assert_eq!(backend.solve(query).outcome, SolverOutcomeKind::Sat);
+        }
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            16,
+            "every poisoned member solved exactly"
+        );
+
+        let stats = cache.alpha_stats()?;
+        println!(
+            "GATE-C alpha: family(8 renamed) confirmations={} contradictions={} proposals={} suppressed={} indexed_buckets={}",
+            stats.confirmations, stats.contradictions, stats.proposals, stats.suppressed_reuses, stats.indexed_buckets
+        );
+        assert_eq!(stats.confirmations, 7, "7 renamed copies confirmed the stored result");
+        assert_eq!(stats.contradictions, 0, "no poisoned member was conflated");
+        assert_eq!(stats.suppressed_reuses, 0, "validation mode never suppresses");
+        let stats = cache.stats()?;
+        println!(
+            "GATE-C alpha: exact cache entries={} hits={} misses={}",
+            stats.entries, stats.hits, stats.misses
+        );
+        Ok(())
     }
 }

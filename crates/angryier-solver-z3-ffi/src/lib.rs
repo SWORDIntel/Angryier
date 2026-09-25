@@ -11,7 +11,8 @@ use angryier_solver::{SolverBackend, SolverQuery, SolverResult};
 use angryier_types::{ConstraintId, ExprId, SolverOutcomeKind};
 use core::time::Duration;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use z3_sys::*;
 
 /// Error returned by the Z3 FFI bridge.
@@ -50,10 +51,110 @@ pub struct Z3FfiBridge {
     /// `assumption_i → constraint_i` so UNSAT cores name the culprit
     /// constraints).
     scope_keys: Vec<(angryier_types::DependencyKey, angryier_types::ConstraintId, Z3_ast)>,
+    /// Watchdog thread armed around the check call of a
+    /// `solve_with_deadline` solve — `None` unless a check is in flight.
+    /// Only ever touched under `&mut self`; see the watchdog commentary
+    /// below [`WatchdogFlags`] for the lifetime reasoning.
+    watchdog: Option<ArmedWatchdog>,
 }
 
-// SAFETY: The caller must ensure single-threaded access to the Z3 context.
+// SAFETY: The caller must ensure single-threaded access to the Z3 context,
+// with one documented exception: `Z3_interrupt` (see the watchdog commentary
+// below) is Z3's thread-safe cancellation point and is the only context call
+// ever made off the owning thread.
 unsafe impl Send for Z3FfiBridge {}
+
+// ---------------------------------------------------------------------------
+// Mid-flight cancellation watchdog
+// ---------------------------------------------------------------------------
+//
+// `interrupt()` only helps while a Z3 procedure is actually running: measured
+// in `tests/preemption_bench.rs`, a *pre-armed* interrupt flag is consumed by
+// the API calls that precede the check (translation, pushes), so arming
+// before `Z3_solver_check_assumptions` does nothing. `solve_with_deadline`
+// therefore arms a watchdog thread immediately *before* the check call and
+// retires it immediately *after*, so the interrupt can only ever land on a
+// check that is in flight.
+//
+// Memory-model and lifetime reasoning for the watchdog:
+//
+// * Pointer validity: `Z3_context` is an opaque handle created in
+//   [`Z3FfiBridge::new`] and freed only in `Drop`; its pointer value is
+//   stable and valid for the bridge's whole lifetime. The watchdog's only
+//   use of the pointer is passing it to `Z3_interrupt`.
+// * Why the cross-thread call is safe: `Z3_interrupt` is Z3's documented
+//   cancellation point for exactly this pattern — "Interrupt the execution
+//   of a Z3 procedure. This procedure can be used to interrupt: solvers,
+//   simplifiers and tactics" (`z3_api.h`), and the upstream API docs state
+//   it may be invoked from a different thread. It only raises the context's
+//   cancel flag; it does not mutate ASTs or solver state, so it cannot race
+//   the owning thread's context use into corruption. All other context use
+//   stays on the owning thread, preserving this crate's single-threaded
+//   access invariant with `Z3_interrupt` as its one documented exception.
+// * The bridge always outlives any armed watchdog. Happy path: retirement
+//   (disarm + join) happens inside `check_and_extract` while the `&mut self`
+//   borrow is live, so the bridge cannot be dropped beneath the thread.
+//   Panic path: `Drop` retires any still-armed watchdog (reachable only if a
+//   deadline solve panicked between arming and retiring) *before*
+//   `Z3_del_context`, so the watchdog can never touch a freed context.
+// * Ordering: `disarmed` is stored `Release` before the channel wake and is
+//   loaded `Acquire` after the watchdog's sleep expires, so retirement
+//   happens-before a would-be firing decision; `fired` is stored `Release`
+//   by the watchdog and read after `join`, which itself happens-before the
+//   joiner's subsequent accesses. The channel exists so retirement wakes
+//   the sleeper immediately — joining never blocks out the rest of the
+//   deadline after the check has already returned.
+// * Residual race (fundamental to cancelling the canceller): if the check
+//   completes in the instant between the watchdog's sleep expiring and the
+//   `disarmed` store, the interrupt lands just after the check returned and
+//   its flag sits on the context. The preemption bench measured that routine
+//   API traffic (translation/push) consumes such a stray flag; worst case a
+//   later procedure reports UNKNOWN once — a conservative miss, never a
+//   fabricated Sat/Unsat.
+
+/// Flags shared between the owning thread and one armed watchdog.
+#[derive(Default)]
+struct WatchdogFlags {
+    /// Set by the owning thread to retire the watchdog; checked after its
+    /// sleep expires — if set, the thread exits without touching the
+    /// context.
+    disarmed: AtomicBool,
+    /// Set by the watchdog iff it actually called `Z3_interrupt`.
+    fired: AtomicBool,
+}
+
+/// A watchdog thread armed around a single check call.
+struct ArmedWatchdog {
+    flags: Arc<WatchdogFlags>,
+    /// Sending wakes the sleeping watchdog early (retirement handshake).
+    disarm_tx: mpsc::Sender<()>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+/// A `Z3_context` pointer wrapped for its one permitted cross-thread use.
+struct InterruptCtx(Z3_context);
+
+impl InterruptCtx {
+    /// The watchdog's entire cross-thread use of the context: raise Z3's
+    /// cancel flag. A method (not a field access) so closures capture the
+    /// whole `Send` wrapper instead of disjoint-capturing its `!Send` field.
+    fn interrupt(&self) {
+        // SAFETY: `self.0` is the owning bridge's `Z3_context`, valid for
+        // the bridge's whole lifetime (freed only in `Drop`, which retires
+        // the calling watchdog thread first), and `Z3_interrupt` is
+        // documented safe to call from another thread — it only raises the
+        // context's cancel flag.
+        unsafe { Z3_interrupt(self.0) }
+    }
+}
+
+// SAFETY: the pointer is only ever dereferenced by being passed to
+// `Z3_interrupt`, which Z3 documents as callable from another thread, and it
+// stays valid for the bridge's whole lifetime (the arm/retire protocol
+// described above guarantees the thread is joined before the context is
+// freed), so moving it into the watchdog thread cannot introduce a
+// use-after-free.
+unsafe impl Send for InterruptCtx {}
 
 impl Z3FfiBridge {
     /// Create a new Z3 FFI bridge with the given expression reader.
@@ -89,6 +190,7 @@ impl Z3FfiBridge {
             context,
             solver,
             scope_keys: Vec::new(),
+            watchdog: None,
         })
     }
 
@@ -98,6 +200,16 @@ impl Z3FfiBridge {
     /// the caller should fall back to a fresh solver (timeout param is
     /// set per-query and can't be scoped).
     fn solve_incremental(&mut self, query: &SolverQuery) -> SolverResult {
+        self.solve_incremental_inner(query, None)
+    }
+
+    /// Shared body of [`SolverBackend::solve`] and
+    /// [`Z3FfiBridge::solve_with_deadline`]: identical translation and
+    /// scoping; a `Some(deadline)` additionally arms the mid-flight
+    /// cancellation watchdog around the check call itself (see
+    /// [`Z3FfiBridge::solve_with_deadline`] for how the two cancellation
+    /// mechanisms compose).
+    fn solve_incremental_inner(&mut self, query: &SolverQuery, deadline: Option<Duration>) -> SolverResult {
         if query.validate_identity().is_err() {
             return backend_error();
         }
@@ -186,7 +298,7 @@ impl Z3FfiBridge {
         let result = if failed {
             backend_error()
         } else {
-            self.check_and_extract(&mut symbols)
+            self.check_and_extract(&mut symbols, deadline)
         };
         unsafe { Z3_solver_pop(ctx, self.solver, 1) };
         result
@@ -200,20 +312,132 @@ impl Z3FfiBridge {
         unsafe { Z3_interrupt(self.context) }
     }
 
-    fn check_and_extract(&self, symbols: &mut HashMap<ExprId, Z3_ast>) -> SolverResult {
+    /// Solve `query` under a hard wall-clock `deadline` enforced by
+    /// mid-flight cancellation.
+    ///
+    /// The query's soft timeout ([`SolverQuery::timeout`]) is still
+    /// installed on the solver params exactly as in [`SolverBackend::solve`]
+    /// — it remains the always-on backstop (and the only limit when no
+    /// deadline is given). The deadline adds an *external* guarantee: a
+    /// watchdog thread that sleeps for `deadline` and then fires
+    /// [`Z3FfiBridge::interrupt`] on this bridge's context, cancelling the
+    /// running `Z3_solver_check_assumptions`, which then returns `UNKNOWN`.
+    /// The two mechanisms compose rather than fight: whichever expires first
+    /// cancels the check and yields `Unknown` — never a fabricated
+    /// `Sat`/`Unsat` — while the loser is retired without side effects (the
+    /// soft limit simply never trips; the watchdog is disarmed and joined
+    /// before it fires).
+    ///
+    /// The watchdog is armed only around the check call itself, after all
+    /// translation and pushes complete: a *pre-armed* interrupt flag is
+    /// consumed by intervening Z3 API calls (measured in
+    /// `tests/preemption_bench.rs`), so arming any earlier would let the
+    /// flag be eaten before the check starts. A zero deadline is treated as
+    /// "no hard deadline" (soft limit only).
+    pub fn solve_with_deadline(&mut self, query: &SolverQuery, deadline: Duration) -> SolverResult {
+        self.solve_incremental_inner(query, Some(deadline))
+    }
+
+    /// Arm the mid-flight cancellation watchdog for the check that is about
+    /// to start. Degrades gracefully: if the thread cannot be spawned the
+    /// check still runs under the soft-limit params (the always-on
+    /// backstop), just without the external hard deadline.
+    fn arm_watchdog(&mut self, deadline: Duration) {
+        debug_assert!(
+            self.watchdog.is_none(),
+            "previous watchdog must be retired before arming a new one"
+        );
+        let (disarm_tx, disarm_rx) = mpsc::channel::<()>();
+        let flags = Arc::new(WatchdogFlags::default());
+        let watcher_flags = flags.clone();
+        // SAFETY: the raw context pointer crosses into the watchdog thread
+        // inside `InterruptCtx`, whose `Send` impl documents why that is
+        // sound; the call it enables (`Z3_interrupt`) is guarded by the
+        // arm/retire protocol described above [`WatchdogFlags`].
+        let ctx = InterruptCtx(self.context);
+        let handle = std::thread::Builder::new()
+            .name("z3-ffi-watchdog".to_owned())
+            .spawn(move || {
+                match disarm_rx.recv_timeout(deadline) {
+                    // Retired early (or the owning bridge vanished without
+                    // disarming): exit without ever touching the context.
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                    // The check outlived its deadline: cancel it in flight.
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if !watcher_flags.disarmed.load(Ordering::Acquire) {
+                            watcher_flags.fired.store(true, Ordering::Release);
+                            ctx.interrupt();
+                        }
+                    }
+                }
+            });
+        match handle {
+            Ok(handle) => {
+                self.watchdog = Some(ArmedWatchdog {
+                    flags,
+                    disarm_tx,
+                    handle,
+                })
+            }
+            Err(spawn_err) => {
+                eprintln!("z3-ffi: watchdog spawn failed ({spawn_err}); relying on the soft timeout param");
+            }
+        }
+    }
+
+    /// Disarm and join the armed watchdog, if any. Returns whether the
+    /// retired watchdog reports having actually fired `Z3_interrupt`.
+    fn retire_watchdog(&mut self) -> bool {
+        let Some(watchdog) = self.watchdog.take() else {
+            return false;
+        };
+        // Order matters: publish `disarmed` first so a watchdog whose sleep
+        // is expiring right now exits instead of firing; the channel send
+        // then wakes it immediately (so joining never blocks for the rest
+        // of the deadline); `join` reaps it before this method returns.
+        watchdog.flags.disarmed.store(true, Ordering::Release);
+        let _ = watchdog.disarm_tx.send(());
+        let _ = watchdog.handle.join();
+        watchdog.flags.fired.load(Ordering::Acquire)
+    }
+
+    fn check_and_extract(&mut self, symbols: &mut HashMap<ExprId, Z3_ast>, deadline: Option<Duration>) -> SolverResult {
         let ctx = self.context;
+        // Check under the live scope assumptions — the UNSAT core names
+        // which constraint literals are responsible.
+        let assumptions: Vec<Z3_ast> = self.scope_keys.iter().map(|(_, _, a)| *a).collect();
+        // Arm the watchdog only now: every translation/push is complete, so
+        // the interrupt can only land on the check itself — never before it
+        // (a pre-armed flag is consumed by preceding API calls).
+        if let Some(deadline) = deadline.filter(|d| !d.is_zero()) {
+            self.arm_watchdog(deadline);
+        }
+        let result =
+            unsafe { Z3_solver_check_assumptions(ctx, self.solver, assumptions.len() as u32, assumptions.as_ptr()) };
+        // Retire (disarm + join) before any further context traffic — model
+        // extraction and the caller's transient-scope pop must not race a
+        // late interrupt.
+        let watchdog_fired = self.retire_watchdog();
+        let outcome = if result == Z3_L_TRUE {
+            SolverOutcomeKind::Sat
+        } else if result == Z3_L_FALSE {
+            SolverOutcomeKind::Unsat
+        } else {
+            SolverOutcomeKind::Unknown
+        };
+        if watchdog_fired && outcome != SolverOutcomeKind::Unknown {
+            // The check completed in the instants between the watchdog's
+            // deadline expiring and the disarm store — see the residual-race
+            // note above [`WatchdogFlags`]. The decision above is still
+            // truthful (the check genuinely finished before observing the
+            // interrupt); only a stray cancel flag may remain on the
+            // context, which subsequent API traffic consumes.
+            eprintln!(
+                "z3-ffi: deadline watchdog fired just after the check returned {outcome:?}; \
+                 a stray interrupt flag may linger on the context"
+            );
+        }
         unsafe {
-            // Check under the live scope assumptions — the UNSAT core names
-            // which constraint literals are responsible.
-            let assumptions: Vec<Z3_ast> = self.scope_keys.iter().map(|(_, _, a)| *a).collect();
-            let result = Z3_solver_check_assumptions(ctx, self.solver, assumptions.len() as u32, assumptions.as_ptr());
-            let outcome = if result == Z3_L_TRUE {
-                SolverOutcomeKind::Sat
-            } else if result == Z3_L_FALSE {
-                SolverOutcomeKind::Unsat
-            } else {
-                SolverOutcomeKind::Unknown
-            };
             let model = if outcome == SolverOutcomeKind::Sat {
                 match Z3_solver_get_model(ctx, self.solver) {
                     Some(model) => {
@@ -509,6 +733,14 @@ impl SolverBackend for Z3FfiBridge {
 
 impl Drop for Z3FfiBridge {
     fn drop(&mut self) {
+        // Belt-and-braces: retire any watchdog that is still armed (only
+        // reachable if a deadline solve panicked between arming and
+        // retiring) BEFORE freeing the context, so the watchdog thread can
+        // never call `Z3_interrupt` on a freed context.
+        self.retire_watchdog();
+        // SAFETY: `self.context` was created by `Z3_mk_context` in `new`,
+        // is not used after this point, and retirement above joined every
+        // thread that held it.
         unsafe {
             Z3_del_context(self.context);
         }

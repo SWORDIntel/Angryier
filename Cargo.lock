@@ -213,6 +213,7 @@ dependencies = [
  "angryier-memory",
  "angryier-models",
  "angryier-provenance",
+ "angryier-replay",
  "angryier-scheduler",
  "angryier-semantics",
  "angryier-semantics-gen",
@@ -262,6 +263,7 @@ version = "0.1.0"
 dependencies = [
  "angryier-arch",
  "angryier-arch-intel64",
+ "angryier-arch-xed-ffi",
  "angryier-execution",
  "angryier-ir",
  "angryier-memory",
@@ -270,6 +272,7 @@ dependencies = [
  "angryier-semantics-gen",
  "angryier-state",
  "angryier-types",
+ "xed-sys",
 ]
 
 [[package]]
