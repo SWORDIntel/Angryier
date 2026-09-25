@@ -65,6 +65,8 @@ pub struct LoadedImage {
     pub program_headers: Option<ProgramHeadersInfo>,
     /// Parsed `PT_DYNAMIC` tables — present on dynamically-linked images.
     pub dynamic: Option<DynamicInfo>,
+    /// Parsed PE32+ metadata — present on PE images only.
+    pub pe: Option<PeInfo>,
 }
 
 /// A parsed `PT_DYNAMIC` entry of interest — a `(tag, value)` pair where
@@ -115,6 +117,19 @@ impl LoadedImage {
     pub fn symbol(&self, name: &str) -> Option<&Symbol> {
         self.symbols.iter().find(|symbol| symbol.name == name)
     }
+
+    /// Returns the imports parsed from a PE32+ import directory, or `None`
+    /// for non-PE images. A PE image without an import directory yields an
+    /// empty slice, not an error.
+    ///
+    /// Delay imports (`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT`) and bound
+    /// imports (`IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT`) are out of scope and
+    /// skipped — only `IMAGE_DIRECTORY_ENTRY_IMPORT` (index 1) is parsed.
+    /// Resolving/patching the recorded IAT slots is left to downstream
+    /// consumers.
+    pub fn pe_imports(&self) -> Option<&[PeImport]> {
+        self.pe.as_ref().map(|pe| pe.imports.as_slice())
+    }
 }
 
 pub trait ImageLoader: Send + Sync {
@@ -127,7 +142,7 @@ pub trait StateImporter: Send + Sync {
     fn import(&self, kind: ImportKind, source: &[u8]) -> Result<Self::State, Self::Error>;
 }
 
-/// Errors produced by the in-memory loader, state importer, and ELF64 loader backends.
+/// Errors produced by the in-memory loader, state importer, and ELF64/PE32+ loader backends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoaderError {
     /// The provided input buffer was empty.
@@ -148,6 +163,11 @@ pub enum LoaderError {
     NoProgramHeaders,
     /// A segment file offset or memory size extends beyond the input buffer.
     SegmentOutOfRange,
+    /// The PE32+ import directory, a descriptor, thunk array, or import name
+    /// is truncated or points outside the mapped image.
+    TruncatedImportTable,
+    /// A PE32+ import DLL name exceeds the enforced maximum of 64 bytes.
+    ImportDllNameTooLong,
 }
 
 impl fmt::Display for LoaderError {
@@ -162,6 +182,8 @@ impl fmt::Display for LoaderError {
             Self::InvalidMachine => f.write_str("invalid machine architecture (expected x86-64)"),
             Self::NoProgramHeaders => f.write_str("no program headers found"),
             Self::SegmentOutOfRange => f.write_str("segment offset or size is out of range"),
+            Self::TruncatedImportTable => f.write_str("PE import table is truncated or out of range"),
+            Self::ImportDllNameTooLong => f.write_str("PE import DLL name exceeds 64 characters"),
         }
     }
 }
@@ -285,6 +307,7 @@ impl ImageLoader for InMemoryImageLoader {
             symbols: Vec::new(),
             program_headers: None,
             dynamic: None,
+            pe: None,
         })
     }
 }
@@ -732,6 +755,7 @@ impl ImageLoader for Elf64Loader {
             symbols: parse_symbol_table(bytes)?,
             program_headers,
             dynamic,
+            pe: None,
         })
     }
 }
@@ -745,10 +769,56 @@ const PE32PLUS_MAGIC: u16 = 0x20B;
 const SECTION_EXEC: u32 = 0x2000_0000;
 const SECTION_READ: u32 = 0x4000_0000;
 const SECTION_WRITE: u32 = 0x8000_0000;
+/// PE32+ optional-header offset of the `NumberOfRvaAndSizes` field.
+const PE32PLUS_NUM_RVA_AND_SIZES: usize = 108;
+/// PE32+ optional-header offset of the data-directory array.
+const PE32PLUS_DATA_DIRS: usize = 112;
+/// `IMAGE_DIRECTORY_ENTRY_IMPORT` — data-directory index of the import table.
+const IMAGE_DIRECTORY_ENTRY_IMPORT: u32 = 1;
+/// Size of one `IMAGE_IMPORT_DESCRIPTOR` (5 x u32) in bytes.
+const PE_IMPORT_DESCRIPTOR_SIZE: usize = 20;
+/// `IMAGE_ORDINAL_FLAG64`: PE32+ thunks with the high bit set are ordinal imports.
+const PE_IMPORT_ORDINAL_FLAG: u64 = 0x8000_0000_0000_0000;
+/// Maximum accepted import DLL-name length in bytes (excluding the NUL).
+const PE_IMPORT_DLL_NAME_MAX: usize = 64;
+
+/// How a PE32+ import is resolved by the exporting DLL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeImportKind {
+    /// By-name import via `IMAGE_IMPORT_BY_NAME` (a hint plus an ASCIZ name) —
+    /// the dominant case for e.g. ntoskrnl imports.
+    Name(String),
+    /// Ordinal import: the low 16 bits of the thunk.
+    Ordinal(u16),
+}
+
+/// One imported function parsed from a PE32+ import directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeImport {
+    /// Name of the DLL owning the import (ASCIZ from the descriptor's Name RVA).
+    pub dll: String,
+    /// Resolution kind: by-name or ordinal.
+    pub kind: PeImportKind,
+    /// RVA of the IAT slot for this import (`FirstThunk + 8*i` on PE32+) —
+    /// the slot a loader must patch. Add the image base for a VA.
+    pub iat_rva: u32,
+}
+
+/// PE32+ metadata parsed by [`Pe32Loader`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PeInfo {
+    /// Imports from `IMAGE_DIRECTORY_ENTRY_IMPORT` (directory index 1), in
+    /// descriptor- then thunk-array order. Empty when the image declares no
+    /// import directory. Delay imports (`IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT`)
+    /// and bound imports (`IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT`) are out of
+    /// scope and skipped — drivers rarely use them.
+    pub imports: Vec<PeImport>,
+}
 
 /// PE32+ image loader: maps each section at `image_base + VirtualAddress`
-/// and resolves the entry point from the optional header. Import-table
-/// linking (dynamic PE) is out of scope — statically-linked images only.
+/// and resolves the entry point from the optional header. The import
+/// directory is parsed into [`PeInfo`] (see [`LoadedImage::pe_imports`]);
+/// IAT patching/import linking is out of scope — that is downstream work.
 pub struct Pe32Loader {
     next_id: Mutex<u64>,
 }
@@ -804,19 +874,23 @@ impl ImageLoader for Pe32Loader {
         // Sections start right after the optional header.
         let sec_base = opt + opt_size;
         let mut segments = Vec::with_capacity(num_sections);
+        // (VirtualAddress, raw size, raw pointer) per section, for RVA -> file
+        // offset translation while parsing the import directory.
+        let mut file_ranges: Vec<(u32, u32, u32)> = Vec::with_capacity(num_sections);
         for i in 0..num_sections {
             let off = sec_base + i * 40;
             if off + 40 > bytes.len() {
                 return Err(LoaderError::TruncatedHeader);
             }
             let virtual_size = read_u32_le(bytes, off + 8)? as u64;
-            let va = read_u32_le(bytes, off + 12)? as u64;
+            let va = read_u32_le(bytes, off + 12)?;
             let raw_size = read_u32_le(bytes, off + 16)? as usize;
             let raw_ptr = read_u32_le(bytes, off + 20)? as usize;
             let characteristics = read_u32_le(bytes, off + 36)?;
             if raw_ptr + raw_size > bytes.len() {
                 return Err(LoaderError::SegmentOutOfRange);
             }
+            file_ranges.push((va, raw_size as u32, raw_ptr as u32));
             // Section data is raw_size bytes on disk, virtual_size in memory
             // (bss-style tail zero-fills).
             let mut data = bytes[raw_ptr..raw_ptr + raw_size].to_vec();
@@ -824,7 +898,7 @@ impl ImageLoader for Pe32Loader {
                 usize::try_from(virtual_size.max(raw_size as u64)).map_err(|_| LoaderError::SegmentOutOfRange)?;
             data.resize(vsize, 0);
             segments.push(Segment {
-                address: image_base + va,
+                address: image_base + u64::from(va),
                 bytes: data,
                 readable: characteristics & SECTION_READ != 0,
                 writable: characteristics & SECTION_WRITE != 0,
@@ -834,6 +908,7 @@ impl ImageLoader for Pe32Loader {
         if segments.is_empty() {
             return Err(LoaderError::NoProgramHeaders);
         }
+        let pe = Some(parse_pe_imports(bytes, opt, opt_size, &file_ranges)?);
         Ok(LoadedImage {
             id: {
                 let mut g = self.next_id.lock().unwrap_or_else(|e| e.into_inner());
@@ -847,8 +922,151 @@ impl ImageLoader for Pe32Loader {
             symbols: Vec::new(),
             program_headers: None,
             dynamic: None,
+            pe,
         })
     }
+}
+
+/// Parses the PE32+ import directory (`IMAGE_DIRECTORY_ENTRY_IMPORT`, index
+/// 1) into an ordered [`PeInfo`].
+///
+/// Behavior:
+/// - No data directories, fewer than two of them, or a null import-directory
+///   RVA yields an empty list (an image without imports is not an error).
+/// - Descriptors are 20 bytes each; an all-zero descriptor terminates.
+/// - Thunks are `u64` on PE32+. High bit set → ordinal (low 16 bits); otherwise
+///   the value is an RVA to `IMAGE_IMPORT_BY_NAME` (u16 hint, then ASCIZ name).
+///   The IAT slot for import `i` is `FirstThunk + 8*i`.
+/// - When `OriginalFirstThunk` is zero (legacy/bound images) the thunks are
+///   read through `FirstThunk`.
+/// - All RVAs must resolve inside the file-backed image; every read is
+///   bounds-checked and malformed data fails closed with
+///   [`LoaderError::TruncatedImportTable`].
+/// - DLL names are ASCIZ with a hard 64-byte cap ([`PE_IMPORT_DLL_NAME_MAX`])
+///   enforced via [`LoaderError::ImportDllNameTooLong`].
+/// - Delay imports and bound imports live in other data directories and are
+///   skipped.
+fn parse_pe_imports(
+    bytes: &[u8],
+    opt: usize,
+    opt_size: usize,
+    file_ranges: &[(u32, u32, u32)],
+) -> Result<PeInfo, LoaderError> {
+    if opt_size < PE32PLUS_DATA_DIRS {
+        // Optional header too small to carry data directories: no imports.
+        return Ok(PeInfo::default());
+    }
+    let num_dirs = read_u32_le(bytes, opt + PE32PLUS_NUM_RVA_AND_SIZES)?;
+    if num_dirs <= IMAGE_DIRECTORY_ENTRY_IMPORT {
+        // Import directory not declared: no imports.
+        return Ok(PeInfo::default());
+    }
+    let dir_va_field = PE32PLUS_DATA_DIRS + 8 * IMAGE_DIRECTORY_ENTRY_IMPORT as usize;
+    if opt_size < dir_va_field + 4 {
+        // Declared but the optional header is too small to hold it.
+        return Err(LoaderError::TruncatedImportTable);
+    }
+    let dir_rva = read_u32_le(bytes, opt + dir_va_field)?;
+    if dir_rva == 0 {
+        return Ok(PeInfo::default());
+    }
+    let size_of_headers = usize::try_from(read_u32_le(bytes, opt + 60)?).unwrap_or(0);
+    let rva_to_file = |rva: u32| -> Option<usize> {
+        let rva = usize::try_from(rva).unwrap_or(usize::MAX);
+        for &(va, raw_size, raw_ptr) in file_ranges {
+            let (va, raw_size, raw_ptr) = (
+                usize::try_from(va).unwrap_or(usize::MAX),
+                usize::try_from(raw_size).unwrap_or(0),
+                usize::try_from(raw_ptr).unwrap_or(usize::MAX),
+            );
+            if rva >= va && rva.saturating_sub(va) < raw_size {
+                return raw_ptr.checked_add(rva - va);
+            }
+        }
+        // Below SizeOfHeaders the image maps the file header identically.
+        (rva < size_of_headers).then_some(rva)
+    };
+
+    let mut imports = Vec::new();
+    let mut desc_off = rva_to_file(dir_rva).ok_or(LoaderError::TruncatedImportTable)?;
+    loop {
+        let desc_end = desc_off
+            .checked_add(PE_IMPORT_DESCRIPTOR_SIZE)
+            .ok_or(LoaderError::TruncatedImportTable)?;
+        let descriptor = bytes.get(desc_off..desc_end).ok_or(LoaderError::TruncatedImportTable)?;
+        if descriptor.iter().all(|&byte| byte == 0) {
+            break; // All-zero terminator.
+        }
+        let original_first_thunk = read_u32_le(bytes, desc_off)?;
+        let name_rva = read_u32_le(bytes, desc_off + 12)?;
+        let first_thunk = read_u32_le(bytes, desc_off + 16)?;
+        if name_rva == 0 || (original_first_thunk == 0 && first_thunk == 0) {
+            // Non-terminator descriptor without a name or any thunk table.
+            return Err(LoaderError::TruncatedImportTable);
+        }
+        let dll = {
+            let name_off = rva_to_file(name_rva).ok_or(LoaderError::TruncatedImportTable)?;
+            let (dll, len) = read_pe_asciz(bytes, name_off)?;
+            if len > PE_IMPORT_DLL_NAME_MAX {
+                return Err(LoaderError::ImportDllNameTooLong);
+            }
+            dll
+        };
+
+        // Legacy/bound images leave OriginalFirstThunk zero and keep the
+        // thunks in the IAT itself.
+        let thunk_rva = if original_first_thunk != 0 {
+            original_first_thunk
+        } else {
+            first_thunk
+        };
+        let mut index: u32 = 0;
+        loop {
+            let slot = thunk_rva
+                .checked_add(index.checked_mul(8).ok_or(LoaderError::TruncatedImportTable)?)
+                .ok_or(LoaderError::TruncatedImportTable)?;
+            let thunk_off = rva_to_file(slot).ok_or(LoaderError::TruncatedImportTable)?;
+            let thunk = read_u64_le_at(bytes, thunk_off).map_err(|_| LoaderError::TruncatedImportTable)?;
+            if thunk == 0 {
+                break; // End of the thunk array.
+            }
+            let iat_rva = first_thunk
+                .checked_add(index.checked_mul(8).ok_or(LoaderError::TruncatedImportTable)?)
+                .ok_or(LoaderError::TruncatedImportTable)?;
+            let kind = if thunk & PE_IMPORT_ORDINAL_FLAG != 0 {
+                PeImportKind::Ordinal((thunk & 0xFFFF) as u16)
+            } else {
+                // PE32+ thunks carry a 32-bit RVA; the hint is a u16 at +0
+                // and the ASCIZ name starts at +2.
+                let by_name_rva = (thunk & 0xFFFF_FFFF) as u32;
+                let by_name_off = rva_to_file(by_name_rva).ok_or(LoaderError::TruncatedImportTable)?;
+                let name_off = by_name_off.checked_add(2).ok_or(LoaderError::TruncatedImportTable)?;
+                let (name, _) = read_pe_asciz(bytes, name_off)?;
+                PeImportKind::Name(name)
+            };
+            imports.push(PeImport {
+                dll: dll.clone(),
+                kind,
+                iat_rva,
+            });
+            index = index.checked_add(1).ok_or(LoaderError::TruncatedImportTable)?;
+        }
+        desc_off = desc_end;
+    }
+    Ok(PeInfo { imports })
+}
+
+/// Reads an ASCIZ string at `off`, returning it together with its byte length
+/// (excluding the NUL). Fails closed with
+/// [`LoaderError::TruncatedImportTable`] when `off` is out of range or the
+/// NUL terminator is missing before the end of the buffer.
+fn read_pe_asciz(bytes: &[u8], off: usize) -> Result<(String, usize), LoaderError> {
+    let rest = bytes.get(off..).ok_or(LoaderError::TruncatedImportTable)?;
+    let nul = rest
+        .iter()
+        .position(|&byte| byte == 0)
+        .ok_or(LoaderError::TruncatedImportTable)?;
+    Ok((String::from_utf8_lossy(&rest[..nul]).into_owned(), nul))
 }
 
 #[cfg(test)]
@@ -1009,6 +1227,14 @@ mod tests {
         assert_eq!(
             format!("{}", LoaderError::SegmentOutOfRange),
             "segment offset or size is out of range"
+        );
+        assert_eq!(
+            format!("{}", LoaderError::TruncatedImportTable),
+            "PE import table is truncated or out of range"
+        );
+        assert_eq!(
+            format!("{}", LoaderError::ImportDllNameTooLong),
+            "PE import DLL name exceeds 64 characters"
         );
     }
 
@@ -1488,5 +1714,222 @@ mod pe32_tests {
         let mut bad2 = fixture();
         bad2[0x84..0x86].copy_from_slice(&0x14Cu16.to_le_bytes()); // i386
         assert!(loader.load(&bad2).is_err());
+    }
+
+    /// One import the [`make_pe_with_imports`] builder emits.
+    enum ImportFunc {
+        Name(&'static str, u16),
+        Ordinal(u16),
+    }
+
+    /// Hand-builds a minimal PE32+ with a `.text` section and a `.rdata`
+    /// section (file offset 0x400, RVA 0x2000) holding an import directory
+    /// for `dll` with `funcs`. The `.rdata` layout is
+    /// `[descriptors 20*2 incl. all-zero terminator][dll ASCIZ][pad to 8][INT 8*(n+1)][IAT 8*(n+1)][pad to 2][hint/name]`,
+    /// so tests can recompute expected RVAs from it.
+    fn make_pe_with_imports(dll: &str, funcs: &[ImportFunc]) -> Vec<u8> {
+        const RDATA_FILE: usize = 0x400;
+        const RDATA_VA: u32 = 0x2000;
+
+        let mut rdata = Vec::new();
+        let desc_off = rdata.len();
+        // One real descriptor plus the mandatory all-zero terminator.
+        rdata.extend_from_slice(&[0u8; 2 * 20]);
+        let dll_off = rdata.len();
+        rdata.extend_from_slice(dll.as_bytes());
+        rdata.push(0);
+        while rdata.len() % 8 != 0 {
+            rdata.push(0);
+        }
+        let int_off = rdata.len();
+        rdata.extend_from_slice(&vec![0u8; 8 * (funcs.len() + 1)]); // Patched below.
+        let iat_off = rdata.len();
+        rdata.extend_from_slice(&vec![0u8; 8 * (funcs.len() + 1)]); // Patched below.
+        if rdata.len() % 2 != 0 {
+            rdata.push(0);
+        }
+        let rva = |off: usize| RDATA_VA + off as u32;
+
+        for (index, func) in funcs.iter().enumerate() {
+            let thunk = match func {
+                ImportFunc::Name(func_name, hint) => {
+                    let by_name_off = rdata.len();
+                    rdata.extend_from_slice(&hint.to_le_bytes());
+                    rdata.extend_from_slice(func_name.as_bytes());
+                    rdata.push(0);
+                    if rdata.len() % 2 != 0 {
+                        rdata.push(0); // Hint/name entries are 2-byte aligned.
+                    }
+                    u64::from(rva(by_name_off))
+                }
+                ImportFunc::Ordinal(ordinal) => PE_IMPORT_ORDINAL_FLAG | u64::from(*ordinal),
+            };
+            // INT and IAT start out identical; a real loader rewrites the IAT.
+            rdata[int_off + index * 8..int_off + index * 8 + 8].copy_from_slice(&thunk.to_le_bytes());
+            rdata[iat_off + index * 8..iat_off + index * 8 + 8].copy_from_slice(&thunk.to_le_bytes());
+        }
+        // Descriptor: OriginalFirstThunk, TimeDateStamp, ForwarderChain, Name, FirstThunk.
+        rdata[desc_off..desc_off + 4].copy_from_slice(&rva(int_off).to_le_bytes());
+        rdata[desc_off + 12..desc_off + 16].copy_from_slice(&rva(dll_off).to_le_bytes());
+        rdata[desc_off + 16..desc_off + 20].copy_from_slice(&rva(iat_off).to_le_bytes());
+
+        let mut pe = vec![0u8; RDATA_FILE];
+        pe[0] = 0x4D;
+        pe[1] = 0x5A;
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(&[0x50, 0x45, 0, 0]);
+        pe[0x84..0x86].copy_from_slice(&PE_MACHINE_AMD64.to_le_bytes());
+        pe[0x86..0x88].copy_from_slice(&2u16.to_le_bytes()); // 2 sections
+        pe[0x94..0x96].copy_from_slice(&0xF0u16.to_le_bytes()); // opt size 240
+        pe[0x98..0x9A].copy_from_slice(&PE32PLUS_MAGIC.to_le_bytes());
+        pe[0xA8..0xAC].copy_from_slice(&0x1000u32.to_le_bytes()); // entry RVA
+        pe[0xB0..0xB8].copy_from_slice(&0x140000000u64.to_le_bytes()); // image base
+        pe[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfHeaders
+        pe[0x104..0x108].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes
+        // Data directory 1 (IMPORT) at optional-header offset 112 + 8 = 0x110.
+        pe[0x110..0x114].copy_from_slice(&rva(desc_off).to_le_bytes());
+        pe[0x114..0x118].copy_from_slice(&(rdata.len() as u32).to_le_bytes());
+        // .text section header at 0x98 + 0xF0 = 0x188.
+        pe[0x188..0x190].copy_from_slice(b".text\0\0\0");
+        pe[0x190..0x194].copy_from_slice(&0x100u32.to_le_bytes()); // virtual size
+        pe[0x194..0x198].copy_from_slice(&0x1000u32.to_le_bytes()); // va
+        pe[0x198..0x19C].copy_from_slice(&6u32.to_le_bytes()); // raw size
+        pe[0x19C..0x1A0].copy_from_slice(&0x200u32.to_le_bytes()); // raw ptr
+        pe[0x1AC..0x1B0].copy_from_slice(&(SECTION_EXEC | SECTION_READ).to_le_bytes());
+        // .rdata section header at 0x1B0.
+        pe[0x1B0..0x1B8].copy_from_slice(b".rdata\0\0");
+        pe[0x1B8..0x1BC].copy_from_slice(&(rdata.len() as u32).to_le_bytes()); // virtual size
+        pe[0x1BC..0x1C0].copy_from_slice(&RDATA_VA.to_le_bytes()); // va
+        pe[0x1C0..0x1C4].copy_from_slice(&(rdata.len() as u32).to_le_bytes()); // raw size
+        pe[0x1C4..0x1C8].copy_from_slice(&(RDATA_FILE as u32).to_le_bytes()); // raw ptr
+        pe[0x1D4..0x1D8].copy_from_slice(&SECTION_READ.to_le_bytes()); // characteristics
+        // Code at file offset 0x200: mov eax,0x2a ; ret.
+        pe[0x200..0x205].copy_from_slice(&[0xB8, 0x2A, 0, 0, 0]);
+        pe[0x205] = 0xC3;
+        pe.extend_from_slice(&rdata);
+        pe
+    }
+
+    #[test]
+    fn pe32_parses_by_name_imports() {
+        let loader = Pe32Loader::new();
+        let pe = make_pe_with_imports(
+            "ntoskrnl.exe",
+            &[
+                ImportFunc::Name("DbgPrint", 0x42),
+                ImportFunc::Name("IoCreateDevice", 7),
+            ],
+        );
+        let image = match loader.load(&pe) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        let imports = image.pe_imports().unwrap_or(&[]);
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0].dll, "ntoskrnl.exe");
+        assert_eq!(imports[0].kind, PeImportKind::Name("DbgPrint".to_string()));
+        assert_eq!(imports[1].dll, "ntoskrnl.exe");
+        assert_eq!(imports[1].kind, PeImportKind::Name("IoCreateDevice".to_string()));
+        // Layout: descriptors 40 + "ntoskrnl.exe\0" 13 = 53, padded to 56; INT
+        // holds 8*(2+1) bytes, so FirstThunk (the IAT) is at rdata offset 80
+        // and import i patches the slot at FirstThunk + 8*i.
+        assert_eq!(imports[0].iat_rva, 0x2000 + 80);
+        assert_eq!(imports[1].iat_rva, 0x2000 + 88);
+    }
+
+    #[test]
+    fn pe32_parses_ordinal_import() {
+        let loader = Pe32Loader::new();
+        let pe = make_pe_with_imports("HAL.dll", &[ImportFunc::Ordinal(0x2A)]);
+        let image = match loader.load(&pe) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        let imports = image.pe_imports().unwrap_or(&[]);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].dll, "HAL.dll");
+        assert_eq!(imports[0].kind, PeImportKind::Ordinal(0x2A));
+        // Layout: descriptors 40 + "HAL.dll\0" 8 = 48 (already 8-aligned); INT
+        // holds 8*(1+1) bytes, so the IAT (FirstThunk) is at rdata offset 64.
+        assert_eq!(imports[0].iat_rva, 0x2000 + 64);
+    }
+
+    #[test]
+    fn pe32_rejects_malformed_import_directory() {
+        let loader = Pe32Loader::new();
+
+        // Import-directory RVA points outside the mapped image.
+        let mut pe = make_pe_with_imports("ntoskrnl.exe", &[ImportFunc::Name("DbgPrint", 1)]);
+        pe[0x110..0x114].copy_from_slice(&0x0090_0000u32.to_le_bytes());
+        assert_eq!(loader.load(&pe).err(), Some(LoaderError::TruncatedImportTable));
+
+        // Descriptor Name RVA (descriptor at file 0x400, Name at +12) is unmapped.
+        let mut pe = make_pe_with_imports("ntoskrnl.exe", &[ImportFunc::Name("DbgPrint", 1)]);
+        pe[0x40C..0x410].copy_from_slice(&0x0090_0000u32.to_le_bytes());
+        assert_eq!(loader.load(&pe).err(), Some(LoaderError::TruncatedImportTable));
+
+        // By-name thunk RVA (INT entry at rdata offset 56 = file 0x438) is unmapped.
+        let mut pe = make_pe_with_imports("ntoskrnl.exe", &[ImportFunc::Name("DbgPrint", 1)]);
+        pe[0x438..0x440].copy_from_slice(&0x0090_0000u64.to_le_bytes());
+        assert_eq!(loader.load(&pe).err(), Some(LoaderError::TruncatedImportTable));
+    }
+
+    #[test]
+    fn pe32_without_import_directory_yields_empty_imports() {
+        let loader = Pe32Loader::new();
+        let image = match loader.load(&fixture()) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        let imports = image.pe_imports().unwrap_or(&[]);
+        assert!(
+            imports.is_empty(),
+            "absent import directory must yield empty, not error"
+        );
+    }
+
+    #[test]
+    fn pe32_immediate_import_terminator_yields_empty_imports() {
+        let loader = Pe32Loader::new();
+        let mut pe = make_pe_with_imports("ntoskrnl.exe", &[ImportFunc::Name("DbgPrint", 1)]);
+        // Zero the only descriptor: the array becomes an immediate all-zero terminator.
+        pe[0x400..0x414].fill(0);
+        let image = match loader.load(&pe) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        let imports = image.pe_imports().unwrap_or(&[]);
+        assert!(imports.is_empty());
+    }
+
+    #[test]
+    fn pe32_enforces_import_dll_name_limit() {
+        let loader = Pe32Loader::new();
+        // 64 bytes is the cap and is accepted.
+        let capped = make_pe_with_imports(&"d".repeat(64), &[ImportFunc::Name("DbgPrint", 1)]);
+        let image = match loader.load(&capped) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        let imports = image.pe_imports().unwrap_or(&[]);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].dll.len(), 64);
+        // 65 bytes fail closed.
+        let too_long = make_pe_with_imports(&"d".repeat(65), &[ImportFunc::Name("DbgPrint", 1)]);
+        assert_eq!(loader.load(&too_long).err(), Some(LoaderError::ImportDllNameTooLong));
+    }
+
+    #[test]
+    fn pe_imports_none_for_non_pe_images() {
+        let loader = InMemoryImageLoader::new();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0x1000u64.to_le_bytes()); // entry
+        buf.extend_from_slice(&1u64.to_le_bytes()); // target profile
+        buf.push(0xC3);
+        let image = match loader.load(&buf) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        assert!(image.pe_imports().is_none());
     }
 }
