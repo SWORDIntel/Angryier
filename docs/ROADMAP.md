@@ -66,7 +66,16 @@ suites require system Z3/XED):
   runs**: `load_elf_dynamic` maps `DT_NEEDED` libraries recursively, applies
   RELATIVE/GLOB_DAT/JUMP_SLOT relocations, evaluates IRELATIVE resolvers,
   seeds TLS, and hooks `__libc_start_main` → `main` (angr-style static
-  linking, no `ld.so` process). PE32+ loads and executes.
+  linking, no `ld.so` process). PE32+ loads and executes — statically
+  linked images only (import-table linking out of scope). **Driver-
+  campaign gap (2026-09-25):** Windows kernel `.sys` analysis needs PE
+  IAT resolution to named stubs, a Windows kernel API model layer
+  (ntoskrnl/NDIS/HAL — zero coverage; the environment model is Linux
+  syscalls + libc), DriverEntry/IRP state shapes, and an integration
+  surface for the external angr-based sweep (no Python API exists).
+  Import-directory parsing is step one (in flight). Gate J discipline:
+  no cross-engine (angr-vs-Angryier) timing exists, so no driver-
+  campaign throughput claim transfers yet.
 - **Dual-mode engine (Phase 6, centerpiece):** `ConcolicSession` shadows
   concrete execution with (concrete, expression) pairs, constant-folds
   untainted data, records path constraints, and inverts branches through the
