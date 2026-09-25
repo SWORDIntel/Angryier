@@ -61,6 +61,15 @@ pub enum ExprOp {
     Extract,
     ZExt,
     SExt,
+    /// Rotate left by the count operand modulo the node's width. Operands are
+    /// `[value, count]`; the value must share the node's bitvector sort and
+    /// the count is any bitvector (the count mod width semantics matches
+    /// SMT-LIB `rotate_left` with a same-width count and x86's rotate-count
+    /// masking).
+    RotL,
+    /// Rotate right by the count operand modulo the node's width — the
+    /// mirror of [`ExprOp::RotL`].
+    RotR,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -315,12 +324,77 @@ impl ShardedExprArena {
                     immediate: value.to_le_bytes()[..usize::from(bits).div_ceil(8)].to_vec(),
                 }
             }
+            ExprOp::RotL | ExprOp::RotR => {
+                let ExprSort::BitVec(bits) = node.sort else {
+                    return Ok(node);
+                };
+                if bits > 128 {
+                    return Ok(node);
+                }
+                // The rotate amount is the count modulo the operand width —
+                // the op's defining semantics (SMT-LIB rotate_left/right with
+                // a same-width count, and x86's count masking). The rotation
+                // is composed from shifts scoped to `bits`: u128::rotate_*
+                // would wrap within the full 128-bit carrier and the wrapped
+                // bits would be masked away.
+                let value = constant_u128(&records[0].node.immediate);
+                let count = constant_u128(&records[1].node.immediate);
+                let amount = (count % u128::from(bits)) as u32;
+                let rotated = if amount == 0 {
+                    value
+                } else if node.op == ExprOp::RotL {
+                    (value << amount) | (value >> (u32::from(bits) - amount))
+                } else {
+                    (value >> amount) | (value << (u32::from(bits) - amount))
+                } & bit_mask(bits);
+                ExprNode {
+                    sort: node.sort,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: rotated.to_le_bytes()[..usize::from(bits).div_ceil(8)].to_vec(),
+                }
+            }
             ExprOp::Eq => ExprNode {
                 sort: ExprSort::Bool,
                 op: ExprOp::Constant,
                 operands: Vec::new(),
                 immediate: vec![u8::from(records[0].node == records[1].node)],
             },
+            ExprOp::Ult | ExprOp::Ule | ExprOp::Slt | ExprOp::Sle => {
+                // The sort rule pins both operands to one bitvector width;
+                // unsigned comparisons read the literals directly, signed
+                // ones sign-extend each literal from that width.
+                let width = match records[0].node.sort {
+                    ExprSort::BitVec(bits) if bits <= 128 => bits,
+                    _ => return Ok(node),
+                };
+                let left = constant_u128(&records[0].node.immediate);
+                let right = constant_u128(&records[1].node.immediate);
+                let holds = match node.op {
+                    ExprOp::Ult => left < right,
+                    ExprOp::Ule => left <= right,
+                    op => {
+                        let signed = |value: u128| -> i128 {
+                            if width > 0 && width < 128 && value & (1u128 << (width - 1)) != 0 {
+                                (value | !bit_mask(width)) as i128
+                            } else {
+                                value as i128
+                            }
+                        };
+                        if op == ExprOp::Slt {
+                            signed(left) < signed(right)
+                        } else {
+                            signed(left) <= signed(right)
+                        }
+                    }
+                };
+                ExprNode {
+                    sort: ExprSort::Bool,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: vec![u8::from(holds)],
+                }
+            }
             ExprOp::Ite => {
                 if records[0].node.immediate == [0] {
                     records[2].node.clone()
@@ -578,6 +652,11 @@ fn validate_sorts(node: &ExprNode, inputs: &[ExprSort]) -> Result<(), ExprArenaE
         ExprOp::Not => inputs == [node.sort],
         ExprOp::Shl | ExprOp::LShr | ExprOp::AShr => {
             inputs.first() == Some(&node.sort) && matches!(inputs.get(1), Some(ExprSort::BitVec(_)))
+        }
+        ExprOp::RotL | ExprOp::RotR => {
+            matches!(node.sort, ExprSort::BitVec(_))
+                && inputs.first() == Some(&node.sort)
+                && matches!(inputs.get(1), Some(ExprSort::BitVec(_)))
         }
         ExprOp::Eq => node.sort == ExprSort::Bool && inputs.first() == inputs.get(1),
         ExprOp::Ult | ExprOp::Ule | ExprOp::Slt | ExprOp::Sle => {
@@ -1018,6 +1097,102 @@ mod tests {
             immediate: Vec::new(),
         })?;
         assert_eq!(arena.get(result), Some(bitvec_constant(99, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_rotl() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let value = arena.intern(bitvec_constant(0b1001_0110, 8))?;
+        let count = arena.intern(bitvec_constant(3, 8))?;
+        let result = arena.intern(binary_bitvec_op(ExprOp::RotL, value, count))?;
+        assert_eq!(arena.get(result), Some(bitvec_constant(0b1011_0100, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fold_rotr() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let value = arena.intern(bitvec_constant(0b1001_0110, 8))?;
+        let count = arena.intern(bitvec_constant(2, 8))?;
+        let result = arena.intern(binary_bitvec_op(ExprOp::RotR, value, count))?;
+        assert_eq!(arena.get(result), Some(bitvec_constant(0b1010_0101, 8)));
+        Ok(())
+    }
+
+    #[test]
+    fn rotate_count_folds_modulo_width() -> Result<(), ExprArenaError> {
+        // A count at or above the width rotates by count mod width (x86
+        // rotate-count masking and SMT-LIB same-width rotate semantics).
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let value = arena.intern(bitvec_constant(0xF0, 8))?;
+        let count = arena.intern(bitvec_constant(66, 8))?;
+        let rotl = arena.intern(binary_bitvec_op(ExprOp::RotL, value, count))?;
+        assert_eq!(arena.get(rotl), Some(bitvec_constant(0xC3, 8)));
+
+        let rotr = arena.intern(binary_bitvec_op(ExprOp::RotR, value, count))?;
+        assert_eq!(arena.get(rotr), Some(bitvec_constant(0x3C, 8)));
+        Ok(())
+    }
+
+    fn binary_bitvec_op_width(op: ExprOp, width: u16, left: ExprId, right: ExprId) -> ExprNode {
+        ExprNode {
+            sort: ExprSort::BitVec(width),
+            op,
+            operands: vec![left, right],
+            immediate: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rotate_sort_rules() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let value64 = arena.intern(bitvec_constant(1, 64))?;
+        let count8 = arena.intern(bitvec_constant(1, 8))?;
+        let count64 = arena.intern(bitvec_constant(1, 64))?;
+        let count32 = arena.intern(bitvec_constant(1, 32))?;
+        let boolean = arena.intern(bool_constant(true))?;
+
+        // The value shares the node sort; the count may be any bitvector
+        // width (shift-shaped rule, sibling of Shl).
+        assert!(
+            arena
+                .intern(binary_bitvec_op_width(ExprOp::RotL, 64, value64, count8))
+                .is_ok()
+        );
+        assert!(
+            arena
+                .intern(binary_bitvec_op_width(ExprOp::RotR, 64, value64, count64))
+                .is_ok()
+        );
+        // A boolean count is not a rotate amount.
+        assert_eq!(
+            arena.intern(binary_bitvec_op_width(ExprOp::RotL, 64, value64, boolean)),
+            Err(ExprArenaError::SortMismatch(ExprOp::RotL))
+        );
+        // The rotated value must share the node sort.
+        assert_eq!(
+            arena.intern(binary_bitvec_op_width(ExprOp::RotL, 32, value64, count32)),
+            Err(ExprArenaError::SortMismatch(ExprOp::RotL))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rotate_nodes_hash_cons_like_siblings() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let value = arena.intern(bitvec_constant(0x1234, 16))?;
+        let other = arena.intern(bitvec_constant(0x0002, 16))?;
+        let first = arena.intern(binary_bitvec_op_width(ExprOp::RotL, 16, value, other))?;
+        let second = arena.intern(binary_bitvec_op_width(ExprOp::RotL, 16, value, other))?;
+        assert_eq!(first, second);
+        // Rotations are directional: operand order and direction are
+        // structural (0x1234 rotl 2 = 0x48D0, rotr 2 = 0x048D, and
+        // 0x0002 rotl 4 = 0x0020 all differ).
+        let swapped = arena.intern(binary_bitvec_op_width(ExprOp::RotL, 16, other, value))?;
+        assert_ne!(first, swapped);
+        let mirrored = arena.intern(binary_bitvec_op_width(ExprOp::RotR, 16, value, other))?;
+        assert_ne!(first, mirrored);
         Ok(())
     }
 

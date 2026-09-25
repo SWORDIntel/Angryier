@@ -160,6 +160,28 @@ impl FuzzySatBackend {
                 let extended = sign_extend(operand(0, env, budget)?, input_width);
                 extended as u128
             }
+            ExprOp::RotL | ExprOp::RotR => {
+                // Rotate by the count modulo the node's width, scoped to the
+                // masked value (a u128 rotate would wrap within the carrier
+                // and lose the wrapped bits to the mask). Widths above the
+                // 128-bit carrier cap at 128 — those values are already
+                // truncated by the carrier, and this backend is approximate
+                // by design.
+                let effective = width.clamp(1, 128);
+                let value = operand(0, env, budget)? & mask;
+                let count = operand(1, env, budget)? % u128::from(effective);
+                let amount = count as u32; // < effective <= 128
+                if amount == 0 {
+                    value
+                } else {
+                    let counter = u32::from(effective) - amount; // in 1..=127
+                    if node.op == ExprOp::RotL {
+                        (value << amount) | (value >> counter)
+                    } else {
+                        (value >> amount) | (value << counter)
+                    }
+                }
+            }
         };
         Some(value & mask)
     }

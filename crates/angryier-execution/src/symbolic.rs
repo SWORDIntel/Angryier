@@ -355,7 +355,16 @@ impl<'a> SymbolicEvaluator<'a> {
 
     fn read_register(&mut self, register: u32, ty: IrType) -> Result<ExprId, SymbolicEvalError> {
         if let Some((expression, _)) = self.registers.get(&register) {
-            return Ok(*expression);
+            // Normalize the stored expression to the requested view width —
+            // the register file may hold the parent-width expression (a
+            // 64-bit-tracked rcx read as CL) or a narrowed sub-view write.
+            // Without this, operations that do not self-coerce (comparisons)
+            // intern ill-sorted nodes; a wider read zero-extends, matching
+            // the ZeroExtendParent semantics of 32-bit x86-64 writes.
+            let stored = *expression;
+            let requested = bit_width(ty)?;
+            let coerced = coerce_width(self.arena, stored, requested)?;
+            return Ok(coerced);
         }
         let width = bit_width(ty)?;
         // Concrete fallback: untouched registers read their concrete value
@@ -464,6 +473,36 @@ fn coerce_width(arena: &SymbolicArena, expr: ExprId, width: u16) -> Result<ExprI
     imm.extend_from_slice(&0u16.to_le_bytes());
     imm.extend_from_slice(&width.to_le_bytes());
     intern(arena, ExprSort::BitVec(width), ExprOp::Extract, vec![expr], imm)
+}
+
+/// Widens the narrower comparison operand to the other's width so the
+/// comparison interns well-sorted. Zero-extension preserves equality and
+/// unsigned order; signed comparisons sign-widen so a negative narrower
+/// value still orders below positive wider ones.
+fn comparison_operands(
+    arena: &SymbolicArena,
+    op: IrPrimitive,
+    left: ExprId,
+    right: ExprId,
+) -> Result<(ExprId, ExprId), SymbolicEvalError> {
+    let left_width = expr_width(arena, left)?;
+    let right_width = expr_width(arena, right)?;
+    if left_width == right_width {
+        return Ok((left, right));
+    }
+    let signed = matches!(op, IrPrimitive::Slt | IrPrimitive::Sle);
+    let extension = if signed { ExprOp::SExt } else { ExprOp::ZExt };
+    let (narrow, target) = if left_width < right_width {
+        (left, right_width)
+    } else {
+        (right, left_width)
+    };
+    let widened = intern(arena, ExprSort::BitVec(target), extension, vec![narrow], Vec::new())?;
+    if left_width < right_width {
+        Ok((widened, right))
+    } else {
+        Ok((left, widened))
+    }
 }
 
 /// Reads an expression's bit-width through the arena's lightweight sort probe
@@ -606,7 +645,67 @@ fn fold_node(
         ExprOp::Xor => Ok(child!(node.operands.first())? ^ child!(node.operands.get(1))?),
         ExprOp::Shl => Ok(child!(node.operands.first())?.wrapping_shl(child!(node.operands.get(1))? as u32)),
         ExprOp::LShr => Ok(child!(node.operands.first())?.wrapping_shr(child!(node.operands.get(1))? as u32)),
-        ExprOp::ZExt | ExprOp::SExt | ExprOp::Extract => child!(node.operands.first()),
+        ExprOp::ZExt => child!(node.operands.first()),
+        ExprOp::SExt => {
+            // Sign-extend from the operand's own width — a canonical
+            // constant already fits it, so the extension is purely the sign
+            // fill.
+            let operand_id = *node.operands.first().ok_or(FoldFail::Absolute)?;
+            let width = arena
+                .sort_of(operand_id)
+                .and_then(|sort| match sort {
+                    ExprSort::BitVec(w) => Some(u32::from(w)),
+                    _ => None,
+                })
+                .ok_or(FoldFail::Absolute)?;
+            let value = child!(node.operands.first())?;
+            if width > 0 && width < 64 && value & (1u64 << (width - 1)) != 0 {
+                Ok(value | (!u64::MAX << width))
+            } else {
+                Ok(value)
+            }
+        }
+        ExprOp::Extract => {
+            // The window lives in the immediate: [start:u16, width:u16].
+            // Folding must honor it — the degenerate ZExt path lowers width
+            // coercions into low-bit extracts whose values feed addresses
+            // and shift counts.
+            let start = node
+                .immediate
+                .get(..2)
+                .map(|bytes| u16::from_le_bytes(bytes.try_into().unwrap_or([0; 2])))
+                .unwrap_or(0);
+            let width = match node.sort {
+                ExprSort::BitVec(w) => u32::from(w),
+                _ => return Err(FoldFail::Absolute),
+            };
+            let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+            Ok((child!(node.operands.first())? >> start) & mask)
+        }
+        ExprOp::RotL | ExprOp::RotR => {
+            // Rotate by the count modulo the node's width, composed from
+            // shifts scoped to that width (the u64 carrier would otherwise
+            // swallow the wrapped bits). For widths above the 64-bit carrier
+            // the result is approximate, matching the fold's existing
+            // treatment of wider-than-carrier values.
+            let width = match node.sort {
+                ExprSort::BitVec(bits) => u64::from(bits),
+                _ => return Err(FoldFail::Absolute),
+            };
+            let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+            let value = child!(node.operands.first())? & mask;
+            let amount = (child!(node.operands.get(1))? % width.max(1)) as u32;
+            if amount == 0 {
+                Ok(value)
+            } else {
+                let counter = u32::try_from(width).unwrap_or(u32::MAX) - amount;
+                if op == ExprOp::RotL {
+                    Ok(value.wrapping_shl(amount) | value.wrapping_shr(counter))
+                } else {
+                    Ok(value.wrapping_shr(amount) | value.wrapping_shl(counter))
+                }
+            }
+        }
         ExprOp::Concat => {
             // Concat(hi, lo) — value = (hi << lo_bits) | lo.
             let hi = child!(node.operands.first())?;
@@ -699,7 +798,16 @@ fn primitive_expr(
                 IrPrimitive::Slt => ExprOp::Slt,
                 _ => ExprOp::Sle,
             };
-            let boolean = intern(arena, ExprSort::Bool, comparison, operands, Vec::new())?;
+            // Well-sortedness guard: shadow expression widths can drift from
+            // the declared IR types (ExprRef inputs, sub-view register
+            // writes), and a 32-bit induction variable initialized through a
+            // 64-bit-tracked register arrives here width-mismatched. Widen
+            // the narrower operand to the wider one — zero-widening
+            // preserves equality and unsigned order; signed comparisons
+            // sign-widen instead so negative narrower values still order
+            // correctly.
+            let (left, right) = comparison_operands(arena, op, operands[0], operands[1])?;
+            let boolean = intern(arena, ExprSort::Bool, comparison, vec![left, right], Vec::new())?;
             // Machine-level comparisons produce 1-bit bitvectors; the
             // expression language uses booleans, so materialize the result.
             let one = intern(arena, ExprSort::BitVec(1), ExprOp::Constant, Vec::new(), vec![1])?;
@@ -723,7 +831,9 @@ fn primitive_expr(
         | IrPrimitive::Xor
         | IrPrimitive::Shl
         | IrPrimitive::LShr
-        | IrPrimitive::AShr => {
+        | IrPrimitive::AShr
+        | IrPrimitive::RotL
+        | IrPrimitive::RotR => {
             let expression_op = match op {
                 IrPrimitive::Add => ExprOp::Add,
                 IrPrimitive::Sub => ExprOp::Sub,
@@ -735,6 +845,8 @@ fn primitive_expr(
                 IrPrimitive::Xor => ExprOp::Xor,
                 IrPrimitive::Shl => ExprOp::Shl,
                 IrPrimitive::LShr => ExprOp::LShr,
+                IrPrimitive::RotL => ExprOp::RotL,
+                IrPrimitive::RotR => ExprOp::RotR,
                 _ => ExprOp::AShr,
             };
             let coerced = operands
@@ -763,9 +875,22 @@ fn primitive_expr(
                 return Ok((operand_expr, ty));
             }
             if operand_width > u32::from(output_width) {
-                return Err(SymbolicEvalError::UnsupportedType(format!(
-                    "{op:?} {operand_width}->{output_width}"
-                )));
+                // A degenerate extension whose source expression is wider
+                // than the target is a truncation of the low bits: some
+                // 32-bit forms lower a ZeroExtend over a count operand whose
+                // register the shadow tracks at the parent (64-bit) width
+                // (for example `shl r32, cl` reading CL through rcx).
+                let mut immediate = Vec::with_capacity(4);
+                immediate.extend_from_slice(&0u16.to_le_bytes());
+                immediate.extend_from_slice(&output_width.to_le_bytes());
+                let value = intern(
+                    arena,
+                    ExprSort::BitVec(output_width),
+                    ExprOp::Extract,
+                    vec![operand_expr],
+                    immediate,
+                )?;
+                return Ok((value, ty));
             }
             let expression_op = if op == IrPrimitive::ZExt {
                 ExprOp::ZExt
@@ -1659,6 +1784,27 @@ fn eval_primitive_concrete(op: IrPrimitive, output_width: u16, inputs: &[(u128, 
         IrPrimitive::Not => !inputs[0].0,
         IrPrimitive::Shl => inputs[0].0.wrapping_shl(inputs[1].0 as u32),
         IrPrimitive::LShr => (inputs[0].0 & mask_u128(inputs[0].1)).wrapping_shr(inputs[1].0 as u32),
+        IrPrimitive::RotL | IrPrimitive::RotR => {
+            // x86 rotate semantics: the count is taken modulo the operand
+            // width. The rotation is composed from shifts scoped to the
+            // width (a u128 rotate would wrap within the carrier).
+            if output_width == 0 {
+                0
+            } else {
+                let value = inputs[0].0 & mask_u128(output_width);
+                let amount = (inputs[1].0 % u128::from(output_width)) as u32;
+                if amount == 0 {
+                    value
+                } else {
+                    let counter = u32::from(output_width) - amount;
+                    if op == IrPrimitive::RotL {
+                        (value << amount) | (value >> counter)
+                    } else {
+                        (value >> amount) | (value << counter)
+                    }
+                }
+            }
+        }
         IrPrimitive::AShr => {
             let shift = u16::try_from(inputs[1].0).unwrap_or(output_width).min(output_width);
             let extended = signed(inputs[0].0, inputs[0].1);

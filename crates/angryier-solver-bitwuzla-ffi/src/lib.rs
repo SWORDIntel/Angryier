@@ -162,6 +162,70 @@ impl BitwuzlaFfiBridge {
                 let term = unsafe { bitwuzla_mk_term2(tm, kind, left, right) };
                 Ok(term)
             }
+            ExprOp::RotL | ExprOp::RotR => {
+                if node.operands.len() != 2 {
+                    return Err(BitwuzlaFfiError::MalformedExpression);
+                }
+                let width = match node.sort {
+                    ExprSort::BitVec(w) => u64::from(w),
+                    _ => return Err(BitwuzlaFfiError::UnsupportedSort),
+                };
+                let value = self.translate(node.operands[0], cache, symbols)?;
+                let count_node = self
+                    .reader
+                    .read(node.operands[1])
+                    .ok_or(BitwuzlaFfiError::UnresolvedExpression(node.operands[1]))?;
+                let count_width = match count_node.sort {
+                    ExprSort::BitVec(w) => u64::from(w),
+                    _ => return Err(BitwuzlaFfiError::UnsupportedSort),
+                };
+                let count = self.translate(node.operands[1], cache, symbols)?;
+                // Bitwuzla's ROL/ROR are indexed by a numeral amount, so a
+                // constant count uses the indexed kinds with the count taken
+                // modulo the width (the op's defining semantics).
+                if count_node.op == ExprOp::Constant {
+                    let mut raw: u128 = 0;
+                    for (i, &b) in count_node.immediate.iter().enumerate().take(16) {
+                        raw |= u128::from(b) << (i * 8);
+                    }
+                    let amount =
+                        u64::try_from(raw % u128::from(width)).map_err(|_| BitwuzlaFfiError::MalformedExpression)?;
+                    let kind = if node.op == ExprOp::RotL {
+                        BITWUZLA_KIND_BV_ROL
+                    } else {
+                        BITWUZLA_KIND_BV_ROR
+                    };
+                    let term = unsafe { bitwuzla_mk_term1_indexed1(tm, kind, value, amount) };
+                    return Ok(term);
+                }
+                // Symbolic count: normalize it to the value's width, then
+                // lower rot(x, n) to (x shifted by m) | (x shifted by
+                // (width - m)) with m = urem(n, width). When m = 0 the
+                // counter-shift is `width`, whose SMT shift semantics yield 0
+                // — the identity rotation falls out.
+                let count = if count_width < width {
+                    unsafe { bitwuzla_mk_term1_indexed1(tm, BITWUZLA_KIND_BV_ZERO_EXTEND, count, width - count_width) }
+                } else if count_width > width {
+                    unsafe { bitwuzla_mk_term1_indexed2(tm, BITWUZLA_KIND_BV_EXTRACT, count, width - 1, 0) }
+                } else {
+                    count
+                };
+                let width_sort = unsafe { bitwuzla_mk_bv_sort(tm, width) };
+                let width_value = unsafe { bitwuzla_mk_bv_value_uint64(tm, width_sort, width) };
+                let amount = unsafe { bitwuzla_mk_term2(tm, BITWUZLA_KIND_BV_UREM, count, width_value) };
+                let counter_amount = unsafe { bitwuzla_mk_term2(tm, BITWUZLA_KIND_BV_SUB, width_value, amount) };
+                let (by_amount, by_counter) = if node.op == ExprOp::RotL {
+                    let shifted = unsafe { bitwuzla_mk_term2(tm, BITWUZLA_KIND_BV_SHL, value, amount) };
+                    let countered = unsafe { bitwuzla_mk_term2(tm, BITWUZLA_KIND_BV_SHR, value, counter_amount) };
+                    (shifted, countered)
+                } else {
+                    let shifted = unsafe { bitwuzla_mk_term2(tm, BITWUZLA_KIND_BV_SHR, value, amount) };
+                    let countered = unsafe { bitwuzla_mk_term2(tm, BITWUZLA_KIND_BV_SHL, value, counter_amount) };
+                    (shifted, countered)
+                };
+                let term = unsafe { bitwuzla_mk_term2(tm, BITWUZLA_KIND_BV_OR, by_amount, by_counter) };
+                Ok(term)
+            }
             ExprOp::Not => {
                 if node.operands.len() != 1 {
                     return Err(BitwuzlaFfiError::MalformedExpression);

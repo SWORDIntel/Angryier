@@ -593,6 +593,64 @@ impl Z3FfiBridge {
                 .ok_or(Z3FfiError::NullAst)?;
                 Ok(ast)
             }
+            ExprOp::RotL | ExprOp::RotR => {
+                if node.operands.len() != 2 {
+                    return Err(Z3FfiError::MalformedExpression);
+                }
+                let width = match node.sort {
+                    ExprSort::BitVec(w) => w,
+                    _ => return Err(Z3FfiError::UnsupportedSort),
+                };
+                let value = self.translate(node.operands[0], cache, symbols)?;
+                let count_node = self
+                    .reader
+                    .read(node.operands[1])
+                    .ok_or(Z3FfiError::UnresolvedExpression(node.operands[1]))?;
+                let count_width = match count_node.sort {
+                    ExprSort::BitVec(w) => w,
+                    _ => return Err(Z3FfiError::UnsupportedSort),
+                };
+                let count = self.translate(node.operands[1], cache, symbols)?;
+                // Z3's rotate entry points require the amount at the value's
+                // own width: widen a narrower count (an 8-bit CL count is the
+                // machine shape), narrow a wider one to its low bits.
+                let count = if count_width < width {
+                    unsafe { Z3_mk_zero_ext(ctx, u32::from(width - count_width), count) }.ok_or(Z3FfiError::NullAst)?
+                } else if count_width > width {
+                    unsafe { Z3_mk_extract(ctx, u32::from(width) - 1, 0, count) }.ok_or(Z3FfiError::NullAst)?
+                } else {
+                    count
+                };
+                let ast = if count_node.op == ExprOp::Constant {
+                    // Constant amount: the indexed rotate, with the count
+                    // taken modulo the width (the op's defining semantics).
+                    let mut raw: u128 = 0;
+                    for (i, &b) in count_node.immediate.iter().enumerate().take(16) {
+                        raw |= u128::from(b) << (i * 8);
+                    }
+                    let amount = u32::try_from(raw % u128::from(width)).map_err(|_| Z3FfiError::MalformedExpression)?;
+                    unsafe {
+                        if node.op == ExprOp::RotL {
+                            Z3_mk_rotate_left(ctx, amount, value)
+                        } else {
+                            Z3_mk_rotate_right(ctx, amount, value)
+                        }
+                    }
+                    .ok_or(Z3FfiError::NullAst)?
+                } else {
+                    // Symbolic amount: the extended rotate applies the same
+                    // modulo-width masking inside Z3.
+                    unsafe {
+                        if node.op == ExprOp::RotL {
+                            Z3_mk_ext_rotate_left(ctx, value, count)
+                        } else {
+                            Z3_mk_ext_rotate_right(ctx, value, count)
+                        }
+                    }
+                    .ok_or(Z3FfiError::NullAst)?
+                };
+                Ok(ast)
+            }
             ExprOp::Not => {
                 if node.operands.len() != 1 {
                     return Err(Z3FfiError::MalformedExpression);

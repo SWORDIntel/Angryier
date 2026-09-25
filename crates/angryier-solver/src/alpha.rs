@@ -159,6 +159,8 @@ fn op_code(op: ExprOp) -> u8 {
         ExprOp::Extract => 22,
         ExprOp::ZExt => 23,
         ExprOp::SExt => 24,
+        ExprOp::RotL => 25,
+        ExprOp::RotR => 26,
     }
 }
 
