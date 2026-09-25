@@ -1,5 +1,7 @@
 # Provenance and Telemetry
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). The tier schema, trace governor, and per-worker `FlightRecorder` ring are implemented.
+
 > **Implementation status:** Scaffolded. `angryier-provenance` (55 lines), `angryier-telemetry` (32 lines), and `angryier-storage` (28 lines) are contract-only. No flight recorder, trace governor, WAL, or transport is implemented.
 
 ---

@@ -1,5 +1,7 @@
 # Scheduler and Multicore Architecture
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). `OsWorkerPool` with work stealing is implemented and measured (3.93× on 4 workers); NUMA-pinned queue groups and the batch planner remain future work.
+
 > **Implementation status:** Scaffolded. `angryier-scheduler` is contract-only. The deterministic CPU scheduler, work-stealing, NUMA groups, and quantum-inspired batch planner are not yet implemented.
 
 ---

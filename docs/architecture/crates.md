@@ -1,5 +1,7 @@
 # Crate Boundaries and Dependency Direction
 
+> **Status superseded (2026-09-24):** the authoritative crate map (42 crates, including `angryier-cfg` and `angryier-solver-fuzzy`) is [ROADMAP.md §3.3](../ROADMAP.md). The map and line counts below froze 2026-09-19 and drift with every commit.
+
 > **Implementation status:** All 40 crates exist with manifests and public contract boundaries. Foundation crates (types, core, arch, arch-intel64, decode-xed, semantics, semantics-intel64, ir, expr, memory, state, execution, solver, ledger, loader, runtime) have real implementations. Adapter and future-phase crates (qihse, keystone, fusion, fuzz, plugins, bench, semantics-gen, semantic-contracts, storage, distribution, taint, provenance, telemetry, scheduler, knowledge, models, replay) have in-memory foundation implementations. Native integration crates (arch-xed-ffi, solver-z3-ffi, solver-bitwuzla-ffi) provide real FFI behind opt-in features, and the safe adapter crates (solver-z3, solver-bitwuzla) wire to them behind their `ffi` features. `angryier-jit` remains a validity/isolation contract only.
 
 ---

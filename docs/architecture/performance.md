@@ -1,5 +1,7 @@
 # Performance Architecture
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). The "Remaining Performance Work" list below is stale — native Z3/Bitwuzla, XED FFI, the portfolio router, and per-worker provenance rings now exist. Gate B measurement work is tracked in the roadmap.
+
 This document describes the performance-oriented design decisions and optimizations
 implemented in the Angryier engine. The architecture prioritizes correctness and
 explicit fail-closed behavior first, then scales through structural sharing, sharding,

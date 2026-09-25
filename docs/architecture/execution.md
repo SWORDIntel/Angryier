@@ -1,5 +1,7 @@
 # Execution Plane: Memory, State, and Expressions
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). Taint, loader, models, and state merging are implemented; memory uses sparse-map backing rather than page-backed COW (documented deviation).
+
 > **Implementation status:** Implemented. `angryier-memory` (539 lines), `angryier-state` (495 lines), and `angryier-expr` (701 lines) have real implementations. `angryier-execution` has a concrete interpreter (803 lines). `angryier-taint` is scaffolded only.
 
 ---

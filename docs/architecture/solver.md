@@ -1,5 +1,7 @@
 # Solver Architecture
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). Z3 and Bitwuzla FFI are real, the portfolio/cache/UNSAT-core/incremental stack is implemented, and solver cancellation landed (`Z3Backend::interrupt()`).
+
 > **Implementation status:** Partially implemented. `angryier-solver` (375 lines) provides the backend-neutral query/result model, result classes (SAT/UNSAT/UNKNOWN/TIMEOUT/RESOURCE_LIMIT/BACKEND_ERROR), and canonical query identity. `angryier-solver-z3` and `angryier-solver-bitwuzla` are fail-closed stubs — no native FFI yet.
 
 ---

@@ -1,6 +1,8 @@
 # Architecture Overview
 
-> **Implementation status:** Architecture frozen. Phases 0–3 and Phase 5 foundations are implemented (types, state, memory, XED decode boundary, semantic IR/sealing, AngryIR lowering, concrete interpreter). Phases 4, 6–16 remain scaffolded.
+> **Status superseded (2026-09-24):** the authoritative status, architecture-as-built, and roadmap is [ROADMAP.md](../ROADMAP.md). The design contracts below remain valid unless the roadmap says otherwise.
+
+> **Implementation status (frozen 2026-09-14, stale):** Architecture frozen. Phases 0–3 and Phase 5 foundations are implemented (types, state, memory, XED decode boundary, semantic IR/sealing, AngryIR lowering, concrete interpreter). Phases 4, 6–16 remain scaffolded.
 
 > `Plan.md` is the operational decision baseline. This document set is the complete system architecture derived from that baseline. Implementation may refine mechanics, layouts, thresholds, and algorithms, but it must not silently weaken a locked invariant. Any architectural change requires an explicit replacement decision and migration note.
 

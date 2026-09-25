@@ -1,5 +1,7 @@
 # Intel XED Decode Boundary
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). Native XED FFI is now linked and wired end-to-end (`angryier-arch-xed-ffi`, behind the `xed` feature).
+
 > **Implementation status:** Implemented (contract layer). `angryier-decode-xed` owns the normalization boundary, metadata types, and error types. Native XED FFI integration is not yet linked — the adapter currently works with synthetic decode objects and must fail explicitly when XED is unavailable.
 
 ---

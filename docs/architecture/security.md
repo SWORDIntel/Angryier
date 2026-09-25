@@ -1,5 +1,7 @@
 # Security, Trust Boundaries, and Failure Containment
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). The three FFI crates are now the documented, audited `unsafe` exceptions; core crates remain `forbid(unsafe_code)`.
+
 > **Implementation status:** Architecture-level. The workspace enforces `unsafe_code = "forbid"` and `panic/unwrap_used/expect_used = "deny"` across all crates. No FFI `unsafe` exceptions exist yet since no native backends are linked.
 
 ---

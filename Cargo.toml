@@ -2,6 +2,16 @@
 members = ["crates/*"]
 resolver = "2"
 
+# Reproducible measurement profile: the per-step hot path crosses many crate
+# boundaries, so thin LTO buys cross-crate inlining at a fraction of fat-LTO
+# link cost; codegen-units = 1 for the interpreter loop. `panic` deliberately
+# stays unwind (abort breaks `cargo test --release`). For perf/flamegraph
+# profiling swap `strip = true` for `debug = "line-tables-only"`.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
 [workspace.package]
 edition = "2024"
 license = "AGPL-3.0-or-later"

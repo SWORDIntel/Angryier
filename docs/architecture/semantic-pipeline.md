@@ -1,5 +1,7 @@
 # Semantic Definition Architecture
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). 363 handwritten Intel 64 forms exist, the declarative generator is live, and the hardware differential oracle validates 856 cases.
+
 > **Implementation status:** Implemented (contract + builder). `angryier-semantics` owns the typed semantic domains, provider/builder traits, and sealed block builder (561 lines). The semantic provider registry, value/effect definitions, and sealing pipeline are implemented. No actual Intel 64 semantic definitions exist yet — the handwritten corpus is the next implementation phase.
 
 ---

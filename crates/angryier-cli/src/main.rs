@@ -5,7 +5,10 @@
 //! This binary reports workspace/crate status. It parses arguments manually
 //! from `std::env::args()` and uses no external dependencies.
 
-const VERSION: &str = "0.1.0";
+/// Single version source: the workspace package version inherited via
+/// `version.workspace = true` in Cargo.toml. `angry.version()` (the runtime
+/// crate) derives from the same source, so the two cannot drift.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const TAGLINE: &str = "Rust-native multicore symbolic/concolic execution engine";
 
 /// One crate in the workspace with its implementation status and a short
@@ -18,7 +21,7 @@ struct CrateInfo {
 
 /// Static registry of every workspace crate the CLI reports on.
 ///
-/// 36 implemented crates with real logic plus 3 scaffolded contract boundaries
+/// 37 implemented crates with real logic plus 2 scaffolded contract boundaries
 /// (fail-closed) = 39 crates total.
 static CRATES: &[CrateInfo] = &[
     // --- Implemented (real logic, not just contracts) ---
@@ -202,6 +205,11 @@ static CRATES: &[CrateInfo] = &[
         implemented: true,
         desc: "Native Intel XED decoder FFI bridge",
     },
+    CrateInfo {
+        name: "angryier-cli",
+        implemented: true,
+        desc: "CLI entry point",
+    },
     // --- Scaffolded (contract boundaries, fail-closed) ---
     CrateInfo {
         name: "angryier-solver-z3",
@@ -213,16 +221,13 @@ static CRATES: &[CrateInfo] = &[
         implemented: false,
         desc: "Fail-closed Bitwuzla adapter stub",
     },
-    CrateInfo {
-        name: "angryier-cli",
-        implemented: false,
-        desc: "CLI entry point",
-    },
 ];
 
 const TOTAL_CRATES: usize = 39;
-const IMPLEMENTED_CRATES: usize = 36;
-const SCAFFOLDED_CRATES: usize = 3;
+const IMPLEMENTED_CRATES: usize = 37;
+const SCAFFOLDED_CRATES: usize = 2;
+// Historical snapshot from the 2026-09 documentation pass, not maintained
+// per-change.
 const TEST_COUNT: usize = 585;
 const TEST_SUITES: usize = 78;
 
@@ -245,7 +250,7 @@ fn status_output() -> String {
          Implemented: {IMPLEMENTED_CRATES} crates with real logic\n\
          Scaffolded: {SCAFFOLDED_CRATES} crates (contract boundaries, fail-closed)\n\
          \n\
-         Tests: {TEST_COUNT} tests across {TEST_SUITES} suites (0 failures)"
+         Tests: {TEST_COUNT} tests across {TEST_SUITES} suites (0 failures, historical count)"
     )
 }
 
@@ -265,15 +270,25 @@ fn crates_output() -> String {
 }
 
 /// Usage text printed by `angryier help` (and `--help` / `-h`).
+///
+/// `run` is always listed; its description reports whether the binary was
+/// built with the `run` feature.
 fn help_output() -> String {
-    "Usage: angryier <command>\n\
-     \n\
-     Commands:\n  \
-       version    Print version information\n  \
-       status     Print workspace status summary\n  \
-       crates     List all crates with implementation status\n  \
-       help       Print this help message"
-        .to_string()
+    let run_desc = if cfg!(feature = "run") {
+        "Execute a binary symbolically"
+    } else {
+        "Not in this build (rebuild with --features run)"
+    };
+    format!(
+        "Usage: angryier <command>\n\
+         \n\
+         Commands:\n  \
+           version    Print version information\n  \
+           status     Print workspace status summary\n  \
+           crates     List all crates with implementation status\n  \
+           run        {run_desc}\n  \
+           help       Print this help message"
+    )
 }
 
 /// Dispatch a parsed argument list to the appropriate subcommand.
@@ -325,86 +340,271 @@ fn run(args: &[String]) -> i32 {
     }
 }
 
+/// `angryier run` argument parsing and execution.
+#[cfg(feature = "run")]
+mod run_cmd {
+    /// General-purpose registers accepted by `--symbolic`.
+    const GPRS: [&str; 16] = [
+        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+    ];
+
+    /// Parsed `angryier run` arguments.
+    #[derive(Debug, PartialEq)]
+    pub struct RunConfig {
+        pub path: String,
+        pub script: Option<String>,
+        pub symbolic: Vec<String>,
+        pub find: Vec<u64>,
+        pub argv: Option<u64>,
+        pub dynamic: bool,
+    }
+
+    pub fn usage() -> String {
+        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--dynamic]\n\
+         note: --find ADDR is hexadecimal, 0x prefix optional"
+            .to_string()
+    }
+
+    /// Consumes the value following the flag at `*i`, advancing `*i` past it.
+    fn value<'a>(args: &'a [String], i: &mut usize, flag: &str) -> Result<&'a str, String> {
+        *i += 1;
+        args.get(*i)
+            .map(String::as_str)
+            .ok_or_else(|| format!("missing value for {flag}"))
+    }
+
+    /// Parses a hexadecimal address with an optional `0x` prefix.
+    fn parse_addr(raw: &str) -> Option<u64> {
+        u64::from_str_radix(raw.strip_prefix("0x").unwrap_or(raw), 16).ok()
+    }
+
+    pub fn parse(args: &[String]) -> Result<RunConfig, String> {
+        let mut path = None;
+        let mut script = None;
+        let mut symbolic = Vec::new();
+        let mut find = Vec::new();
+        let mut argv = None;
+        let mut dynamic = false;
+        let mut i = 0;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if arg == "--script" {
+                script = Some(value(args, &mut i, arg)?.to_string());
+            } else if arg == "--symbolic" {
+                let reg = value(args, &mut i, arg)?;
+                if !GPRS.contains(&reg) {
+                    return Err(format!(
+                        "invalid --symbolic register '{reg}' (valid: rax rcx rdx rbx rsp rbp rsi rdi r8-r15)"
+                    ));
+                }
+                symbolic.push(reg.to_string());
+            } else if arg == "--find" {
+                let raw = value(args, &mut i, arg)?;
+                match parse_addr(raw) {
+                    Some(addr) => find.push(addr),
+                    None => {
+                        return Err(format!(
+                            "invalid --find address '{raw}' (expected hex, 0x prefix optional)"
+                        ));
+                    }
+                }
+            } else if arg == "--argv" {
+                let raw = value(args, &mut i, arg)?;
+                match raw.parse::<u64>() {
+                    Ok(n) => argv = Some(n),
+                    Err(_) => {
+                        return Err(format!(
+                            "invalid --argv value '{raw}' (expected a non-negative integer)"
+                        ));
+                    }
+                }
+            } else if arg == "--dynamic" {
+                dynamic = true;
+            } else if !arg.starts_with('-') {
+                path = Some(arg.to_string());
+            } else {
+                return Err(format!("unknown flag '{arg}'"));
+            }
+            i += 1;
+        }
+        let path = path.ok_or_else(|| "missing <binary> operand".to_string())?;
+        Ok(RunConfig {
+            path,
+            script,
+            symbolic,
+            find,
+            argv,
+            dynamic,
+        })
+    }
+
+    pub fn execute(config: &RunConfig) -> i32 {
+        let lua = mlua::Lua::new();
+        if let Err(e) = angryier_runtime::script::register(&lua) {
+            eprintln!("script init: {e}");
+            return 1;
+        }
+        let sym_table = config
+            .symbolic
+            .iter()
+            .map(|r| format!("{r} = 64"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let find_table = config.find.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        let argv_opt = config.argv.map(|n| format!("argv = {n},")).unwrap_or_default();
+        let dyn_opt = if config.dynamic { "dynamic = true," } else { "" };
+        let driver = if let Some(script) = &config.script {
+            match std::fs::read_to_string(script) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("read {script}: {e}");
+                    return 1;
+                }
+            }
+        } else {
+            format!(
+                r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = 1024, states = 16 }})
+print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.steps, r.forks, r.merges, r.terminated, r.found))"#,
+                path = config.path
+            )
+        };
+        match lua.load(&driver).eval::<mlua::Value>() {
+            Ok(_) => 0,
+            Err(e) => {
+                eprintln!("script: {e}");
+                1
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn args(items: &[&str]) -> Vec<String> {
+            items.iter().map(|s| s.to_string()).collect()
+        }
+
+        fn config(
+            path: &str,
+            script: Option<&str>,
+            symbolic: &[&str],
+            find: &[u64],
+            argv: Option<u64>,
+            dynamic: bool,
+        ) -> RunConfig {
+            RunConfig {
+                path: path.to_string(),
+                script: script.map(|s| s.to_string()),
+                symbolic: symbolic.iter().map(|s| s.to_string()).collect(),
+                find: find.to_vec(),
+                argv,
+                dynamic,
+            }
+        }
+
+        #[test]
+        fn parses_minimal_invocation() {
+            assert_eq!(
+                parse(&args(&["./bin"])),
+                Ok(config("./bin", None, &[], &[], None, false))
+            );
+        }
+
+        #[test]
+        fn parses_all_flags() {
+            assert_eq!(
+                parse(&args(&[
+                    "./bin",
+                    "--script",
+                    "f.lua",
+                    "--symbolic",
+                    "rdi",
+                    "--symbolic",
+                    "rsi",
+                    "--find",
+                    "0x40102a",
+                    "--argv",
+                    "8",
+                    "--dynamic"
+                ])),
+                Ok(config(
+                    "./bin",
+                    Some("f.lua"),
+                    &["rdi", "rsi"],
+                    &[0x40102a],
+                    Some(8),
+                    true
+                ))
+            );
+        }
+
+        #[test]
+        fn find_accepts_hex_without_prefix() {
+            assert_eq!(
+                parse(&args(&["./bin", "--find", "0x40102a", "--find", "40102a"])),
+                Ok(config("./bin", None, &[], &[0x40102a, 0x40102a], None, false))
+            );
+        }
+
+        #[test]
+        fn missing_binary_errors() {
+            assert_eq!(
+                parse(&args(&["--dynamic"])),
+                Err("missing <binary> operand".to_string())
+            );
+        }
+
+        #[test]
+        fn unknown_flag_errors() {
+            // Typo of `--symbolic`.
+            assert_eq!(
+                parse(&args(&["./bin", "--symboilc", "rdi"])),
+                Err("unknown flag '--symboilc'".to_string())
+            );
+            assert_eq!(parse(&args(&["./bin", "-x"])), Err("unknown flag '-x'".to_string()));
+        }
+
+        #[test]
+        fn missing_flag_value_errors() {
+            for flag in ["--script", "--symbolic", "--find", "--argv"] {
+                assert_eq!(parse(&args(&["./bin", flag])), Err(format!("missing value for {flag}")));
+            }
+        }
+
+        #[test]
+        fn invalid_register_errors() {
+            assert_eq!(
+                parse(&args(&["./bin", "--symbolic", "xmm0"])),
+                Err("invalid --symbolic register 'xmm0' (valid: rax rcx rdx rbx rsp rbp rsi rdi r8-r15)".to_string())
+            );
+        }
+
+        #[test]
+        fn non_numeric_argv_errors() {
+            assert_eq!(
+                parse(&args(&["./bin", "--argv", "eight"])),
+                Err("invalid --argv value 'eight' (expected a non-negative integer)".to_string())
+            );
+        }
+
+        #[test]
+        fn non_hex_find_errors() {
+            assert_eq!(
+                parse(&args(&["./bin", "--find", "zzz"])),
+                Err("invalid --find address 'zzz' (expected hex, 0x prefix optional)".to_string())
+            );
+        }
+    }
+}
+
 #[cfg(feature = "run")]
 fn run_subcommand(args: &[String]) -> i32 {
-    let mut path = None;
-    let mut script = None;
-    let mut symbolic: Vec<String> = Vec::new();
-    let mut find: Vec<String> = Vec::new();
-    let mut argv: Option<u64> = None;
-    let mut dynamic = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--script" => {
-                i += 1;
-                script = args.get(i).cloned();
-            }
-            "--symbolic" => {
-                i += 1;
-                if let Some(s) = args.get(i) {
-                    symbolic.push(s.clone());
-                }
-            }
-            "--find" => {
-                i += 1;
-                if let Some(s) = args.get(i) {
-                    find.push(s.clone());
-                }
-            }
-            "--argv" => {
-                i += 1;
-                argv = args.get(i).and_then(|s| s.parse().ok());
-            }
-            "--dynamic" => dynamic = true,
-            p if !p.starts_with('-') => path = Some(p.to_string()),
-            _ => {}
-        }
-        i += 1;
-    }
-    let Some(path) = path else {
-        eprintln!(
-            "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find 0xADDR] [--argv N] [--dynamic]"
-        );
-        return 1;
-    };
-
-    let lua = mlua::Lua::new();
-    if let Err(e) = angryier_runtime::script::register(&lua) {
-        eprintln!("script init: {e}");
-        return 1;
-    }
-    let sym_table = symbolic
-        .iter()
-        .map(|r| format!("{r} = 64"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let find_table = find
-        .iter()
-        .filter_map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-        .map(|a| a.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let argv_opt = argv.map(|n| format!("argv = {n},")).unwrap_or_default();
-    let dyn_opt = if dynamic { "dynamic = true," } else { "" };
-    let driver = if let Some(script) = script {
-        match std::fs::read_to_string(&script) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("read {script}: {e}");
-                return 1;
-            }
-        }
-    } else {
-        format!(
-            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = 1024, states = 16 }})
-print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.steps, r.forks, r.merges, r.terminated, r.found))"#
-        )
-    };
-    match lua.load(&driver).eval::<mlua::Value>() {
-        Ok(_) => 0,
-        Err(e) => {
-            eprintln!("script: {e}");
+    match run_cmd::parse(args) {
+        Ok(config) => run_cmd::execute(&config),
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            eprintln!("{}", run_cmd::usage());
             1
         }
     }
@@ -441,6 +641,11 @@ mod tests {
     }
 
     #[test]
+    fn status_output_labels_test_count_historical() {
+        assert!(status_output().contains("historical count"));
+    }
+
+    #[test]
     fn status_output_contains_suite_count() {
         assert!(status_output().contains("78 suites"));
     }
@@ -471,7 +676,15 @@ mod tests {
         assert!(help.contains("version"));
         assert!(help.contains("status"));
         assert!(help.contains("crates"));
+        assert!(help.contains("run"));
         assert!(help.contains("help"));
+    }
+
+    #[test]
+    fn crates_output_reports_cli_implemented() {
+        let crates = crates_output();
+        assert!(crates.contains("angryier-cli"));
+        assert!(!crates.contains("angryier-cli          Scaffolded"));
     }
 
     #[test]

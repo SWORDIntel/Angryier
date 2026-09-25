@@ -1,6 +1,6 @@
 # Angryier Benchmarking Contract
 
-> **Implementation status:** Contract only. `angryier-bench` is scaffolded. No benchmark harness, corpus, or metrics schema is implemented yet.
+> **Implementation status:** The contract below is enforced by a real `angryier-bench` sink (`BenchmarkRecord`/`InMemoryBenchmarkSink`, 20+ tests), and gate measurements are packaged reproducibly by `scripts/gate_report.sh` (see the Gate Measurement Reports section). Reference comparison-engine harnessing remains future work.
 
 Performance claims are accepted only when they are reproducible, semantically comparable, and split by workload class.
 
@@ -486,3 +486,38 @@ CI or scheduled benchmark infrastructure should flag:
 - any incorrect authoritative cross-run reuse.
 
 Normal system noise must be accounted for; a single anomalous run should not block without confirmation.
+
+---
+
+# Gate Measurement Reports (GATE-A/B/C)
+
+`scripts/gate_report.sh` runs the five `#[ignore]`d gate benchmarks
+(`GATE-A speed`, `GATE-B footprint`/`solver`, `GATE-C preemption`/`alpha`),
+captures every `GATE-`-prefixed stdout line verbatim, and writes a paired
+human/machine report (`reports/gate-report-<UTC-date>.{md,json}`) recording
+`generated_utc`, `git_commit`, `git_dirty`, `rustc`, `cpu`, and per-benchmark
+`name`/`command`/`lines` plus exit code, duration, and stderr tail. Reports
+are committable by design. See the script header for usage (`--dry-run`,
+per-benchmark selection and timeouts).
+
+Where a gate line carries the numbers, it maps onto the existing
+`angryier-bench` sink without new infrastructure — e.g.
+`GATE-B footprint: symbolic 10000 states, RSS +115.0 MB ...` becomes:
+
+```rust
+BenchmarkRecord {
+    run: RunId(20260924),               // report date; (run, case) must be unique
+    case: "gate_b_footprint_symbolic",  // one record per gate leg
+    fidelity: FidelityProfile::Prove,   // symbolic leg; Explore for concolic legs
+    wall_seconds: /* fork-cost elapsed seconds */,
+    states: 10_000,                     // record() rejects states == 0
+    solver_queries: 0,                  // where the gate line carries them
+    coverage_units: 0,
+    replay_verified: true,
+    semantic_verified: true,
+}
+```
+
+Gate lines that carry rates instead of state counts (GATE-A steps/ms,
+GATE-C queries/s) do not fit the sink's fixed numeric fields; the JSON
+report is the complete record, and the sink is for aggregation only.

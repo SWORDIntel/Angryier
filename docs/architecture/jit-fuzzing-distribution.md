@@ -1,5 +1,7 @@
 # JIT, Fuzzing, and Distribution
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). `fuzz_generate` is live end-to-end and the distribution codec is implemented; JIT remains contract-only by design (Gate G).
+
 > **Implementation status:** Scaffolded. `angryier-jit` (144 lines), `angryier-fuzz` (36 lines), and `angryier-distribution` (19 lines) are contract-only. No Cranelift/native JIT, fuzzer adapters, or distributed execution is implemented.
 
 ---

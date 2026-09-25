@@ -1,5 +1,7 @@
 # Shared Identity and Version Model
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md).
+
 > **Implementation status:** Implemented. `angryier-types` owns all cross-plane IDs, versions, and identity types. `ContentId` and `SemanticFingerprint` are distinct newtypes with domain-separated identity frames.
 
 ---

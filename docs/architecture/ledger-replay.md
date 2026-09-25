@@ -1,5 +1,7 @@
 # Atomic Execution Ledger and Replay
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). Replay capsule storage, a validator, and the durable `FileReplayStore` backend are implemented.
+
 > **Implementation status:** Partially implemented. `angryier-ledger` (309 lines) provides the atomic ledger contract, epoch model, and rejection classes. `angryier-replay` is scaffolded — no replay capsule storage or verifier is implemented.
 
 ---

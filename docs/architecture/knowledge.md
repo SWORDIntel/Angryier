@@ -1,5 +1,7 @@
 # Knowledge Plane: QIHSE, KEYSTONE, and Learned Fusion
 
+> **Status superseded (2026-09-24):** see [ROADMAP.md](../ROADMAP.md). In-memory indexing/retrieval/fusion encoders exist; only real persistence and the QIHSE/KEYSTONE submodules remain future work (Gate E).
+
 > **Implementation status:** Scaffolded. `angryier-knowledge`, `angryier-qihse`, `angryier-keystone`, `angryier-fusion`, and `angryier-storage` are contract-only. No persistence, indexing, embedding, or retrieval is implemented.
 
 ---
