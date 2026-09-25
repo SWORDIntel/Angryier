@@ -75,13 +75,14 @@ suites require system Z3/XED):
   A differential test proves concolic and full-symbolic modes produce the
   same input on the same binary. **Speed (release profile — thin
   LTO, 90k-step real trace, `tests/concolic_speed.rs`, packaged by
-  `scripts/gate_report.sh`):** concolic runs at **1.5–1.6× full-symbolic**
-  (4.7–4.9 s vs 7.5–7.6 s, re-measured 2026-09-25 on the committed tree
-  after the state/memory/expr fast paths were adopted end-to-end) with the
-  concrete floor at 0.41 s (220 steps/ms) — concolic is ~3.9× faster than
-  at first measurement (18.3 s) and concrete ~13× (5.5 s). The 5–10×
-  target remains open; the next round is callgrind-profile-driven
-  (2026-09-25 profile taken, see Known gaps).
+  `scripts/gate_report.sh`):** concolic runs at **1.8× full-symbolic**
+  (3.92 s vs 6.98 s, measured 2026-09-25 after the FxHash arena round;
+  was 4.9/7.5 s = 1.5–1.6× after the state/memory/expr fast-path
+  adoption) with the concrete floor at 0.41 s (~220 steps/ms) — concolic
+  is ~4.7× faster than at first measurement (18.3 s) and concrete ~13×
+  (5.5 s). The 5–10× target remains open; the profiled remainder is
+  SHA-256 dependency keys (~16%) plus concolic-side short-circuits (see
+  Known gaps).
 - **Full symbolic mode (Phase 10 engine):** `SymbolicSession` forks at
   branches, solver-gates directions (`step_state_checked` prunes UNSAT),
   merges at reconvergence points (`merge_at`/`merge_snapshots` via `Ite`),
@@ -186,13 +187,16 @@ suites require system Z3/XED):
   `PersistentMemory::write_materialized` still clones the page map per
   store but no longer registers in the profile. **Fresh callgrind profile
   (2026-09-25, 20k-step mix-loop, release+debuginfo):** ~50% of all
-  instructions are hashing — SipHash (`RandomState`) over `ExprNode`
-  keys in the arena hash-cons maps ~33%, SHA-256 dependency keys on
-  intern misses ~16% (loop workloads mint fresh expressions per
-  iteration, so the probe-before-hash fix doesn't apply); malloc/free
-  ~12%; shadow evaluation itself ~9%. Next round: cheap deterministic
-  hasher (FxHash-class) for the arena's hash-cons/expression maps, then
-  a fixed-size-input dependency-key derivation over cached child keys.
+  instructions were hashing — SipHash (`RandomState`) over `ExprNode`
+  keys in the arena hash-cons maps ~33% (**fixed the same day**: FxHash
+  in `angryier-types`, arena + evaluator hot maps swapped; concolic −20%,
+  symbolic −8%, Gate-A multiplier 1.5–1.6× → 1.8×), SHA-256 dependency
+  keys on intern misses ~16% (loop workloads mint fresh expressions per
+  iteration; derivation is already Merkle-style over child keys, so
+  further wins need a digest change — deferred pending identity-cost
+  review); malloc/free ~12%; shadow evaluation itself ~9%. Beyond
+  hashing, the ratio target needs concolic-side short-circuits (skip
+  shadow evaluation of blocks with no symbolic influence).
 - Symbolic-evaluator gaps surfaced by the speed benchmark — **closed
   2026-09-25** except one: degenerate `ZExt` truncates via `Extract` with
   view-width-normalized register reads, comparison operands coerce
@@ -614,18 +618,16 @@ and reproducible correctness/performance reports.
 5. **x87 runtime integration — DONE.** 17 iclasses → all 39 forms wired
    into `form_map.rs` (XED quirks handled), 16-bit immediate forms mapped,
    engine-vs-native tests green.
-6. **Performance round 2 (state/memory/expr crates) — lower-layer fixes
-   DONE (2026-09-24/25), speed re-run DONE.** Four of five profiled hot
-   spots fixed and adopted end-to-end (register pending-overlay writes,
-   `read_into`, probe-before-hash intern, sort/op probes); concolic
-   re-measured at **1.5–1.6×** full-symbolic (§2). **Round 3 is
-   profile-driven (callgrind 2026-09-25):** ~50% of instructions are
-   hashing — swap the arena's hash-cons maps to a cheap deterministic
-   hasher (~33% SipHash over `ExprNode` keys), then shrink SHA-256
-   dependency-key derivation (~16%) to a fixed-size input over cached
-   child keys. Both modes benefit; the 5–10× ratio target additionally
-   needs concolic-side short-circuits (skip shadow evaluation of blocks
-   with no symbolic influence).
+6. **Performance rounds 2–3 — DONE (2026-09-24/25).** Round 2: four of
+   five profiled hot spots fixed and adopted end-to-end (register
+   pending-overlay writes, `read_into`, probe-before-hash intern, sort/op
+   probes). Round 3 (profile-driven, callgrind 2026-09-25): FxHash for
+   the arena hash-cons and evaluator hot maps — concolic **−20%**
+   (22.9 steps/ms), symbolic −8%, multiplier **1.8×**. Remaining
+   profiled costs: SHA-256 dependency keys (~16%, digest-change
+   decision deferred), malloc/free (~12%), and concolic-side
+   short-circuits (skip shadow evaluation of blocks with no symbolic
+   influence) — the last is the next lever toward the 5–10× ratio.
 7. **Solver-reuse completion (Phase 8 finish) — DONE (2026-09-24).**
    Value-aware cache admission (deterministic, measured); preemption
    measured via budget cancellation (prompt `Unknown`, ~27 ms overhead;
@@ -714,11 +716,11 @@ GUI, other ISAs, CUDA/OpenCL planning.
   gcc -O0/-O2, dynamic ELF, PE32+).
 - **Gate A — concolic correctness.** Symbolic results correct, canonical
   identities stable, both modes agree on the differential suite.
-  **Correctness passed** (dual-mode differential test). **Speed: 1.5–1.6×
-  full-symbolic under the release profile** (re-measured 2026-09-25, up
-  from 0.9× parity at first measurement; concolic itself ~3.9× faster
-  than baseline); the 5–10× target remains open — round 3 is
-  profile-driven (§5 item 6).
+  **Correctness passed** (dual-mode differential test). **Speed: 1.8×
+  full-symbolic under the release profile** (re-measured 2026-09-25 after
+  the FxHash round, up from 0.9× parity at first measurement; concolic
+  itself ~4.7× faster than baseline); the 5–10× target remains open —
+  next levers in §5 item 6.
 - **Gate B — multicore scaling.** Useful scaling on real binaries in both
   modes; report 10k-state footprint and depth-500 migration cost.
   **Measured in debug and release (2026-09-25):** solver contexts are
