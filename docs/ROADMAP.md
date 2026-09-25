@@ -75,14 +75,21 @@ suites require system Z3/XED):
   A differential test proves concolic and full-symbolic modes produce the
   same input on the same binary. **Speed (release profile — thin
   LTO, 90k-step real trace, `tests/concolic_speed.rs`, packaged by
-  `scripts/gate_report.sh`):** concolic runs at **1.8× full-symbolic**
-  (3.92 s vs 6.98 s, measured 2026-09-25 after the FxHash arena round;
-  was 4.9/7.5 s = 1.5–1.6× after the state/memory/expr fast-path
-  adoption) with the concrete floor at 0.41 s (~220 steps/ms) — concolic
-  is ~4.7× faster than at first measurement (18.3 s) and concrete ~13×
-  (5.5 s). The 5–10× target remains open; the profiled remainder is
-  SHA-256 dependency keys (~16%) plus concolic-side short-circuits (see
-  Known gaps).
+  `scripts/gate_report.sh`):** on the dense-influence fixture concolic
+  runs at **1.8× full-symbolic** (3.98 s vs 7.18 s, 2026-09-25 after
+  the FxHash round; the concrete-first fast path below is neutral there
+  by construction — the input reaches every block) with the concrete
+  floor at ~0.42 s (~213 steps/ms). **The QSYM-style concrete-first fast
+  path landed the same day: blocks with no symbolic influence skip shadow
+  evaluation entirely (buffered concrete walk, fallback on first
+  influence, committed state indistinguishable from the full fold;
+  concrete branch conditions record no constraint)** — on the new
+  sparse-influence leg (input consulted once in 60k steps, the shape of
+  real programs between input uses) **concolic runs at 1.96× the
+  concrete floor** (108.7 vs 213.0 steps/ms, zero path constraints), vs
+  9–12× overhead on dense code. Cumulative: concolic is ~4.6× faster
+  than first measurement (18.3 s dense). The 5–10× target remains open;
+  the profiled remainder is SHA-256 dependency keys (~16%).
 - **Full symbolic mode (Phase 10 engine):** `SymbolicSession` forks at
   branches, solver-gates directions (`step_state_checked` prunes UNSAT),
   merges at reconvergence points (`merge_at`/`merge_snapshots` via `Ite`),
@@ -196,7 +203,9 @@ suites require system Z3/XED):
   further wins need a digest change — deferred pending identity-cost
   review); malloc/free ~12%; shadow evaluation itself ~9%. Beyond
   hashing, the ratio target needs concolic-side short-circuits (skip
-  shadow evaluation of blocks with no symbolic influence).
+  shadow evaluation of blocks with no symbolic influence) — **landed
+  2026-09-25** (`try_concrete_block`; sparse-influence overhead vs the
+  concrete floor is 1.96×, dense-leg multiplier unchanged at 1.8×).
 - Symbolic-evaluator gaps surfaced by the speed benchmark — **closed
   2026-09-25** except one: degenerate `ZExt` truncates via `Extract` with
   view-width-normalized register reads, comparison operands coerce
@@ -500,9 +509,17 @@ flattering the comparison).
 
 ### Phase 7 — semantic generator + broad Intel 64 coverage
 **Status: generator live and oracle-validated (856 integer/SSE + 462 x87
-hardware cases); x87 family started (39 forms) and wired into the runtime
-form map — float-using binaries execute end-to-end.**
-**Remaining:** FSTSW AX needs an FPU status-word register; then
++ 284 rotate hardware cases); x87 family started (39 forms) and wired into
+the runtime form map — float-using binaries execute end-to-end. All 8
+handwritten ROL/ROR providers (r64/r32 × imm8/CL) emit the rotate
+primitive directly (2026-09-25) — the rewiring exposed and fixed two
+latent r32 bugs (`roll $imm` was a udiv no-op; r32-CL read at the wrong
+width and never executed on real decodes) and r32-CL rotates are now
+routed in the runtime form map.**
+**Remaining:** FSTSW AX needs an FPU status-word register; **SHL/SHR/SAR
+r32 count masking has the same bug class the rotate rewiring fixed
+(unmasked counts vs x86 mod-32 → `shl $33, %eax` diverges)**; r32 rotate
+flag modeling (CF) and r64-CL OF; then
 expand families in order — AVX → AVX2 → AVX-512 →
 VNNI/AVX10 → AMX → CET/APX (AES/SHA/BMI interleaved); CI regeneration/diff
 gate; documented undefined-flag behavior (AF/PF/OF-on-shift-by-zero).
