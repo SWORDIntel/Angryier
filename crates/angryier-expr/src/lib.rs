@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 
+use angryier_types::fx::FxHashMap;
 use angryier_types::{DependencyKey, ExprId, ExpressionNormalizationVersion};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::BTreeSet,
     sync::{
         RwLock,
         atomic::{AtomicU64, Ordering},
@@ -179,7 +180,7 @@ struct ExprRecord {
 
 #[derive(Default)]
 struct ArenaShard {
-    by_node: HashMap<ExprNode, ExprId>,
+    by_node: FxHashMap<ExprNode, ExprId>,
     records: Vec<ExprRecord>,
 }
 

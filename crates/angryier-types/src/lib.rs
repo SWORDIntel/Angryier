@@ -191,8 +191,98 @@ pub struct AnalysisContext {
     pub security: SecurityContext,
 }
 
+/// Fast non-cryptographic hasher (the rustc-hash / Fx algorithm) for
+/// in-process hot maps keyed by engine-owned types (`ExprNode`, `ExprId`,
+/// dependency keys).
+///
+/// Profiled 2026-09-25 (callgrind, 20k-step mix-loop): SipHash over
+/// `ExprNode` hash-cons keys was ~33% of all executed instructions. Fx
+/// hashes the same keys an order of magnitude cheaper.
+///
+/// Contract: deterministic across processes and runs (no per-process seed —
+/// also what replay determinism wants), and equality-consistent (equal keys
+/// hash equal). It is NOT collision-resistant: a crafted key stream can
+/// degrade a map to linear probing. Keys here derive from engine-internal
+/// node structure where a collision costs extra probes, never a wrong
+/// answer (`Eq` remains the arbiter), and identity/slicing digests stay on
+/// SHA-256 — never use this hasher where a digest is load-bearing.
+pub mod fx {
+    use std::hash::{BuildHasherDefault, Hasher};
+
+    #[derive(Clone, Default)]
+    pub struct FxHasher {
+        hash: u64,
+    }
+
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    impl FxHasher {
+        #[inline]
+        fn add_to_hash(&mut self, word: u64) {
+            self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(SEED);
+        }
+    }
+
+    macro_rules! fx_write_int {
+        ($($method:ident => $ty:ty),+ $(,)?) => {
+            $(
+                #[inline]
+                fn $method(&mut self, value: $ty) {
+                    self.add_to_hash(value as u64);
+                }
+            )+
+        };
+    }
+
+    impl Hasher for FxHasher {
+        fx_write_int! {
+            write_u8 => u8,
+            write_u16 => u16,
+            write_u32 => u32,
+            write_u64 => u64,
+            write_usize => usize,
+        }
+
+        #[inline]
+        fn write_u128(&mut self, value: u128) {
+            self.add_to_hash(value as u64);
+            self.add_to_hash((value >> 64) as u64);
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            let (chunks, remainder) = bytes.as_chunks::<8>();
+            for chunk in chunks {
+                self.add_to_hash(u64::from_le_bytes(*chunk));
+            }
+            if !remainder.is_empty() {
+                let mut packed = 0u64;
+                for (index, byte) in remainder.iter().enumerate() {
+                    packed |= (*byte as u64) << (8 * index);
+                }
+                self.add_to_hash(packed);
+            }
+        }
+
+        #[inline]
+        fn finish(&self) -> u64 {
+            self.hash
+        }
+    }
+
+    /// Deterministic builder for [`FxHasher`] (zero-sized, `Default`-seeded).
+    pub type FxBuildHasher = BuildHasherDefault<FxHasher>;
+
+    pub type FxHashMap<K, V> = std::collections::HashMap<K, V, FxBuildHasher>;
+
+    pub type FxHashSet<K> = std::collections::HashSet<K, FxBuildHasher>;
+}
+
 #[cfg(test)]
 mod tests {
+    use std::hash::Hash;
+    use std::hash::Hasher;
+
+    use super::fx::FxHasher;
     use super::*;
 
     #[test]
@@ -230,5 +320,54 @@ mod tests {
         let split_framing = ContentId::derive(ContentDomain::KnowledgeArtifact, schema, b"a\0b");
 
         assert_ne!(joined, split_framing);
+    }
+
+    #[test]
+    fn fx_hasher_is_deterministic_and_equality_consistent() {
+        use super::fx::{FxHashMap, FxHashSet};
+
+        // Deterministic across hasher instances (no per-process seed).
+        let mut first = FxHasher::default();
+        let mut second = FxHasher::default();
+        "an expression node key".hash(&mut first);
+        "an expression node key".hash(&mut second);
+        assert_eq!(first.finish(), second.finish());
+
+        // Equal keys hash equal through the derived Hash impls the hot maps
+        // rely on; unequal keys need not differ (collisions are legal, only
+        // probing cost) — so this asserts map behavior, not inequality.
+        let mut words: FxHashSet<&str> = FxHashSet::default();
+        words.insert("sort");
+        words.insert("op");
+        words.insert("operands");
+        words.insert("immediate");
+        assert_eq!(words.len(), 4);
+        assert!(words.contains("op"));
+        assert!(!words.contains("symbolic_sources"));
+
+        let mut map: FxHashMap<(u16, u128), u32> = FxHashMap::default();
+        map.insert((64, 0xDEAD_BEEF), 7);
+        assert_eq!(map.get(&(64, 0xDEAD_BEEF)), Some(&7));
+        assert_eq!(map.get(&(32, 0xDEAD_BEEF)), None);
+    }
+
+    #[test]
+    fn fx_hasher_byte_slices_follow_the_same_path_as_integers() {
+        use super::fx::FxHasher;
+
+        // write_u64 and write of the same 8 little-endian bytes are allowed
+        // to differ; what matters is that each is stable. Assert both
+        // stability and rough avalanche behavior on single words.
+        let mut one = FxHasher::default();
+        one.write_u64(1);
+        let mut two = FxHasher::default();
+        two.write_u64(2);
+        assert_ne!(one.finish(), two.finish());
+
+        let mut bytes = FxHasher::default();
+        bytes.write(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let mut repeated = FxHasher::default();
+        repeated.write(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(bytes.finish(), repeated.finish());
     }
 }

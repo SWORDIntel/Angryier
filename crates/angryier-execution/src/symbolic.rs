@@ -10,7 +10,8 @@
 //! it supports the scalar integer operations that flag computation and
 //! conditional branches use, and refuses everything else explicitly.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use angryier_types::fx::{FxHashMap, FxHashSet};
+use std::collections::BTreeMap;
 
 use angryier_expr::{ExprArena, ExprArenaError, ExprNode, ExprOp, ExprSort};
 use angryier_ir::{IrBlock, IrOp, IrPrimitive, IrType, IrValueId, RegisterWriteKind};
@@ -540,7 +541,7 @@ pub fn constant_value(arena: &SymbolicArena, expression: ExprId) -> Result<u64, 
 /// recursion budget may fold from a shallower root.
 pub fn constant_value_with_memo(
     arena: &SymbolicArena,
-    memo: &mut HashSet<ExprId>,
+    memo: &mut FxHashSet<ExprId>,
     expression: ExprId,
 ) -> Result<u64, SymbolicEvalError> {
     fold_eval(arena, expression, 0, None, Some(memo))
@@ -570,7 +571,7 @@ fn fold_eval(
     expression: ExprId,
     depth: u8,
     resolve_expr: Option<&dyn Fn(ExprId) -> Option<u64>>,
-    mut memo: Option<&mut HashSet<ExprId>>,
+    mut memo: Option<&mut FxHashSet<ExprId>>,
 ) -> Result<u64, FoldFail> {
     if depth > 16 {
         return Err(FoldFail::Depth);
@@ -616,7 +617,7 @@ fn fold_child(
     operand: Option<&ExprId>,
     depth: u8,
     resolve_expr: Option<&dyn Fn(ExprId) -> Option<u64>>,
-    memo: &mut Option<&mut HashSet<ExprId>>,
+    memo: &mut Option<&mut FxHashSet<ExprId>>,
 ) -> Result<u64, FoldFail> {
     let operand = operand.copied().ok_or(FoldFail::Absolute)?;
     fold_eval(arena, operand, depth + 1, resolve_expr, memo.as_deref_mut())
@@ -628,7 +629,7 @@ fn fold_node(
     op: ExprOp,
     depth: u8,
     resolve_expr: Option<&dyn Fn(ExprId) -> Option<u64>>,
-    mut memo: Option<&mut HashSet<ExprId>>,
+    mut memo: Option<&mut FxHashSet<ExprId>>,
 ) -> Result<u64, FoldFail> {
     let node = arena.get(expression).ok_or(FoldFail::Absolute)?;
     // Sequential child folds share the memo through reborrows.
@@ -1065,12 +1066,12 @@ pub struct ConcolicEvaluator<'a> {
     /// re-evaluates the same blocks step after step; re-interning their
     /// (identical) constants every visit makes the arena hash each one again
     /// and again. Widths above 128 bits bypass the cache.
-    constants: HashMap<(u16, u128), ExprId>,
+    constants: FxHashMap<(u16, u128), ExprId>,
     /// Negative fold memo: expressions proven non-constant by
     /// [`constant_value`]. Arena nodes are immutable, so a failure is valid
     /// forever; without it every symbolic register write would re-walk the
     /// top of a value chain that grows one node per iteration.
-    non_constants: HashSet<ExprId>,
+    non_constants: FxHashSet<ExprId>,
     /// Scratch value table reused across block evaluations: the shadow
     /// evaluates one block per step, and regrowing this table from empty
     /// each time costs several reallocations per step.
@@ -1087,8 +1088,8 @@ impl<'a> ConcolicEvaluator<'a> {
             memory: BTreeMap::new(),
             bindings: Vec::new(),
             next_symbol: 0,
-            constants: HashMap::new(),
-            non_constants: HashSet::new(),
+            constants: FxHashMap::default(),
+            non_constants: FxHashSet::default(),
             values_scratch: Vec::new(),
         }
     }
