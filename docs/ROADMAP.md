@@ -73,7 +73,7 @@ suites require system Z3/XED):
   (ntoskrnl/NDIS/HAL — zero coverage; the environment model is Linux
   syscalls + libc), DriverEntry/IRP state shapes, and an integration
   surface for the external angr-based sweep (no Python API exists).
-  Import-directory parsing landed (2026-09-25); IAT-to-stub resolution and the DriverEntry entry mode are in flight. Gate J discipline:
+  Import-directory parsing, IAT-to-stub resolution, the DriverEntry entry mode, and per-export forced-return hooks landed (2026-09-25) on synthetic importing PEs; real .sys validation plus a Windows kernel API model layer and the sweep integration surface remain. Gate J discipline:
   no cross-engine (angr-vs-Angryier) timing exists, so no driver-
   campaign throughput claim transfers yet.
 - **Dual-mode engine (Phase 6, centerpiece):** `ConcolicSession` shadows
