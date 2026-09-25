@@ -73,15 +73,15 @@ suites require system Z3/XED):
   portfolio (`solve_last_branch`); EXPLORE/HUNT record analysis debt instead
   of aborting; `requires_prove()`/`promote_to_symbolic` hand off to PROVE.
   A differential test proves concolic and full-symbolic modes produce the
-  same input on the same binary. **Speed (final release profile — thin
+  same input on the same binary. **Speed (release profile — thin
   LTO, 90k-step real trace, `tests/concolic_speed.rs`, packaged by
-  `scripts/gate_report.sh`):** concolic runs at **1.3× full-symbolic**
-  (5.73 s vs 7.69 s) with the concrete floor at 0.62 s — concolic is
-  3.2× faster than at first measurement (18.3 s) and concrete 8.9×
-  (5.5 s). The multiplier peaked at 1.7× mid-optimization; thin LTO
-  benefited full-symbolic proportionally more. The 5–10× target remains
-  open — the profiled next wins are the runtime's adoption of the new
-  `read_into`/`write_in_place` fast paths (§5 backlog).
+  `scripts/gate_report.sh`):** concolic runs at **1.5–1.6× full-symbolic**
+  (4.7–4.9 s vs 7.5–7.6 s, re-measured 2026-09-25 on the committed tree
+  after the state/memory/expr fast paths were adopted end-to-end) with the
+  concrete floor at 0.41 s (220 steps/ms) — concolic is ~3.9× faster than
+  at first measurement (18.3 s) and concrete ~13× (5.5 s). The 5–10×
+  target remains open; the next round is callgrind-profile-driven
+  (2026-09-25 profile taken, see Known gaps).
 - **Full symbolic mode (Phase 10 engine):** `SymbolicSession` forks at
   branches, solver-gates directions (`step_state_checked` prunes UNSAT),
   merges at reconvergence points (`merge_at`/`merge_snapshots` via `Ite`),
@@ -133,16 +133,18 @@ suites require system Z3/XED):
   LIFO-local/FIFO-steal, global overflow, `PoolStats`. Measured 3.93×
   wall-time on 4 workers (`parallel_concolic`, static musl hello);
   `parallel_explore` spreads 48 states / 377 unique PCs across 4 workers.
-- **Gate B measurements (debug build, post-rework):** after the
+- **Gate B measurements (post-rework):** after the
   state/memory/expr round (2026-09-24), 10k diverging concrete EXPLORE
-  states cost **2.7 KB/state RSS** with **17 µs forks** (was
-  42.8 KB / 255 µs — a 16× footprint collapse at the Process level; the
-  memory layer alone measured 47 → 0.87 KB/state, 54×); 10k symbolic
+  states cost **2.7 KB/state RSS** with **17 µs forks** in debug
+  (was 42.8 KB / 255 µs — a 16× footprint collapse at the Process level;
+  the memory layer alone measured 47 → 0.87 KB/state, 54×); 10k symbolic
   PROVE states cost **11.1 KB/state** plus a 285k-node shared interned
-  arena (fork 0.9 ms, down from 2.2 ms). Z3 context at depth 500 is only
-  **44 KB** — solver migration is a *time* problem, not memory: cold
-  rebuild 84–85 ms vs 6–8 ms warm incremental (**11–13×**), and a
-  half-shared prefix recovers almost none of it. Benchmarks:
+  arena. **Release rerun (2026-09-25):** footprints identical (layout is
+  optimization-invariant) with forks at **4.0 µs concrete /
+  80.9 µs symbolic**; solver migration is a *time* problem, not memory —
+  Z3 context at depth 500 is only **52 KB**, cold rebuild 76–88 ms vs
+  1.3–6.0 ms warm incremental (**15.5–20.2×** release), and a half-shared
+  prefix recovers almost none of it. Benchmarks:
   `angryier-runtime/tests/gate_b.rs`,
   `angryier-solver-z3-ffi/tests/migration_bench.rs`.
 - **Environment:** SimProcedure library (strlen/strcmp/malloc/free/memcpy/
@@ -176,14 +178,21 @@ suites require system Z3/XED):
   FSTSW AX still needs a status-word register and FST st(i) hits an XED
   decode quirk; deep `ld.so` emulation replaced by
   the static-hook approach; AVX/AVX-2/AVX-512 families not yet in the corpus.
-- The concolic fast path is faster than full symbolic (1.6× release) but
-  far from the 5–10× target. Profiled remaining costs, all outside the
-  runtime: `PersistentRegisters::write` deep-clones the register BTreeMap
-  on every write (~8% of runtime); `PersistentMemory::write_materialized`
-  clones the page map per store; `LayeredMemory::read` allocates a `Vec`
-  per read; `ShardedExprArena::intern` computes the SHA-256 dependency
-  hash even on hash-cons hits (~35% of remaining instructions);
-  `ExprArena::get` clones full nodes for sort/op-only callers.
+- The concolic fast path is faster than full symbolic (1.5–1.6× release,
+  re-measured 2026-09-25) but far from the 5–10× target. Of the five
+  previously profiled costs, four are fixed (register-write BTreeMap
+  deep-clone, per-read `Vec` in `LayeredMemory::read`, SHA-256 on
+  hash-cons *hits*, full-node clones for sort/op-only probes);
+  `PersistentMemory::write_materialized` still clones the page map per
+  store but no longer registers in the profile. **Fresh callgrind profile
+  (2026-09-25, 20k-step mix-loop, release+debuginfo):** ~50% of all
+  instructions are hashing — SipHash (`RandomState`) over `ExprNode`
+  keys in the arena hash-cons maps ~33%, SHA-256 dependency keys on
+  intern misses ~16% (loop workloads mint fresh expressions per
+  iteration, so the probe-before-hash fix doesn't apply); malloc/free
+  ~12%; shadow evaluation itself ~9%. Next round: cheap deterministic
+  hasher (FxHash-class) for the arena's hash-cons/expression maps, then
+  a fixed-size-input dependency-key derivation over cached child keys.
 - Symbolic-evaluator gaps surfaced by the speed benchmark: `ZExt 64→32`
   unsupported, 32-bit induction-variable init yields width-mismatched
   `SortMismatch(Ult)`, `RotL/RotR` unsupported symbolically, and concrete
@@ -584,9 +593,11 @@ and reproducible correctness/performance reports.
 
 ## 5. Current execution order (concrete next steps)
 
-1. **Gate B measurement pack — DONE (debug build).** Both benchmarks landed
-   (`tests/gate_b.rs`, `tests/migration_bench.rs`) with first numbers in §2.
-   Follow-up: release-build rerun.
+1. **Gate B measurement pack — DONE (debug build), release rerun DONE
+   (2026-09-25).** Both benchmarks landed
+   (`tests/gate_b.rs`, `tests/migration_bench.rs`); release numbers in §2
+   (footprints identical, forks 4.0 µs concrete / 80.9 µs symbolic,
+   migration 15.5–20.2×).
 2. **Concolic speed measurement — DONE (negative result).** 90k-step real
    trace, `tests/concolic_speed.rs`: ~0.9× full-symbolic, ~3.2× concrete.
    The 5–10× claim is killed as implemented; the derived work is item 4.
@@ -599,14 +610,18 @@ and reproducible correctness/performance reports.
 5. **x87 runtime integration — DONE.** 17 iclasses → all 39 forms wired
    into `form_map.rs` (XED quirks handled), 16-bit immediate forms mapped,
    engine-vs-native tests green.
-6. **Performance round 2 (state/memory/expr crates).** The profiled
-   remaining hot spots, benefiting concrete, concolic, and full-symbolic
-   alike: `PersistentRegisters::write` deep-clones the register BTreeMap
-   per write (~8% of runtime); `PersistentMemory::write_materialized`
-   clones the page map per store; `LayeredMemory::read` allocates a `Vec`
-   per read; `ShardedExprArena::intern` hashes SHA-256 even on hash-cons
-   hits (~35% of remaining instructions); `ExprArena::get` clones full
-   nodes for sort/op-only callers. Fix, then re-run the speed benchmark.
+6. **Performance round 2 (state/memory/expr crates) — lower-layer fixes
+   DONE (2026-09-24/25), speed re-run DONE.** Four of five profiled hot
+   spots fixed and adopted end-to-end (register pending-overlay writes,
+   `read_into`, probe-before-hash intern, sort/op probes); concolic
+   re-measured at **1.5–1.6×** full-symbolic (§2). **Round 3 is
+   profile-driven (callgrind 2026-09-25):** ~50% of instructions are
+   hashing — swap the arena's hash-cons maps to a cheap deterministic
+   hasher (~33% SipHash over `ExprNode` keys), then shrink SHA-256
+   dependency-key derivation (~16%) to a fixed-size input over cached
+   child keys. Both modes benefit; the 5–10× ratio target additionally
+   needs concolic-side short-circuits (skip shadow evaluation of blocks
+   with no symbolic influence).
 7. **Solver-reuse completion (Phase 8 finish) — DONE (2026-09-24).**
    Value-aware cache admission (deterministic, measured); preemption
    measured via budget cancellation (prompt `Unknown`, ~27 ms overhead;
@@ -627,12 +642,12 @@ and reproducible correctness/performance reports.
    remainder) — DONE (2026-09-24).** Record → `FileReplayStore` → fresh
    load → deterministic replay matching native ground truth; fail-closed
    tamper rejection proven. Gate 0's original remainder is closed.
-10. **Polish-and-publish track — round 1 DONE (2026-09-24).** CLI
-    documented (`docs/CLI.md`); gate-report runner landed
-    (`scripts/gate_report.sh` → reproducible md+json). Remaining: apply
-    the proposed release profile and regenerate gate numbers under it;
-    stable API; CLI hygiene fixes (Phase 15 list); the Production 1.0
-    validation report once items 8–9 land.
+10. **Polish-and-publish track — round 1 DONE (2026-09-24); release
+    profile applied and gate numbers regenerated under it (2026-09-25,
+    `reports/gate-report-2026-09-25.*`).** CLI hygiene quirks in flight
+    (2026-09-25): steps-default unification, repeated-positional error,
+    symbolic-width hardcode. Remaining: stable API; the Production 1.0
+    validation report.
 11. **Docs hygiene (this file).** ROADMAP.md is the single status source;
     update it in the same commit as any phase-status change (the
     loop-summarization commits landed after the last ROADMAP edit and
@@ -657,9 +672,10 @@ and reproducible correctness/performance reports.
 8. Canonical identities + exact reuse — **done and measured on a two-input
    trace**; broader real-trace measurement pending.
 9. Native multicore with useful physical-core scaling — **partial**
-   (3.93×/4 workers concolic; Gate B pack measured: 43 KB/state concrete,
-   11.5 KB/state symbolic, 11–13× cold/warm solver migration, 44 KB
-   contexts — debug build; release rerun + both-mode scaling pending).
+   (3.93×/4 workers concolic; Gate B pack measured in debug and release:
+   2.7 KB/state concrete, 11.1 KB/state symbolic, 15.5–20.2× cold/warm
+   solver migration, 52 KB contexts; both-mode scaling on real binaries
+   pending).
 10. NUMA-aware placement — **partial** (distance model in `StealCost`;
     pinned queue groups pending).
 11. Solver affinity, timeout, preemption — **done** (timeouts,
@@ -695,16 +711,18 @@ GUI, other ISAs, CUDA/OpenCL planning.
   gcc -O0/-O2, dynamic ELF, PE32+).
 - **Gate A — concolic correctness.** Symbolic results correct, canonical
   identities stable, both modes agree on the differential suite.
-  **Correctness passed** (dual-mode differential test). **Speed: 1.3×
-  full-symbolic under the final release profile** (up from 0.9× parity at
-  first measurement; concolic itself 3.2× faster than baseline); the
-  5–10× target remains open, with the profiled next wins in §5.
+  **Correctness passed** (dual-mode differential test). **Speed: 1.5–1.6×
+  full-symbolic under the release profile** (re-measured 2026-09-25, up
+  from 0.9× parity at first measurement; concolic itself ~3.9× faster
+  than baseline); the 5–10× target remains open — round 3 is
+  profile-driven (§5 item 6).
 - **Gate B — multicore scaling.** Useful scaling on real binaries in both
-  modes; report 10k-state footprint and depth-500 migration cost. **First
-  measurements in (debug build):** solver contexts are memory-cheap (44 KB
-  at depth 500) but migration costs 11–13× warm incremental time, and
-  prefix sharing recovers little — state footprint is 11.5–43 KB/state.
-  Still open: release-build reruns and both-mode scaling on real binaries.
+  modes; report 10k-state footprint and depth-500 migration cost.
+  **Measured in debug and release (2026-09-25):** solver contexts are
+  memory-cheap (52 KB at depth 500) but migration costs 15.5–20.2× warm
+  incremental time, and prefix sharing recovers little — state footprint
+  is 2.7 KB/state concrete, 11.1 KB/state symbolic.
+  Still open: both-mode scaling on real binaries.
 - **Gate C — generalized reuse.** No alpha-equivalence/subsumption
   suppressing solver work until exact reuse is proven on real traces.
   Exact reuse proven; the alpha tier now exists in validation mode with

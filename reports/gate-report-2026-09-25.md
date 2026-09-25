@@ -1,0 +1,74 @@
+# Gate measurement report — 2026-09-25
+
+- Generated (UTC): 2026-09-25T11:48:48Z
+- Git: 3523b1dbb51f (dirty)
+- rustc: rustc 1.98.0 (88d9e12ae 2026-08-18)
+- CPU: Intel(R) Xeon(R) CPU E5-2470 v2 @ 2.40GHz
+- Runner: scripts/gate_report.sh (GATE- lines captured verbatim from stdout)
+
+## gate_a_concolic_speed
+
+Command: `cargo test --release -p angryier-runtime --features xed --test concolic_speed -- --ignored --nocapture`
+
+Exit: 0, duration 31 s
+
+```text
+GATE-A speed: trace 89915 steps | concrete 407.4 ms (220.7 steps/ms) | concolic 4914.7 ms (18.3 steps/ms, 12.06x concrete) | full-symbolic 7521.9 ms (12.0 steps/ms) | concolic-vs-symbolic multiplier 1.5x
+GATE-A fixture: cc -O2, LOOPS=3000 immediate bound, seed RAX=0xc0ffee12345678, one data-dependent branch per iteration
+GATE-A concolic detail: 6000 path constraints recorded, shadow debt (requires_prove) = false, solver calls during stepping = 0
+GATE-A full-symbolic detail: 89915/89915 budget steps consumed, 4802 forks, peak 33 live states, 2016 terminated, 0 failed, 32 live at stop, max_states cap = 32
+GATE-A multiplier basis: direct — full symbolic consumed the full 89915-step budget in 7521.9 ms vs concolic 4914.7 ms
+```
+
+## gate_b_footprint
+
+Command: `cargo test -p angryier-runtime --features xed --test gate_b -- --ignored --nocapture`
+
+Exit: 0, duration 10 s
+
+```text
+GATE-B footprint: concrete 10000 states, RSS +26.1 MB (2.7 KB/state), fork cost 15.0 us/state over 150.45ms
+GATE-B footprint: symbolic 10000 states, RSS +108.3 MB (11.1 KB/state), arena nodes 285153, fork cost 911.9 us/state over 9.12s
+GATE-B footprint: concrete 10000 states, RSS +26.1 MB (2.7 KB/state) | symbolic 10000 states, RSS +108.3 MB (11.1 KB/state), arena nodes 285153
+```
+
+## gate_b_solver_migration
+
+Command: `cargo test -p angryier-solver-z3-ffi --test migration_bench -- --ignored --nocapture`
+
+Exit: 0, duration 1 s
+
+```text
+GATE-B solver: depth 100 cold=28.3ms partial=15.2ms warm=1.6ms (cold/warm ratio 17.7)
+GATE-B solver: depth 250 cold=48.3ms partial=38.9ms warm=3.2ms (cold/warm ratio 15.1)
+GATE-B solver: depth 500 cold=88.1ms partial=83.7ms warm=6.0ms (cold/warm ratio 14.6), ctx RSS +0.05 MB (52 KB)
+```
+
+## gate_c_preemption
+
+Command: `cargo test --release -p angryier-solver-z3-ffi --test preemption_bench -- --ignored --nocapture`
+
+Exit: 0, duration 20 s
+
+```text
+GATE-C preemption: family=semiprime factoring (32-bit N), budgets=10/50/100/500ms reps=3
+GATE-C preemption: uninterrupted outcome=Sat wall=11601ms (ceiling 20000ms)
+GATE-C preemption: verified ground truth Sat: 131071 * 65521 == N (32-bit)
+GATE-C preemption: budget=10ms outcome=Unknown wall_mean=34ms overhead~24ms throughput=21.29 q/s (3 reps in 141ms)
+GATE-C preemption: budget=50ms outcome=Unknown wall_mean=59ms overhead~24ms throughput=13.62 q/s (3 reps in 220ms)
+GATE-C preemption: budget=100ms outcome=Unknown wall_mean=108ms overhead~24ms throughput=8.24 q/s (3 reps in 364ms)
+GATE-C preemption: budget=500ms outcome=Unknown wall_mean=509ms overhead~24ms throughput=1.93 q/s (3 reps in 1556ms)
+GATE-C preemption: prearmed interrupt() outcome=Sat wall=1.05ms (next-check cancellation consumed before check)
+```
+
+## gate_c_alpha
+
+Command: `cargo test -p angryier-solver -- --ignored --nocapture`
+
+Exit: 0, duration 0 s
+
+```text
+GATE-C alpha: family(8 renamed) confirmations=7 contradictions=0 proposals=16 suppressed=0 indexed_buckets=9
+GATE-C alpha: exact cache entries=16 hits=0 misses=16
+```
+
