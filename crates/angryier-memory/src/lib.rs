@@ -2,10 +2,7 @@
 
 use angryier_core::CodeVersionSource;
 use angryier_types::{Address, CodePageId, CodePageVersion, CodeVersionGuard, ExprId, ObjectId};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
 
@@ -96,6 +93,14 @@ impl std::error::Error for MemoryError {}
 pub trait LayeredMemory: Clone + Send + Sync {
     type Error;
     fn read(&self, address: Address, len: usize) -> Result<Vec<ByteValue>, Self::Error>;
+    /// Allocation-free read: fills `out` (whose length is the read length)
+    /// instead of returning a fresh `Vec`. The default wraps [`read`](Self::read);
+    /// concrete implementations override it with a buffer-filling path.
+    fn read_into(&self, address: Address, out: &mut [ByteValue]) -> Result<(), Self::Error> {
+        let bytes = self.read(address, out.len())?;
+        out.clone_from_slice(&bytes);
+        Ok(())
+    }
     fn write(&self, address: Address, bytes: &[ByteValue]) -> Result<Self, Self::Error>;
     fn fork(&self) -> Self;
     fn page_version(&self, page: CodePageId) -> Option<CodePageVersion>;
@@ -185,46 +190,109 @@ pub trait SymbolicAddressResolver: Send + Sync {
     fn candidates(&self, address: ExprId, limit: usize) -> Result<Vec<Address>, MemoryError>;
 }
 
-/// Sparse memory page: only stores bytes that have actually been written.
+/// Size of one concrete-data line inside a [`MemoryPage`].
+const PAGE_LINE_BYTES: usize = 64;
+
+/// Invariants: offsets are `< DEFAULT_PAGE_SIZE` (4096), so a page holds
+/// exactly 64 lines and `lines.len() <= 64`.
+type PageLine = [u8; PAGE_LINE_BYTES];
+
+/// Sparse, copy-on-write memory page.
 ///
 /// Unwritten offsets read back as `Concrete(0)`, so a freshly materialized
-/// page costs only the overhead of two empty `BTreeMap`s regardless of the
-/// logical page size. Concrete and symbolic values are kept in separate maps;
-/// an offset is symbolic if present in `symbolic`, otherwise it falls back to
-/// `concrete` (or zero).
+/// page costs only the overhead of an empty line table and an empty symbolic
+/// map regardless of the logical page size. Concrete data is stored in
+/// 64-byte lines shared through `Arc`: copying a page copies the line table
+/// (64 pointers) and shares every untouched line, while a store clones only
+/// the one line it modifies. Symbolic values stay per-byte in a sparse map —
+/// one symbolic byte must never materialize concrete data — and take
+/// precedence over the concrete line on reads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct MemoryPage {
-    concrete: BTreeMap<usize, u8>,
+    lines: Vec<Option<Arc<PageLine>>>,
     symbolic: BTreeMap<usize, ExprId>,
 }
 
 impl MemoryPage {
     /// Reads a single byte at `offset`: symbolic entries take precedence,
-    /// then concrete, then `Concrete(0)` for unwritten offsets.
+    /// then the concrete line byte, then `Concrete(0)` for unwritten offsets.
     ///
-    /// The bulk `read` path iterates the sparse maps directly for speed, so
-    /// this is retained as the single-byte primitive (and exercised by unit
-    /// tests).
+    /// The bulk `read` path copies whole line slices for speed, so this is
+    /// the single-byte primitive (exercised by unit tests).
     #[allow(dead_code)]
     fn value(&self, offset: usize) -> ByteValue {
         if let Some(expression) = self.symbolic.get(&offset) {
             ByteValue::Symbolic(*expression)
         } else {
-            ByteValue::Concrete(self.concrete.get(&offset).copied().unwrap_or(0))
+            let byte = self
+                .lines
+                .get(offset / PAGE_LINE_BYTES)
+                .and_then(|line| line.as_ref())
+                .map_or(0, |line| line[offset % PAGE_LINE_BYTES]);
+            ByteValue::Concrete(byte)
         }
     }
 
     fn write(&mut self, offset: usize, value: ByteValue) {
         match value {
-            ByteValue::Concrete(byte) => {
-                self.concrete.insert(offset, byte);
-                self.symbolic.remove(&offset);
-            }
+            ByteValue::Concrete(_) => self.write_values(offset, &[value]),
             ByteValue::Symbolic(expression) => {
                 self.symbolic.insert(offset, expression);
-                self.concrete.remove(&offset);
+                // A symbolic write must not leave stale concrete bytes where
+                // the symbolic cell now lives.
+                self.clear_line_bytes(offset);
             }
         }
+    }
+
+    /// Applies a contiguous run of concrete values at consecutive offsets
+    /// starting at `offset`, cloning (or first materializing) only the lines
+    /// the run touches and evicting any symbolic cells it covers. Offsets
+    /// must stay inside the page. Symbolic entries inside `values`, if any,
+    /// are ignored — callers route those through [`write`](Self::write).
+    fn write_values(&mut self, offset: usize, values: &[ByteValue]) {
+        if values.is_empty() {
+            return;
+        }
+        let mut cursor = 0usize;
+        while cursor < values.len() {
+            let page_offset = offset + cursor;
+            let line_index = page_offset / PAGE_LINE_BYTES;
+            let in_line = page_offset % PAGE_LINE_BYTES;
+            let chunk = (values.len() - cursor).min(PAGE_LINE_BYTES - in_line);
+            if line_index >= self.lines.len() {
+                self.lines.resize(line_index + 1, None);
+            }
+            let line = self.lines[line_index].get_or_insert_with(|| Arc::new([0u8; PAGE_LINE_BYTES]));
+            let line = Arc::make_mut(line);
+            for (index, value) in values[cursor..cursor + chunk].iter().enumerate() {
+                if let ByteValue::Concrete(byte) = value {
+                    line[in_line + index] = *byte;
+                }
+            }
+            cursor += chunk;
+        }
+        let end = offset + values.len();
+        self.symbolic
+            .retain(|cell_offset, _| *cell_offset < offset || *cell_offset >= end);
+    }
+
+    /// Zeroes the concrete byte at `offset` so a symbolic cell is not
+    /// shadowed by stale concrete data.
+    fn clear_line_bytes(&mut self, offset: usize) {
+        let line_index = offset / PAGE_LINE_BYTES;
+        if let Some(slot) = self.lines.get_mut(line_index)
+            && let Some(line) = slot
+        {
+            let line = Arc::make_mut(line);
+            line[offset % PAGE_LINE_BYTES] = 0;
+        }
+    }
+
+    /// Number of materialized concrete lines (diagnostics and tests).
+    #[cfg(test)]
+    fn concrete_lines(&self) -> usize {
+        self.lines.iter().flatten().count()
     }
 }
 
@@ -475,48 +543,78 @@ impl PersistentMemory {
             return Ok(self.clone());
         }
 
-        let mut grouped: BTreeMap<u64, Vec<(usize, ByteValue)>> = BTreeMap::new();
-        for (index, value) in bytes.iter().copied().enumerate() {
-            let offset = u64::try_from(index).map_err(|_| MemoryError::AddressOverflow)?;
-            let current = address.checked_add(offset).ok_or(MemoryError::AddressOverflow)?;
-            grouped
-                .entry(Self::page_number(current))
-                .or_default()
-                .push((Self::page_offset(current), value));
-        }
-
+        let end = Self::inclusive_end(address, bytes.len())?;
         let mut pages = (*self.pages).clone();
-        for (page, changes) in grouped {
+
+        // Walk the store one page window at a time: the page being written
+        // copies its line table (untouched lines stay shared through their
+        // `Arc`s) and clones only the lines the store modifies. Page windows
+        // are disjoint, so each materialized page is inserted exactly once.
+        let mut cursor = 0usize;
+        while cursor < bytes.len() {
+            let current = address
+                .checked_add(u64::try_from(cursor).map_err(|_| MemoryError::AddressOverflow)?)
+                .ok_or(MemoryError::AddressOverflow)?;
+            let page_number = Self::page_number(current);
+            let page_start_offset = Self::page_offset(current);
+            let page_span = (DEFAULT_PAGE_SIZE - page_start_offset).min(bytes.len() - cursor);
+            let window = &bytes[cursor..cursor + page_span];
+
             let mut materialized = pages
-                .get(&page)
+                .get(&page_number)
                 .map(|existing| (**existing).clone())
                 .unwrap_or_default();
-            for (offset, value) in changes {
-                materialized.write(offset, value);
-            }
-            pages.insert(page, Arc::new(materialized));
-        }
-
-        let mut code_versions = (*self.code_versions).clone();
-        if bump_executable_versions {
-            let end = Self::inclusive_end(address, bytes.len())?;
-            let mut touched = BTreeSet::new();
-            for page in Self::page_number(address)..=Self::page_number(end) {
-                touched.insert(CodePageId(page));
-            }
-
-            for page in touched {
-                if let Some(version) = code_versions.get_mut(&page) {
-                    version.0 = version.0.checked_add(1).ok_or(MemoryError::VersionOverflow(page))?;
+            let mut window_index = 0usize;
+            while window_index < window.len() {
+                match window[window_index] {
+                    ByteValue::Concrete(_) => {
+                        // Extend over the contiguous concrete run and apply
+                        // it directly from the caller's slice.
+                        let run_start = window_index;
+                        while window_index < window.len() && matches!(window[window_index], ByteValue::Concrete(_)) {
+                            window_index += 1;
+                        }
+                        materialized.write_values(page_start_offset + run_start, &window[run_start..window_index]);
+                    }
+                    ByteValue::Symbolic(expression) => {
+                        materialized.write(page_start_offset + window_index, ByteValue::Symbolic(expression));
+                        window_index += 1;
+                    }
                 }
             }
+            pages.insert(page_number, Arc::new(materialized));
+            cursor += page_span;
         }
+
+        // Version guards only diverge when an executable page is actually
+        // bumped: data/stack stores share the previous code-version table
+        // instead of cloning it.
+        let code_versions = if bump_executable_versions {
+            let to_bump: Vec<CodePageId> = (Self::page_number(address)..=Self::page_number(end))
+                .map(CodePageId)
+                .filter(|page| self.code_versions.contains_key(page))
+                .collect();
+            if to_bump.is_empty() {
+                Arc::clone(&self.code_versions)
+            } else {
+                let mut versions = (*self.code_versions).clone();
+                for page in to_bump {
+                    let Some(version) = versions.get_mut(&page) else {
+                        continue;
+                    };
+                    version.0 = version.0.checked_add(1).ok_or(MemoryError::VersionOverflow(page))?;
+                }
+                Arc::new(versions)
+            }
+        } else {
+            Arc::clone(&self.code_versions)
+        };
 
         Ok(Self {
             regions: Arc::clone(&self.regions),
             region_index: Arc::clone(&self.region_index),
             pages: Arc::new(pages),
-            code_versions: Arc::new(code_versions),
+            code_versions,
         })
     }
 }
@@ -525,18 +623,21 @@ impl LayeredMemory for PersistentMemory {
     type Error = MemoryError;
 
     fn read(&self, address: Address, len: usize) -> Result<Vec<ByteValue>, Self::Error> {
-        self.check_access(address, len, MemoryAccessKind::Read)?;
-
         // Unwritten bytes read as `Concrete(0)`, so pre-fill the output with
-        // zeros and only overwrite the entries that were actually written in
-        // each materialized page. This avoids a per-byte page lookup and lets
-        // sparse pages contribute their (few) written bytes directly.
+        // zeros and let `read_into` overwrite only materialized data.
         let mut output = vec![ByteValue::Concrete(0); len];
-        if len == 0 {
-            return Ok(output);
+        self.read_into(address, &mut output)?;
+        Ok(output)
+    }
+
+    fn read_into(&self, address: Address, out: &mut [ByteValue]) -> Result<(), Self::Error> {
+        self.check_access(address, out.len(), MemoryAccessKind::Read)?;
+        out.fill(ByteValue::Concrete(0));
+        if out.is_empty() {
+            return Ok(());
         }
 
-        let end = Self::inclusive_end(address, len)?;
+        let end = Self::inclusive_end(address, out.len())?;
         let last_page = Self::page_number(end);
         let mut cursor = address;
         let mut out_index = 0usize;
@@ -551,13 +652,30 @@ impl LayeredMemory for PersistentMemory {
             };
 
             if let Some(page_data) = self.pages.get(&page) {
-                // Only the bytes actually present in the sparse maps need to be
-                // copied; everything else stays `Concrete(0)`.
-                for (&offset, &byte) in page_data.concrete.range(start_offset..=end_offset_inclusive) {
-                    output[out_index + (offset - start_offset)] = ByteValue::Concrete(byte);
+                // Copy whole concrete-line slices where materialized; gaps
+                // stay `Concrete(0)` from the pre-fill, and symbolic cells
+                // overlay their bytes afterwards.
+                let range = start_offset..=end_offset_inclusive;
+                let first_line = start_offset / PAGE_LINE_BYTES;
+                let last_line = end_offset_inclusive / PAGE_LINE_BYTES;
+                for line_index in first_line..=last_line {
+                    let Some(line) = page_data.lines.get(line_index).and_then(|line| line.as_ref()) else {
+                        continue;
+                    };
+                    let line_start = line_index * PAGE_LINE_BYTES;
+                    let from = start_offset.max(line_start);
+                    let to = (end_offset_inclusive + 1).min(line_start + PAGE_LINE_BYTES);
+                    let byte_values: &mut [ByteValue] =
+                        &mut out[out_index + from - start_offset..out_index + to - start_offset];
+                    for (slot, byte) in byte_values
+                        .iter_mut()
+                        .zip(line[(from - line_start)..(to - line_start)].iter())
+                    {
+                        *slot = ByteValue::Concrete(*byte);
+                    }
                 }
-                for (&offset, &expression) in page_data.symbolic.range(start_offset..=end_offset_inclusive) {
-                    output[out_index + (offset - start_offset)] = ByteValue::Symbolic(expression);
+                for (&offset, &expression) in page_data.symbolic.range(range) {
+                    out[out_index + (offset - start_offset)] = ByteValue::Symbolic(expression);
                 }
             }
 
@@ -572,7 +690,7 @@ impl LayeredMemory for PersistentMemory {
                 .ok_or(MemoryError::AddressOverflow)?;
         }
 
-        Ok(output)
+        Ok(())
     }
 
     fn write(&self, address: Address, bytes: &[ByteValue]) -> Result<Self, Self::Error> {
@@ -960,6 +1078,10 @@ impl LayeredMemory for SymbolicMemory {
 
     fn read(&self, address: Address, len: usize) -> Result<Vec<ByteValue>, Self::Error> {
         self.inner.read(address, len)
+    }
+
+    fn read_into(&self, address: Address, out: &mut [ByteValue]) -> Result<(), Self::Error> {
+        self.inner.read_into(address, out)
     }
 
     fn write(&self, address: Address, bytes: &[ByteValue]) -> Result<Self, Self::Error> {
@@ -1362,11 +1484,11 @@ mod tests {
         page.write(10, ByteValue::Concrete(0x01));
         page.write(20, ByteValue::Concrete(0x02));
         page.write(30, ByteValue::Concrete(0x03));
-        assert_eq!(
-            page.concrete.len(),
-            3,
-            "only the three written offsets should be stored"
-        );
+        // Three writes inside one 64-byte line: one line, no symbolic cells.
+        assert_eq!(page.concrete_lines(), 1, "writes in one line share a single line");
+        assert_eq!(page.value(10), ByteValue::Concrete(0x01));
+        assert_eq!(page.value(20), ByteValue::Concrete(0x02));
+        assert_eq!(page.value(30), ByteValue::Concrete(0x03));
         assert_eq!(page.symbolic.len(), 0);
     }
 
@@ -1387,7 +1509,11 @@ mod tests {
         let mut page = MemoryPage::default();
         page.write(7, ByteValue::Concrete(0x11));
         page.write(7, ByteValue::Concrete(0x22));
-        assert_eq!(page.concrete.len(), 1, "overwriting an offset should not grow the map");
+        assert_eq!(
+            page.concrete_lines(),
+            1,
+            "overwriting an offset should not grow the line table"
+        );
         assert_eq!(page.value(7), ByteValue::Concrete(0x22), "latest write wins");
     }
 
@@ -1398,7 +1524,7 @@ mod tests {
         page.write(100, ByteValue::Symbolic(ExprId(5)));
         assert_eq!(page.value(0), ByteValue::Concrete(0xab));
         assert_eq!(page.value(100), ByteValue::Symbolic(ExprId(5)));
-        assert_eq!(page.concrete.len(), 1);
+        assert_eq!(page.concrete_lines(), 1);
         assert_eq!(page.symbolic.len(), 1);
     }
 
@@ -1794,6 +1920,141 @@ mod tests {
         )?;
         let read = written.read_symbolic(ByteValue::Concrete(0x10), 1, &resolver, &policy)?;
         assert_eq!(read, vec![ByteValue::Concrete(0xab)]);
+        Ok(())
+    }
+
+    #[test]
+    fn store_clones_only_the_touched_line() -> Result<(), MemoryError> {
+        // Fill two lines of one page, then store into the first: the second
+        // line must remain Arc-shared with the pre-store page.
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])?;
+        let filled: Vec<ByteValue> = (0..128_u8).map(ByteValue::Concrete).collect();
+        let memory = memory.write(0x1000, &filled)?;
+
+        let page_number = PersistentMemory::page_number(0x1000);
+        let untouched_before = memory
+            .pages
+            .get(&page_number)
+            .and_then(|page| page.lines.get(1))
+            .and_then(|line| line.clone());
+
+        let modified = memory.write(0x1000, &[ByteValue::Concrete(0xee)])?;
+
+        let untouched_after = modified
+            .pages
+            .get(&page_number)
+            .and_then(|page| page.lines.get(1))
+            .and_then(|line| line.clone());
+        assert!(
+            untouched_before.is_some() && untouched_after.is_some(),
+            "both lines must be materialized"
+        );
+        if let (Some(before), Some(after)) = (untouched_before, untouched_after) {
+            assert!(
+                Arc::ptr_eq(&before, &after),
+                "an untouched line must stay shared across the store"
+            );
+        }
+        assert_eq!(modified.read(0x1000, 1)?, vec![ByteValue::Concrete(0xee)]);
+        assert_eq!(modified.read(0x1040, 1)?, vec![ByteValue::Concrete(0x40)]);
+        Ok(())
+    }
+
+    #[test]
+    fn data_store_shares_code_version_table() -> Result<(), MemoryError> {
+        // A store that touches no executable page must share (not clone) the
+        // code-version table; an executable store must diverge it.
+        let memory = PersistentMemory::new(vec![
+            region(0x1000, 0x1000, true, true),
+            region(0x9000, 0x1000, true, false),
+        ])?;
+        let code_page = PersistentMemory::page_id_for_address(0x1000);
+
+        let data_write = memory.write(0x9000, &[ByteValue::Concrete(0x11)])?;
+        assert!(
+            Arc::ptr_eq(&memory.code_versions, &data_write.code_versions),
+            "non-executable store must share the code-version table"
+        );
+        assert_eq!(
+            data_write.page_version(code_page),
+            Some(CodePageVersion(0)),
+            "non-executable store must not bump versions"
+        );
+
+        let code_write = memory.write(0x1000, &[ByteValue::Concrete(0x22)])?;
+        assert!(
+            !Arc::ptr_eq(&memory.code_versions, &code_write.code_versions),
+            "executable store must diverge the code-version table"
+        );
+        assert_eq!(code_write.page_version(code_page), Some(CodePageVersion(1)));
+        assert_eq!(memory.page_version(code_page), Some(CodePageVersion(0)));
+        Ok(())
+    }
+
+    #[test]
+    fn read_into_matches_read_and_handles_mixed_content() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x3000, true, false)])?;
+        // Concrete run spanning a line boundary, a symbolic byte, a gap, and
+        // a second page.
+        let memory = memory.write(
+            0x103e,
+            &[ByteValue::Concrete(1), ByteValue::Concrete(2), ByteValue::Concrete(3)],
+        )?;
+        let memory = memory.write(0x1042, &[ByteValue::Symbolic(ExprId(31))])?;
+        let memory = memory.write(0x2001, &[ByteValue::Concrete(0x77)])?;
+
+        let mut buffer = [ByteValue::Concrete(0); 12];
+        memory.read_into(0x103e, &mut buffer)?;
+        let via_vec = memory.read(0x103e, 12)?;
+        assert_eq!(buffer.as_slice(), via_vec.as_slice(), "read_into must match read");
+        assert_eq!(
+            &buffer[..3],
+            &[ByteValue::Concrete(1), ByteValue::Concrete(2), ByteValue::Concrete(3)]
+        );
+        assert_eq!(buffer[3], ByteValue::Concrete(0), "unwritten gap reads zero");
+        assert_eq!(buffer[4], ByteValue::Symbolic(ExprId(31)));
+        assert!(buffer[5..].iter().all(|byte| *byte == ByteValue::Concrete(0)));
+        // The second page's byte reads back through both APIs as well.
+        let mut single = [ByteValue::Concrete(0); 1];
+        memory.read_into(0x2001, &mut single)?;
+        assert_eq!(single[0], ByteValue::Concrete(0x77));
+
+        // Zero-length and error paths.
+        memory.read_into(0x103e, &mut [])?;
+        assert!(matches!(
+            memory.read_into(0x8000, &mut buffer),
+            Err(MemoryError::Unmapped(0x8000))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_concrete_symbolic_store_across_lines_and_pages() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x3000, true, false)])?;
+        let store = [
+            ByteValue::Concrete(0xaa),
+            ByteValue::Concrete(0xbb),
+            ByteValue::Symbolic(ExprId(7)),
+            ByteValue::Concrete(0xdd),
+        ];
+        // Straddle the first page's last line and the next page.
+        let written = memory.write(0x1ffe, &store)?;
+
+        assert_eq!(
+            written.read(0x1ffe, 4)?,
+            vec![
+                ByteValue::Concrete(0xaa),
+                ByteValue::Concrete(0xbb),
+                ByteValue::Symbolic(ExprId(7)),
+                ByteValue::Concrete(0xdd),
+            ]
+        );
+        // Neighbors outside the store stay zero.
+        assert_eq!(written.read(0x1ffd, 1)?, vec![ByteValue::Concrete(0)]);
+        assert_eq!(written.read(0x2002, 1)?, vec![ByteValue::Concrete(0)]);
+        // Concrete over a symbolic cell evicts it.
+        let overwritten = written.write(0x2000, &[ByteValue::Concrete(0x99)])?;
+        assert_eq!(overwritten.read(0x2000, 1)?, vec![ByteValue::Concrete(0x99)]);
         Ok(())
     }
 }

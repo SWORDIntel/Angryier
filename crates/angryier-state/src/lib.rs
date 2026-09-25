@@ -2,7 +2,10 @@
 
 use angryier_memory::{ByteValue, LayeredMemory};
 use angryier_types::{Address, AnalysisDebtKind, ConstraintId, ExprId, FidelityProfile, StateId, TargetProfileId};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FidelityEntry {
@@ -212,13 +215,36 @@ impl StateOwnership {
 }
 
 /// Copy-on-write register storage with fixed widths established by the
-/// architecture backend. Cloning the register file is O(1); a write clones only
-/// the small register index and replaces one value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// architecture backend.
+///
+/// The file is structurally shared like a persistent map: the committed
+/// `base` lives behind one `Arc` that a fork clones in O(1), and each write
+/// copies only the small `pending` overlay (bounded by
+/// [`PENDING_FLUSH_THRESHOLD`]) before replacing one entry. Siblings
+/// therefore share the base until they diverge, while sequential stepping
+/// never deep-clones the full register map. Once the overlay reaches the
+/// flush threshold the next write merges it into a fresh base, amortizing
+/// the merge to a bounded cost per write.
+///
+/// The [`RegisterState::write`] signature is `&self -> Self` (callers keep
+/// both the old and new snapshot observable), so the persistent path always
+/// copies the bounded overlay rather than mutating in place. Callers that
+/// hold the register file uniquely and do not need the previous snapshot can
+/// use [`PersistentRegisters::write_in_place`], which mutates a
+/// uniquely-owned base map directly via `Arc::make_mut` and clones it only
+/// on the first write after a fork.
+#[derive(Clone)]
 pub struct PersistentRegisters {
     widths: Arc<BTreeMap<u32, usize>>,
-    values: Arc<BTreeMap<u32, RegisterValue>>,
+    base: Arc<BTreeMap<u32, RegisterValue>>,
+    /// Writes since the last flush; consulted before `base` on reads.
+    pending: BTreeMap<u32, RegisterValue>,
 }
+
+/// Overlay size at which the next persistent write flushes `pending` into a
+/// fresh base map. Bounds both the per-write overlay copy and the amortized
+/// flush cost for the ~100-entry Intel 64 register file.
+const PENDING_FLUSH_THRESHOLD: usize = 16;
 
 impl PersistentRegisters {
     pub fn from_widths<I>(widths: I) -> Result<Self, RegisterError>
@@ -240,7 +266,8 @@ impl PersistentRegisters {
 
         Ok(Self {
             widths: Arc::new(width_map),
-            values: Arc::new(values),
+            base: Arc::new(values),
+            pending: BTreeMap::new(),
         })
     }
 
@@ -251,14 +278,130 @@ impl PersistentRegisters {
     pub fn contains(&self, register: u32) -> bool {
         self.widths.contains_key(&register)
     }
+
+    /// The logically visible value for `register`: the pending overlay wins
+    /// over the committed base.
+    fn effective_value(&self, register: u32) -> Option<&RegisterValue> {
+        match self.pending.get(&register) {
+            Some(value) => Some(value),
+            None => self.base.get(&register),
+        }
+    }
+
+    /// In-place concrete write for uniquely-held register files.
+    ///
+    /// Flushes any pending overlay, then inserts through `Arc::make_mut`: a
+    /// uniquely-owned base map mutates in place (O(log n)); a base shared
+    /// with a fork sibling is cloned exactly once, on the first write after
+    /// the fork, and mutates in place afterwards.
+    pub fn write_in_place(&mut self, register: u32, value: &[u8]) -> Result<(), RegisterError> {
+        let expected = self
+            .widths
+            .get(&register)
+            .copied()
+            .ok_or(RegisterError::UnknownRegister(register))?;
+        if value.len() != expected {
+            return Err(RegisterError::WidthMismatch {
+                register,
+                expected,
+                actual: value.len(),
+            });
+        }
+        self.flush_pending();
+        Arc::make_mut(&mut self.base).insert(register, RegisterValue::Concrete(Arc::<[u8]>::from(value)));
+        Ok(())
+    }
+
+    /// In-place symbolic write; see [`write_in_place`](Self::write_in_place)
+    /// for the copy-on-write contract.
+    pub fn write_symbolic_in_place(&mut self, register: u32, expression: ExprId) -> Result<(), RegisterError> {
+        let width_bytes = self
+            .widths
+            .get(&register)
+            .copied()
+            .ok_or(RegisterError::UnknownRegister(register))?;
+        self.flush_pending();
+        Arc::make_mut(&mut self.base).insert(
+            register,
+            RegisterValue::Symbolic {
+                expression,
+                width_bytes,
+            },
+        );
+        Ok(())
+    }
+
+    /// Merges the pending overlay into the base map, mutating in place when
+    /// the base is uniquely owned.
+    fn flush_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending);
+        Arc::make_mut(&mut self.base).extend(pending);
+    }
+
+    /// Builds the next snapshot for a persistent write: shares the base,
+    /// copies the bounded overlay, and flushes when the overlay is full.
+    fn next_with(&self, register: u32, value: RegisterValue) -> Self {
+        let mut pending = self.pending.clone();
+        pending.insert(register, value);
+        if pending.len() >= PENDING_FLUSH_THRESHOLD {
+            let mut base = (*self.base).clone();
+            base.extend(pending);
+            return Self {
+                widths: Arc::clone(&self.widths),
+                base: Arc::new(base),
+                pending: BTreeMap::new(),
+            };
+        }
+        Self {
+            widths: Arc::clone(&self.widths),
+            base: Arc::clone(&self.base),
+            pending,
+        }
+    }
 }
+
+impl core::fmt::Debug for PersistentRegisters {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Render the logical map (base overlaid by pending) so differently
+        // flattened but equal files debug identically.
+        let mut logical: Vec<(u32, &RegisterValue)> = self.base.iter().map(|(k, v)| (*k, v)).collect();
+        for (register, value) in &self.pending {
+            if let Some(slot) = logical.iter_mut().find(|(id, _)| id == register) {
+                slot.1 = value;
+            } else {
+                logical.push((*register, value));
+            }
+        }
+        logical.sort_by_key(|(id, _)| *id);
+        formatter
+            .debug_struct("PersistentRegisters")
+            .field("widths", &self.widths)
+            .field("values", &logical)
+            .finish()
+    }
+}
+
+impl PartialEq for PersistentRegisters {
+    fn eq(&self, other: &Self) -> bool {
+        if self.widths != other.widths {
+            return false;
+        }
+        let keys: BTreeSet<u32> = self.base.keys().chain(self.pending.keys()).copied().collect();
+        keys.iter()
+            .all(|register| self.effective_value(*register) == other.effective_value(*register))
+    }
+}
+
+impl Eq for PersistentRegisters {}
 
 impl RegisterState for PersistentRegisters {
     type Error = RegisterError;
 
     fn read(&self, register: u32) -> Result<Vec<u8>, Self::Error> {
-        self.values
-            .get(&register)
+        self.effective_value(register)
             .ok_or(RegisterError::UnknownRegister(register))
             .and_then(|value| match value {
                 RegisterValue::Concrete(bytes) => Ok(bytes.as_ref().to_vec()),
@@ -279,21 +422,13 @@ impl RegisterState for PersistentRegisters {
                 actual: value.len(),
             });
         }
-
-        let mut values = (*self.values).clone();
-        values.insert(register, RegisterValue::Concrete(Arc::<[u8]>::from(value.to_vec())));
-
-        Ok(Self {
-            widths: Arc::clone(&self.widths),
-            values: Arc::new(values),
-        })
+        Ok(self.next_with(register, RegisterValue::Concrete(Arc::<[u8]>::from(value))))
     }
 }
 
 impl SymbolicRegisterState for PersistentRegisters {
     fn read_value(&self, register: u32) -> Result<RegisterValue, Self::Error> {
-        self.values
-            .get(&register)
+        self.effective_value(register)
             .cloned()
             .ok_or(RegisterError::UnknownRegister(register))
     }
@@ -304,18 +439,13 @@ impl SymbolicRegisterState for PersistentRegisters {
             .get(&register)
             .copied()
             .ok_or(RegisterError::UnknownRegister(register))?;
-        let mut values = (*self.values).clone();
-        values.insert(
+        Ok(self.next_with(
             register,
             RegisterValue::Symbolic {
                 expression,
                 width_bytes,
             },
-        );
-        Ok(Self {
-            widths: Arc::clone(&self.widths),
-            values: Arc::new(values),
-        })
+        ))
     }
 }
 
@@ -760,6 +890,137 @@ mod tests {
             assert_eq!(expression, ExprId(99));
             assert_eq!(width_bytes, 8);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn persistent_write_shares_base_with_parent() -> Result<(), RegisterError> {
+        // The persistent (&self) write must keep forks sharing the committed
+        // base; only the bounded pending overlay diverges.
+        let registers = PersistentRegisters::from_widths((0..48_u32).map(|id| (id, 8)))?;
+        let fork = registers.clone();
+        let written = registers.write(3, &[0x7f; 8])?;
+
+        assert!(Arc::ptr_eq(&registers.base, &fork.base), "fork shares the base Arc");
+        assert!(Arc::ptr_eq(&registers.base, &written.base), "write shares the base Arc");
+        assert_eq!(written.read(3)?, vec![0x7f; 8]);
+        assert_eq!(registers.read(3)?, vec![0; 8]);
+        assert_eq!(fork.read(3)?, vec![0; 8]);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_overlay_flushes_and_reads_stay_correct() -> Result<(), RegisterError> {
+        // Push enough distinct registers through the overlay to cross the
+        // flush threshold repeatedly; every intermediate snapshot must read
+        // back exactly its own writes.
+        let registers = PersistentRegisters::from_widths((0..32_u32).map(|id| (id, 8)))?;
+        let mut current = registers.clone();
+        for round in 0..4_u8 {
+            for register in 0..24_u32 {
+                let byte = round.wrapping_add(register as u8);
+                current = current.write(register, &[byte; 8])?;
+                assert_eq!(current.read(register)?, vec![byte; 8]);
+            }
+        }
+        // Final state: later rounds win.
+        for register in 0..24_u32 {
+            assert_eq!(current.read(register)?, vec![3_u8.wrapping_add(register as u8); 8]);
+        }
+        // Original untouched.
+        for register in 0..24_u32 {
+            assert_eq!(registers.read(register)?, vec![0; 8]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn write_in_place_mutates_unique_map_without_clone() -> Result<(), RegisterError> {
+        let mut registers = PersistentRegisters::from_widths([(1, 8), (2, 8)])?;
+        registers.write_in_place(1, &[0x11; 8])?;
+        // Snapshot the allocation address without holding a reference, so
+        // the uniqueness check is not disturbed by the probe itself.
+        let base_before = Arc::as_ptr(&registers.base);
+
+        // Uniquely owned: the same base allocation is mutated in place.
+        registers.write_in_place(2, &[0x22; 8])?;
+        assert_eq!(
+            Arc::as_ptr(&registers.base),
+            base_before,
+            "uniquely-owned base must mutate in place"
+        );
+        assert_eq!(registers.read(1)?, vec![0x11; 8]);
+        assert_eq!(registers.read(2)?, vec![0x22; 8]);
+        Ok(())
+    }
+
+    #[test]
+    fn write_in_place_clones_shared_map_only_on_first_write() -> Result<(), RegisterError> {
+        let mut registers = PersistentRegisters::from_widths([(1, 8)])?;
+        registers.write_in_place(1, &[0x01; 8])?;
+        let fork = registers.clone();
+
+        // First write after the fork: base is shared, so it clones once.
+        registers.write_in_place(1, &[0x02; 8])?;
+        assert!(
+            !Arc::ptr_eq(&registers.base, &fork.base),
+            "divergent write must not mutate the sibling's base"
+        );
+        assert_eq!(fork.read(1)?, vec![0x01; 8], "sibling keeps its snapshot");
+
+        // Second write: the new base is uniquely owned, so it mutates in
+        // place (same allocation address).
+        let diverged_base = Arc::as_ptr(&registers.base);
+        registers.write_in_place(1, &[0x03; 8])?;
+        assert_eq!(
+            Arc::as_ptr(&registers.base),
+            diverged_base,
+            "only the first write after a fork clones the base"
+        );
+        assert_eq!(registers.read(1)?, vec![0x03; 8]);
+        Ok(())
+    }
+
+    #[test]
+    fn write_in_place_respects_overlay_and_validation() -> Result<(), RegisterError> {
+        let mut registers = PersistentRegisters::from_widths([(1, 4)])?;
+        registers = registers.write(1, &[0xaa; 4])?; // sits in the pending overlay
+        registers.write_in_place(1, &[0xbb; 4])?;
+        assert_eq!(registers.read(1)?, vec![0xbb; 4]);
+        assert!(registers.pending.is_empty(), "overlay must be flushed into the base");
+
+        assert!(matches!(
+            registers.write_in_place(1, &[0; 8]),
+            Err(RegisterError::WidthMismatch {
+                register: 1,
+                expected: 4,
+                actual: 8
+            })
+        ));
+        assert!(matches!(
+            registers.write_in_place(9, &[0; 4]),
+            Err(RegisterError::UnknownRegister(9))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn equality_is_logical_across_flush_boundaries() -> Result<(), RegisterError> {
+        let widths: Vec<(u32, usize)> = (0..40_u32).map(|id| (id, 8)).collect();
+        let mut overlaid = PersistentRegisters::from_widths(widths.clone())?;
+        let mut flushed = overlaid.clone();
+        for register in 0..24_u32 {
+            overlaid = overlaid.write(register, &[register as u8; 8])?; // stays partly overlaid
+            flushed.write_in_place(register, &[register as u8; 8])?; // always flushed
+        }
+        assert_eq!(overlaid, flushed, "same logical content must compare equal");
+        assert_eq!(
+            format!("{overlaid:?}"),
+            format!("{flushed:?}"),
+            "Debug renders the logical map"
+        );
+        let diverged = overlaid.write(0, &[0xff; 8])?;
+        assert_ne!(overlaid, diverged);
         Ok(())
     }
 }

@@ -84,6 +84,19 @@ pub trait ExprArena: Send + Sync {
     fn get(&self, id: ExprId) -> Option<ExprNode>;
     fn dependency_summary(&self, id: ExprId) -> Option<DependencySummary>;
     fn normalization_version(&self) -> ExpressionNormalizationVersion;
+
+    /// Cheap sort probe: returns a copy of just the node's sort instead of a
+    /// full [`ExprNode`] clone. The default falls back to [`get`](Self::get);
+    /// concrete arenas override it with a lock-and-copy of the small enum.
+    fn sort_of(&self, id: ExprId) -> Option<ExprSort> {
+        self.get(id).map(|node| node.sort)
+    }
+
+    /// Cheap op probe: returns a copy of just the node's operator instead of a
+    /// full [`ExprNode`] clone. The default falls back to [`get`](Self::get).
+    fn op_of(&self, id: ExprId) -> Option<ExprOp> {
+        self.get(id).map(|node| node.op)
+    }
 }
 
 /// Object-safe trait for reading expression nodes by ID.
@@ -198,13 +211,33 @@ impl ShardedExprArena {
             .ok_or(ExprArenaError::UnknownOperand(id))
     }
 
+    /// Lightweight operator probe: copies one enum instead of cloning the
+    /// whole record (two `Vec`s plus the dependency summary).
+    fn op_checked(&self, id: ExprId) -> Result<ExprOp, ExprArenaError> {
+        let (shard, local) = decode_id(id);
+        let shard = self.shards[shard].read().map_err(|_| ExprArenaError::LockPoisoned)?;
+        shard
+            .records
+            .get(local)
+            .map(|record| record.node.op)
+            .ok_or(ExprArenaError::UnknownOperand(id))
+    }
+
     fn build_dependency(&self, node: &ExprNode) -> Result<DependencySummary, ExprArenaError> {
         let mut sources = BTreeSet::new();
         let mut child_keys = Vec::with_capacity(node.operands.len());
         let mut child_sorts = Vec::with_capacity(node.operands.len());
         for operand in &node.operands {
-            let record = self.record(*operand)?;
-            sources.extend(record.dependency.symbolic_sources);
+            // Visit one operand at a time so each shard lock is held only
+            // long enough to copy the key/sort and extend the source set —
+            // no record clone (two heap buffers per operand) is needed.
+            let (shard, local) = decode_id(*operand);
+            let shard = self.shards[shard].read().map_err(|_| ExprArenaError::LockPoisoned)?;
+            let record = shard
+                .records
+                .get(local)
+                .ok_or(ExprArenaError::UnknownOperand(*operand))?;
+            sources.extend(&record.dependency.symbolic_sources);
             child_keys.push(record.dependency.key);
             child_sorts.push(record.node.sort);
         }
@@ -239,6 +272,14 @@ impl ShardedExprArena {
         if node.operands.is_empty() {
             return Ok(node);
         }
+        // A node with any non-constant operand cannot fold: probe operators
+        // first (one small enum copy each) and only pull full records on the
+        // all-constant path.
+        for &operand in &node.operands {
+            if self.op_checked(operand)? != ExprOp::Constant {
+                return Ok(node);
+            }
+        }
         let records: Vec<_> = node
             .operands
             .iter()
@@ -247,9 +288,6 @@ impl ShardedExprArena {
             .collect::<Result<_, _>>()?;
         let sorts: Vec<_> = records.iter().map(|record| record.node.sort).collect();
         validate_sorts(&node, &sorts)?;
-        if records.iter().any(|record| record.node.op != ExprOp::Constant) {
-            return Ok(node);
-        }
 
         let folded = match node.op {
             ExprOp::Add | ExprOp::Sub | ExprOp::Mul | ExprOp::And | ExprOp::Or | ExprOp::Xor | ExprOp::Not => {
@@ -304,11 +342,29 @@ impl ExprArena for ShardedExprArena {
         let node = BasicHotCanonicalizer.canonicalize(node);
         validate_node(&node)?;
         let node = self.fold_constants(node)?;
+
+        // Shard routing uses a cheap deterministic hash of the node so the
+        // hash-cons table can be probed BEFORE the SHA-256 dependency key is
+        // computed. On a hit (the common case for re-executed blocks) the
+        // dependency hash is never re-derived: the stored record already
+        // carries the key computed once at insertion.
+        let shard_index = node_shard(&node);
+        {
+            let shard = self.shards[shard_index]
+                .read()
+                .map_err(|_| ExprArenaError::LockPoisoned)?;
+            if let Some(existing) = shard.by_node.get(&node).copied() {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return Ok(existing);
+            }
+        }
+
         let dependency = self.build_dependency(&node)?;
-        let shard_index = usize::from(dependency.key.0[0]) % SHARD_COUNT;
         let mut shard = self.shards[shard_index]
             .write()
             .map_err(|_| ExprArenaError::LockPoisoned)?;
+        // Re-check under the write lock: another thread may have inserted the
+        // same node between the read probe and here.
         if let Some(existing) = shard.by_node.get(&node).copied() {
             self.hits.fetch_add(1, Ordering::Relaxed);
             return Ok(existing);
@@ -335,6 +391,18 @@ impl ExprArena for ShardedExprArena {
         self.record(id).ok().map(|record| record.dependency)
     }
 
+    fn sort_of(&self, id: ExprId) -> Option<ExprSort> {
+        let (shard, local) = decode_id(id);
+        let shard = self.shards[shard].read().ok()?;
+        shard.records.get(local).map(|record| record.node.sort)
+    }
+
+    fn op_of(&self, id: ExprId) -> Option<ExprOp> {
+        let (shard, local) = decode_id(id);
+        let shard = self.shards[shard].read().ok()?;
+        shard.records.get(local).map(|record| record.node.op)
+    }
+
     fn normalization_version(&self) -> ExpressionNormalizationVersion {
         self.version
     }
@@ -348,6 +416,81 @@ impl ExprReader for ShardedExprArena {
 
 fn decode_id(id: ExprId) -> (usize, usize) {
     ((id.0 >> LOCAL_BITS) as usize, (id.0 & LOCAL_MASK) as usize)
+}
+
+/// FNV-1a 64 mixing state for [`node_shard`].
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fnv_mix(hash: u64, bytes: &[u8]) -> u64 {
+    let mut mixed = hash;
+    for byte in bytes {
+        mixed ^= u64::from(*byte);
+        mixed = mixed.wrapping_mul(FNV_PRIME);
+    }
+    mixed
+}
+
+/// Cheap deterministic shard routing for a canonicalized node.
+///
+/// This is routing only — the authoritative content identity remains the
+/// SHA-256 [`DependencyKey`] computed once at insertion and stored in the
+/// record. `by_node` inside the shard is the final arbiter of equality, so
+/// hash collisions merely co-locate nodes. The encoding length-prefixes the
+/// variable-length parts (immediate, operand list) so that distinct nodes
+/// cannot produce identical byte streams.
+fn node_shard(node: &ExprNode) -> usize {
+    let mut hash = FNV_OFFSET_BASIS;
+    hash = fnv_mix(hash, sort_tag(node.sort).as_slice());
+    hash = fnv_mix(hash, &[op_tag(node.op)]);
+    hash = fnv_mix(hash, &(node.immediate.len() as u64).to_le_bytes());
+    hash = fnv_mix(hash, &node.immediate);
+    hash = fnv_mix(hash, &(node.operands.len() as u64).to_le_bytes());
+    for operand in &node.operands {
+        hash = fnv_mix(hash, &operand.0.to_le_bytes());
+    }
+    (hash as usize) & (SHARD_COUNT - 1)
+}
+
+/// Flat deterministic encoding of a sort for shard routing (mirrors the
+/// domain separation of [`encode_sort`] without the SHA-256 dependency).
+fn sort_tag(sort: ExprSort) -> [u8; 8] {
+    let mut tag = [0_u8; 8];
+    match sort {
+        ExprSort::BitVec(bits) => {
+            tag[0] = 0;
+            tag[1..3].copy_from_slice(&bits.to_le_bytes());
+        }
+        ExprSort::Float {
+            exponent_bits,
+            significand_bits,
+        } => {
+            tag[0] = 1;
+            tag[1] = exponent_bits;
+            tag[2] = significand_bits;
+        }
+        ExprSort::Bool => tag[0] = 2,
+        ExprSort::Vector { lanes, lane_bits } => {
+            tag[0] = 3;
+            tag[1..3].copy_from_slice(&lanes.to_le_bytes());
+            tag[3..5].copy_from_slice(&lane_bits.to_le_bytes());
+        }
+        ExprSort::Opmask(bits) => {
+            tag[0] = 4;
+            tag[1..3].copy_from_slice(&bits.to_le_bytes());
+        }
+        ExprSort::Tile {
+            rows,
+            bytes_per_row,
+            element_bits,
+        } => {
+            tag[0] = 5;
+            tag[1] = rows;
+            tag[2..4].copy_from_slice(&bytes_per_row.to_le_bytes());
+            tag[4..6].copy_from_slice(&element_bits.to_le_bytes());
+        }
+    }
+    tag
 }
 
 fn validate_node(node: &ExprNode) -> Result<(), ExprArenaError> {
@@ -1080,6 +1223,208 @@ mod tests {
         assert!(summary_a.is_some());
         assert!(summary_b.is_some());
         assert_eq!(summary_a, summary_b);
+        Ok(())
+    }
+
+    /// Independent re-derivation of the dependency-key recipe. The arena's
+    /// `DependencyKey` value feeds canonical solver-query identity, so the
+    /// exact byte stream handed to SHA-256 is pinned here: any change to when
+    /// or how the key is computed must keep these bytes identical.
+    fn expected_key(version: u64, node: &ExprNode, child_keys: &[DependencyKey]) -> DependencyKey {
+        fn encode_sort(hasher: &mut Sha256, sort: ExprSort) {
+            match sort {
+                ExprSort::BitVec(bits) => {
+                    hasher.update([0]);
+                    hasher.update(bits.to_le_bytes());
+                }
+                ExprSort::Float {
+                    exponent_bits,
+                    significand_bits,
+                } => {
+                    hasher.update([1, exponent_bits, significand_bits]);
+                }
+                ExprSort::Bool => hasher.update([2]),
+                ExprSort::Vector { lanes, lane_bits } => {
+                    hasher.update([3]);
+                    hasher.update(lanes.to_le_bytes());
+                    hasher.update(lane_bits.to_le_bytes());
+                }
+                ExprSort::Opmask(bits) => {
+                    hasher.update([4]);
+                    hasher.update(bits.to_le_bytes());
+                }
+                ExprSort::Tile {
+                    rows,
+                    bytes_per_row,
+                    element_bits,
+                } => {
+                    hasher.update([5, rows]);
+                    hasher.update(bytes_per_row.to_le_bytes());
+                    hasher.update(element_bits.to_le_bytes());
+                }
+            }
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"ANGRYIER\0EXPR\0");
+        hasher.update(version.to_le_bytes());
+        encode_sort(&mut hasher, node.sort);
+        hasher.update([node.op as u8]);
+        hasher.update((node.immediate.len() as u64).to_le_bytes());
+        hasher.update(&node.immediate);
+        hasher.update((child_keys.len() as u64).to_le_bytes());
+        for key in child_keys {
+            hasher.update(key.0);
+        }
+        DependencyKey(hasher.finalize().into())
+    }
+
+    #[test]
+    fn dependency_key_recipe_is_bit_identical() -> Result<(), ExprArenaError> {
+        let version = ExpressionNormalizationVersion(7);
+        let arena = ShardedExprArena::new(version);
+
+        // Leaf: symbol node (immediate feeds both key and symbolic sources).
+        let sym_node = symbol(0xABCD);
+        let sym_id = arena.intern(sym_node.clone())?;
+        assert_eq!(
+            arena.dependency_summary(sym_id).map(|summary| summary.key),
+            Some(expected_key(version.0, &sym_node, &[]))
+        );
+
+        // Binary: add over two symbols.
+        let left = arena.intern(symbol(10))?;
+        let right = arena.intern(symbol(20))?;
+        let add_node = ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Add,
+            operands: vec![left, right],
+            immediate: Vec::new(),
+        };
+        let add_id = arena.intern(add_node.clone())?;
+        let child_keys = [
+            arena.dependency_summary(left).map(|s| s.key),
+            arena.dependency_summary(right).map(|s| s.key),
+        ];
+        assert_eq!(
+            arena.dependency_summary(add_id).map(|summary| summary.key),
+            Some(expected_key(
+                version.0,
+                &add_node,
+                &[
+                    child_keys[0].ok_or(ExprArenaError::UnknownOperand(left))?,
+                    child_keys[1].ok_or(ExprArenaError::UnknownOperand(right))?,
+                ]
+            ))
+        );
+
+        // Immediate-carrying op: extract over the add.
+        let extract_node = ExprNode {
+            sort: ExprSort::BitVec(8),
+            op: ExprOp::Extract,
+            operands: vec![add_id],
+            immediate: vec![4, 0, 8, 0],
+        };
+        let extract_id = arena.intern(extract_node.clone())?;
+        assert_eq!(
+            arena.dependency_summary(extract_id).map(|summary| summary.key),
+            Some(expected_key(
+                version.0,
+                &extract_node,
+                &[arena
+                    .dependency_summary(add_id)
+                    .map(|s| s.key)
+                    .ok_or(ExprArenaError::UnknownOperand(add_id))?]
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hash_cons_hits_serve_the_stored_dependency_key() -> Result<(), ExprArenaError> {
+        // The hit path must return the id whose stored dependency key was
+        // computed once at insertion — no re-hash, same value.
+        let miss_arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let hit_arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+
+        let node = ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Xor,
+            operands: vec![miss_arena.intern(symbol(5))?, miss_arena.intern(symbol(6))?],
+            immediate: Vec::new(),
+        };
+        let miss_id = miss_arena.intern(node.clone())?;
+        let expected = miss_arena
+            .dependency_summary(miss_id)
+            .map(|summary| summary.key)
+            .ok_or(ExprArenaError::UnknownOperand(miss_id))?;
+
+        let hit_left = hit_arena.intern(symbol(5))?;
+        let hit_right = hit_arena.intern(symbol(6))?;
+        let hit_node = ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Xor,
+            operands: vec![hit_left, hit_right],
+            immediate: Vec::new(),
+        };
+        let first = hit_arena.intern(hit_node.clone())?;
+        let second = hit_arena.intern(hit_node)?; // hash-cons hit
+        assert_eq!(first, second);
+        assert_eq!(hit_arena.stats().intern_hits, 1);
+        assert_eq!(
+            hit_arena.dependency_summary(second).map(|s| s.key),
+            Some(expected),
+            "hit path must serve the stored (insertion-time) dependency key"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lightweight_probes_match_full_get() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let left = arena.intern(symbol(1))?;
+        let eq_id = arena.intern(ExprNode {
+            sort: ExprSort::Bool,
+            op: ExprOp::Eq,
+            operands: vec![left, left],
+            immediate: Vec::new(),
+        })?;
+
+        assert_eq!(arena.sort_of(left), Some(ExprSort::BitVec(64)));
+        assert_eq!(arena.op_of(left), Some(ExprOp::Symbol));
+        assert_eq!(arena.sort_of(eq_id), Some(ExprSort::Bool));
+        assert_eq!(arena.op_of(eq_id), Some(ExprOp::Eq));
+        assert_eq!(arena.sort_of(ExprId(u32::MAX)), None);
+        assert_eq!(arena.op_of(ExprId(u32::MAX)), None);
+        // Trait-object path uses the probes too.
+        let dynamic: &dyn ExprArena<Error = ExprArenaError> = &arena;
+        assert_eq!(dynamic.sort_of(eq_id), Some(ExprSort::Bool));
+        assert_eq!(dynamic.op_of(eq_id), Some(ExprOp::Eq));
+        Ok(())
+    }
+
+    #[test]
+    fn sort_mismatch_errors_survive_the_hit_probe() -> Result<(), ExprArenaError> {
+        // A node with bad sorts can never be in the hash-cons table (it is
+        // rejected before insertion), so the pre-hash probe must not swallow
+        // the error — it still surfaces from the dependency build.
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let bits = arena.intern(symbol(1))?;
+        let boolean = arena.intern(ExprNode {
+            sort: ExprSort::Bool,
+            op: ExprOp::Constant,
+            operands: Vec::new(),
+            immediate: vec![1],
+        })?;
+
+        assert_eq!(
+            arena.intern(ExprNode {
+                sort: ExprSort::BitVec(64),
+                op: ExprOp::Add,
+                operands: vec![bits, boolean],
+                immediate: Vec::new(),
+            }),
+            Err(ExprArenaError::SortMismatch(ExprOp::Add))
+        );
         Ok(())
     }
 }
