@@ -1259,7 +1259,10 @@ fn flag_mask_for(insn: &str) -> u64 {
             }
         }
         "rol" | "ror" => {
-            if count_one {
+            if insn.contains("%eax") {
+                // r32 rotate providers model no flags yet — values only.
+                0
+            } else if count_one {
                 CF | OF
             } else {
                 CF
@@ -1494,6 +1497,12 @@ fn differential_semantics_vs_hardware() -> Result<(), Box<dyn std::error::Error>
         "mov $9, %rcx\n    ror %cl, %rax",
         "mov $1, %rcx\n    rol %cl, %rax",
         "mov $1, %rcx\n    ror %cl, %rax",
+        // r32 rotates: imm8 and CL forms (CL previously unrouted in the
+        // form map; the corpus models no flags at r32 — values only).
+        "rol $5, %eax",
+        "ror $3, %eax",
+        "mov $9, %rcx\n    rol %cl, %eax",
+        "mov $33, %rcx\n    ror %cl, %eax",
         "cmpxchg %rbx, %rax",
         "xchg %rbx, %rcx",
         "movabs $0x1122334455667788, %r8\n    mov %r8, %rax",

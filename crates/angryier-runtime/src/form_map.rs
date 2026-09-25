@@ -380,6 +380,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg64] if has_cl => Some(forms::ROL_R64_CL),
             [Shape::Reg64] => Some(forms::ROL_R64_IMM8),
             [Shape::Reg32, Shape::Imm] => Some(forms::ROL_R32_IMM8),
+            [Shape::Reg32] if has_cl => Some(forms::ROL_R32_CL),
+            [Shape::Reg32] => Some(forms::ROL_R32_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_ROR => match shapes {
@@ -387,6 +389,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg64] if has_cl => Some(forms::ROR_R64_CL),
             [Shape::Reg64] => Some(forms::ROR_R64_IMM8),
             [Shape::Reg32, Shape::Imm] => Some(forms::ROR_R32_IMM8),
+            [Shape::Reg32] if has_cl => Some(forms::ROR_R32_CL),
+            [Shape::Reg32] => Some(forms::ROR_R32_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_RCL => match shapes {
