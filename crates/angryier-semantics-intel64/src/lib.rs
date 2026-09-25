@@ -12,12 +12,14 @@
 mod providers;
 mod providers_ext;
 mod registry;
+mod x87;
 
 pub mod declarative;
 pub use declarative::{DeclarativeProvider, GENERATED_RULE_BASE, generated_providers};
 pub use providers::*;
 pub use providers_ext::*;
 pub use registry::Intel64CorpusRegistry;
+pub use x87::*;
 
 use angryier_types::SemanticRuleId;
 
@@ -909,6 +911,57 @@ pub mod forms {
     pub const MUL_MEM64: u32 = 0x01DA;
     pub const MUL_R32: u32 = 0x01DB;
     pub const MUL_MEM32: u32 = 0x01DC;
+
+    // x87 FPU state initialization (fninit)
+    pub const FINIT: u32 = 0x0268;
+
+    // x87 FLD (push): m32real, m64real, st(i), and the constants 1.0 / 0.0
+    pub const FLD_M32: u32 = 0x0269;
+    pub const FLD_M64: u32 = 0x026A;
+    pub const FLD_STI: u32 = 0x026B;
+    pub const FLD1: u32 = 0x026C;
+    pub const FLDZ: u32 = 0x026D;
+
+    // x87 FST/FSTP: st(i) destination (FST st(i) is blocked on decoder support),
+    // m32real and m64real destinations
+    pub const FSTP_STI: u32 = 0x026E;
+    pub const FST_M32: u32 = 0x026F;
+    pub const FST_M64: u32 = 0x0270;
+    pub const FSTP_M32: u32 = 0x0271;
+    pub const FSTP_M64: u32 = 0x0272;
+
+    // x87 arithmetic. ST0_STI = destination st(0) (D8 encodings);
+    // STI_ST0 = destination st(i) (DC encodings); memory forms add to st(0).
+    pub const FADD_ST0_STI: u32 = 0x0273;
+    pub const FADD_STI_ST0: u32 = 0x0274;
+    pub const FADD_M32: u32 = 0x0275;
+    pub const FADD_M64: u32 = 0x0276;
+    pub const FSUB_ST0_STI: u32 = 0x0277;
+    pub const FSUB_STI_ST0: u32 = 0x0278;
+    pub const FSUB_M32: u32 = 0x0279;
+    pub const FSUB_M64: u32 = 0x027A;
+    pub const FSUBR_ST0_STI: u32 = 0x027B;
+    pub const FSUBR_STI_ST0: u32 = 0x027C;
+    pub const FSUBR_M32: u32 = 0x027D;
+    pub const FSUBR_M64: u32 = 0x027E;
+    pub const FMUL_ST0_STI: u32 = 0x027F;
+    pub const FMUL_STI_ST0: u32 = 0x0280;
+    pub const FMUL_M32: u32 = 0x0281;
+    pub const FMUL_M64: u32 = 0x0282;
+    pub const FDIV_ST0_STI: u32 = 0x0283;
+    pub const FDIV_STI_ST0: u32 = 0x0284;
+    pub const FDIV_M32: u32 = 0x0285;
+    pub const FDIV_M64: u32 = 0x0286;
+    pub const FDIVR_ST0_STI: u32 = 0x0287;
+    pub const FDIVR_STI_ST0: u32 = 0x0288;
+    pub const FDIVR_M32: u32 = 0x0289;
+    pub const FDIVR_M64: u32 = 0x028A;
+
+    // x87 compare into RFLAGS (ZF/PF/CF); P variants pop afterwards
+    pub const FUCOMI_ST0_STI: u32 = 0x028B;
+    pub const FUCOMIP_ST0_STI: u32 = 0x028C;
+    pub const FCOMI_ST0_STI: u32 = 0x028D;
+    pub const FCOMIP_ST0_STI: u32 = 0x028E;
 }
 
 /// RFLAGS bit positions used by the corpus.

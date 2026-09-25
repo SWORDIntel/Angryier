@@ -4,6 +4,7 @@
 
 use crate::providers::*;
 use crate::providers_ext::*;
+use crate::x87::*;
 use angryier_semantics::{DecodedInstructionView, ResolutionKind, SemanticError, SemanticRegistry, SemanticResolution};
 use angryier_types::SemanticVersion;
 use std::collections::BTreeMap;
@@ -618,6 +619,46 @@ impl Intel64CorpusRegistry {
             Arc::new(BswapR32),
             Arc::new(PushF),
             Arc::new(PopF),
+            // x87 FPU family (first slice)
+            Arc::new(Finit),
+            Arc::new(FldM32),
+            Arc::new(FldM64),
+            Arc::new(FldSti),
+            Arc::new(Fld1),
+            Arc::new(Fldz),
+            Arc::new(FstpSti),
+            Arc::new(FstM32),
+            Arc::new(FstM64),
+            Arc::new(FstpM32),
+            Arc::new(FstpM64),
+            Arc::new(FaddSt0Sti),
+            Arc::new(FaddStiSt0),
+            Arc::new(FaddM32),
+            Arc::new(FaddM64),
+            Arc::new(FsubSt0Sti),
+            Arc::new(FsubStiSt0),
+            Arc::new(FsubM32),
+            Arc::new(FsubM64),
+            Arc::new(FsubrSt0Sti),
+            Arc::new(FsubrStiSt0),
+            Arc::new(FsubrM32),
+            Arc::new(FsubrM64),
+            Arc::new(FmulSt0Sti),
+            Arc::new(FmulStiSt0),
+            Arc::new(FmulM32),
+            Arc::new(FmulM64),
+            Arc::new(FdivSt0Sti),
+            Arc::new(FdivStiSt0),
+            Arc::new(FdivM32),
+            Arc::new(FdivM64),
+            Arc::new(FdivrSt0Sti),
+            Arc::new(FdivrStiSt0),
+            Arc::new(FdivrM32),
+            Arc::new(FdivrM64),
+            Arc::new(FucomiSt0Sti),
+            Arc::new(FucomipSt0Sti),
+            Arc::new(FcomiSt0Sti),
+            Arc::new(FcomipSt0Sti),
         ];
 
         // Build form index from known form IDs. Each provider corresponds to
@@ -708,7 +749,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 595] = [
+const ALL_FORMS: [u32; 634] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -1305,6 +1346,45 @@ const ALL_FORMS: [u32; 595] = [
     crate::forms::BSWAP_R32,
     crate::forms::PUSHF,
     crate::forms::POPF,
+    crate::forms::FINIT,
+    crate::forms::FLD_M32,
+    crate::forms::FLD_M64,
+    crate::forms::FLD_STI,
+    crate::forms::FLD1,
+    crate::forms::FLDZ,
+    crate::forms::FSTP_STI,
+    crate::forms::FST_M32,
+    crate::forms::FST_M64,
+    crate::forms::FSTP_M32,
+    crate::forms::FSTP_M64,
+    crate::forms::FADD_ST0_STI,
+    crate::forms::FADD_STI_ST0,
+    crate::forms::FADD_M32,
+    crate::forms::FADD_M64,
+    crate::forms::FSUB_ST0_STI,
+    crate::forms::FSUB_STI_ST0,
+    crate::forms::FSUB_M32,
+    crate::forms::FSUB_M64,
+    crate::forms::FSUBR_ST0_STI,
+    crate::forms::FSUBR_STI_ST0,
+    crate::forms::FSUBR_M32,
+    crate::forms::FSUBR_M64,
+    crate::forms::FMUL_ST0_STI,
+    crate::forms::FMUL_STI_ST0,
+    crate::forms::FMUL_M32,
+    crate::forms::FMUL_M64,
+    crate::forms::FDIV_ST0_STI,
+    crate::forms::FDIV_STI_ST0,
+    crate::forms::FDIV_M32,
+    crate::forms::FDIV_M64,
+    crate::forms::FDIVR_ST0_STI,
+    crate::forms::FDIVR_STI_ST0,
+    crate::forms::FDIVR_M32,
+    crate::forms::FDIVR_M64,
+    crate::forms::FUCOMI_ST0_STI,
+    crate::forms::FUCOMIP_ST0_STI,
+    crate::forms::FCOMI_ST0_STI,
+    crate::forms::FCOMIP_ST0_STI,
 ];
 
 #[cfg(test)]

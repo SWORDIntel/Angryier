@@ -17,10 +17,12 @@ angryier-types = { path = "../angryier-types" }
 path = "src/lib.rs"
 
 [dev-dependencies]
+angryier-arch-xed-ffi = { path = "../angryier-arch-xed-ffi" }
 angryier-execution = { path = "../angryier-execution" }
 angryier-ir = { path = "../angryier-ir" }
 angryier-memory = { path = "../angryier-memory" }
 angryier-state = { path = "../angryier-state" }
+xed-sys = "0.6"
 
 [lints]
 workspace = true
