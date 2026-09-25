@@ -10,7 +10,7 @@
 //! it supports the scalar integer operations that flag computation and
 //! conditional branches use, and refuses everything else explicitly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use angryier_expr::{ExprArena, ExprArenaError, ExprNode, ExprOp, ExprSort};
 use angryier_ir::{IrBlock, IrOp, IrPrimitive, IrType, IrValueId, RegisterWriteKind};
@@ -421,28 +421,27 @@ fn intern(
         operands,
         immediate,
     };
-    let dbg = format!("{node:?}");
+    // Formatting the full node here is prohibitively expensive on the hot
+    // shadow path (one Debug render per interned node); the arena error plus
+    // the op under construction is enough context to diagnose a rejection.
     arena
         .intern(node)
-        .map_err(|error| SymbolicEvalError::Expression(format!("{error:?} from {dbg}")))
+        .map_err(|error| SymbolicEvalError::Expression(format!("{error:?} while interning {op:?} node")))
 }
 
 /// Converts a 1-bit bitvector expression into a boolean expression.
 /// Converts a Bits(1) branch condition into a Bool expression — Bool when
 /// already sorted, otherwise `ite(bit, true, false)` as a Bool node.
 pub fn bit_to_bool(arena: &SymbolicArena, expression: ExprId) -> Result<ExprId, SymbolicEvalError> {
-    let node = arena.get(expression).ok_or(SymbolicEvalError::Expression(format!(
+    let sort = arena.sort_of(expression).ok_or(SymbolicEvalError::Expression(format!(
         "unknown expression {}",
         expression.0
     )))?;
-    if node.sort == ExprSort::Bool {
+    if sort == ExprSort::Bool {
         return Ok(expression);
     }
-    if node.sort != ExprSort::BitVec(1) {
-        return Err(SymbolicEvalError::UnsupportedType(format!(
-            "{:?} as condition",
-            node.sort
-        )));
+    if sort != ExprSort::BitVec(1) {
+        return Err(SymbolicEvalError::UnsupportedType(format!("{sort:?} as condition")));
     }
     let one = intern(arena, ExprSort::BitVec(1), ExprOp::Constant, Vec::new(), vec![1])?;
     intern(arena, ExprSort::Bool, ExprOp::Eq, vec![expression, one], Vec::new())
@@ -454,14 +453,7 @@ pub fn bit_to_bool(arena: &SymbolicArena, expression: ExprId) -> Result<ExprId, 
 /// expression behind; coercion keeps binary ops well-sorted without
 /// concretizing.
 fn coerce_width(arena: &SymbolicArena, expr: ExprId, width: u16) -> Result<ExprId, SymbolicEvalError> {
-    let current = arena
-        .get(expr)
-        .and_then(|node| match node.sort {
-            ExprSort::BitVec(w) => Some(w),
-            ExprSort::Bool => Some(1),
-            _ => None,
-        })
-        .ok_or_else(|| SymbolicEvalError::UnsupportedType("non-bitvector operand".into()))?;
+    let current = expr_width(arena, expr)?;
     if current == width {
         return Ok(expr);
     }
@@ -474,6 +466,19 @@ fn coerce_width(arena: &SymbolicArena, expr: ExprId, width: u16) -> Result<ExprI
     intern(arena, ExprSort::BitVec(width), ExprOp::Extract, vec![expr], imm)
 }
 
+/// Reads an expression's bit-width through the arena's lightweight sort probe
+/// (a copy of the small sort enum, not a full node clone).
+fn expr_width(arena: &SymbolicArena, expr: ExprId) -> Result<u16, SymbolicEvalError> {
+    arena
+        .sort_of(expr)
+        .and_then(|sort| match sort {
+            ExprSort::BitVec(w) => Some(w),
+            ExprSort::Bool => Some(1),
+            _ => None,
+        })
+        .ok_or_else(|| SymbolicEvalError::UnsupportedType("non-bitvector operand".into()))
+}
+
 /// Reads the value of a constant expression — recursively evaluating
 /// arithmetic over literal leaves so `Add(Const, Const)`-shaped addresses
 /// (from rip-relative or rsp-offset computations) resolve without a solver.
@@ -482,7 +487,179 @@ fn coerce_width(arena: &SymbolicArena, expr: ExprId, width: u16) -> Result<ExprI
 /// fold as truth values. Returns `UnsupportedOperation` when a non-
 /// constant leaf remains.
 pub fn constant_value(arena: &SymbolicArena, expression: ExprId) -> Result<u64, SymbolicEvalError> {
-    constant_value_resolved(arena, expression, &|_| None)
+    fold_eval(arena, expression, 0, None, None)
+        .ok()
+        .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("non-constant operand".into()))
+}
+
+/// [`constant_value`] through a caller-owned negative memo shared across
+/// calls. Arena nodes are immutable, so a node proven non-constant (a Symbol
+/// sits beneath it, or its operator is outside the foldable subset) can never
+/// fold later; caching those verdicts turns a loop-carried value's re-fold —
+/// one node deeper every iteration — into a memo probe plus one node walk.
+/// Depth-capped failures are never cached: a node that merely ran out of
+/// recursion budget may fold from a shallower root.
+pub fn constant_value_with_memo(
+    arena: &SymbolicArena,
+    memo: &mut HashSet<ExprId>,
+    expression: ExprId,
+) -> Result<u64, SymbolicEvalError> {
+    fold_eval(arena, expression, 0, None, Some(memo))
+        .ok()
+        .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("non-constant operand".into()))
+}
+
+/// Why a fold produced no value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FoldFail {
+    /// The subtree can never fold (Symbol leaf, non-foldable operator, or an
+    /// operand that is absolutely non-constant). Memoizable.
+    Absolute,
+    /// The depth budget ran out; from a shallower root the subtree may still
+    /// fold. Not memoizable.
+    Depth,
+}
+
+/// Shared fold core: `resolve_expr` optionally binds leaves to concrete
+/// values, `memo` optionally caches absolute non-constant verdicts (only
+/// safe without a resolver, which is stateful between calls). The failure
+/// mode distinguishes absolutely non-constant subtrees from depth-capped
+/// ones so the memo never records a budget artifact.
+#[allow(clippy::type_complexity)]
+fn fold_eval(
+    arena: &SymbolicArena,
+    expression: ExprId,
+    depth: u8,
+    resolve_expr: Option<&dyn Fn(ExprId) -> Option<u64>>,
+    mut memo: Option<&mut HashSet<ExprId>>,
+) -> Result<u64, FoldFail> {
+    if depth > 16 {
+        return Err(FoldFail::Depth);
+    }
+    // A recorded concrete value (memory-derived pointer) short-circuits
+    // structural evaluation.
+    if let Some(value) = resolve_expr.and_then(|resolve| resolve(expression)) {
+        return Ok(value);
+    }
+    if memo.as_deref().is_some_and(|set| set.contains(&expression)) {
+        return Err(FoldFail::Absolute);
+    }
+    // Probe the operator first (one small enum copy): Symbol leaves have no
+    // value once any resolver declined, so they return without the full node
+    // clone `get` performs.
+    let op = arena.op_of(expression).ok_or(FoldFail::Absolute)?;
+    let folded = match op {
+        ExprOp::Symbol => Err(FoldFail::Absolute),
+        ExprOp::Constant => {
+            let node = arena.get(expression).ok_or(FoldFail::Absolute)?;
+            let mut buffer = [0u8; 8];
+            let len = node.immediate.len().min(8);
+            buffer[..len].copy_from_slice(&node.immediate[..len]);
+            Ok(u64::from_le_bytes(buffer))
+        }
+        _ => fold_node(arena, expression, op, depth, resolve_expr, memo.as_deref_mut()),
+    };
+    if let Err(FoldFail::Absolute) = folded
+        && let Some(set) = memo
+    {
+        if set.len() >= NONCONSTANT_CACHE_CAP {
+            set.clear();
+        }
+        set.insert(expression);
+    }
+    folded
+}
+
+/// One operand's fold, preserving the child's own failure mode (a depth-capped
+/// child must not be promoted to an absolute verdict).
+fn fold_child(
+    arena: &SymbolicArena,
+    operand: Option<&ExprId>,
+    depth: u8,
+    resolve_expr: Option<&dyn Fn(ExprId) -> Option<u64>>,
+    memo: &mut Option<&mut HashSet<ExprId>>,
+) -> Result<u64, FoldFail> {
+    let operand = operand.copied().ok_or(FoldFail::Absolute)?;
+    fold_eval(arena, operand, depth + 1, resolve_expr, memo.as_deref_mut())
+}
+
+fn fold_node(
+    arena: &SymbolicArena,
+    expression: ExprId,
+    op: ExprOp,
+    depth: u8,
+    resolve_expr: Option<&dyn Fn(ExprId) -> Option<u64>>,
+    mut memo: Option<&mut HashSet<ExprId>>,
+) -> Result<u64, FoldFail> {
+    let node = arena.get(expression).ok_or(FoldFail::Absolute)?;
+    // Sequential child folds share the memo through reborrows.
+    macro_rules! child {
+        ($operand:expr) => {
+            fold_child(arena, $operand, depth, resolve_expr, &mut memo)
+        };
+    }
+    match op {
+        ExprOp::Add => Ok(child!(node.operands.first())?.wrapping_add(child!(node.operands.get(1))?)),
+        ExprOp::Sub => Ok(child!(node.operands.first())?.wrapping_sub(child!(node.operands.get(1))?)),
+        ExprOp::And => Ok(child!(node.operands.first())? & child!(node.operands.get(1))?),
+        ExprOp::Or => Ok(child!(node.operands.first())? | child!(node.operands.get(1))?),
+        ExprOp::Xor => Ok(child!(node.operands.first())? ^ child!(node.operands.get(1))?),
+        ExprOp::Shl => Ok(child!(node.operands.first())?.wrapping_shl(child!(node.operands.get(1))? as u32)),
+        ExprOp::LShr => Ok(child!(node.operands.first())?.wrapping_shr(child!(node.operands.get(1))? as u32)),
+        ExprOp::ZExt | ExprOp::SExt | ExprOp::Extract => child!(node.operands.first()),
+        ExprOp::Concat => {
+            // Concat(hi, lo) — value = (hi << lo_bits) | lo.
+            let hi = child!(node.operands.first())?;
+            let lo_id = *node.operands.get(1).ok_or(FoldFail::Absolute)?;
+            let lo = child!(Some(&lo_id))?;
+            let lo_bits = arena
+                .sort_of(lo_id)
+                .and_then(|sort| match sort {
+                    ExprSort::BitVec(w) => Some(u32::from(w)),
+                    _ => None,
+                })
+                .unwrap_or(8);
+            Ok((hi << lo_bits.min(63)) | lo)
+        }
+        ExprOp::Not => Ok(1_u64.wrapping_sub(child!(node.operands.first())?)),
+        ExprOp::Eq => Ok(u64::from(
+            child!(node.operands.first())? == child!(node.operands.get(1))?,
+        )),
+        ExprOp::Ite => {
+            // Fold the guard; if it doesn't reduce, both branches agreeing
+            // still yields a concrete value.
+            let guard = child!(node.operands.first());
+            let lhs = child!(node.operands.get(1));
+            let rhs = child!(node.operands.get(2));
+            let selected = match guard {
+                Ok(1) => Some(lhs),
+                Ok(0) => Some(rhs),
+                Ok(_) | Err(_) => None,
+            };
+            match selected {
+                Some(branch) => branch,
+                None => {
+                    let agreeing = match (lhs, rhs) {
+                        (Ok(left), Ok(right)) if left == right => Ok(left),
+                        _ => Err(FoldFail::Absolute),
+                    };
+                    match agreeing {
+                        Ok(value) => Ok(value),
+                        // The guard never resolves (a Symbol sits beneath
+                        // it): the fold's fate is sealed by the branches.
+                        Err(_) if matches!(guard, Err(FoldFail::Absolute)) => Err(FoldFail::Absolute),
+                        // The guard only hit the depth cap or folded to a
+                        // non-selecting value: from a shallower root it may
+                        // still select, so nothing here is absolute.
+                        Err(_) => Err(FoldFail::Depth),
+                    }
+                }
+            }
+        }
+        // Operators outside the foldable subset never fold regardless of
+        // budget: an absolute verdict, memoizable.
+        _ => Err(FoldFail::Absolute),
+    }
 }
 
 /// Like [`constant_value`], but `resolve_expr(symbol_id)` can bind Symbol
@@ -493,121 +670,14 @@ fn constant_value_resolved(
     expression: ExprId,
     resolve_expr: &dyn Fn(ExprId) -> Option<u64>,
 ) -> Result<u64, SymbolicEvalError> {
-    fn eval(
-        arena: &SymbolicArena,
-        expression: ExprId,
-        depth: u8,
-        resolve_expr: &dyn Fn(ExprId) -> Option<u64>,
-    ) -> Option<u64> {
-        if depth > 16 {
-            return None;
-        }
-        // A recorded concrete value (memory-derived pointer) short-
-        // circuits structural evaluation.
-        if let Some(v) = resolve_expr(expression) {
-            return Some(v);
-        }
-        let node = arena.get(expression)?;
-        match node.op {
-            ExprOp::Constant => {
-                let mut buffer = [0u8; 8];
-                let len = node.immediate.len().min(8);
-                buffer[..len].copy_from_slice(&node.immediate[..len]);
-                Some(u64::from_le_bytes(buffer))
-            }
-            ExprOp::Symbol => {
-                let id = u64::from_le_bytes(node.immediate.get(..8)?.try_into().ok()?);
-                let _ = id;
-                None
-            }
-            ExprOp::Add => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?.wrapping_add(eval(
-                    arena,
-                    *node.operands.get(1)?,
-                    depth + 1,
-                    resolve_expr,
-                )?),
-            ),
-            ExprOp::Sub => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?.wrapping_sub(eval(
-                    arena,
-                    *node.operands.get(1)?,
-                    depth + 1,
-                    resolve_expr,
-                )?),
-            ),
-            ExprOp::And => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?
-                    & eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr)?,
-            ),
-            ExprOp::Or => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?
-                    | eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr)?,
-            ),
-            ExprOp::Xor => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?
-                    ^ eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr)?,
-            ),
-            ExprOp::Shl => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?.wrapping_shl(eval(
-                    arena,
-                    *node.operands.get(1)?,
-                    depth + 1,
-                    resolve_expr,
-                )? as u32),
-            ),
-            ExprOp::LShr => Some(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?.wrapping_shr(eval(
-                    arena,
-                    *node.operands.get(1)?,
-                    depth + 1,
-                    resolve_expr,
-                )? as u32),
-            ),
-            ExprOp::ZExt | ExprOp::SExt | ExprOp::Extract => {
-                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)
-            }
-            ExprOp::Concat => {
-                // Concat(hi, lo) — value = (hi << lo_bits) | lo.
-                let hi = eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?;
-                let lo_id = *node.operands.get(1)?;
-                let lo = eval(arena, lo_id, depth + 1, resolve_expr)?;
-                let lo_bits = arena
-                    .get(lo_id)
-                    .and_then(|n| match n.sort {
-                        ExprSort::BitVec(w) => Some(u32::from(w)),
-                        _ => None,
-                    })
-                    .unwrap_or(8);
-                Some((hi << lo_bits.min(63)) | lo)
-            }
-            ExprOp::Not => Some(1 - eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?),
-            ExprOp::Eq => Some(u64::from(
-                eval(arena, *node.operands.first()?, depth + 1, resolve_expr)?
-                    == eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr)?,
-            )),
-            ExprOp::Ite => {
-                // Fold the guard; if it doesn't reduce, both branches
-                // agreeing still yields a concrete value.
-                let guard = eval(arena, *node.operands.first()?, depth + 1, resolve_expr);
-                let lhs = eval(arena, *node.operands.get(1)?, depth + 1, resolve_expr);
-                let rhs = eval(arena, *node.operands.get(2)?, depth + 1, resolve_expr);
-                match guard {
-                    Some(1) => lhs,
-                    Some(0) => rhs,
-                    _ if lhs.is_some() && lhs == rhs => lhs,
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-    eval(arena, expression, 0, resolve_expr)
+    fold_eval(arena, expression, 0, Some(resolve_expr), None)
+        .ok()
         .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("non-constant operand".into()))
 }
 
 /// Builds the expression for an IR primitive. Shared by the fully symbolic
-/// evaluator and the concolic shadow.
+/// evaluator and the concolic shadow. Widths resolve through the arena's
+/// `sort_of` probe (no node clones, no memo to maintain).
 fn primitive_expr(
     arena: &SymbolicArena,
     op: IrPrimitive,
@@ -688,14 +758,7 @@ fn primitive_expr(
             // Reconcile on the operand's *expression* width — a Bool flag or
             // a widened sub-view may disagree with the declared IR type.
             let operand_expr = operands[0];
-            let operand_width = arena
-                .get(operand_expr)
-                .and_then(|node| match node.sort {
-                    ExprSort::BitVec(w) => Some(u32::from(w)),
-                    ExprSort::Bool => Some(1),
-                    _ => None,
-                })
-                .ok_or_else(|| SymbolicEvalError::UnsupportedType("non-bitvector extension operand".into()))?;
+            let operand_width = u32::from(expr_width(arena, operand_expr)?);
             if operand_width == u32::from(output_width) {
                 return Ok((operand_expr, ty));
             }
@@ -768,14 +831,7 @@ fn primitive_expr(
                 u16::try_from(start).map_err(|_| SymbolicEvalError::UnsupportedOperation("extract offset".into()))?;
             // Reconcile on the operand's *expression* width — a widened or
             // narrowed value may disagree with the declared IR type.
-            let operand_width = arena
-                .get(operands[0])
-                .and_then(|node| match node.sort {
-                    ExprSort::BitVec(w) => Some(u32::from(w)),
-                    ExprSort::Bool => Some(1),
-                    _ => None,
-                })
-                .ok_or_else(|| SymbolicEvalError::UnsupportedType("non-bitvector extract operand".into()))?;
+            let operand_width = u32::from(expr_width(arena, operands[0])?);
             if u32::from(start) + u32::from(output_width) > operand_width {
                 // Zero-extend the operand to cover the extract window.
                 let zext = intern(
@@ -841,6 +897,20 @@ pub trait ConcolicImage {
     fn read_register(&self, register: u32) -> Option<Vec<u8>>;
     /// Concrete/symbolic bytes at `address`, or `None` when unmapped.
     fn read_bytes(&self, address: u64, length: usize) -> Option<Vec<ByteValue>>;
+    /// Allocation-free [`read_bytes`](Self::read_bytes): fills `out` (whose
+    /// length is the read length) instead of returning a fresh `Vec`. Returns
+    /// `false` exactly when `read_bytes` would return `None`. The default
+    /// wraps `read_bytes`; images backed by a [`LayeredMemory`](angryier_memory::LayeredMemory)
+    /// override it with the memory's own buffer-filling read.
+    fn read_bytes_into(&self, address: u64, out: &mut [ByteValue]) -> bool {
+        match self.read_bytes(address, out.len()) {
+            Some(bytes) => {
+                out.clone_from_slice(&bytes);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// One recorded branch constraint: the 1-bit condition expression and the
@@ -866,6 +936,20 @@ pub struct ConcolicEvaluator<'a> {
     memory: BTreeMap<u64, ByteValue>,
     bindings: Vec<ConcolicBinding>,
     next_symbol: u64,
+    /// Interned constant expressions keyed by (width, value). The shadow
+    /// re-evaluates the same blocks step after step; re-interning their
+    /// (identical) constants every visit makes the arena hash each one again
+    /// and again. Widths above 128 bits bypass the cache.
+    constants: HashMap<(u16, u128), ExprId>,
+    /// Negative fold memo: expressions proven non-constant by
+    /// [`constant_value`]. Arena nodes are immutable, so a failure is valid
+    /// forever; without it every symbolic register write would re-walk the
+    /// top of a value chain that grows one node per iteration.
+    non_constants: HashSet<ExprId>,
+    /// Scratch value table reused across block evaluations: the shadow
+    /// evaluates one block per step, and regrowing this table from empty
+    /// each time costs several reallocations per step.
+    values_scratch: Vec<Option<(ExprId, Option<u128>, IrType)>>,
 }
 
 impl<'a> ConcolicEvaluator<'a> {
@@ -878,6 +962,9 @@ impl<'a> ConcolicEvaluator<'a> {
             memory: BTreeMap::new(),
             bindings: Vec::new(),
             next_symbol: 0,
+            constants: HashMap::new(),
+            non_constants: HashSet::new(),
+            values_scratch: Vec::new(),
         }
     }
 
@@ -970,7 +1057,10 @@ impl<'a> ConcolicEvaluator<'a> {
         image: &dyn ConcolicImage,
         block: &IrBlock,
     ) -> Result<SymbolicBlockSummary, SymbolicEvalError> {
-        let mut values: Vec<Option<(ExprId, Option<u128>, IrType)>> = Vec::new();
+        // Reuse the value table across steps (same instruction count per
+        // revisited block); on error the scratch is simply re-grown.
+        let mut values = std::mem::take(&mut self.values_scratch);
+        values.clear();
         let mut written_registers = Vec::new();
         let mut branch = None;
         let mut terminated = false;
@@ -991,8 +1081,20 @@ impl<'a> ConcolicEvaluator<'a> {
                     Some((expression, concrete, *ty))
                 }
                 IrOp::Primitive { op, ty, inputs } => {
-                    let resolved = resolve_inputs_c(&values, inputs)?;
-                    let (expression, concrete) = self.primitive_concolic(*op, *ty, &resolved)?;
+                    // Resolve operands into a stack buffer: the shadow
+                    // evaluates every block on every step, and a heap `Vec`
+                    // per operation is measurable at that rate.
+                    const MAX_INLINE: usize = 4;
+                    let (expression, concrete) = if inputs.len() <= MAX_INLINE {
+                        let mut inline = [(ExprId(0), None, IrType::Bits(1)); MAX_INLINE];
+                        for (slot, id) in inline.iter_mut().zip(inputs) {
+                            *slot = get_value_c(&values, *id)?;
+                        }
+                        self.primitive_concolic(*op, *ty, &inline[..inputs.len()])?
+                    } else {
+                        let resolved = resolve_inputs_c(&values, inputs)?;
+                        self.primitive_concolic(*op, *ty, &resolved)?
+                    };
                     Some((expression, concrete, *ty))
                 }
                 IrOp::WriteRegister { register, value, kind } => {
@@ -1037,7 +1139,7 @@ impl<'a> ConcolicEvaluator<'a> {
                     };
                     // Fold the stored value when its expression is a constant.
                     if concrete.is_none() {
-                        concrete = constant_value(self.arena, expression).ok().map(u128::from);
+                        concrete = self.constant_value_memo(expression).map(u128::from);
                     }
                     self.registers.insert(*register, (expression, ty));
                     self.register_concretes.insert(*register, concrete);
@@ -1098,6 +1200,7 @@ impl<'a> ConcolicEvaluator<'a> {
             }
         }
 
+        self.values_scratch = values;
         Ok(SymbolicBlockSummary {
             branch,
             written_registers,
@@ -1109,44 +1212,69 @@ impl<'a> ConcolicEvaluator<'a> {
     /// Evaluates a primitive concolically: when every input carries a
     /// concrete value the result folds to a constant (keeping addresses and
     /// flag computations concrete); otherwise it builds the expression.
+    /// Machine primitives have at most a handful of operands and the shadow
+    /// evaluates them on every step, so both paths resolve through a stack
+    /// buffer instead of a fresh heap `Vec` per operation.
     fn primitive_concolic(
         &mut self,
         op: IrPrimitive,
         ty: IrType,
         inputs: &[(ExprId, Option<u128>, IrType)],
     ) -> Result<(ExprId, Option<u128>), SymbolicEvalError> {
+        const MAX_INLINE: usize = 4;
         let output_width = bit_width(ty)?;
-        let concretes: Option<Vec<u128>> = inputs.iter().map(|(_, concrete, _)| *concrete).collect();
-        if let Some(concretes) = concretes
+
+        // Constant folding: every input concrete and every width foldable.
+        if inputs.len() <= MAX_INLINE
             && output_width <= 128
-        {
-            let typed: Vec<(u128, u16)> = inputs
+            && inputs
                 .iter()
-                .zip(concretes.iter())
-                .map(|((_, _, input_ty), value)| (*value, bit_width(*input_ty).unwrap_or(64)))
-                .collect();
-            if typed.iter().all(|(_, width)| *width <= 128)
-                && let Some(result) = eval_primitive_concrete(op, output_width, &typed)
-            {
+                .all(|(_, concrete, input_ty)| concrete.is_some() && bit_width(*input_ty).unwrap_or(64) <= 128)
+        {
+            let mut typed = [(0u128, 0u16); MAX_INLINE];
+            for (slot, (_, concrete, input_ty)) in typed.iter_mut().zip(inputs) {
+                *slot = (concrete.unwrap_or(0), bit_width(*input_ty).unwrap_or(64));
+            }
+            if let Some(result) = eval_primitive_concrete(op, output_width, &typed[..inputs.len()]) {
                 let byte_width = usize::from(output_width).div_ceil(8);
-                let mut bytes = result.to_le_bytes().to_vec();
-                bytes.resize(byte_width, 0);
-                let expression = intern(
-                    self.arena,
-                    ExprSort::BitVec(output_width),
-                    ExprOp::Constant,
-                    Vec::new(),
-                    bytes,
-                )?;
+                let bytes = &result.to_le_bytes()[..byte_width];
+                let expression = self.constant(ty, bytes)?;
                 return Ok((expression, Some(result)));
             }
         }
-        let resolved: Vec<(ExprId, IrType)> = inputs
-            .iter()
-            .map(|(expression, _, input_ty)| (*expression, *input_ty))
-            .collect();
-        let (expression, _) = primitive_expr(self.arena, op, ty, &resolved)?;
-        Ok((expression, None))
+
+        // Symbolic path: the (expression, type) view of each input, resolved
+        // through a stack buffer for the machine-primitive arities.
+        let (expression, _) = if inputs.len() <= MAX_INLINE {
+            let mut inline = [(ExprId(0), IrType::Bits(1)); MAX_INLINE];
+            for (slot, (expression, _, input_ty)) in inline.iter_mut().zip(inputs) {
+                *slot = (*expression, *input_ty);
+            }
+            primitive_expr(self.arena, op, ty, &inline[..inputs.len()])?
+        } else {
+            let expression_of = inputs
+                .iter()
+                .map(|(expression, _, input_ty)| (*expression, *input_ty))
+                .collect::<Vec<(ExprId, IrType)>>();
+            primitive_expr(self.arena, op, ty, &expression_of)?
+        };
+        // The arena folds an all-constant operand set into one Constant node
+        // even when the concolic folder above declined (some input was a
+        // constant expression whose concrete tag was unknown). One operator
+        // probe re-tags those results here, so downstream writes keep their
+        // concrete value without the recursive `constant_value` re-fold.
+        let concrete = match self.arena.op_of(expression) {
+            Some(ExprOp::Constant) if output_width <= 128 => self.arena.get(expression).map(|node| {
+                node.immediate
+                    .iter()
+                    .enumerate()
+                    .take(16)
+                    .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)))
+                    & mask_u128(output_width)
+            }),
+            _ => None,
+        };
+        Ok((expression, concrete))
     }
 
     /// Replaces `source_width` bits at `bit_offset` inside `parent` with
@@ -1284,6 +1412,10 @@ impl<'a> ConcolicEvaluator<'a> {
         concrete_address: Option<u128>,
         ty: IrType,
     ) -> Result<(ExprId, Option<u128>), SymbolicEvalError> {
+        /// Widest load filled through the stack buffer; wider (non-machine)
+        /// types take the owned path.
+        const MAX_INLINE_LOAD: usize = 64;
+
         let width = bit_width(ty)?;
         let byte_width = usize::from(width).div_ceil(8);
         let base = match concrete_address.and_then(|value| u64::try_from(value).ok()) {
@@ -1292,37 +1424,67 @@ impl<'a> ConcolicEvaluator<'a> {
                 .map_err(|_| SymbolicEvalError::UnsupportedOperation("load with symbolic address".into()))?,
         };
 
-        let mut bytes = Vec::with_capacity(byte_width);
-        for offset in 0..byte_width as u64 {
-            let byte = match self.memory.get(&(base + offset)) {
-                Some(value) => *value,
-                None => {
-                    let read = image
-                        .read_bytes(base + offset, 1)
-                        .ok_or(SymbolicEvalError::UnsupportedOperation(format!(
-                            "load of unmapped byte {:#x}",
-                            base + offset
-                        )))?;
-                    read.first().copied().unwrap_or(ByteValue::Concrete(0))
+        // One bulk image read fills the whole span (no per-byte `Vec`), the
+        // shadow overlay then rewrites its own bytes on top. When the span
+        // read fails, resolve byte-at-a-time so shadow-covered bytes at the
+        // span's edge still load and unmapped errors name the exact offset.
+        let mut owned: Vec<ByteValue>;
+        let mut inline = [ByteValue::Concrete(0); MAX_INLINE_LOAD];
+        let bytes: &mut [ByteValue] = if byte_width <= MAX_INLINE_LOAD {
+            &mut inline[..byte_width]
+        } else {
+            owned = vec![ByteValue::Concrete(0); byte_width];
+            &mut owned[..]
+        };
+        if image.read_bytes_into(base, bytes) {
+            for (offset, slot) in bytes.iter_mut().enumerate() {
+                if let Some(value) = self.memory.get(&(base + offset as u64)) {
+                    *slot = *value;
                 }
-            };
-            bytes.push(byte);
+            }
+        } else {
+            for (offset, slot) in bytes.iter_mut().enumerate() {
+                let at = base + offset as u64;
+                *slot = match self.memory.get(&at) {
+                    Some(value) => *value,
+                    None => {
+                        let read = image
+                            .read_bytes(at, 1)
+                            .ok_or(SymbolicEvalError::UnsupportedOperation(format!(
+                                "load of unmapped byte {at:#x}"
+                            )))?;
+                        read.first().copied().unwrap_or(ByteValue::Concrete(0))
+                    }
+                };
+            }
         }
 
         if bytes.iter().all(|byte| matches!(byte, ByteValue::Concrete(_))) {
-            let data: Vec<u8> = bytes
-                .iter()
-                .map(|byte| match byte {
-                    ByteValue::Concrete(b) => *b,
-                    ByteValue::Symbolic(_) => unreachable!(),
-                })
-                .collect();
+            let mut inline_data = [0u8; MAX_INLINE_LOAD];
+            let owned_data: Vec<u8>;
+            let data: &[u8] = if byte_width <= MAX_INLINE_LOAD {
+                for (index, byte) in bytes.iter().enumerate() {
+                    if let ByteValue::Concrete(value) = byte {
+                        inline_data[index] = *value;
+                    }
+                }
+                &inline_data[..byte_width]
+            } else {
+                owned_data = bytes
+                    .iter()
+                    .map(|byte| match byte {
+                        ByteValue::Concrete(value) => *value,
+                        ByteValue::Symbolic(_) => 0,
+                    })
+                    .collect();
+                &owned_data[..]
+            };
             let concrete = data
                 .iter()
                 .enumerate()
                 .take(16)
                 .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)));
-            return Ok((self.constant(ty, &data)?, Some(concrete)));
+            return Ok((self.constant(ty, data)?, Some(concrete)));
         }
 
         // Little-endian: byte 0 is the least significant. Concatenate from
@@ -1367,15 +1529,21 @@ impl<'a> ConcolicEvaluator<'a> {
                 .map_err(|_| SymbolicEvalError::UnsupportedOperation("store with symbolic address".into()))?,
         };
 
-        let node = self
+        // Probe the operator first: the constant fast path needs the node's
+        // immediate, while the (hot) symbolic path must not clone the node at
+        // all.
+        let op = self
             .arena
-            .get(value)
+            .op_of(value)
             .ok_or_else(|| SymbolicEvalError::Expression(format!("unknown expression {}", value.0)))?;
-        if node.op == ExprOp::Constant {
-            for (offset, byte) in node.immediate.iter().enumerate().take(byte_width) {
-                self.memory.insert(base + offset as u64, ByteValue::Concrete(*byte));
+        if op == ExprOp::Constant {
+            if let Some(node) = self.arena.get(value) {
+                for (offset, byte) in node.immediate.iter().enumerate().take(byte_width) {
+                    self.memory.insert(base + offset as u64, ByteValue::Concrete(*byte));
+                }
+                return Ok(());
             }
-            return Ok(());
+            return Err(SymbolicEvalError::Expression(format!("unknown expression {}", value.0)));
         }
         for offset in 0..byte_width {
             let byte_expr = self.extract(value, offset as u16 * 8, 8)?;
@@ -1384,11 +1552,40 @@ impl<'a> ConcolicEvaluator<'a> {
         Ok(())
     }
 
-    fn constant(&self, ty: IrType, bytes_le: &[u8]) -> Result<ExprId, SymbolicEvalError> {
+    /// [`constant_value`] through the negative fold memo: expressions already
+    /// proven non-constant skip the recursive node walk. A loop-carried
+    /// value's expression grows one node per iteration, and every register
+    /// write would otherwise re-walk its top levels.
+    fn constant_value_memo(&mut self, expression: ExprId) -> Option<u64> {
+        constant_value_with_memo(self.arena, &mut self.non_constants, expression).ok()
+    }
+
+    /// Interns a constant, memoized by (width, value): the shadow evaluates
+    /// the same block on every visit, so repeated constants resolve without
+    /// touching the arena.
+    fn constant(&mut self, ty: IrType, bytes_le: &[u8]) -> Result<ExprId, SymbolicEvalError> {
         let width = bit_width(ty)?;
         let byte_width = usize::from(width).div_ceil(8);
         if bytes_le.len() != byte_width {
             return Err(SymbolicEvalError::UnsupportedType(format!("constant width for {ty:?}")));
+        }
+        if byte_width <= 16 {
+            let mut value = 0u128;
+            for (index, byte) in bytes_le.iter().enumerate() {
+                value |= u128::from(*byte) << (8 * index);
+            }
+            if let Some(expression) = self.constants.get(&(width, value)) {
+                return Ok(*expression);
+            }
+            let expression = intern(
+                self.arena,
+                ExprSort::BitVec(width),
+                ExprOp::Constant,
+                Vec::new(),
+                bytes_le.to_vec(),
+            )?;
+            self.constants.insert((width, value), expression);
+            return Ok(expression);
         }
         intern(
             self.arena,
@@ -1406,6 +1603,10 @@ fn bit_width(ty: IrType) -> Result<u16, SymbolicEvalError> {
         other => Err(SymbolicEvalError::UnsupportedType(format!("{other:?}"))),
     }
 }
+
+/// Eviction threshold for the negative fold memo: bounded like the constant
+/// cache — cleared rather than grown once long traces would overflow it.
+const NONCONSTANT_CACHE_CAP: usize = 1 << 20;
 
 fn get_value(values: &[Option<(ExprId, IrType)>], id: IrValueId) -> Result<(ExprId, IrType), SymbolicEvalError> {
     usize::try_from(id.0)
@@ -1664,7 +1865,7 @@ impl SymbolicSessionMemory {
         let byte_count = usize::from(width).div_ceil(8);
         // The expression's own width may be narrower than the declared
         // store width (widened sub-view) — extend to cover the split.
-        let expression = match arena.get(expression).map(|n| n.sort) {
+        let expression = match arena.sort_of(expression) {
             Some(ExprSort::BitVec(w)) if w < width => intern(
                 arena,
                 ExprSort::BitVec(width),

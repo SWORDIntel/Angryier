@@ -40,7 +40,8 @@ use angryier_semantics::{
 use angryier_semantics_intel64::Intel64CorpusRegistry;
 use angryier_solver::{CanonicalConstraint, SolverBackend, SolverOutcomeKind, SolverQuery};
 use angryier_state::{
-    ExecutionState, FidelityLedger, PersistentConstraintLineage, PersistentRegisters, RegisterState, StateOwnership,
+    ExecutionState, FidelityLedger, PersistentConstraintLineage, PersistentRegisters, RegisterState, RegisterValue,
+    StateOwnership, SymbolicRegisterState,
 };
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,9 +49,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use angryier_types::{
-    Address, AnalysisDebtKind, BlockId, ConstraintCanonicalizationVersion, ConstraintId, ContentIdentitySchemaVersion,
-    ExprId, FidelityProfile, ImageId, SemanticFingerprintSchemaVersion, SemanticVersion, SolverQueryId, StateId,
-    TargetProfileId,
+    Address, AnalysisDebtKind, BlockId, CodeVersionGuard, ConstraintCanonicalizationVersion, ConstraintId,
+    ContentIdentitySchemaVersion, ExprId, FidelityProfile, ImageId, SemanticFingerprintSchemaVersion, SemanticVersion,
+    SolverQueryId, StateId, TargetProfileId,
 };
 
 #[cfg(feature = "xed")]
@@ -218,6 +219,28 @@ impl BranchSolution {
     }
 }
 
+/// A cached decode+lowering for one PC, so revisiting a PC whose instruction
+/// bytes and code-page versions are unchanged skips decode, semantic emission,
+/// sealing, and lowering. The block is shared (cheap `Process` clones); the
+/// cached bytes and guards are the staleness key — a hit requires the exact
+/// instruction bytes and covering code-page guards to still match, which is
+/// precisely the condition under which re-decoding and re-lowering would
+/// reproduce this block bit for bit.
+#[derive(Clone)]
+struct CachedStep {
+    /// The lowered block (also mirrored in `Process::block_cache`).
+    block: Arc<IrBlock>,
+    /// Decoded instruction length.
+    length: u8,
+    /// Decoded form id.
+    form_id: u32,
+    /// Instruction bytes (padded to the containing region bound) at the time
+    /// of caching.
+    bytes: Vec<u8>,
+    /// Code-page guards covering the instruction at the time of caching.
+    guards: Vec<CodeVersionGuard>,
+}
+
 /// A loaded process with execution state.
 ///
 /// `Clone` shares the persistent register/memory structures (copy-on-write),
@@ -231,6 +254,10 @@ pub struct Process {
     /// Initial state captured at load time, used to restart with new inputs.
     pub entry_state: ExecutionState<PersistentRegisters, PersistentMemory>,
     pub block_cache: BTreeMap<Address, IrBlock>,
+    /// Decode+lowering reuse cache for stepping, keyed by PC. Hits require
+    /// unchanged instruction bytes and code-page guards, so self-modifying
+    /// code falls back to a fresh decode+lower.
+    step_cache: BTreeMap<Address, CachedStep>,
     pub simproc_hooks: BTreeMap<Address, String>,
     /// Static symbol table of the loaded image (empty when absent).
     pub symbols: Vec<Symbol>,
@@ -305,48 +332,56 @@ impl Process {
 
     /// Reads the current program counter (RIP).
     pub fn pc(&self) -> Result<Address, RuntimeError> {
-        let bytes = self
-            .state
-            .registers
-            .read(register_id::RIP.0)
-            .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
-        let mut buf = [0u8; 8];
-        let len = bytes.len().min(8);
-        buf[..len].copy_from_slice(&bytes[..len]);
-        Ok(u64::from_le_bytes(buf))
+        read_register_u64(&self.state.registers, register_id::RIP.0)
     }
 
     /// Writes the program counter (RIP).
+    ///
+    /// In-place COW write: the base map mutates directly while uniquely held
+    /// and is cloned exactly once when a snapshot shares it (the entry state
+    /// captured at load time, or a forked sibling `Process`), so sequential
+    /// stepping pays no per-write overlay copy.
     fn write_pc(&mut self, pc: Address) -> Result<(), RuntimeError> {
-        self.state.registers = self
-            .state
+        self.state
             .registers
-            .write(register_id::RIP.0, &pc.to_le_bytes())
-            .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
-        Ok(())
+            .write_in_place(register_id::RIP.0, &pc.to_le_bytes())
+            .map_err(|e| RuntimeError::Register(format!("{e:?}")))
     }
 
     /// Reads a register as u64.
     pub fn read_register(&self, register: u32) -> Result<u64, RuntimeError> {
-        let bytes = self
-            .state
-            .registers
-            .read(register)
-            .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
-        let mut buf = [0u8; 8];
-        let len = bytes.len().min(8);
-        buf[..len].copy_from_slice(&bytes[..len]);
-        Ok(u64::from_le_bytes(buf))
+        read_register_u64(&self.state.registers, register)
     }
 
     /// Writes a 64-bit value into an architectural register.
+    ///
+    /// In-place COW write; see [`write_pc`](Self::write_pc) for the snapshot
+    /// contract.
     pub fn write_register(&mut self, register: u32, value: u64) -> Result<(), RuntimeError> {
-        self.state.registers = self
-            .state
+        self.state
             .registers
-            .write(register, &value.to_le_bytes())
-            .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
-        Ok(())
+            .write_in_place(register, &value.to_le_bytes())
+            .map_err(|e| RuntimeError::Register(format!("{e:?}")))
+    }
+}
+
+/// Reads a register as u64 without allocating: `RegisterState::read` copies
+/// the value into a fresh `Vec<u8>` per call, while `read_value` hands back
+/// an `Arc` clone for concrete values. Symbolic registers surface the same
+/// error `read` would produce.
+fn read_register_u64(registers: &PersistentRegisters, register: u32) -> Result<u64, RuntimeError> {
+    match registers.read_value(register) {
+        Ok(RegisterValue::Concrete(bytes)) => {
+            let mut buf = [0u8; 8];
+            let len = bytes.len().min(8);
+            buf[..len].copy_from_slice(&bytes[..len]);
+            Ok(u64::from_le_bytes(buf))
+        }
+        Ok(RegisterValue::Symbolic { .. }) => Err(RuntimeError::Register(format!(
+            "{:?}",
+            angryier_state::RegisterError::SymbolicValue(register)
+        ))),
+        Err(e) => Err(RuntimeError::Register(format!("{e:?}"))),
     }
 }
 
@@ -505,13 +540,14 @@ impl<D: Decoder> Runtime<D> {
         };
         if lod_size > 0 {
             let rsi = process.read_register(register_id::GPR_BASE + 6)?;
-            let data = process
+            let mut data = [ByteValue::Concrete(0); 8];
+            process
                 .state
                 .memory
-                .read(rsi, lod_size)
+                .read_into(rsi, &mut data[..lod_size])
                 .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
             let mut value = 0u64;
-            for (i, byte) in data.iter().enumerate() {
+            for (i, byte) in data[..lod_size].iter().enumerate() {
                 let b = match byte {
                     ByteValue::Concrete(b) => *b,
                     ByteValue::Symbolic(_) => 0,
@@ -559,21 +595,23 @@ impl<D: Decoder> Runtime<D> {
         let store_bytes = rax.to_le_bytes();
 
         let mut count = if rep { rcx } else { 1 };
+        let mut data = [ByteValue::Concrete(0); 8];
         while count > 0 {
-            let data: Vec<ByteValue> = if is_move {
+            if is_move {
                 process
                     .state
                     .memory
-                    .read(rsi, size)
-                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?
-                    .to_vec()
+                    .read_into(rsi, &mut data[..size])
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
             } else {
-                store_bytes[..size].iter().map(|b| ByteValue::Concrete(*b)).collect()
-            };
+                for (slot, byte) in data[..size].iter_mut().zip(store_bytes[..size].iter()) {
+                    *slot = ByteValue::Concrete(*byte);
+                }
+            }
             process.state.memory = process
                 .state
                 .memory
-                .write(rdi, &data)
+                .write(rdi, &data[..size])
                 .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
             rdi = rdi.wrapping_add(size as u64);
             if is_move {
@@ -814,6 +852,7 @@ impl<D: Decoder> Runtime<D> {
             entry_state: state.clone(),
             state,
             block_cache: BTreeMap::new(),
+            step_cache: BTreeMap::new(),
             simproc_hooks: BTreeMap::new(),
             symbols: Vec::new(),
             trace: Vec::new(),
@@ -967,6 +1006,7 @@ impl<D: Decoder> Runtime<D> {
             entry_state: state.clone(),
             state,
             block_cache: BTreeMap::new(),
+            step_cache: BTreeMap::new(),
             simproc_hooks: BTreeMap::new(),
             symbols: image.symbols.clone(),
             trace: Vec::new(),
@@ -990,11 +1030,12 @@ impl<D: Decoder> Runtime<D> {
     }
 
     /// Recovers the image CFG and extracts pure induction loops — a
-    /// single-block body whose only side effects are `counter += step` and
-    /// a `cmp counter, bound` feeding the back-edge branch. Summaries let
-    /// the session collapse a concrete trip count in O(1).
+    /// straight-line body (one block, or a chain of blocks linked only by
+    /// unconditional jumps or adjacency) whose only state effects are
+    /// `counter += step` and a `cmp counter, bound` feeding the back-edge
+    /// branch. Summaries let the session collapse the trip count in O(1),
+    /// concretely or over symbolic counter/bound expressions.
     pub fn loop_summaries(&self, process: &Process) -> Vec<LoopSummary> {
-        use angryier_arch::OperandKind;
         use angryier_cfg::recover;
         let mut out = Vec::new();
         let regions: Vec<(u64, Vec<u8>)> = process
@@ -1013,117 +1054,10 @@ impl<D: Decoder> Runtime<D> {
                 continue;
             };
             for lp in cfg.loops() {
-                if lp.body.len() != 1 {
-                    continue;
-                }
-                let Some(block) = cfg.blocks.get(&lp.header) else {
+                let Some(summary) = summarize_induction_loop(&cfg, &lp) else {
                     continue;
                 };
-                let insns = &block.instructions;
-                if insns.len() < 2 || insns.len() > 6 {
-                    continue;
-                }
-                // Last insn must be a conditional branch back to the header;
-                // its fall-through is the loop exit.
-                let Some(term) = insns.last() else { continue };
-                if !is_jcc(term.form_id) {
-                    continue;
-                }
-                let Some(back) = term.operands.iter().find_map(|o| {
-                    if let OperandKind::RelativeBranch(rb) = &o.kind {
-                        Some(term.relative_target(*rb))
-                    } else {
-                        None
-                    }
-                }) else {
-                    continue;
-                };
-                if back != lp.header {
-                    continue;
-                }
-                let exit = term.address + u64::from(term.length);
-                // Find the counter cmp and the counter update.
-                let mut counter: Option<u32> = None;
-                let mut bound = Bound::None;
-                let mut step: i64 = 0;
-                let mut pure = true;
-                for insn in &insns[..insns.len() - 1] {
-                    match insn.form_id {
-                        f if is_cmp_reg(f) => {
-                            let reg = insn.operands.iter().find_map(|o| {
-                                if let OperandKind::Register(rv) = &o.kind {
-                                    Some(rv.parent.0)
-                                } else {
-                                    None
-                                }
-                            });
-                            let imm = insn.operands.iter().find_map(|o| {
-                                if let OperandKind::Immediate(i) = &o.kind {
-                                    Some(i.value)
-                                } else {
-                                    None
-                                }
-                            });
-                            match (reg, imm) {
-                                (Some(r), Some(v)) => {
-                                    counter = Some(r);
-                                    bound = Bound::Imm(v);
-                                }
-                                (Some(r), None) => {
-                                    counter = Some(r);
-                                    if let Some(OperandKind::Register(rv)) = insn.operands.get(1).map(|o| &o.kind) {
-                                        bound = Bound::Reg(rv.parent.0);
-                                    }
-                                }
-                                _ => pure = false,
-                            }
-                        }
-                        f if is_counter_update(f) => {
-                            // add/sub/inc/dec — operand0 register, step imm.
-                            let reg = insn.operands.iter().find_map(|o| {
-                                if let OperandKind::Register(rv) = &o.kind {
-                                    Some(rv.parent.0)
-                                } else {
-                                    None
-                                }
-                            });
-                            let imm = insn.operands.iter().find_map(|o| {
-                                if let OperandKind::Immediate(i) = &o.kind {
-                                    Some(i.value as i64)
-                                } else {
-                                    None
-                                }
-                            });
-                            let s = match (reg, imm, f) {
-                                (Some(_), Some(v), _) if is_sub_form(f) => -v,
-                                (Some(_), Some(v), _) => v,
-                                (Some(_), None, _) if is_sub_form(f) => -1, // dec
-                                (Some(_), None, _) => 1,                    // inc
-                                _ => {
-                                    pure = false;
-                                    0
-                                }
-                            };
-                            step += s;
-                        }
-                        f if is_nop(f) => {}
-                        _ => pure = false,
-                    }
-                }
-                let (Some(counter), Some(cond)) = (counter, jcc_cond(term.form_id)) else {
-                    continue;
-                };
-                if !pure || step == 0 {
-                    continue;
-                }
-                out.push(LoopSummary {
-                    header: lp.header,
-                    exit,
-                    counter,
-                    step,
-                    bound,
-                    cond,
-                });
+                out.push(summary);
             }
         }
         out
@@ -1317,6 +1251,7 @@ impl<D: Decoder> Runtime<D> {
             entry_state: state.clone(),
             state,
             block_cache: BTreeMap::new(),
+            step_cache: BTreeMap::new(),
             simproc_hooks: BTreeMap::new(),
             symbols: image.symbols,
             trace: Vec::new(),
@@ -1366,6 +1301,8 @@ impl<D: Decoder> Runtime<D> {
 
         // Read instruction bytes from memory, bounded by the containing region
         // so that instructions near the end of a segment do not fail the read.
+        // The fetch runs every step, so it fills a stack buffer through
+        // `read_into` instead of materializing a fresh `Vec<ByteValue>`.
         let available = process
             .state
             .memory
@@ -1376,11 +1313,55 @@ impl<D: Decoder> Runtime<D> {
                 usize::try_from(region.base.saturating_add(region.size).saturating_sub(pc)).unwrap_or(MAX_INSN_LEN)
             });
         let read_len = available.min(MAX_INSN_LEN);
-        let bytes = process
+        let mut buffer = [ByteValue::Concrete(0); MAX_INSN_LEN];
+        process
             .state
             .memory
-            .read(pc, read_len)
+            .read_into(pc, &mut buffer[..read_len])
             .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        let bytes: &[ByteValue] = &buffer[..read_len];
+
+        // Fast path: a previously decoded+lowered step at this PC is reusable
+        // while the instruction bytes and the covering code-page guards are
+        // unchanged — under exactly those conditions a fresh decode, semantic
+        // emission, seal, and lowering would reproduce the cached block (the
+        // decoder and registry are deterministic per (pc, bytes), and equal
+        // guards mean no write touched the pages since). This turns loop
+        // revisits into execute-only steps. The byte check compares straight
+        // against the read so the raw byte vector is only materialized on a
+        // miss.
+        if let Some(hit) = process.step_cache.get(&pc)
+            && hit.bytes.len() == bytes.len()
+            && hit
+                .bytes
+                .iter()
+                .zip(bytes.iter())
+                .all(|(cached, read)| matches!(read, ByteValue::Concrete(value) if value == cached))
+            && process
+                .state
+                .memory
+                .code_version_guards_for_range(pc, usize::from(hit.length))
+                .map(|guards| guards == hit.guards)
+                .unwrap_or(false)
+        {
+            let block = Arc::clone(&hit.block);
+            let length = hit.length;
+            let form_id = hit.form_id;
+
+            // Observers see the lowered block against the pre-execution state.
+            observe(process, &block)?;
+
+            // Execute.
+            let (new_state, outcome) = self
+                .interpreter
+                .execute_block(&process.state, &block, ExecutionMode::Concrete)
+                .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+
+            process.state = new_state;
+            process.step_count += 1;
+            return finish_step(process, pc, length, form_id, outcome);
+        }
+
         let raw: Vec<u8> = bytes
             .iter()
             .map(|b| match b {
@@ -1419,6 +1400,11 @@ impl<D: Decoder> Runtime<D> {
 
         let (ir_block, decoded) = self.lower_at(process, pc, &decoded)?;
 
+        // The block's key carries the pre-execution code-page guards; reuse
+        // must compare against those (an instruction writing its own page
+        // makes current guards differ, forcing a fresh decode next visit).
+        let guards = ir_block.key.code_versions.clone();
+
         // Observers see the lowered block against the pre-execution state.
         observe(process, &ir_block)?;
 
@@ -1434,33 +1420,20 @@ impl<D: Decoder> Runtime<D> {
         let length = decoded.length;
         let form_id = decoded.form_id;
 
-        // Cache the block.
-        process.block_cache.insert(pc, ir_block.clone());
+        // Cache the decode+lowering for reuse on the next visit (the lowered
+        // block itself is already mirrored in `block_cache` by `lower_at`).
+        process.step_cache.insert(
+            pc,
+            CachedStep {
+                block: Arc::new(ir_block),
+                length,
+                form_id,
+                bytes: raw,
+                guards,
+            },
+        );
 
-        match outcome {
-            ExecutionOutcome::Continue { next_pc, .. } => {
-                process.write_pc(next_pc)?;
-                if process.trace.len() >= MAX_TRACE {
-                    process.trace.remove(0);
-                }
-                process.trace.push(pc);
-                Ok(StepOutcome::Stepped {
-                    pc,
-                    next_pc,
-                    length,
-                    form_id,
-                })
-            }
-            ExecutionOutcome::Fork { .. } => Err(RuntimeError::ForkInConcreteMode),
-            ExecutionOutcome::Terminated { .. } => {
-                process.terminated = true;
-                Ok(StepOutcome::Terminated { pc })
-            }
-            ExecutionOutcome::Trap { vector, .. } => {
-                process.terminated = true;
-                Ok(StepOutcome::Trap { pc, vector })
-            }
-        }
+        finish_step(process, pc, length, form_id, outcome)
     }
 
     /// Decodes `decoded` (at `pc`) through the semantic registry, seals the
@@ -2333,9 +2306,14 @@ pub enum LoopCond {
     Ne,
 }
 
-/// A pure single-block induction loop — the session can collapse its
-/// remaining iterations into one counter write when the trip count is
-/// concrete.
+/// A pure straight-line induction loop — the session can collapse its
+/// remaining iterations into one counter write, concretely (closed-form trip
+/// count) or symbolically (closed-form exit-counter expression over the
+/// counter/bound expressions, plus the exit-condition constraint).
+///
+/// The body may span several CFG blocks when they form an unconditional
+/// chain (jumps or adjacency) with no inner branches or merges; anything
+/// beyond that shape is not extracted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoopSummary {
     /// Loop header (and back-edge target).
@@ -2350,6 +2328,12 @@ pub struct LoopSummary {
     pub bound: Bound,
     /// Exit condition.
     pub cond: LoopCond,
+    /// Comparison flavor of the back-edge jcc: signed (jl/jle/jg/jge) or
+    /// unsigned (jb/jbe/ja/jae). Equality exits are width-only.
+    pub signed: bool,
+    /// Effective compare/update width in bits (32 or 64) — the loop's
+    /// arithmetic lives in a `width`-bit slice of the parent register.
+    pub width: u16,
 }
 
 fn is_jcc(form: u32) -> bool {
@@ -2428,6 +2412,258 @@ fn is_nop(form: u32) -> bool {
     form == f::NOP
 }
 
+/// Folds a fully-concrete expression with a much deeper budget than
+/// [`angryier_execution::constant_value`]: a stepped counter grows one Add
+/// node per loop iteration and outruns the shared folder's depth cap while
+/// staying trivially concrete. Covers the value-preserving ops a counter
+/// chain is built from; `None` on anything else or on a non-constant leaf.
+fn deep_constant_value(arena: &SymbolicArena, expression: ExprId) -> Option<u64> {
+    fn eval(arena: &SymbolicArena, expression: ExprId, depth: u32) -> Option<u64> {
+        if depth > 1024 {
+            return None;
+        }
+        let node = arena.get(expression)?;
+        // Arithmetic wraps at the node's own width.
+        let mask = match node.sort {
+            angryier_expr::ExprSort::BitVec(bits) if bits < 64 => (1u64 << bits) - 1,
+            _ => u64::MAX,
+        };
+        let operand = |index: usize| eval(arena, node.operands.get(index).copied()?, depth + 1);
+        match node.op {
+            ExprOp::Constant => {
+                let mut buffer = [0u8; 8];
+                let len = node.immediate.len().min(8);
+                buffer[..len].copy_from_slice(&node.immediate[..len]);
+                Some(u64::from_le_bytes(buffer))
+            }
+            ExprOp::Add => Some(operand(0)?.wrapping_add(operand(1)?) & mask),
+            ExprOp::Sub => Some(operand(0)?.wrapping_sub(operand(1)?) & mask),
+            ExprOp::Mul => Some(operand(0)?.wrapping_mul(operand(1)?) & mask),
+            ExprOp::And => Some(operand(0)? & operand(1)?),
+            ExprOp::Or => Some(operand(0)? | operand(1)?),
+            ExprOp::Xor => Some(operand(0)? ^ operand(1)?),
+            ExprOp::Not => Some(!operand(0)? & mask),
+            _ => None,
+        }
+    }
+    eval(arena, expression, 0)
+}
+
+/// Whether the back-edge jcc compares signed (jl/jle/jg/jge) rather than
+/// unsigned (jb/jbe/ja/jae).
+fn jcc_signed(form: u32) -> bool {
+    use angryier_semantics_intel64::forms as f;
+    matches!(form, f::JL_REL32 | f::JLE_REL32 | f::JG_REL32 | f::JGE_REL32)
+}
+
+/// Longest straight-line body chain we will scan for induction patterns.
+const MAX_LOOP_BODY_BLOCKS: usize = 8;
+/// Instruction budget for one loop body scan.
+const MAX_LOOP_BODY_INSNS: usize = 16;
+
+/// The straight-line block chain of a natural loop: header → … → latch,
+/// where every non-latch block has exactly one static successor (an
+/// unconditional jump or plain fall-through into the next body block) and
+/// the chain covers the whole body. Anything else — an inner branch (early
+/// exit, inner loop), a call, a merge from within the body — is not
+/// straight-line and returns `None`.
+fn straight_line_body(cfg: &angryier_cfg::Cfg, lp: &angryier_cfg::Loop) -> Option<Vec<Address>> {
+    use angryier_cfg::EdgeKind;
+    let body: BTreeSet<Address> = lp.body.iter().copied().collect();
+    if body.len() > MAX_LOOP_BODY_BLOCKS {
+        return None;
+    }
+    let latch = lp.back_edge.0;
+    let mut chain = vec![lp.header];
+    let mut current = lp.header;
+    while current != latch {
+        let block = cfg.blocks.get(&current)?;
+        let last = block.instructions.last()?.address;
+        let successors: Vec<&angryier_cfg::CfgEdge> = cfg
+            .edges
+            .iter()
+            .filter(|edge| edge.from == last && edge.to.is_some())
+            .collect();
+        // Exactly one static successor, reachable by an unconditional link
+        // or plain fall-through — a conditional inside the body is an inner
+        // branch (its two edges would both appear), and calls/returns/
+        // indirect edges are not straight-line.
+        if successors.len() != 1 {
+            return None;
+        }
+        let edge = successors.first()?;
+        if !matches!(edge.kind, EdgeKind::FallThrough | EdgeKind::Unconditional) {
+            return None;
+        }
+        let next = edge.to?;
+        if !body.contains(&next) {
+            return None;
+        }
+        chain.push(next);
+        current = next;
+    }
+    if chain.len() != body.len() {
+        return None;
+    }
+    Some(chain)
+}
+
+/// Extracts the induction pattern of a natural loop whose body is a
+/// straight-line block chain: the concatenated instructions (minus the
+/// chain-link jumps, which have no state effect) must be nothing but
+/// counter updates and a final `cmp counter, bound` feeding the back-edge
+/// jcc. `None` when the shape does not match — the loop keeps stepping.
+fn summarize_induction_loop(cfg: &angryier_cfg::Cfg, lp: &angryier_cfg::Loop) -> Option<LoopSummary> {
+    use angryier_arch::OperandKind;
+    use angryier_semantics_intel64::forms as f;
+    let chain = straight_line_body(cfg, lp)?;
+    // Concatenate the body instructions in execution order, dropping the
+    // unconditional jumps that chain blocks together.
+    let mut insns: Vec<angryier_arch::DecodedInstruction> = Vec::new();
+    for (i, &start) in chain.iter().enumerate() {
+        let block = cfg.blocks.get(&start)?;
+        let count = block.instructions.len();
+        for (j, insn) in block.instructions.iter().enumerate() {
+            let links_next = j + 1 == count && i + 1 < chain.len() && insn.form_id == f::JMP_REL32;
+            if !links_next {
+                insns.push(insn.clone());
+            }
+        }
+        if insns.len() > MAX_LOOP_BODY_INSNS {
+            return None;
+        }
+    }
+    if insns.len() < 2 {
+        return None;
+    }
+    // Last insn must be a conditional branch back to the header; its
+    // fall-through is the loop exit.
+    let term = insns.last()?.clone();
+    if !is_jcc(term.form_id) {
+        return None;
+    }
+    let back = term.operands.iter().find_map(|o| {
+        if let OperandKind::RelativeBranch(rb) = &o.kind {
+            Some(term.relative_target(*rb))
+        } else {
+            None
+        }
+    })?;
+    if back != lp.header {
+        return None;
+    }
+    let exit = term.address + u64::from(term.length);
+    // Scan the body: counter updates first, then the compare that feeds the
+    // back edge. The closed forms model update-then-test, so a compare seen
+    // before an update (test-then-increment shapes) is not summarized.
+    let mut counter: Option<u32> = None;
+    let mut bound = Bound::None;
+    let mut step: i64 = 0;
+    let mut width: u16 = 0;
+    let mut update_reg: Option<u32> = None;
+    let mut pure = true;
+    for insn in &insns[..insns.len() - 1] {
+        let reg_operand = insn.operands.iter().find_map(|o| {
+            if let OperandKind::Register(rv) = &o.kind {
+                Some((rv.parent.0, o.width_bits))
+            } else {
+                None
+            }
+        });
+        match insn.form_id {
+            form if is_cmp_reg(form) => {
+                let imm = insn.operands.iter().find_map(|o| {
+                    if let OperandKind::Immediate(i) = &o.kind {
+                        Some(i.value)
+                    } else {
+                        None
+                    }
+                });
+                let Some((reg, reg_width)) = reg_operand else {
+                    pure = false;
+                    continue;
+                };
+                if counter.is_some() {
+                    pure = false; // one compare only
+                    continue;
+                }
+                counter = Some(reg);
+                if width == 0 {
+                    width = reg_width;
+                } else if width != reg_width {
+                    pure = false;
+                }
+                bound = match imm {
+                    Some(v) => Bound::Imm(v),
+                    None => match insn.operands.get(1).map(|o| &o.kind) {
+                        Some(OperandKind::Register(rv)) => Bound::Reg(rv.parent.0),
+                        _ => Bound::None,
+                    },
+                };
+                if bound == Bound::Reg(reg) {
+                    pure = false; // `cmp counter, counter` carries no bound
+                }
+            }
+            form if is_counter_update(form) => {
+                // Register-register add/sub steps through a variable — not a
+                // concrete induction step.
+                if matches!(form, f::ADD_R64_R64 | f::SUB_R64_R64) {
+                    pure = false;
+                    continue;
+                }
+                if counter.is_some() {
+                    pure = false; // update after the compare: test-then-inc
+                    continue;
+                }
+                let imm = insn.operands.iter().find_map(|o| {
+                    if let OperandKind::Immediate(i) = &o.kind {
+                        Some(i.value as i64)
+                    } else {
+                        None
+                    }
+                });
+                let Some((reg, reg_width)) = reg_operand else {
+                    pure = false;
+                    continue;
+                };
+                if update_reg.is_some_and(|r| r != reg) {
+                    pure = false; // two different counters
+                    continue;
+                }
+                update_reg = Some(reg);
+                if width == 0 {
+                    width = reg_width;
+                } else if width != reg_width {
+                    pure = false;
+                }
+                step += match imm {
+                    Some(v) if is_sub_form(form) => -v,
+                    Some(v) => v,
+                    None if is_sub_form(form) => -1, // dec
+                    None => 1,                       // inc
+                };
+            }
+            form if is_nop(form) => {}
+            _ => pure = false,
+        }
+    }
+    let counter = counter?;
+    let cond = jcc_cond(term.form_id)?;
+    if !pure || step == 0 || update_reg != Some(counter) || !matches!(width, 32 | 64) {
+        return None;
+    }
+    Some(LoopSummary {
+        header: lp.header,
+        exit,
+        counter,
+        step,
+        bound,
+        cond,
+        signed: jcc_signed(term.form_id),
+        width,
+    })
+}
+
 fn read_concrete_bytes(process: &Process, address: Address, len: u64) -> Result<Vec<u8>, RuntimeError> {
     let len = usize::try_from(len).map_err(|_| RuntimeError::Memory("syscall buffer too large".into()))?;
     if len == 0 {
@@ -2457,11 +2693,20 @@ fn read_concrete_bytes(process: &Process, address: Address, len: u64) -> Result<
 /// read their live values; memory reads expose concrete/symbolic bytes.
 impl ConcolicImage for Process {
     fn read_register(&self, register: u32) -> Option<Vec<u8>> {
-        self.state.registers.read(register).ok()
+        match self.state.registers.read_value(register) {
+            // Concrete values copy out of the shared `Arc`; symbolic
+            // registers read as unknown, exactly like `RegisterState::read`.
+            Ok(RegisterValue::Concrete(bytes)) => Some(bytes.as_ref().to_vec()),
+            _ => None,
+        }
     }
 
     fn read_bytes(&self, address: u64, length: usize) -> Option<Vec<ByteValue>> {
         self.state.memory.read(address, length).ok()
+    }
+
+    fn read_bytes_into(&self, address: u64, out: &mut [ByteValue]) -> bool {
+        LayeredMemory::read_into(&self.state.memory, address, out).is_ok()
     }
 }
 
@@ -3004,6 +3249,41 @@ impl<'a, D: Decoder> ConcolicSession<'a, D> {
     }
 }
 
+/// Applies a block-execution outcome to the process — the shared tail of the
+/// cached and freshly lowered paths through [`Runtime::step_with`].
+fn finish_step(
+    process: &mut Process,
+    pc: Address,
+    length: u8,
+    form_id: u32,
+    outcome: ExecutionOutcome,
+) -> Result<StepOutcome, RuntimeError> {
+    match outcome {
+        ExecutionOutcome::Continue { next_pc, .. } => {
+            process.write_pc(next_pc)?;
+            if process.trace.len() >= MAX_TRACE {
+                process.trace.remove(0);
+            }
+            process.trace.push(pc);
+            Ok(StepOutcome::Stepped {
+                pc,
+                next_pc,
+                length,
+                form_id,
+            })
+        }
+        ExecutionOutcome::Fork { .. } => Err(RuntimeError::ForkInConcreteMode),
+        ExecutionOutcome::Terminated { .. } => {
+            process.terminated = true;
+            Ok(StepOutcome::Terminated { pc })
+        }
+        ExecutionOutcome::Trap { vector, .. } => {
+            process.terminated = true;
+            Ok(StepOutcome::Trap { pc, vector })
+        }
+    }
+}
+
 /// The next PC a stepped outcome jumped to, when it continued.
 fn stepped_next_pc(outcome: &StepOutcome) -> Option<u64> {
     match outcome {
@@ -3338,6 +3618,16 @@ pub struct SymbolicState {
     pub expr_concrete: BTreeMap<ExprId, u64>,
 }
 
+/// A summarized loop's operand (counter or bound) as resolved in one state:
+/// folded to a constant, or the symbolic expression behind it.
+#[derive(Clone, Copy, Debug)]
+enum LoopValue {
+    /// The register folds to this constant.
+    Concrete(u64),
+    /// The register holds this symbolic expression of `width` bits.
+    Symbolic(ExprId, u16),
+}
+
 /// What one symbolic step did to a state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolicStepOutcome {
@@ -3460,8 +3750,12 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         self
     }
 
-    /// Computes loop summaries for the loaded image and enables collapsing
-    /// — pure induction loops with concrete counters then run in O(1).
+    /// Computes loop summaries for the loaded image and enables collapsing:
+    /// pure induction loops (straight-line bodies, concrete counter update,
+    /// compare feeding the back edge) then run in O(1) — concretely through
+    /// the closed-form trip count, and with symbolic counters/bounds through
+    /// the closed-form exit-counter expression plus the exit-condition
+    /// constraint. Eq/Ne exits included; everything else keeps stepping.
     pub fn enable_loop_summaries(&mut self) {
         if let Some(state) = self.states.first() {
             self.loop_summaries = self
@@ -3473,70 +3767,449 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         }
     }
 
-    /// Collapses a summarized loop when the state's counter and bound are
-    /// concrete: computes the remaining trip count in closed form, writes
-    /// the exit counter value, and jumps to the exit address. Returns the
-    /// outcome on success, `None` when the state must execute normally
-    /// (symbolic counter/bound or an unhandled condition).
+    /// Collapses a summarized loop in one step. Concrete counter and bound
+    /// take the closed-form trip count; a symbolic counter and/or bound gets
+    /// a closed-form exit-counter expression (built over the machine's
+    /// wrapping bitvector semantics, merging the loop-more and exit-now
+    /// futures exactly the way stepping-then-merging would) plus the
+    /// exit-condition constraint, so downstream solving sees precisely the
+    /// summarized path. Returns `None` whenever the shape is not
+    /// expressible — the state then executes normally, because a wrong
+    /// summary is worse than no summary.
     fn try_loop_summary(&mut self, index: usize, summary: LoopSummary) -> Option<SymbolicStepOutcome> {
-        let state = &mut self.states[index];
-        // Counter: symbolic expr folds to a constant, else the concrete map.
-        let counter = state
-            .registers
-            .get(&summary.counter)
-            .and_then(|(e, _)| angryier_execution::constant_value(self.arena, *e).ok())
-            .or_else(|| state.concrete_registers.get(&summary.counter).copied())
-            .or_else(|| state.process.read_register(summary.counter).ok());
+        let counter = self.resolve_loop_value(index, summary.counter)?;
         let bound = match summary.bound {
-            Bound::Imm(v) => Some(v),
-            Bound::Reg(r) => state
-                .concrete_registers
-                .get(&r)
-                .copied()
-                .or_else(|| state.process.read_register(r).ok()),
-            Bound::None => None,
+            Bound::Imm(v) => LoopValue::Concrete(v),
+            Bound::Reg(r) => self.resolve_loop_value(index, r)?,
+            Bound::None => return None,
         };
-        let (counter, bound) = (counter?, bound?);
-        let step = summary.step;
-        // Remaining iterations until the exit condition holds after the
-        // update — closed forms for the four inequality directions.
-        let c = counter as i128;
-        let b = bound as i128;
-        let s = step as i128;
-        let n: i128 = match (summary.cond, s.signum()) {
-            // jl/jb back edge: loop while c < b; n = ceil((b-c)/s), s>0.
-            (LoopCond::Lt, 1) if c < b => (b - c + s - 1) / s,
-            (LoopCond::Le, 1) if c <= b => (b + 1 - c + s - 1) / s,
-            // jg/ja: loop while c > b; s<0 → n = ceil((c-b)/|s|).
-            (LoopCond::Gt, -1) if c > b => (c - b - s - 1) / (-s),
-            (LoopCond::Ge, -1) if c >= b => (c + 1 - b - s - 1) / (-s),
-            _ => return None, // Eq/Ne or mismatched sign — not summarized.
-        };
-        if n <= 0 || n > (1 << 40) {
-            return None;
+        match (counter, bound) {
+            (LoopValue::Concrete(c), LoopValue::Concrete(b)) => self.apply_concrete_loop_summary(index, &summary, c, b),
+            (counter, bound) => self.apply_symbolic_loop_summary(index, &summary, counter, bound),
         }
-        let final_counter = counter.wrapping_add((n as u64).wrapping_mul(step as u64));
-        // Write the exit counter into symbolic + concrete + process regs.
-        let width = state
-            .registers
-            .get(&summary.counter)
-            .map(|(_, ty)| match ty {
+    }
+
+    /// Resolves `register` in state `index` for summarization: the symbolic
+    /// binding when one exists (folding it when it is constant), else the
+    /// concrete shadow. `None` when nothing is known.
+    fn resolve_loop_value(&self, index: usize, register: u32) -> Option<LoopValue> {
+        let state = self.states.get(index)?;
+        if let Some((expr, ty)) = state.registers.get(&register) {
+            let width = match ty {
                 angryier_ir::IrType::Bits(w) => *w,
                 _ => 64,
-            })
-            .unwrap_or(64);
-        if let Ok(expr) = self.arena.intern(angryier_expr::ExprNode {
-            sort: angryier_expr::ExprSort::BitVec(width),
-            op: angryier_expr::ExprOp::Constant,
-            operands: Vec::new(),
-            immediate: final_counter.to_le_bytes().to_vec(),
-        }) {
-            state
-                .registers
-                .insert(summary.counter, (expr, angryier_ir::IrType::Bits(width)));
+            };
+            if let Ok(value) = angryier_execution::constant_value(self.arena, *expr) {
+                return Some(LoopValue::Concrete(value));
+            }
+            // A counter the state has stepped grows one Add node per loop
+            // iteration, outgrowing the shared folder's depth cap — but a
+            // symbol-free expression still has a definite value. Fold deeper
+            // before calling it symbolic: misclassifying a constant would
+            // let the Ne divisibility constraint prune the real future (a
+            // wrong summary), so unfoldable symbol-free values get no
+            // summary at all.
+            let symbolic = self
+                .arena
+                .dependency_summary(*expr)
+                .map(|summary| !summary.symbolic_sources.is_empty())
+                .unwrap_or(true);
+            if !symbolic {
+                return deep_constant_value(self.arena, *expr).map(LoopValue::Concrete);
+            }
+            return Some(LoopValue::Symbolic(*expr, width));
         }
-        state.concrete_registers.insert(summary.counter, final_counter);
-        let _ = state.process.write_register(summary.counter, final_counter);
+        let value = state
+            .concrete_registers
+            .get(&register)
+            .copied()
+            .or_else(|| state.process.read_register(register).ok())?;
+        Some(LoopValue::Concrete(value))
+    }
+
+    /// Concrete trip count: computes the remaining iterations in closed
+    /// form — flavor- and width-exact over the compare's domain — and
+    /// writes the exit counter. `None` (fall through to stepping) whenever
+    /// the arithmetic could wrap out of that domain, the distance is not
+    /// reachable (Ne exits), or the trip count is absurd.
+    fn apply_concrete_loop_summary(
+        &mut self,
+        index: usize,
+        summary: &LoopSummary,
+        counter: u64,
+        bound: u64,
+    ) -> Option<SymbolicStepOutcome> {
+        let width = u32::from(summary.width.min(64));
+        let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+        let c = counter & mask;
+        let b = bound & mask;
+        let s = i128::from(summary.step); // nonzero by construction
+        // Interpret at the compare's width: signed comparisons sign-extend
+        // from `width` bits, unsigned use the plain pattern.
+        let extend = |v: u64| -> i128 {
+            if !summary.signed || width >= 64 {
+                i128::from(v)
+            } else if (v >> (width - 1)) & 1 == 1 {
+                i128::from(v) - (1i128 << width)
+            } else {
+                i128::from(v)
+            }
+        };
+        let sc = extend(c);
+        let sb = extend(b);
+        // Inclusive domain bounds in extended units.
+        let (bottom, top): (i128, i128) = if summary.signed {
+            (-(1i128 << (width - 1)), (1i128 << (width - 1)) - 1)
+        } else {
+            (0, (1i128 << width) - 1)
+        };
+        let trip_limit = 1i128 << 40;
+        // Inequality exits: only the natural direction (count-up for Lt/Le,
+        // count-down for Gt/Ge) has a finite closed form.
+        let natural = matches!(
+            (summary.cond, s > 0),
+            (LoopCond::Lt, true) | (LoopCond::Le, true) | (LoopCond::Gt, false) | (LoopCond::Ge, false)
+        );
+        let (n, final_counter): (i128, u64) = match summary.cond {
+            LoopCond::Lt | LoopCond::Le | LoopCond::Gt | LoopCond::Ge if natural => {
+                // Does the first body execution (counter + step) already
+                // satisfy the exit test? Otherwise iterate until it does.
+                let first = sc + s;
+                let exit_now = match summary.cond {
+                    LoopCond::Lt => first >= sb,
+                    LoopCond::Le => first > sb,
+                    LoopCond::Gt => first <= sb,
+                    LoopCond::Ge => first < sb,
+                    _ => return None,
+                };
+                let (iterations, exit_ext) = if exit_now {
+                    (1, sc + s)
+                } else {
+                    let distance = match summary.cond {
+                        // steps until the counter is past (or at) the bound
+                        LoopCond::Lt => sb - sc,
+                        LoopCond::Le => sb + 1 - sc,
+                        LoopCond::Gt => sc - sb,
+                        LoopCond::Ge => sc + 1 - sb,
+                        _ => return None,
+                    };
+                    let magnitude = s.abs();
+                    let steps = (distance + magnitude - 1) / magnitude;
+                    (steps, sc + steps * s)
+                };
+                if !(1..=trip_limit).contains(&iterations) {
+                    return None;
+                }
+                // The whole walk must stay inside the compare's domain — an
+                // exit value (or any intermediate one) that wraps out of it
+                // means the closed form no longer matches the machine, so
+                // keep stepping.
+                if !(bottom..=top).contains(&exit_ext) {
+                    return None;
+                }
+                (iterations, (exit_ext as u64) & mask)
+            }
+            // je back edge: exit when the counter differs from the bound.
+            // The body always runs once; if that value lands exactly on the
+            // bound the back edge is taken exactly once more. Wrapping here
+            // is the machine's own semantics — no domain check.
+            LoopCond::Eq => {
+                let step = summary.step as u64;
+                let e1 = c.wrapping_add(step) & mask;
+                if e1 == b {
+                    (2, b.wrapping_add(step) & mask)
+                } else {
+                    (1, e1)
+                }
+            }
+            // jne back edge: exit when the counter reaches the bound — the
+            // step must divide the distance cleanly, otherwise the bound is
+            // unreachable and the loop keeps stepping.
+            LoopCond::Ne => {
+                let distance = b.wrapping_sub(c);
+                let magnitude = summary.step.unsigned_abs();
+                if distance == 0 || !distance.is_multiple_of(magnitude) {
+                    return None;
+                }
+                (i128::from(distance / magnitude), b)
+            }
+            _ => return None,
+        };
+        if !(1..=trip_limit).contains(&n) {
+            return None;
+        }
+        self.write_summary_result(index, summary, final_counter, None)
+    }
+
+    /// Symbolic trip count: counter and/or bound are expressions, the step a
+    /// concrete nonzero constant. The exit counter is built as a closed-form
+    /// expression over the machine's wrapping bitvector semantics — an `ite`
+    /// that merges the loop-more and exit-now futures (the merge stepping
+    /// would produce), with corner arms covering the wraparound entries —
+    /// and the exit-condition constraint is appended so downstream solving
+    /// sees exactly the summarized path. `None` keeps the state stepping.
+    #[allow(clippy::too_many_lines)]
+    fn apply_symbolic_loop_summary(
+        &mut self,
+        index: usize,
+        summary: &LoopSummary,
+        counter: LoopValue,
+        bound: LoopValue,
+    ) -> Option<SymbolicStepOutcome> {
+        let w = summary.width.min(64);
+        let s = summary.step;
+        let signed = summary.signed;
+        let inequality = matches!(summary.cond, LoopCond::Lt | LoopCond::Le | LoopCond::Gt | LoopCond::Ge);
+        // Inequality summaries need a unit step (clean closed forms) in the
+        // natural direction; anything else keeps stepping.
+        if inequality
+            && !matches!(
+                (summary.cond, s),
+                (LoopCond::Lt, 1) | (LoopCond::Le, 1) | (LoopCond::Gt, -1) | (LoopCond::Ge, -1)
+            )
+        {
+            return None;
+        }
+        let bits = usize::from(w);
+        let mask: u64 = if w >= 64 { u64::MAX } else { (1u64 << w) - 1 };
+        // Domain corners as bit patterns: where a +1/-1 wraps.
+        let (bottom, top): (u64, u64) = if signed {
+            (1u64 << (w - 1), (1u64 << (w - 1)) - 1)
+        } else {
+            (0, mask)
+        };
+
+        let arena = self.arena;
+        let bv = angryier_expr::ExprSort::BitVec(w);
+        let boolean = angryier_expr::ExprSort::Bool;
+        let konst = |value: u64| -> Option<ExprId> {
+            let mut pattern = (value & mask).to_le_bytes().to_vec();
+            pattern.truncate(bits.div_ceil(8));
+            arena
+                .intern(angryier_expr::ExprNode {
+                    sort: bv,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: pattern,
+                })
+                .ok()
+        };
+        let node = |op: ExprOp, operands: Vec<ExprId>, sort: angryier_expr::ExprSort| -> Option<ExprId> {
+            arena
+                .intern(angryier_expr::ExprNode {
+                    sort,
+                    op,
+                    operands,
+                    immediate: Vec::new(),
+                })
+                .ok()
+        };
+        // Coerce one side to the loop's compare width (sign-extend for
+        // signed flavors so the wider compare matches the architectural
+        // one), constants truncate to the width-bit slice.
+        let coerce = |value: LoopValue| -> Option<ExprId> {
+            match value {
+                LoopValue::Concrete(v) => konst(v),
+                LoopValue::Symbolic(expr, expr_width) => {
+                    if expr_width == w {
+                        Some(expr)
+                    } else if expr_width < w {
+                        let op = if signed { ExprOp::SExt } else { ExprOp::ZExt };
+                        node(op, vec![expr], bv)
+                    } else {
+                        let mut immediate = Vec::with_capacity(4);
+                        immediate.extend_from_slice(&0u16.to_le_bytes());
+                        immediate.extend_from_slice(&w.to_le_bytes());
+                        arena
+                            .intern(angryier_expr::ExprNode {
+                                sort: bv,
+                                op: ExprOp::Extract,
+                                operands: vec![expr],
+                                immediate,
+                            })
+                            .ok()
+                    }
+                }
+            }
+        };
+        let c = coerce(counter)?;
+        let b = coerce(bound)?;
+        let step_const = konst(s as u64)?;
+        let add_step = |x: ExprId| node(ExprOp::Add, vec![x, step_const], bv);
+        let eq = |x: ExprId, y: ExprId| node(ExprOp::Eq, vec![x, y], boolean);
+        let lt = |x: ExprId, y: ExprId| node(if signed { ExprOp::Slt } else { ExprOp::Ult }, vec![x, y], boolean);
+        let le = |x: ExprId, y: ExprId| node(if signed { ExprOp::Sle } else { ExprOp::Ule }, vec![x, y], boolean);
+        let ite = |guard: ExprId, then: ExprId, else_: ExprId| node(ExprOp::Ite, vec![guard, then, else_], bv);
+        let bool_konst = |value: bool| -> Option<ExprId> {
+            arena
+                .intern(angryier_expr::ExprNode {
+                    sort: boolean,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: vec![u8::from(value)],
+                })
+                .ok()
+        };
+        // Boolean disjunction/conjunction encoded through Ite: the native
+        // FFI bridge only maps And/Or onto bitvector ops, while Ite is
+        // sort-generic there — `a || b` as `ite(a, true, b)`, `a && b` as
+        // `ite(a, b, false)`.
+        let or = |x: ExprId, y: ExprId| -> Option<ExprId> { node(ExprOp::Ite, vec![x, bool_konst(true)?, y], boolean) };
+        let and =
+            |x: ExprId, y: ExprId| -> Option<ExprId> { node(ExprOp::Ite, vec![x, y, bool_konst(false)?], boolean) };
+        let not = |x: ExprId| node(ExprOp::Not, vec![x], boolean);
+        // Can this side's value be the wrap corner? Concrete values compare
+        // directly; a symbolic one might be anything.
+        let hits = |value: LoopValue, corner: u64| match value {
+            LoopValue::Concrete(v) => (v & mask) == corner,
+            LoopValue::Symbolic(..) => true,
+        };
+
+        let e_expr: ExprId;
+        let mut constraints: Vec<ExprId> = Vec::new();
+        match summary.cond {
+            // Exit when counter >= bound: count up to the bound, or fall
+            // out after one body when already past it. A counter at the top
+            // wraps to the bottom and climbs back to the bound — unless the
+            // bound is the bottom itself, where it exits immediately.
+            LoopCond::Lt => {
+                let mut guard = lt(c, b)?;
+                if hits(counter, top) {
+                    let corner = and(eq(c, konst(top)?)?, not(eq(b, konst(bottom)?)?)?)?;
+                    guard = or(guard, corner)?;
+                }
+                e_expr = ite(guard, b, add_step(c)?)?;
+                constraints.push(le(b, e_expr)?);
+            }
+            // Exit when counter > bound: count up past the bound.
+            LoopCond::Le => {
+                // A bound at the top never satisfies e > b — that future
+                // never terminates, so it is constrained away.
+                if hits(bound, top) {
+                    match bound {
+                        LoopValue::Concrete(_) => return None,
+                        LoopValue::Symbolic(..) => constraints.push(not(eq(b, konst(top)?)?)?),
+                    }
+                }
+                let mut guard = le(c, b)?;
+                if hits(counter, top) {
+                    guard = or(guard, eq(c, konst(top)?)?)?;
+                }
+                e_expr = ite(guard, add_step(b)?, add_step(c)?)?;
+                constraints.push(lt(b, e_expr)?);
+            }
+            // Exit when counter <= bound: count down to the bound. A
+            // counter at the bottom wraps to the top and descends back —
+            // unless the bound is the top itself.
+            LoopCond::Gt => {
+                let mut immediate = add_step(c)?;
+                if hits(counter, bottom) {
+                    // Wrapped top: exits at the bound (or stays at the top
+                    // when the bound is the top, which is the unwrapped
+                    // value anyway).
+                    let corner = ite(eq(b, konst(top)?)?, immediate, b)?;
+                    immediate = ite(eq(c, konst(bottom)?)?, corner, immediate)?;
+                }
+                e_expr = ite(lt(b, c)?, b, immediate)?;
+                constraints.push(le(e_expr, b)?);
+            }
+            // Exit when counter < bound: count down past the bound.
+            LoopCond::Ge => {
+                // A bound at the bottom never satisfies e < b — that future
+                // never terminates, so it is constrained away.
+                if hits(bound, bottom) {
+                    match bound {
+                        LoopValue::Concrete(_) => return None,
+                        LoopValue::Symbolic(..) => constraints.push(not(eq(b, konst(bottom)?)?)?),
+                    }
+                }
+                let mut guard = le(b, c)?;
+                if hits(counter, bottom) {
+                    guard = or(guard, eq(c, konst(bottom)?)?)?;
+                }
+                e_expr = ite(guard, add_step(b)?, add_step(c)?)?;
+                constraints.push(lt(e_expr, b)?);
+            }
+            // je back edge — exit when the counter differs from the bound:
+            // one body unless the first value lands exactly on the bound,
+            // in which case exactly two. Wrapping here is the machine's own
+            // semantics, so the formula is exact for any step size.
+            LoopCond::Eq => {
+                let first = add_step(c)?;
+                e_expr = ite(eq(first, b)?, add_step(b)?, first)?;
+                constraints.push(not(eq(e_expr, b)?)?);
+            }
+            // jne back edge — exit when the counter reaches the bound: the
+            // exit counter IS the bound. Reaching it at all requires the
+            // step to divide the distance cleanly; the divisibility
+            // constraint carries that (a unit step always divides).
+            LoopCond::Ne => {
+                e_expr = b;
+                if s != 1 && s != -1 {
+                    let magnitude = s.unsigned_abs();
+                    let distance = node(ExprOp::Sub, vec![b, c], bv)?;
+                    let quotient = node(ExprOp::UDiv, vec![distance, konst(magnitude)?], bv)?;
+                    let scaled = node(ExprOp::Mul, vec![quotient, konst(magnitude)?], bv)?;
+                    let remainder = node(ExprOp::Sub, vec![distance, scaled], bv)?;
+                    constraints.push(eq(remainder, konst(0)?)?);
+                }
+            }
+        }
+        self.write_summary_result(index, summary, 0, Some((e_expr, w, constraints)))
+    }
+
+    /// Commits a summarization: writes the exit counter (a constant, or the
+    /// symbolic exit expression plus its constraints) and moves the state
+    /// to the loop exit.
+    fn write_summary_result(
+        &mut self,
+        index: usize,
+        summary: &LoopSummary,
+        final_counter: u64,
+        symbolic: Option<(ExprId, u16, Vec<ExprId>)>,
+    ) -> Option<SymbolicStepOutcome> {
+        let width = summary.width.min(64);
+        let bits = usize::from(width);
+        let symbolic_fold = symbolic.is_some();
+        let (expr, constraints) = match symbolic {
+            Some((e_expr, _, constraints)) => (e_expr, constraints),
+            None => {
+                // Exactly `width/8` bytes of the width-masked value.
+                let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+                let mut pattern = (final_counter & mask).to_le_bytes().to_vec();
+                pattern.truncate(bits.div_ceil(8));
+                let expr = self
+                    .arena
+                    .intern(angryier_expr::ExprNode {
+                        sort: angryier_expr::ExprSort::BitVec(width),
+                        op: ExprOp::Constant,
+                        operands: Vec::new(),
+                        immediate: pattern,
+                    })
+                    .ok()?;
+                (expr, Vec::new())
+            }
+        };
+        // The concrete shadow only takes a value when the expression folds
+        // (it always does on the concrete path); a symbolic exit value
+        // shadows the stale concrete register exactly like a normal
+        // symbolic register write would.
+        let folded = if symbolic_fold {
+            angryier_execution::constant_value(self.arena, expr).ok()
+        } else {
+            Some(final_counter)
+        };
+        let state = &mut self.states[index];
+        state
+            .registers
+            .insert(summary.counter, (expr, angryier_ir::IrType::Bits(width)));
+        if let Some(value) = folded {
+            state.concrete_registers.insert(summary.counter, value);
+            let _ = state.process.write_register(summary.counter, value);
+        }
+        for constraint in constraints {
+            state.constraints.push(constraint);
+        }
         let _ = state.process.write_pc(summary.exit);
         Some(SymbolicStepOutcome::Stepped { next_pc: summary.exit })
     }
@@ -3678,8 +4351,10 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         }
 
         // Decode at pc from the state's concrete memory, bounded to the
-        // containing region so tail instructions don't overrun.
-        let raw = {
+        // containing region so tail instructions don't overrun. Both the
+        // `ByteValue` read and the concrete-byte view live in stack buffers.
+        let mut raw = [0u8; MAX_INSN_LEN];
+        let raw_len = {
             let available = state
                 .process
                 .state
@@ -3689,28 +4364,31 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 .find(|region| pc >= region.base && pc < region.base.saturating_add(region.size))
                 .map_or(MAX_INSN_LEN, |region| {
                     usize::try_from(region.base.saturating_add(region.size).saturating_sub(pc)).unwrap_or(MAX_INSN_LEN)
-                });
-            let bytes = state
+                })
+                .min(MAX_INSN_LEN);
+            let mut buffer = [ByteValue::Concrete(0); MAX_INSN_LEN];
+            state
                 .process
                 .state
                 .memory
-                .read(pc, available.min(MAX_INSN_LEN))
+                .read_into(pc, &mut buffer[..available])
                 .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
-            bytes
-                .iter()
-                .map(|b| match b {
-                    ByteValue::Concrete(v) => *v,
+            for (slot, byte) in raw.iter_mut().zip(buffer[..available].iter()) {
+                *slot = match byte {
+                    ByteValue::Concrete(value) => *value,
                     ByteValue::Symbolic(_) => 0,
-                })
-                .collect::<Vec<u8>>()
+                };
+            }
+            available
         };
-        if raw.is_empty() {
+        if raw_len == 0 {
             return Err(RuntimeError::Decode("no bytes at PC".into()));
         }
+        let raw = &raw[..raw_len];
         let decoded = self
             .runtime
             .decoder
-            .decode(pc, &raw)
+            .decode(pc, raw)
             .map_err(|e| RuntimeError::Decode(format!("{e:?}")))?;
 
         // REP string ops: the concrete engine intercepts them before the
@@ -4820,5 +5498,323 @@ where
             reports.push(report);
         }
         Ok(reports)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replay capsules (roadmap item 9, Gate 0 remainder): record a concrete
+// native run into a fail-closed replay capsule, and re-execute it later from
+// the capsule's recorded inputs.
+// ---------------------------------------------------------------------------
+
+/// Opt-in replay-capsule recording and fail-closed replay for recorded
+/// native runs.
+///
+/// Recording is an explicit, caller-owned [`ReplayRecorder`] — the runtime's
+/// hot path carries no always-on instrumentation. A recorded capsule carries
+/// the identity frame (image hash, semantic version, target profile,
+/// environment-model key, code-page guards) plus the run payload (input
+/// registers/stdin and the expected exit-code/`write`-output checkpoints).
+/// Replaying validates the capsule against the host BEFORE any re-execution
+/// — a mismatched image hash or version rejects fail-closed — then
+/// re-executes deterministically through the normal `Runtime` path from the
+/// capsule's recorded inputs (the `angryier_replay` engine validates and
+/// logs capsules but does not drive concrete execution; this module IS the
+/// deterministic replay) and asserts the outcome checkpoints.
+pub mod replay {
+    use super::{Runtime, RuntimeError};
+    use angryier_arch::Decoder;
+    use angryier_loader::{Elf64Loader, ImageLoader, LoadedImage};
+    use angryier_replay::{
+        BasicReplayValidator, ExpectedCheckpoints, FileReplayStore, RecordedInputs, ReplayCapsule, ReplayError,
+        ReplayValidator, capsule_domain_id, image_hash,
+    };
+    use angryier_types::{
+        AnalysisContext, CodePageId, CodePageVersion, CodeVersionGuard, ContentId, DependencyKey, FidelityProfile,
+        ReplayCapsuleId, ReplaySchemaVersion, RetentionProfile, RunId, SecurityContext,
+    };
+    use std::collections::BTreeMap;
+
+    /// Capsule schema produced by this runtime's recorder.
+    pub const CAPSULE_SCHEMA: ReplaySchemaVersion = ReplaySchemaVersion(2);
+    /// Identity of the environment model whose observable effects the
+    /// checkpoints capture (the modeled Linux x86-64 syscall layer).
+    const ENVIRONMENT_DESCRIPTOR: &[u8] = b"angryier:environment:linux-x86_64-syscall-model:1";
+    /// Deterministic-mode scheduler seed used unless overridden.
+    const DEFAULT_SCHEDULER_SEED: u64 = 0x5EED_0000_0000_0001;
+    const PAGE_SIZE: u64 = 4096;
+
+    /// Failures of capsule recording, validation, or replay.
+    #[derive(Debug)]
+    pub enum ReplayRuntimeError {
+        /// Capsule validation or checkpoint comparison failed.
+        Replay(ReplayError),
+        /// Loading or re-execution through the runtime failed.
+        Runtime(RuntimeError),
+    }
+
+    impl std::fmt::Display for ReplayRuntimeError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Replay(e) => write!(formatter, "replay capsule rejected: {e}"),
+                Self::Runtime(e) => write!(formatter, "replay execution failed: {e}"),
+            }
+        }
+    }
+
+    impl std::error::Error for ReplayRuntimeError {}
+
+    impl From<ReplayError> for ReplayRuntimeError {
+        fn from(error: ReplayError) -> Self {
+            Self::Replay(error)
+        }
+    }
+
+    impl From<RuntimeError> for ReplayRuntimeError {
+        fn from(error: RuntimeError) -> Self {
+            Self::Runtime(error)
+        }
+    }
+
+    /// A recorded concrete run: the published capsule plus the observed
+    /// outcome it captured.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct RecordedRun {
+        pub capsule: ReplayCapsule,
+        pub exit_code: u64,
+        pub write_output: Vec<u8>,
+        pub steps: u64,
+    }
+
+    /// The outcome of a validated, checkpoint-matched replay.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ReplayOutcome {
+        pub capsule_id: ReplayCapsuleId,
+        pub exit_code: u64,
+        pub write_output: Vec<u8>,
+        pub steps: u64,
+    }
+
+    /// Environment-model identity recorded in capsules: a domain-separated
+    /// content id of the environment descriptor, so record and replay hosts
+    /// agree byte-for-byte.
+    fn environment_key() -> DependencyKey {
+        DependencyKey(capsule_domain_id(ENVIRONMENT_DESCRIPTOR).0)
+    }
+
+    /// Deterministic capsule id derived from the image identity, the
+    /// recorded inputs, and the scheduler seed: the same recorded session
+    /// always yields the same id.
+    fn derive_capsule_id(image: ContentId, inputs: &RecordedInputs, scheduler_seed: u64) -> ReplayCapsuleId {
+        let mut canonical = Vec::new();
+        canonical.extend_from_slice(&image.0);
+        canonical.extend_from_slice(&(inputs.registers.len() as u64).to_le_bytes());
+        for (register, value) in &inputs.registers {
+            canonical.extend_from_slice(&register.to_le_bytes());
+            canonical.extend_from_slice(&value.to_le_bytes());
+        }
+        canonical.extend_from_slice(&(inputs.stdin.len() as u64).to_le_bytes());
+        canonical.extend_from_slice(&inputs.stdin);
+        canonical.extend_from_slice(&scheduler_seed.to_le_bytes());
+        let derived = u64::from_le_bytes(capsule_domain_id(&canonical).0[..8].try_into().unwrap_or([0; 8]));
+        ReplayCapsuleId(if derived == 0 { 1 } else { derived })
+    }
+
+    /// Code-version guards covering the image's executable pages at load
+    /// time (pages start at version 0: the runtime's page-version machinery
+    /// has not mutated them).
+    fn code_version_guards(image: &LoadedImage) -> Vec<CodeVersionGuard> {
+        let mut pages: BTreeMap<u64, CodePageVersion> = BTreeMap::new();
+        for segment in &image.segments {
+            if !segment.executable {
+                continue;
+            }
+            let start = segment.address / PAGE_SIZE;
+            let end = segment.address.saturating_add(segment.bytes.len() as u64) / PAGE_SIZE;
+            for page in start..=end {
+                pages.entry(page).or_insert(CodePageVersion(0));
+            }
+        }
+        pages
+            .into_iter()
+            .map(|(page, version)| CodeVersionGuard {
+                page: CodePageId(page),
+                version,
+            })
+            .collect()
+    }
+
+    fn host_validator<D: Decoder>(runtime: &Runtime<D>, host_image_hash: ContentId) -> BasicReplayValidator {
+        let mut validator =
+            BasicReplayValidator::for_replay_host(CAPSULE_SCHEMA, runtime.target_profile, host_image_hash);
+        validator.admit(runtime.semantic_version);
+        validator
+    }
+
+    /// Opt-in recorder for replay capsules. Carries only the deterministic
+    /// scheduler seed; identity fields are captured from the runtime and
+    /// image at record time. Costs nothing unless explicitly constructed.
+    #[derive(Clone, Debug)]
+    pub struct ReplayRecorder {
+        scheduler_seed: u64,
+    }
+
+    impl ReplayRecorder {
+        pub fn new() -> Self {
+            Self {
+                scheduler_seed: DEFAULT_SCHEDULER_SEED,
+            }
+        }
+
+        /// A recorder with an explicit deterministic scheduler seed.
+        pub fn with_scheduler_seed(scheduler_seed: u64) -> Self {
+            Self { scheduler_seed }
+        }
+
+        pub fn scheduler_seed(&self) -> u64 {
+            self.scheduler_seed
+        }
+
+        /// Runs `image_bytes` concretely through the runtime with the given
+        /// input registers (applied after load, last write wins) and stdin,
+        /// capturing a self-validated replay capsule plus the observed
+        /// outcome. Fails when the run does not terminate via the modeled
+        /// `exit` syscall: a capsule without an exit-code checkpoint is
+        /// never emitted.
+        pub fn record<D: Decoder>(
+            &self,
+            runtime: &Runtime<D>,
+            image_bytes: &[u8],
+            registers: &[(u32, u64)],
+            stdin: &[u8],
+            max_steps: u64,
+        ) -> Result<RecordedRun, ReplayRuntimeError> {
+            let loader = Elf64Loader::new();
+            let image = loader
+                .load(image_bytes)
+                .map_err(|e| ReplayRuntimeError::Runtime(RuntimeError::Loader(e)))?;
+            let image_hash = image_hash(image_bytes);
+            let mut process = runtime.load_image(image.clone())?;
+
+            let inputs = RecordedInputs {
+                registers: BTreeMap::from_iter(registers.iter().copied()).into_iter().collect(),
+                stdin: stdin.to_vec(),
+            };
+            for (register, value) in &inputs.registers {
+                process.write_register(*register, *value)?;
+            }
+            process.stdin = inputs.stdin.clone();
+            runtime.run(&mut process, max_steps)?;
+
+            let Some(exit_code) = process.syscalls.exit_code() else {
+                return Err(ReplayRuntimeError::Replay(ReplayError::CapsuleIncomplete));
+            };
+            let write_output = process.syscalls.output();
+            let capsule = ReplayCapsule {
+                id: derive_capsule_id(image_hash, &inputs, self.scheduler_seed),
+                schema: CAPSULE_SCHEMA,
+                context: AnalysisContext {
+                    run_id: RunId(0),
+                    target_profile: runtime.target_profile,
+                    fidelity: FidelityProfile::Prove,
+                    retention: RetentionProfile::Forensic,
+                    security: SecurityContext {
+                        classification: 0,
+                        compartment: 0,
+                    },
+                },
+                initial_state: process.state.id,
+                semantic_version: runtime.semantic_version,
+                semantic_content: ContentId::default(),
+                code_versions: code_version_guards(&image),
+                environment_key: environment_key(),
+                scheduler_seed: self.scheduler_seed,
+                image_hash,
+                inputs,
+                expected: ExpectedCheckpoints {
+                    exit_code: Some(exit_code),
+                    write_output: write_output.clone(),
+                },
+            };
+            // A recorder must never emit an invalid capsule.
+            host_validator(runtime, image_hash)
+                .validate(&capsule)
+                .map_err(ReplayRuntimeError::Replay)?;
+            Ok(RecordedRun {
+                capsule,
+                exit_code,
+                write_output,
+                steps: process.step_count,
+            })
+        }
+
+        /// Loads a capsule from a durable [`FileReplayStore`], validates it
+        /// against `runtime` and `image_bytes`, re-executes it
+        /// deterministically, and asserts the outcome checkpoints.
+        pub fn replay<D: Decoder>(
+            &self,
+            runtime: &Runtime<D>,
+            store: &FileReplayStore,
+            capsule_id: ReplayCapsuleId,
+            image_bytes: &[u8],
+            max_steps: u64,
+        ) -> Result<ReplayOutcome, ReplayRuntimeError> {
+            let capsule = store.retrieve(capsule_id).map_err(ReplayRuntimeError::Replay)?;
+            runtime.replay_capsule(image_bytes, &capsule, max_steps)
+        }
+    }
+
+    impl Default for ReplayRecorder {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl<D: Decoder> Runtime<D> {
+        /// Fail-closed capsule replay.
+        ///
+        /// Identity and version checks (schema, image hash vs `image_bytes`,
+        /// semantic version, target profile, environment key, guards) run
+        /// BEFORE any re-execution: a mismatch rejects with an explicit
+        /// [`ReplayError`] and the engine never starts. Validated capsules
+        /// are re-executed deterministically through the normal `Runtime`
+        /// path from the capsule's recorded inputs; the exit code and
+        /// captured `write` output must match the capsule's checkpoints or
+        /// the replay fails with [`ReplayError::CheckpointMismatch`].
+        pub fn replay_capsule(
+            &self,
+            image_bytes: &[u8],
+            capsule: &ReplayCapsule,
+            max_steps: u64,
+        ) -> Result<ReplayOutcome, ReplayRuntimeError> {
+            host_validator(self, image_hash(image_bytes))
+                .validate(capsule)
+                .map_err(ReplayRuntimeError::Replay)?;
+
+            let mut process = self.load_elf(image_bytes)?;
+            for (register, value) in &capsule.inputs.registers {
+                process.write_register(*register, *value)?;
+            }
+            process.stdin = capsule.inputs.stdin.clone();
+            self.run(&mut process, max_steps)?;
+
+            let Some(exit_code) = process.syscalls.exit_code() else {
+                return Err(ReplayRuntimeError::Replay(ReplayError::CapsuleIncomplete));
+            };
+            let write_output = process.syscalls.output();
+            let expected_exit = capsule
+                .expected
+                .exit_code
+                .ok_or(ReplayRuntimeError::Replay(ReplayError::CapsuleIncomplete))?;
+            if exit_code != expected_exit || write_output != capsule.expected.write_output {
+                return Err(ReplayRuntimeError::Replay(ReplayError::CheckpointMismatch));
+            }
+            Ok(ReplayOutcome {
+                capsule_id: capsule.id,
+                exit_code,
+                write_output,
+                steps: process.step_count,
+            })
+        }
     }
 }

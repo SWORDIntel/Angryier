@@ -95,15 +95,25 @@ where
 {
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Verified-content memo cap: entries are tiny and bounded by the number of
+/// distinct lowered blocks, but a runaway loop minting fresh block ids still
+/// gets a hard ceiling.
+const VERIFIED_CAP: usize = 1 << 20;
+
 pub struct ConcreteInterpreter<R, M> {
     marker: core::marker::PhantomData<fn() -> (R, M)>,
+    /// Content ids this interpreter has already verified. Verification is a
+    /// pure function of block content, and stepping re-executes the same
+    /// blocks over and over — the memo keeps the invariant check off the
+    /// per-step path without weakening it for new content.
+    verified: std::sync::Mutex<std::collections::HashMap<angryier_types::ContentId, ()>>,
 }
 
 impl<R, M> ConcreteInterpreter<R, M> {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             marker: core::marker::PhantomData,
+            verified: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -166,9 +176,27 @@ where
         if mode != ExecutionMode::Concrete {
             return Err(ConcreteExecutionError::UnsupportedMode(mode));
         }
-        BasicIrVerifier
-            .verify(block)
-            .map_err(ConcreteExecutionError::InvalidIr)?;
+        // Verify only content not verified before: the check is pure in the
+        // block's content, so re-executions of the same content (the common
+        // case once the runtime's step cache kicks in) skip it. A poisoned
+        // lock falls back to re-verifying rather than failing the step.
+        let content = block.key.semantic_content;
+        let already_verified = self
+            .verified
+            .lock()
+            .map(|verified| verified.contains_key(&content))
+            .unwrap_or(false);
+        if !already_verified {
+            BasicIrVerifier
+                .verify(block)
+                .map_err(ConcreteExecutionError::InvalidIr)?;
+            if let Ok(mut verified) = self.verified.lock() {
+                if verified.len() >= VERIFIED_CAP {
+                    verified.clear();
+                }
+                verified.insert(content, ());
+            }
+        }
         if state.target_profile != block.key.target_profile {
             return Err(ConcreteExecutionError::TargetProfileMismatch {
                 state: state.target_profile,
@@ -272,25 +300,32 @@ where
                     merged
                 }
             };
-            *state = state
-                .write_register(*register, &written)
+            // Assign the register file directly instead of routing through
+            // `ExecutionState::write_register`, which clones the entire state
+            // (memory, constraints, fidelity ledger) per write; the block's
+            // input snapshot stays observable via the `execute_block` clone.
+            state.registers = state
+                .registers
+                .write(*register, &written)
                 .map_err(ConcreteExecutionError::Register)?;
             None
         }
         IrOp::Load { address, ty } => {
             let address = value_address(get_value(values, *address)?)?;
             let width = type_bytes(*ty)?;
-            let bytes = state
+            // Buffer-filling read: no `Vec<ByteValue>` allocation per load.
+            let mut buffer = [ByteValue::Concrete(0); 64];
+            state
                 .memory
-                .read(address, width)
+                .read_into(address, &mut buffer[..width])
                 .map_err(ConcreteExecutionError::Memory)?;
             let mut concrete = [0u8; 64];
             let mut len = 0usize;
-            for (offset, byte) in bytes.into_iter().enumerate() {
+            for (offset, byte) in buffer[..width].iter().enumerate() {
                 match byte {
                     ByteValue::Concrete(byte) => {
                         if len < 64 {
-                            concrete[len] = byte;
+                            concrete[len] = *byte;
                             len += 1;
                         }
                     }
@@ -312,9 +347,18 @@ where
         IrOp::Store { address, value } => {
             let address = value_address(get_value(values, *address)?)?;
             let value = get_value(values, *value)?;
-            let concrete: Vec<_> = value.bytes_le().iter().copied().map(ByteValue::Concrete).collect();
-            *state = state
-                .write_memory(address, &concrete)
+            // The stored bytes fit in 64 (`type_bytes` rejects wider values),
+            // so build the `ByteValue` run in a stack buffer and write the
+            // memory field directly — no per-store `Vec` and no whole-state
+            // clone (`write_memory` clones everything for one field).
+            let bytes = value.bytes_le();
+            let mut buffer = [ByteValue::Concrete(0); 64];
+            for (slot, byte) in buffer.iter_mut().zip(bytes.iter().copied()) {
+                *slot = ByteValue::Concrete(byte);
+            }
+            state.memory = state
+                .memory
+                .write(address, &buffer[..bytes.len()])
                 .map_err(ConcreteExecutionError::Memory)?;
             None
         }

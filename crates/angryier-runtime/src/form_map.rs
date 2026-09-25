@@ -24,6 +24,29 @@ use angryier_semantics_intel64::forms;
 /// execute exactly. No registered corpus form uses this id.
 pub const UNMAPPED_FORM_ID: u32 = 0;
 
+// The x87 iclasses come from the bridge's `iclass` re-export. Pin their
+// numeric values (xed-2024.05.20) so a bindings update that renumbers them
+// fails to compile instead of silently mis-mapping.
+const _: () = {
+    assert!(iclass::XED_ICLASS_FADD == 249);
+    assert!(iclass::XED_ICLASS_FCOMI == 263);
+    assert!(iclass::XED_ICLASS_FCOMIP == 264);
+    assert!(iclass::XED_ICLASS_FDIV == 270);
+    assert!(iclass::XED_ICLASS_FDIVR == 272);
+    assert!(iclass::XED_ICLASS_FLD == 291);
+    assert!(iclass::XED_ICLASS_FLD1 == 292);
+    assert!(iclass::XED_ICLASS_FLDZ == 300);
+    assert!(iclass::XED_ICLASS_FMUL == 301);
+    assert!(iclass::XED_ICLASS_FNINIT == 304);
+    assert!(iclass::XED_ICLASS_FST == 321);
+    assert!(iclass::XED_ICLASS_FSTP == 322);
+    assert!(iclass::XED_ICLASS_FSTPNCE == 323);
+    assert!(iclass::XED_ICLASS_FSUB == 324);
+    assert!(iclass::XED_ICLASS_FSUBR == 326);
+    assert!(iclass::XED_ICLASS_FUCOMI == 330);
+    assert!(iclass::XED_ICLASS_FUCOMIP == 331);
+};
+
 /// Sentinel form ids for string instructions. These are not corpus forms: a
 /// `rep`-prefixed string instruction encodes an internal loop, which cannot be
 /// straight-line corpus semantics. The runtime executes them directly.
@@ -55,6 +78,8 @@ enum Shape {
     Reg32,
     Reg16,
     Reg8,
+    /// An x87 stack register (80-bit view of an X87_BASE parent).
+    Stack,
     /// The 8-bit `CL` register, used by variable-count shifts and rotates.
     Imm,
     /// 8-bit memory access.
@@ -82,6 +107,11 @@ enum Shape {
 
 fn shape_of(operand: &Operand) -> Shape {
     match &operand.kind {
+        OperandKind::Register(register)
+            if (register_id::X87_BASE..register_id::X87_BASE + 8).contains(&register.parent.0) =>
+        {
+            Shape::Stack
+        }
         OperandKind::Register(register) => match register.width_bits {
             512 => Shape::Zmm,
             256 => Shape::Ymm,
@@ -181,6 +211,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem32, Shape::Imm] => Some(forms::ADD_MEM32_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::ADD_R32_R32),
             [Shape::Reg16, Shape::Reg16] => Some(forms::ADD_R16_R16),
+            [Shape::Reg16, Shape::Imm] => Some(forms::ADD_MEM16_IMM16),
             [Shape::Reg32, Shape::Imm] => Some(forms::ADD_R32_IMM8),
             [Shape::Reg32, Shape::Mem32] => Some(forms::ADD_R32_MEM32),
             [Shape::Reg8, Shape::Mem8] => Some(forms::ADD_R8_MEM8),
@@ -197,6 +228,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Reg32] => Some(forms::SUB_R32_R32),
             [Shape::Reg32, Shape::Imm] => Some(forms::SUB_R32_IMM8),
             [Shape::Reg32, Shape::Mem32] => Some(forms::SUB_R32_MEM32),
+            [Shape::Reg16, Shape::Imm] => Some(forms::SUB_MEM16_IMM16),
             [Shape::Reg8, Shape::Mem8] => Some(forms::SUB_R8_MEM8),
             [Shape::Mem8, Shape::Reg8] => Some(forms::SUB_MEM8_R8),
             [Shape::Mem8, Shape::Imm] => Some(forms::SUB_MEM8_IMM8),
@@ -220,6 +252,10 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem16, Shape::Reg16] => Some(forms::CMP_MEM16_R16),
             [Shape::Mem32, Shape::Imm] => Some(forms::CMP_MEM32_IMM32),
             [Shape::Mem16, Shape::Imm] => Some(forms::CMP_MEM16_IMM16),
+            // The 16-bit immediate forms are memory-shaped in the corpus, but
+            // their operand-generic providers cover register destinations
+            // exactly (same reuse as the CMOV memory shapes above).
+            [Shape::Reg16, Shape::Imm] => Some(forms::CMP_MEM16_IMM16),
 
             [Shape::Reg64, Shape::Reg64] => Some(forms::CMP_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::CMP_R64_IMM32),
@@ -238,6 +274,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Imm] => Some(forms::AND_R32_IMM32),
             [Shape::Reg32, Shape::Mem32] => Some(forms::AND_R32_MEM32),
             [Shape::Reg64, Shape::Mem64] => Some(forms::AND_R64_MEM64),
+            [Shape::Reg16, Shape::Imm] => Some(forms::AND_MEM16_IMM16),
             [Shape::Reg8, Shape::Mem8] => Some(forms::AND_R8_MEM8),
             [Shape::Mem32, Shape::Imm] => Some(forms::AND_MEM32_IMM32),
             [Shape::Mem64, Shape::Imm] => Some(forms::AND_MEM64_IMM32),
@@ -257,6 +294,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Imm] => Some(forms::OR_R32_IMM32),
             [Shape::Reg32, Shape::Mem32] => Some(forms::OR_R32_MEM32),
             [Shape::Reg64, Shape::Mem64] => Some(forms::OR_R64_MEM64),
+            [Shape::Reg16, Shape::Imm] => Some(forms::OR_MEM16_IMM16),
             [Shape::Reg8, Shape::Mem8] => Some(forms::OR_R8_MEM8),
             [Shape::Mem32, Shape::Imm] => Some(forms::OR_MEM32_IMM32),
             [Shape::Mem64, Shape::Imm] => Some(forms::OR_MEM64_IMM32),
@@ -276,6 +314,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Imm] => Some(forms::XOR_R32_IMM32),
             [Shape::Reg32, Shape::Mem32] => Some(forms::XOR_R32_MEM32),
             [Shape::Reg64, Shape::Mem64] => Some(forms::XOR_R64_MEM64),
+            [Shape::Reg16, Shape::Imm] => Some(forms::XOR_MEM16_IMM16),
             [Shape::Reg8, Shape::Mem8] => Some(forms::XOR_R8_MEM8),
             [Shape::Mem32, Shape::Imm] => Some(forms::XOR_MEM32_IMM32),
             [Shape::Mem64, Shape::Imm] => Some(forms::XOR_MEM64_IMM32),
@@ -747,6 +786,107 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Xmm, Shape::Xmm] => Some(forms::MOVSD_XMM_XMM),
             _ => None,
         },
+        // x87 family. Load and arithmetic encodings report the implicit ST(0)
+        // operand first, so memory operands trail; the FST/FSTP stores report
+        // the memory destination first.
+        iclass::XED_ICLASS_FNINIT => Some(forms::FINIT),
+        iclass::XED_ICLASS_FLD1 => Some(forms::FLD1),
+        iclass::XED_ICLASS_FLDZ => Some(forms::FLDZ),
+        iclass::XED_ICLASS_FLD => match shapes {
+            [.., Shape::Mem32] => Some(forms::FLD_M32),
+            [.., Shape::Mem64] => Some(forms::FLD_M64),
+            [Shape::Stack, Shape::Stack] => Some(forms::FLD_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FST => match shapes {
+            [Shape::Mem32, ..] => Some(forms::FST_M32),
+            [Shape::Mem64, ..] => Some(forms::FST_M64),
+            // `fst st(i)` has no corpus form: XED reports the `fst st(0)`
+            // alias as FNOP (unmapped below) and rejects the D9 D1+i
+            // encodings at decode time.
+            _ => None,
+        },
+        // XED reports the D9 D8+i `fstp st(i)` encoding as FSTPNCE; both
+        // iclasses route to the same corpus form.
+        iclass::XED_ICLASS_FSTP | iclass::XED_ICLASS_FSTPNCE => match shapes {
+            [Shape::Mem32, ..] => Some(forms::FSTP_M32),
+            [Shape::Mem64, ..] => Some(forms::FSTP_M64),
+            [Shape::Stack, Shape::Stack] => Some(forms::FSTP_STI),
+            _ => None,
+        },
+        family @ (iclass::XED_ICLASS_FADD
+        | iclass::XED_ICLASS_FSUB
+        | iclass::XED_ICLASS_FSUBR
+        | iclass::XED_ICLASS_FMUL
+        | iclass::XED_ICLASS_FDIV
+        | iclass::XED_ICLASS_FDIVR) => {
+            let (st0_dst, sti_dst, m32, m64) = match family {
+                iclass::XED_ICLASS_FADD => (
+                    forms::FADD_ST0_STI,
+                    forms::FADD_STI_ST0,
+                    forms::FADD_M32,
+                    forms::FADD_M64,
+                ),
+                iclass::XED_ICLASS_FSUB => (
+                    forms::FSUB_ST0_STI,
+                    forms::FSUB_STI_ST0,
+                    forms::FSUB_M32,
+                    forms::FSUB_M64,
+                ),
+                iclass::XED_ICLASS_FSUBR => (
+                    forms::FSUBR_ST0_STI,
+                    forms::FSUBR_STI_ST0,
+                    forms::FSUBR_M32,
+                    forms::FSUBR_M64,
+                ),
+                iclass::XED_ICLASS_FMUL => (
+                    forms::FMUL_ST0_STI,
+                    forms::FMUL_STI_ST0,
+                    forms::FMUL_M32,
+                    forms::FMUL_M64,
+                ),
+                iclass::XED_ICLASS_FDIV => (
+                    forms::FDIV_ST0_STI,
+                    forms::FDIV_STI_ST0,
+                    forms::FDIV_M32,
+                    forms::FDIV_M64,
+                ),
+                _ => (
+                    forms::FDIVR_ST0_STI,
+                    forms::FDIVR_STI_ST0,
+                    forms::FDIVR_M32,
+                    forms::FDIVR_M64,
+                ),
+            };
+            // Operand 0 names the read-write destination: ST(0) for the D8
+            // encodings, ST(i) for the DC encodings.
+            let dst_is_st0 = match decoded.operands.first().map(|operand| &operand.kind) {
+                Some(OperandKind::Register(view)) => view.parent.0 == register_id::X87_BASE,
+                _ => return None,
+            };
+            match shapes {
+                [.., Shape::Mem32] => Some(m32),
+                [.., Shape::Mem64] => Some(m64),
+                [Shape::Stack, Shape::Stack] => Some(if dst_is_st0 { st0_dst } else { sti_dst }),
+                _ => None,
+            }
+        }
+        iclass::XED_ICLASS_FUCOMI => match shapes {
+            [Shape::Stack, Shape::Stack] => Some(forms::FUCOMI_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FUCOMIP => match shapes {
+            [Shape::Stack, Shape::Stack] => Some(forms::FUCOMIP_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCOMI => match shapes {
+            [Shape::Stack, Shape::Stack] => Some(forms::FCOMI_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCOMIP => match shapes {
+            [Shape::Stack, Shape::Stack] => Some(forms::FCOMIP_ST0_STI),
+            _ => None,
+        },
         iclass::XED_ICLASS_MOVSX => match shapes {
             [Shape::Reg64, Shape::Reg32] => Some(forms::MOVSX_R64_R32),
             [Shape::Reg64, Shape::Reg8] => Some(forms::MOVSX_R64_R8),
@@ -1206,5 +1346,82 @@ mod tests {
         assert_ne!(forms::MOV_R64_R64, UNMAPPED_FORM_ID);
         assert_ne!(forms::HLT, UNMAPPED_FORM_ID);
         assert_ne!(crate::SYSCALL_FORM_ID, UNMAPPED_FORM_ID);
+    }
+
+    #[test]
+    fn maps_x87_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // fninit / fld1 / fldz
+        assert_eq!(mapped(&[0xDB, 0xE3])?, Some(forms::FINIT));
+        assert_eq!(mapped(&[0xD9, 0xE8])?, Some(forms::FLD1));
+        assert_eq!(mapped(&[0xD9, 0xEE])?, Some(forms::FLDZ));
+        // fld m64 / fld m32 / fld %st(1)
+        assert_eq!(mapped(&[0xDD, 0x00])?, Some(forms::FLD_M64));
+        assert_eq!(mapped(&[0xD9, 0x00])?, Some(forms::FLD_M32));
+        assert_eq!(mapped(&[0xD9, 0xC1])?, Some(forms::FLD_STI));
+        // fst m32 / fst m64
+        assert_eq!(mapped(&[0xD9, 0x10])?, Some(forms::FST_M32));
+        assert_eq!(mapped(&[0xDD, 0x10])?, Some(forms::FST_M64));
+        // fstp m32 / fstp m64 / fstp %st(1) (DD encoding)
+        assert_eq!(mapped(&[0xD9, 0x18])?, Some(forms::FSTP_M32));
+        assert_eq!(mapped(&[0xDD, 0x18])?, Some(forms::FSTP_M64));
+        assert_eq!(mapped(&[0xDD, 0xD9])?, Some(forms::FSTP_STI));
+        // fstp %st(0) via the D9 encoding decodes as FSTPNCE, not FSTP.
+        assert_eq!(mapped(&[0xD9, 0xD8])?, Some(forms::FSTP_STI));
+        // Arithmetic, both stack directions and both memory widths.
+        assert_eq!(mapped(&[0xD8, 0xC1])?, Some(forms::FADD_ST0_STI));
+        assert_eq!(mapped(&[0xDC, 0xC1])?, Some(forms::FADD_STI_ST0));
+        assert_eq!(mapped(&[0xD8, 0x00])?, Some(forms::FADD_M32));
+        assert_eq!(mapped(&[0xDC, 0x00])?, Some(forms::FADD_M64));
+        // XED swaps the FSUB/FSUBR (and FDIV/FDIVR) iclasses on the DC
+        // encodings; the destination register still picks the form.
+        assert_eq!(mapped(&[0xD8, 0xE1])?, Some(forms::FSUB_ST0_STI));
+        assert_eq!(mapped(&[0xDC, 0xE1])?, Some(forms::FSUBR_STI_ST0));
+        assert_eq!(mapped(&[0xD8, 0xE9])?, Some(forms::FSUBR_ST0_STI));
+        assert_eq!(mapped(&[0xDC, 0xE9])?, Some(forms::FSUB_STI_ST0));
+        assert_eq!(mapped(&[0xDC, 0x20])?, Some(forms::FSUB_M64));
+        assert_eq!(mapped(&[0xDC, 0x28])?, Some(forms::FSUBR_M64));
+        assert_eq!(mapped(&[0xD8, 0xC9])?, Some(forms::FMUL_ST0_STI));
+        assert_eq!(mapped(&[0xDC, 0xC9])?, Some(forms::FMUL_STI_ST0));
+        assert_eq!(mapped(&[0xDC, 0x08])?, Some(forms::FMUL_M64));
+        assert_eq!(mapped(&[0xD8, 0xF1])?, Some(forms::FDIV_ST0_STI));
+        assert_eq!(mapped(&[0xDC, 0xF1])?, Some(forms::FDIVR_STI_ST0));
+        assert_eq!(mapped(&[0xDC, 0x30])?, Some(forms::FDIV_M64));
+        assert_eq!(mapped(&[0xD8, 0xF9])?, Some(forms::FDIVR_ST0_STI));
+        assert_eq!(mapped(&[0xDC, 0xF9])?, Some(forms::FDIV_STI_ST0));
+        assert_eq!(mapped(&[0xDC, 0x38])?, Some(forms::FDIVR_M64));
+        // Compare family.
+        assert_eq!(mapped(&[0xDB, 0xE9])?, Some(forms::FUCOMI_ST0_STI));
+        assert_eq!(mapped(&[0xDF, 0xE9])?, Some(forms::FUCOMIP_ST0_STI));
+        assert_eq!(mapped(&[0xDB, 0xF1])?, Some(forms::FCOMI_ST0_STI));
+        assert_eq!(mapped(&[0xDF, 0xF1])?, Some(forms::FCOMIP_ST0_STI));
+        Ok(())
+    }
+
+    #[test]
+    fn unmapped_x87_reports_none() -> Result<(), Box<dyn std::error::Error>> {
+        // fstsw %ax needs the status word, which no register models.
+        assert_eq!(mapped(&[0x9B, 0xDF, 0xE0])?, None);
+        // fst %st(1) has no corpus form.
+        assert_eq!(mapped(&[0xDD, 0xD1])?, None);
+        // fnop is XED's decoding of the `fst %st(0)` alias; outside the 39
+        // mapped forms it stays unmapped.
+        assert_eq!(mapped(&[0xD9, 0xD0])?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn maps_16bit_immediate_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // cmp $imm16, %dx (imm16 and sign-extended imm8 encodings)
+        assert_eq!(mapped(&[0x66, 0x81, 0xFA, 0x34, 0x12])?, Some(forms::CMP_MEM16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x83, 0xFA, 0x7F])?, Some(forms::CMP_MEM16_IMM16));
+        // The remaining 16-bit ALU immediate siblings.
+        assert_eq!(mapped(&[0x66, 0x81, 0xC2, 0x34, 0x12])?, Some(forms::ADD_MEM16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x81, 0xEA, 0x34, 0x12])?, Some(forms::SUB_MEM16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x81, 0xE2, 0x34, 0x12])?, Some(forms::AND_MEM16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x81, 0xCA, 0x34, 0x12])?, Some(forms::OR_MEM16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x81, 0xF2, 0x34, 0x12])?, Some(forms::XOR_MEM16_IMM16));
+        // test $imm16, %dx was already mapped.
+        assert_eq!(mapped(&[0x66, 0xF7, 0xC2, 0x34, 0x12])?, Some(forms::TEST_R16_IMM16));
+        Ok(())
     }
 }
