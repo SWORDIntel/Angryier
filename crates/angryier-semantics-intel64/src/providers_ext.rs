@@ -1266,6 +1266,10 @@ shift_r32_cl!(SarR32Cl, forms::SAR_R32_CL, PrimitiveOp::ArithmeticShiftRight, 0x
 // 32-bit rotates (simplified — no CF)
 // ---------------------------------------------------------------------------
 
+/// Emits a 32-bit rotate: the count is normalized the x86 way — masked to 5
+/// bits (count mod 32), which for a 32-bit operand is exactly the rotate
+/// primitive's own mod-width reduction — and the rotation itself is the
+/// single `RotateLeft`/`RotateRight` primitive (no shl/lshr/or expansion).
 macro_rules! rotate_r32_imm8 {
     ($name:ident, $form:expr, $rule:expr, $is_left:expr) => {
         #[derive(Clone, Copy, Debug)]
@@ -1290,44 +1294,19 @@ macro_rules! rotate_r32_imm8 {
                 let val = out.read_operand(0, U32)?;
                 let count = out.read_operand(1, U8)?;
                 let count_32 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U32, &[count])?;
-                let thirty_two = const_u32(out, 32)?;
-                let effective = out.emit(
-                    SemanticOp::Primitive(PrimitiveOp::UnsignedDiv),
-                    U32,
-                    &[count_32, thirty_two],
-                )?;
-                let shifted = if $is_left {
-                    out.emit(
-                        SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
-                        U32,
-                        &[val, effective],
-                    )?
+                // x86 masks rotate counts to 5 bits for 32-bit operands
+                // (count mod 32 — the operand-size quirk that also governs
+                // 8/16-bit rotates); the primitive then reduces modulo the
+                // 32-bit width, the same function, so there is no double
+                // masking and no under-masking.
+                let mask = const_u32(out, 0x1F)?;
+                let count_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U32, &[count_32, mask])?;
+                let prim = if $is_left {
+                    PrimitiveOp::RotateLeft
                 } else {
-                    out.emit(
-                        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-                        U32,
-                        &[val, effective],
-                    )?
+                    PrimitiveOp::RotateRight
                 };
-                let complement = out.emit(
-                    SemanticOp::Primitive(PrimitiveOp::Sub),
-                    U32,
-                    &[thirty_two, effective],
-                )?;
-                let other = if $is_left {
-                    out.emit(
-                        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-                        U32,
-                        &[val, complement],
-                    )?
-                } else {
-                    out.emit(
-                        SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
-                        U32,
-                        &[val, complement],
-                    )?
-                };
-                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U32, &[shifted, other])?;
+                let result = out.emit(SemanticOp::Primitive(prim), U32, &[val, count_masked])?;
                 out.write_operand(0, result)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
@@ -1360,52 +1339,28 @@ macro_rules! rotate_r32_cl {
                 insn: &dyn DecodedInstructionView,
                 out: &mut dyn SemanticBuilder,
             ) -> Result<SemanticReceipt, SemanticError> {
-                let src = out.read_operand(0, U64)?;
+                let val = out.read_operand(0, U32)?;
                 let cl = out.read_register(RegisterId(register_id::GPR_BASE + 1), U64)?;
                 let zero = const_u64(out, 0)?;
+                // CL only (the rest of RCX is masked away), reduced modulo
+                // 32 — the x86 normalization for 32-bit operands; the
+                // primitive's mod-width reduction is identical.
                 let mask = const_u64(out, 0x1F)?;
-                let thirty_two = const_u32(out, 32)?;
-                let val = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src, zero])?;
                 let count_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[cl, mask])?;
                 let effective = out.emit(
                     SemanticOp::Primitive(PrimitiveOp::Extract),
                     U32,
                     &[count_64, zero],
                 )?;
-                let shifted = if $is_left {
-                    out.emit(
-                        SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
-                        U32,
-                        &[val, effective],
-                    )?
+                let prim = if $is_left {
+                    PrimitiveOp::RotateLeft
                 } else {
-                    out.emit(
-                        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-                        U32,
-                        &[val, effective],
-                    )?
+                    PrimitiveOp::RotateRight
                 };
-                let complement = out.emit(
-                    SemanticOp::Primitive(PrimitiveOp::Sub),
-                    U32,
-                    &[thirty_two, effective],
-                )?;
-                let other = if $is_left {
-                    out.emit(
-                        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-                        U32,
-                        &[val, complement],
-                    )?
-                } else {
-                    out.emit(
-                        SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
-                        U32,
-                        &[val, complement],
-                    )?
-                };
-                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U32, &[shifted, other])?;
-                let result_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[result])?;
-                out.write_operand(0, result_64)?;
+                let result = out.emit(SemanticOp::Primitive(prim), U32, &[val, effective])?;
+                // A 32-bit destination zero-extends its parent register;
+                // the operand write's view kind performs that widening.
+                out.write_operand(0, result)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }

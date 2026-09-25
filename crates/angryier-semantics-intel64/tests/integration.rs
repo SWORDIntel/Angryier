@@ -74,6 +74,24 @@ fn r8_operand(index: u8, reg: u32, access: AccessKind) -> Operand {
     }
 }
 
+/// A 32-bit dword register operand (`eax`, `ecx`, ...) shaped like a real
+/// decode: the write zero-extends the parent register, as 32-bit x86-64
+/// writes do.
+fn r32_operand(index: u8, reg: u32, access: AccessKind) -> Operand {
+    Operand {
+        index,
+        width_bits: 32,
+        access,
+        visibility: OperandVisibility::Explicit,
+        kind: OperandKind::Register(RegisterView::partial(
+            RegisterId(reg),
+            0,
+            32,
+            RegisterWriteBehavior::ZeroExtendParent,
+        )),
+    }
+}
+
 fn rel32_operand(index: u8, displacement: i64) -> Operand {
     Operand {
         index,
@@ -6938,7 +6956,7 @@ fn insertps_zmask_zeroes_dwords() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn rol_r32_cl_executes() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&with_reg(&make_state()?, RAX, 0x00000000_80000001)?, RCX, 4)?;
-    let decoded = make_decoded(forms::ROL_R32_CL, vec![reg_operand(0, RAX, AccessKind::ReadWrite)]);
+    let decoded = make_decoded(forms::ROL_R32_CL, vec![r32_operand(0, RAX, AccessKind::ReadWrite)]);
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
 
@@ -6953,7 +6971,7 @@ fn rol_r32_cl_executes() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn ror_r32_cl_executes() -> Result<(), Box<dyn std::error::Error>> {
     let initial = with_reg(&with_reg(&make_state()?, RAX, 0x00000000_00000003)?, RCX, 4)?;
-    let decoded = make_decoded(forms::ROR_R32_CL, vec![reg_operand(0, RAX, AccessKind::ReadWrite)]);
+    let decoded = make_decoded(forms::ROR_R32_CL, vec![r32_operand(0, RAX, AccessKind::ReadWrite)]);
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
 

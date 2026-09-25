@@ -19,6 +19,7 @@ path = "src/lib.rs"
 [dev-dependencies]
 angryier-arch-xed-ffi = { path = "../angryier-arch-xed-ffi" }
 angryier-execution = { path = "../angryier-execution" }
+angryier-expr = { path = "../angryier-expr" }
 angryier-ir = { path = "../angryier-ir" }
 angryier-memory = { path = "../angryier-memory" }
 angryier-state = { path = "../angryier-state" }

@@ -1923,28 +1923,16 @@ impl SemanticProvider for RolR64Imm8 {
     ) -> Result<SemanticReceipt, SemanticError> {
         let value = out.read_operand(0, U64)?;
         let count = out.read_operand(1, U64)?;
+        // x86-64 normalizes the rotate count to 6 bits (count mod 64). The
+        // rotate primitive itself reduces the count modulo the operand
+        // width — the same function at 64 bits — so masking once here is
+        // exactly the architectural normalization, never a double mask.
         let mask = const_u64(out, 0x3F)?;
         let count_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[count, mask])?;
-        let sixty_four = const_u64(out, 64)?;
-        let complement = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::Sub),
-            U64,
-            &[sixty_four, count_masked],
-        )?;
-        let shifted_left = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
+        let result = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::RotateLeft),
             U64,
             &[value, count_masked],
-        )?;
-        let shifted_right = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-            U64,
-            &[value, complement],
-        )?;
-        let result = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::Or),
-            U64,
-            &[shifted_left, shifted_right],
         )?;
         write_rotate_flags(out, result, ShiftKind::RotateLeft)?;
         out.write_operand(0, result)?;
@@ -1978,24 +1966,15 @@ impl SemanticProvider for RorR64Imm8 {
     ) -> Result<SemanticReceipt, SemanticError> {
         let value = out.read_operand(0, U64)?;
         let count = out.read_operand(1, U64)?;
+        // Same count normalization as ROL: a single 6-bit (mod 64)
+        // architectural mask; the primitive's own mod-width reduction is
+        // identical at 64 bits.
         let mask = const_u64(out, 0x3F)?;
         let count_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[count, mask])?;
-        let sixty_four = const_u64(out, 64)?;
-        let complement = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::Sub),
-            U64,
-            &[sixty_four, count_masked],
-        )?;
-        let shifted_right = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        let result = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::RotateRight),
             U64,
             &[value, count_masked],
-        )?;
-        let shifted_left = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[value, complement])?;
-        let result = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::Or),
-            U64,
-            &[shifted_right, shifted_left],
         )?;
         write_rotate_flags(out, result, ShiftKind::RotateRight)?;
         out.write_operand(0, result)?;
@@ -2747,31 +2726,33 @@ impl SemanticProvider for RolR64Cl {
     ) -> Result<SemanticReceipt, SemanticError> {
         let value = out.read_operand(0, U64)?;
         let count = out.read_register(RegisterId(register_id::GPR_BASE + 1), U64)?;
+        // x86-64 takes the count from CL, ignoring the rest of RCX, and
+        // reduces it modulo 64. Reading the full parent and masking to 6
+        // bits performs both steps; the rotate primitive's own mod-width
+        // reduction is the same function at 64 bits.
         let mask = const_u64(out, 0x3F)?;
         let count_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[count, mask])?;
+        let result = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::RotateLeft),
+            U64,
+            &[value, count_masked],
+        )?;
+        // CF = last bit rotated out = bit (64 - count) of the value — the
+        // result's LSB for every nonzero masked count (a zero count leaves
+        // CF alone on hardware; the shift saturates so the corpus pins it).
         let sixty_four = const_u64(out, 64)?;
         let complement = out.emit(
             SemanticOp::Primitive(PrimitiveOp::Sub),
             U64,
             &[sixty_four, count_masked],
         )?;
-        let shifted_left = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
-            U64,
-            &[value, count_masked],
-        )?;
-        let shifted_right = out.emit(
+        let cf_source = out.emit(
             SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
             U64,
             &[value, complement],
         )?;
-        let result = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::Or),
-            U64,
-            &[shifted_left, shifted_right],
-        )?;
         let one = const_u64(out, 1)?;
-        let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[shifted_right, one])?;
+        let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[cf_source, one])?;
         write_cf_only(out, cf)?;
         out.write_operand(0, result)?;
         fall_through(out, insn)?;
@@ -2804,25 +2785,19 @@ impl SemanticProvider for RorR64Cl {
     ) -> Result<SemanticReceipt, SemanticError> {
         let value = out.read_operand(0, U64)?;
         let count = out.read_register(RegisterId(register_id::GPR_BASE + 1), U64)?;
+        // Same normalization as ROL: CL only (the rest of RCX is masked
+        // away), reduced modulo 64; the primitive applies the identical
+        // mod-width reduction at 64 bits.
         let mask = const_u64(out, 0x3F)?;
         let count_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[count, mask])?;
-        let sixty_four = const_u64(out, 64)?;
-        let complement = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::Sub),
-            U64,
-            &[sixty_four, count_masked],
-        )?;
-        let shifted_right = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        let result = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::RotateRight),
             U64,
             &[value, count_masked],
         )?;
-        let shifted_left = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[value, complement])?;
-        let result = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::Or),
-            U64,
-            &[shifted_right, shifted_left],
-        )?;
+        // CF = last bit rotated out = bit (count - 1) of the value — the
+        // result's MSB for every nonzero masked count (a zero count leaves
+        // CF alone on hardware; the saturating shift pins it to 0).
         let one = const_u64(out, 1)?;
         let count_minus_one = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[count_masked, one])?;
         let cf_raw = out.emit(
