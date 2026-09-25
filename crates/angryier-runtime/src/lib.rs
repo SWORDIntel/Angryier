@@ -29,7 +29,7 @@ use angryier_ir::{BasicSemanticLowerer, IrBlock, IrInstruction, IrOp};
 use angryier_loader::{Elf64Loader, ImageLoader, LoadedImage, Symbol};
 use angryier_memory::{ByteValue, LayeredMemory, MemoryRegion, PersistentMemory};
 use angryier_models::{
-    SimProcedureRegistry, SimResult, SimState,
+    KernelReturnStub, SimProcedure, SimProcedureRegistry, SimResult, SimState,
     syscall::{self, SyscallModel},
 };
 use angryier_scheduler::{OsWorkerPool, PoolStats};
@@ -71,6 +71,28 @@ const HEAP_BASE: u64 = 0x5000_0000;
 const MMAP_BASE: u64 = 0x7f00_0000_0000;
 /// Size of the mapped heap region managed by `brk`.
 const HEAP_SIZE: u64 = 0x40_0000;
+
+/// Base of the PE-driver import-stub region (see [`Runtime::load_pe_driver`]):
+/// one 16-byte cell per import, whose first byte is a bare `ret` (`0xC3`) so
+/// unhooked imports execute natively — `call` → `ret` returns to the caller
+/// with RAX holding the caller's leftover value: defined, deterministic, zero
+/// modeling.
+pub const PE_DRIVER_STUB_BASE: u64 = 0x0000_7000_0000_0000;
+/// Size of the PE-driver import-stub region (256 stubs at 16-byte stride).
+const PE_DRIVER_STUB_SIZE: u64 = 0x1000;
+/// Stride of one import-stub cell.
+const PE_DRIVER_STUB_STRIDE: u64 = 16;
+/// Base of the PE-driver scratch region: the zeroed writable block standing
+/// in for the kernel `DRIVER_OBJECT` handed to `DriverEntry` in RCX. RDX
+/// points `0x200` into it as a `UNICODE_STRING`-shaped zeroed registry path
+/// — drivers that only store the pointer work; contents are not modeled.
+pub const PE_DRIVER_SCRATCH_BASE: u64 = 0x0000_7000_1000_0000;
+/// Size of the PE-driver scratch region.
+const PE_DRIVER_SCRATCH_SIZE: u64 = 0x1000;
+/// Sentinel return address pushed for `DriverEntry`: returning from the
+/// driver entry lands on the shared `exit` SimProcedure hook and terminates
+/// cleanly — the same pattern `libc_start_main` uses.
+const EXIT_HOOK: u64 = 0xdead_beef_0000;
 
 /// Maximum x86-64 instruction length in bytes.
 const MAX_INSN_LEN: usize = 15;
@@ -259,6 +281,13 @@ pub struct Process {
     /// code falls back to a fresh decode+lower.
     step_cache: BTreeMap<Address, CachedStep>,
     pub simproc_hooks: BTreeMap<Address, String>,
+    /// PE-driver import stubs (see [`Runtime::load_pe_driver`]): stub
+    /// address → (dll, export name or `#ordinal`). Set by `load_pe_driver`.
+    pub pe_import_stubs: BTreeMap<Address, (String, String)>,
+    /// Instance SimProcedure hooks keyed by call-target address. Checked
+    /// before the name-keyed `simproc_hooks` in `step_with`, with
+    /// call-correct return semantics (RIP = `[RSP]`; RSP += 8).
+    pub simproc_instances: BTreeMap<Address, Arc<dyn SimProcedure>>,
     /// Static symbol table of the loaded image (empty when absent).
     pub symbols: Vec<Symbol>,
     /// Addresses of executed blocks, in execution order (bounded by
@@ -302,6 +331,37 @@ impl Process {
     /// Registers a SimProcedure hook at a specific address.
     pub fn hook_simproc(&mut self, address: Address, name: &str) {
         self.simproc_hooks.insert(address, name.to_string());
+    }
+
+    /// Hooks a PE-driver import to a kernel-return stub: calls routed through
+    /// the import's IAT slot land on [`KernelReturnStub { value }`] instead
+    /// of executing the native stub.
+    ///
+    /// The dll matches case-insensitively (Windows export resolution is
+    /// case-insensitive); the export name matches exactly. Fails when the
+    /// process carries no such import — e.g. for non-driver processes.
+    pub fn hook_export_return(&mut self, dll: &str, export_name: &str, value: u64) -> Result<(), RuntimeError> {
+        let dll_lower = dll.to_ascii_lowercase();
+        let address = self
+            .pe_import_stubs
+            .iter()
+            .find(|(_, (stub_dll, stub_export))| {
+                stub_dll.to_ascii_lowercase() == dll_lower && stub_export == export_name
+            })
+            .map(|(address, _)| *address)
+            .ok_or_else(|| RuntimeError::SimProcedure(format!("unknown PE import: {dll}!{export_name}")))?;
+        self.simproc_instances
+            .insert(address, Arc::new(KernelReturnStub { value }));
+        Ok(())
+    }
+
+    /// Iterates the PE-driver import stubs as (stub address, dll, export
+    /// name or `#ordinal`) — diagnostics and scripting hooks. Empty for
+    /// processes not loaded through [`Runtime::load_pe_driver`].
+    pub fn pe_imports(&self) -> impl Iterator<Item = (&Address, &str, &str)> {
+        self.pe_import_stubs
+            .iter()
+            .map(|(address, (dll, name))| (address, dll.as_str(), name.as_str()))
     }
 
     /// Looks up a symbol by name in the loaded image.
@@ -854,6 +914,8 @@ impl<D: Decoder> Runtime<D> {
             block_cache: BTreeMap::new(),
             step_cache: BTreeMap::new(),
             simproc_hooks: BTreeMap::new(),
+            pe_import_stubs: BTreeMap::new(),
+            simproc_instances: BTreeMap::new(),
             symbols: Vec::new(),
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
@@ -1008,6 +1070,8 @@ impl<D: Decoder> Runtime<D> {
             block_cache: BTreeMap::new(),
             step_cache: BTreeMap::new(),
             simproc_hooks: BTreeMap::new(),
+            pe_import_stubs: BTreeMap::new(),
+            simproc_instances: BTreeMap::new(),
             symbols: image.symbols.clone(),
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
@@ -1137,8 +1201,142 @@ impl<D: Decoder> Runtime<D> {
         self.load_image(image)
     }
 
+    /// Loads a PE32+ Windows driver for execution from `DriverEntry`.
+    ///
+    /// Sections map like [`Runtime::load_pe`]; then the import table is
+    /// linked angr-style: every import gets a 16-byte stub cell in a
+    /// dedicated region ([`PE_DRIVER_STUB_BASE`]), the first byte of which is
+    /// a bare `ret` (`0xC3`), and the IAT slot is patched to the stub
+    /// address. Unhooked imports therefore execute natively — `call` → `ret`
+    /// returns to the caller with RAX holding the caller's leftover value:
+    /// defined, deterministic, zero modeling. Hooked imports (see
+    /// [`Process::hook_export_return`]) dispatch a [`KernelReturnStub`]
+    /// instead.
+    ///
+    /// Entry state matches a kernel `DriverEntry` call (Windows x86-64
+    /// convention): RCX = a zeroed writable `DRIVER_OBJECT` scratch
+    /// ([`PE_DRIVER_SCRATCH_BASE`]), RDX = a `UNICODE_STRING`-shaped zeroed
+    /// scratch `0x200` into the same region, and a sentinel return address
+    /// ([`EXIT_HOOK`]) so a `DriverEntry` that returns terminates cleanly
+    /// through the shared `exit` hook.
+    pub fn load_pe_driver(&self, bytes: &[u8]) -> Result<Process, RuntimeError> {
+        let loader = angryier_loader::Pe32Loader::new();
+        let image = loader.load(bytes).map_err(RuntimeError::Loader)?;
+        let imports: Vec<angryier_loader::PeImport> = image
+            .pe_imports()
+            .map(<[angryier_loader::PeImport]>::to_vec)
+            .unwrap_or_default();
+
+        let extra_regions = vec![
+            MemoryRegion {
+                object: angryier_types::ObjectId(5),
+                base: PE_DRIVER_STUB_BASE,
+                size: PE_DRIVER_STUB_SIZE,
+                readable: true,
+                writable: false,
+                executable: true,
+            },
+            MemoryRegion {
+                object: angryier_types::ObjectId(6),
+                base: PE_DRIVER_SCRATCH_BASE,
+                size: PE_DRIVER_SCRATCH_SIZE,
+                readable: true,
+                writable: true,
+                executable: false,
+            },
+        ];
+        let mut process = self.load_image_with_extra_regions(image, extra_regions)?;
+
+        // IAT patching: stub i lives at STUB_BASE + 16*i and holds a single
+        // `ret` byte. Skipped wholesale for images without imports.
+        if !imports.is_empty() {
+            let image_base = pe_image_base(bytes)?;
+            let capacity = usize::try_from(PE_DRIVER_STUB_SIZE / PE_DRIVER_STUB_STRIDE)
+                .map_err(|_| RuntimeError::Memory("import stub capacity overflow".into()))?;
+            if imports.len() > capacity {
+                return Err(RuntimeError::Memory(format!(
+                    "PE import stub region exhausted: {} imports, capacity {capacity}",
+                    imports.len()
+                )));
+            }
+            for (index, import) in imports.iter().enumerate() {
+                let export = match &import.kind {
+                    angryier_loader::PeImportKind::Name(name) => name.clone(),
+                    angryier_loader::PeImportKind::Ordinal(ordinal) => format!("#{ordinal}"),
+                };
+                let stub = PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_STRIDE * index as u64;
+                process.state.memory = process
+                    .state
+                    .memory
+                    .load_concrete(stub, &[0xC3])
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                // The IAT slot's absolute VA is image_base + iat_rva.
+                // LoadedImage keeps only the biased segment addresses (the
+                // section RVAs are not retained), so the base is recovered
+                // from the optional header directly.
+                let slot = image_base.wrapping_add(u64::from(import.iat_rva));
+                let mapped = process.state.memory.regions().iter().any(|region| {
+                    slot >= region.base
+                        && slot
+                            .checked_add(8)
+                            .is_some_and(|end| end <= region.base.saturating_add(region.size))
+                        && (region.readable || region.writable)
+                });
+                if !mapped {
+                    return Err(RuntimeError::Memory(format!(
+                        "IAT slot {slot:#x} for import {}!{export} is outside a mapped writable-or-readable segment",
+                        import.dll
+                    )));
+                }
+                process.state.memory = process
+                    .state
+                    .memory
+                    .load_concrete(slot, &stub.to_le_bytes())
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                process.pe_import_stubs.insert(stub, (import.dll.clone(), export));
+            }
+        }
+
+        // DriverEntry register state (after load_image's register init):
+        // RCX = pDriverObject, RDX = pRegistryPath.
+        process.write_register(register_id::GPR_BASE + 1, PE_DRIVER_SCRATCH_BASE)?;
+        process.write_register(register_id::GPR_BASE + 2, PE_DRIVER_SCRATCH_BASE + 0x200)?;
+
+        // Sentinel return address: a DriverEntry that returns lands on the
+        // shared `exit` hook and terminates cleanly.
+        let rsp = process.read_register(register_id::GPR_BASE + 4)?.wrapping_sub(8);
+        let hook: Vec<ByteValue> = EXIT_HOOK
+            .to_le_bytes()
+            .iter()
+            .map(|b| ByteValue::Concrete(*b))
+            .collect();
+        process.state.memory = process
+            .state
+            .memory
+            .write(rsp, &hook)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        process.write_register(register_id::GPR_BASE + 4, rsp)?;
+        process.hook_simproc(EXIT_HOOK, "exit");
+
+        // The patches above are load-time state: keep restart-from-entry
+        // (`reset_to_entry`) meaningful for drivers too.
+        process.entry_state = process.state.clone();
+        Ok(process)
+    }
+
     /// Creates a Process from an already-loaded image.
     pub fn load_image(&self, image: LoadedImage) -> Result<Process, RuntimeError> {
+        self.load_image_with_extra_regions(image, Vec::new())
+    }
+
+    /// [`Runtime::load_image`] with additional memory regions joined into the
+    /// map before it is built — used by [`Runtime::load_pe_driver`] for the
+    /// import-stub and scratch regions.
+    fn load_image_with_extra_regions(
+        &self,
+        image: LoadedImage,
+        extra_regions: Vec<MemoryRegion>,
+    ) -> Result<Process, RuntimeError> {
         if image.target_profile != self.target_profile {
             return Err(RuntimeError::Loader(angryier_loader::LoaderError::InvalidFormat));
         }
@@ -1185,6 +1383,10 @@ impl<D: Decoder> Runtime<D> {
             writable: true,
             executable: false,
         });
+
+        for region in extra_regions {
+            regions.push(region);
+        }
 
         let mut memory = PersistentMemory::new(regions).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
 
@@ -1253,6 +1455,8 @@ impl<D: Decoder> Runtime<D> {
             block_cache: BTreeMap::new(),
             step_cache: BTreeMap::new(),
             simproc_hooks: BTreeMap::new(),
+            pe_import_stubs: BTreeMap::new(),
+            simproc_instances: BTreeMap::new(),
             symbols: image.symbols,
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
@@ -1293,6 +1497,12 @@ impl<D: Decoder> Runtime<D> {
         }
 
         let pc = process.pc()?;
+
+        // Instance SimProcedure hooks (call-target stubs) take priority over
+        // the name-keyed hooks.
+        if let Some(model) = process.simproc_instances.get(&pc).cloned() {
+            return self.dispatch_simproc_instance(process, pc, &model);
+        }
 
         // Check for SimProcedure hooks.
         if let Some(name) = process.simproc_hooks.get(&pc).cloned() {
@@ -2075,8 +2285,7 @@ impl<D: Decoder> Runtime<D> {
             let argc = process.read_register(register_id::GPR_BASE + 6)?; // rsi
             let argv = process.read_register(register_id::GPR_BASE + 2)?; // rdx
             let rsp = process.read_register(register_id::GPR_BASE + 4)?.wrapping_sub(8);
-            // Return address → a synthetic `exit` hook address.
-            const EXIT_HOOK: u64 = 0xdead_beef_0000;
+            // Return address → a synthetic `exit` hook address ([`EXIT_HOOK`]).
             let bytes: Vec<ByteValue> = EXIT_HOOK
                 .to_le_bytes()
                 .iter()
@@ -2153,6 +2362,71 @@ impl<D: Decoder> Runtime<D> {
                     address,
                     name: name.to_string(),
                 })
+            }
+        }
+    }
+
+    /// Dispatches an instance SimProcedure hook (see
+    /// [`Process::simproc_instances`]) at a call target.
+    ///
+    /// Unlike the name-keyed hooks — which patch at instruction sites and
+    /// advance PC by the +1-byte convention — instance hooks sit at call
+    /// targets reached by a real `call`, so the return address the call
+    /// pushed is authoritative: a return pops `[RSP]` into RIP and adds 8 to
+    /// RSP (the call-correct convention).
+    fn dispatch_simproc_instance(
+        &self,
+        process: &mut Process,
+        address: Address,
+        model: &Arc<dyn SimProcedure>,
+    ) -> Result<StepOutcome, RuntimeError> {
+        // Bridge ExecutionState → SimState (GPR bridging mirrors
+        // `dispatch_simproc`: RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5,
+        // RSI=6, RDI=7).
+        let mut sim_state = SimState::new();
+        for index in 0u32..8 {
+            let reg_id = register_id::GPR_BASE + index;
+            if let Ok(val) = process.state.registers.read(reg_id) {
+                let mut buf = [0u8; 8];
+                let len = val.len().min(8);
+                buf[..len].copy_from_slice(&val[..len]);
+                sim_state.set_reg(u64::from(index), u64::from_le_bytes(buf));
+            }
+        }
+
+        let result = model.apply(&sim_state);
+        process.simproc_dispatches += 1;
+        let name = model.name().to_string();
+
+        match result {
+            SimResult::Exit => {
+                process.terminated = true;
+                Ok(StepOutcome::SimProcedure { address, name })
+            }
+            SimResult::Return(value) => {
+                pop_call_return(process)?;
+                process.write_register(register_id::GPR_BASE, value)?;
+                Ok(StepOutcome::SimProcedure { address, name })
+            }
+            SimResult::Continue(next) => {
+                // Apply the continued state's effects through the persistent
+                // write APIs, then pop the return — a kernel stub
+                // conceptually returns to its caller.
+                for (base, bytes) in &next.memory_writes {
+                    let values: Vec<ByteValue> = bytes.iter().map(|b| ByteValue::Concrete(*b)).collect();
+                    process.state.memory = process
+                        .state
+                        .memory
+                        .write(*base, &values)
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                }
+                for (index, value) in &next.registers {
+                    if *index < 8 {
+                        process.write_register(register_id::GPR_BASE + (*index as u32), *value)?;
+                    }
+                }
+                pop_call_return(process)?;
+                Ok(StepOutcome::SimProcedure { address, name })
             }
         }
     }
@@ -2258,6 +2532,53 @@ fn read_u64_va(image: &LoadedImage, va: u64) -> Option<u64> {
         .find(|s| va >= s.address && va + 8 <= s.address + s.bytes.len() as u64)?;
     let off = usize::try_from(va - seg.address).ok()?;
     Some(u64::from_le_bytes(seg.bytes[off..off + 8].try_into().ok()?))
+}
+
+/// Recovers the PE32+ `ImageBase` from raw file bytes: DOS `e_lfanew` at
+/// `0x3C`, PE signature at `e_lfanew`, COFF header at `+4`, optional header
+/// at `+24`; the magic must be PE32+ (`0x20B`) and `ImageBase` is the `u64`
+/// at optional-header offset 24.
+///
+/// [`LoadedImage`] keeps the biased segment addresses (image_base + section
+/// VA) but neither the section RVAs nor the base itself, and `PeImport::
+/// iat_rva` is base-relative — so `load_pe_driver` re-reads the base from
+/// the file, mirroring the layout the loader already validated.
+fn pe_image_base(bytes: &[u8]) -> Result<u64, RuntimeError> {
+    let invalid = || RuntimeError::Loader(angryier_loader::LoaderError::InvalidFormat);
+    let u16_at = |off: usize| -> Result<u16, RuntimeError> {
+        let slice = bytes
+            .get(off..off.checked_add(2).ok_or_else(invalid)?)
+            .ok_or_else(invalid)?;
+        Ok(u16::from_le_bytes([slice[0], slice[1]]))
+    };
+    let u32_at = |off: usize| -> Result<u32, RuntimeError> {
+        let slice = bytes
+            .get(off..off.checked_add(4).ok_or_else(invalid)?)
+            .ok_or_else(invalid)?;
+        Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    };
+    let u64_at = |off: usize| -> Result<u64, RuntimeError> {
+        let slice = bytes
+            .get(off..off.checked_add(8).ok_or_else(invalid)?)
+            .ok_or_else(invalid)?;
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(slice);
+        Ok(u64::from_le_bytes(buf))
+    };
+
+    let e_lfanew = usize::try_from(u32_at(0x3C)?).map_err(|_| invalid())?;
+    // 'PE\0\0' signature, then the COFF header; the optional header follows.
+    let coff = e_lfanew.checked_add(4).ok_or_else(invalid)?;
+    let opt = coff.checked_add(20).ok_or_else(invalid)?;
+    let opt_size = usize::from(u16_at(coff.checked_add(16).ok_or_else(invalid)?)?);
+    match opt.checked_add(opt_size) {
+        Some(end) if end <= bytes.len() => {}
+        _ => return Err(invalid()),
+    }
+    if u16_at(opt)? != 0x020B {
+        return Err(invalid()); // PE32 (32-bit) unsupported — same as the loader
+    }
+    u64_at(opt.checked_add(24).ok_or_else(invalid)?)
 }
 
 /// Reads a NUL-terminated string at `va` from an image's segments.
@@ -3270,6 +3591,31 @@ impl<'a, D: Decoder> ConcolicSession<'a, D> {
 
 /// Applies a block-execution outcome to the process — the shared tail of the
 /// cached and freshly lowered paths through [`Runtime::step_with`].
+/// Pops a call frame: RIP = `[RSP]`; RSP += 8 — the return convention for
+/// instance SimProcedure hooks at call targets (see
+/// `Runtime::dispatch_simproc_instance`). Symbolic bytes in the return slot
+/// concretize to 0, matching the fetch path's concrete read.
+fn pop_call_return(process: &mut Process) -> Result<u64, RuntimeError> {
+    let rsp = process.read_register(register_id::GPR_BASE + 4)?;
+    let mut frame = [ByteValue::Concrete(0); 8];
+    process
+        .state
+        .memory
+        .read_into(rsp, &mut frame)
+        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+    let mut target = 0u64;
+    for (i, byte) in frame.iter().enumerate() {
+        let value = match byte {
+            ByteValue::Concrete(b) => *b,
+            ByteValue::Symbolic(_) => 0,
+        };
+        target |= u64::from(value) << (i * 8);
+    }
+    process.write_register(register_id::GPR_BASE + 4, rsp.wrapping_add(8))?;
+    process.write_pc(target)?;
+    Ok(target)
+}
+
 fn finish_step(
     process: &mut Process,
     pc: Address,

@@ -644,6 +644,24 @@ impl SimProcedure for ExitProcedure {
     }
 }
 
+/// Kernel-export return stub: models a hooked import (e.g. a PE-driver
+/// `ntoskrnl.exe` import) whose observable effect for the caller is a fixed
+/// return value, ignoring the simulated arguments entirely.
+pub struct KernelReturnStub {
+    /// The value the stub returns in RAX.
+    pub value: u64,
+}
+
+impl SimProcedure for KernelReturnStub {
+    fn name(&self) -> &'static str {
+        "kernel_stub_return"
+    }
+
+    fn apply(&self, _state: &SimState) -> SimResult {
+        SimResult::Return(self.value)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Syscall environment model
 // ---------------------------------------------------------------------------
@@ -1120,6 +1138,19 @@ mod tests {
         let mut stepped = state;
         stepped.step(&res);
         assert!(stepped.exited);
+    }
+
+    #[test]
+    fn kernel_return_stub_returns_fixed_value() {
+        let stub = KernelReturnStub { value: 0x42 };
+        assert_eq!(stub.name(), "kernel_stub_return");
+        // The stub ignores the simulated state and returns its fixed value.
+        let mut state = SimState::new();
+        state.set_arg(0, 0x1000);
+        assert_eq!(stub.apply(&state), SimResult::Return(0x42));
+
+        let other = KernelReturnStub { value: u64::MAX };
+        assert_eq!(other.apply(&state), SimResult::Return(u64::MAX));
     }
 
     #[test]
