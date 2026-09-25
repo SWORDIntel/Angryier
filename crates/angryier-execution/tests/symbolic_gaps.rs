@@ -21,6 +21,7 @@ use angryier_execution::{
 };
 use angryier_expr::{ExprArena, ExprNode, ExprOp, ExprSort, ShardedExprArena};
 use angryier_ir::{IrBlock, IrBlockKey, IrInstruction, IrOp, IrPrimitive, IrType, IrValueId, RegisterWriteKind};
+use angryier_memory::ByteValue;
 use angryier_types::{BlockId, ContentId, ExprId, ExpressionNormalizationVersion, ImageId, TargetProfileId};
 
 fn arena() -> ShardedExprArena {
@@ -504,5 +505,171 @@ fn rotate_of_symbol_does_not_fold() -> Result<(), Box<dyn std::error::Error>> {
         .dependency_summary(rotated)
         .ok_or(SymbolicEvalError::UnsupportedOperation("no dependency".into()))?;
     assert_eq!(summary.symbolic_sources.len(), 1);
+    Ok(())
+}
+
+// ── Concolic concrete-first fast path (QSYM-style block skipping) ─────────
+//
+// The fast path walks a block with concrete values only and falls back to
+// the full symbolic walk on the first sign of input influence. These tests
+// pin the three contracts that make the skip safe:
+// 1. committed state is indistinguishable from the full walk's fold
+//    (written registers keep expression+concrete shadow entries);
+// 2. concrete stores land as fresh concrete shadow bytes — a later load
+//    must never observe a stale shadow byte the concrete engine already
+//    overwrote (including overwriting a marked input byte, which the full
+//    walk's constant-store path also does);
+// 3. an aborted fast walk leaves no partial state behind.
+
+/// Image with registers AND memory for store/load fast-path coverage.
+struct MemoryImage {
+    registers: BTreeMap<u32, u64>,
+    memory: BTreeMap<u64, u8>,
+}
+
+impl ConcolicImage for MemoryImage {
+    fn read_register(&self, register: u32) -> Option<Vec<u8>> {
+        self.registers.get(&register).map(|value| value.to_le_bytes().to_vec())
+    }
+
+    fn read_bytes(&self, address: u64, length: usize) -> Option<Vec<ByteValue>> {
+        let mut out = Vec::with_capacity(length);
+        for offset in 0..length {
+            out.push(ByteValue::Concrete(*self.memory.get(&(address + offset as u64))?));
+        }
+        Some(out)
+    }
+}
+
+#[test]
+fn concrete_fast_path_commits_memory_and_serves_fresh_loads() -> Result<(), Box<dyn std::error::Error>> {
+    let arena = arena();
+    let mut evaluator = ConcolicEvaluator::new(&arena);
+    // One marked input byte at the store target: the store must overwrite
+    // it with a concrete shadow byte exactly like the full walk's
+    // constant-store path, and the later load must see the stored value,
+    // never the symbol underneath and never the image's zero.
+    evaluator.mark_memory(0x1000, 1)?;
+    let image = MemoryImage {
+        registers: BTreeMap::from([(0u32, 0x1000u64)]),
+        memory: BTreeMap::from([(0x1000u64, 0u8)]),
+    };
+
+    // [r0] = 0x1122334455667788 — every input concrete, fast path taken.
+    evaluator.eval_block(
+        &image,
+        &block(vec![
+            read_register(0, 0, 64),
+            constant(1, 64, 0x1122_3344_5566_7788),
+            IrInstruction {
+                result: None,
+                op: IrOp::Store {
+                    address: IrValueId(0),
+                    value: IrValueId(1),
+                },
+            },
+        ]),
+    )?;
+
+    // r1 = [r0] — the fast-path load must fold the freshly committed
+    // concrete shadow bytes, not the image's zero byte.
+    evaluator.eval_block(
+        &image,
+        &block(vec![
+            read_register(0, 0, 64),
+            IrInstruction {
+                result: Some(IrValueId(1)),
+                op: IrOp::Load {
+                    address: IrValueId(0),
+                    ty: IrType::Bits(64),
+                },
+            },
+            write_register(1, 1),
+        ]),
+    )?;
+
+    assert_eq!(
+        evaluator.register_concretes().get(&1),
+        Some(&Some(0x1122_3344_5566_7788)),
+        "load after fast-path store must observe the stored value"
+    );
+    // The store also committed concrete bytes over the marked input byte.
+    assert_eq!(
+        evaluator.shadow_memory().get(&0x1000),
+        Some(&ByteValue::Concrete(0x88)),
+        "fast-path store must overwrite the symbolic input byte concretely"
+    );
+    Ok(())
+}
+
+#[test]
+fn concrete_fast_path_falls_back_cleanly_on_symbolic_registers() -> Result<(), Box<dyn std::error::Error>> {
+    let arena = arena();
+    let mut evaluator = ConcolicEvaluator::new(&arena);
+    evaluator.mark_register(0, bits(64))?;
+    let image = MemoryImage {
+        registers: BTreeMap::from([(0u32, 41u64), (3u32, 0u64)]),
+        memory: BTreeMap::new(),
+    };
+
+    // Uninfluenced block first: r3 = 7 commits through the fast path.
+    evaluator.eval_block(&image, &block(vec![constant(0, 64, 7), write_register(3, 0)]))?;
+    assert_eq!(evaluator.register_concretes().get(&3), Some(&Some(7)));
+
+    // Influenced block: r2 = r0 + 1 — the fast walk aborts at the symbolic
+    // read of r0 and the full walk builds the expression.
+    evaluator.eval_block(
+        &image,
+        &block(vec![
+            read_register(0, 0, 64),
+            constant(1, 64, 1),
+            primitive(2, IrPrimitive::Add, 64, &[0, 1]),
+            write_register(2, 2),
+        ]),
+    )?;
+    assert_eq!(
+        evaluator.register_concretes().get(&2),
+        Some(&None),
+        "r2 must carry the symbolic Add expression"
+    );
+    let added = evaluator
+        .register_value(2)
+        .ok_or(SymbolicEvalError::UnsupportedOperation("no r2 value".into()))?;
+    let node = arena
+        .get(added)
+        .ok_or(SymbolicEvalError::UnsupportedOperation("no node".into()))?;
+    assert_eq!(node.op, ExprOp::Add, "full walk must have built the Add node");
+
+    // The aborted fast walk must not have disturbed the earlier commit.
+    assert_eq!(
+        evaluator.register_concretes().get(&3),
+        Some(&Some(7)),
+        "fallback must leave prior fast-path state untouched"
+    );
+    Ok(())
+}
+
+#[test]
+fn concrete_fast_path_skips_branch_constraints_for_concrete_conditions() -> Result<(), Box<dyn std::error::Error>> {
+    let arena = arena();
+    let mut evaluator = ConcolicEvaluator::new(&arena);
+    let image = MemoryImage {
+        registers: BTreeMap::from([(0u32, 5u64)]),
+        memory: BTreeMap::new(),
+    };
+
+    // cmp r0, 10; jcc — r0 is concrete, so the block takes the fast path
+    // and records no branch (a concrete condition cannot be inverted).
+    let summary = evaluator.eval_block(&image, &compare_block(0, 64, 10, IrPrimitive::Ult))?;
+    assert!(summary.branch.is_none(), "concrete branch must not record a constraint");
+
+    // The mirror case with a symbolic register still records.
+    let mut symbolic = ConcolicEvaluator::new(&arena);
+    symbolic.mark_register(0, bits(64))?;
+    let summary = symbolic.eval_block(&image, &compare_block(0, 64, 10, IrPrimitive::Ult))?;
+    assert!(
+        summary.branch.is_some(),
+        "symbolic branch must still record a constraint"
+    );
     Ok(())
 }

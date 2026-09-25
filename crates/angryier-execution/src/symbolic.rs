@@ -1021,6 +1021,27 @@ pub struct ConcolicBinding {
 pub trait ConcolicImage {
     /// Concrete bytes of `register` (little-endian), or `None` when unknown.
     fn read_register(&self, register: u32) -> Option<Vec<u8>>;
+    /// Declared bit width of `register`, or `None` when unknown. Defaults
+    /// to the allocating [`read_register`](Self::read_register) read; images
+    /// with a width table override it.
+    fn register_width(&self, register: u32) -> Option<u16> {
+        let bytes = self.read_register(register)?;
+        u16::try_from(bytes.len() * 8).ok()
+    }
+    /// Allocation-free register read: fills `out` (whose length is the
+    /// requested byte width) with the register's concrete little-endian
+    /// bytes. Returns `false` when the register is unknown or narrower
+    /// than requested. The default wraps
+    /// [`read_register`](Self::read_register).
+    fn read_register_into(&self, register: u32, out: &mut [u8]) -> bool {
+        match self.read_register(register) {
+            Some(bytes) if bytes.len() >= out.len() => {
+                out.copy_from_slice(&bytes[..out.len()]);
+                true
+            }
+            _ => false,
+        }
+    }
     /// Concrete/symbolic bytes at `address`, or `None` when unmapped.
     fn read_bytes(&self, address: u64, length: usize) -> Option<Vec<ByteValue>>;
     /// Allocation-free [`read_bytes`](Self::read_bytes): fills `out` (whose
@@ -1183,6 +1204,12 @@ impl<'a> ConcolicEvaluator<'a> {
         image: &dyn ConcolicImage,
         block: &IrBlock,
     ) -> Result<SymbolicBlockSummary, SymbolicEvalError> {
+        // QSYM-style concrete-first fast path: blocks with no symbolic
+        // influence evaluate without expression construction or interning;
+        // the first sign of influence falls through to the full walk.
+        if let Some(summary) = self.try_concrete_block(image, block) {
+            return Ok(summary);
+        }
         // Reuse the value table across steps (same instruction count per
         // revisited block); on error the scratch is simply re-grown.
         let mut values = std::mem::take(&mut self.values_scratch);
@@ -1335,12 +1362,274 @@ impl<'a> ConcolicEvaluator<'a> {
         })
     }
 
-    /// Evaluates a primitive concolically: when every input carries a
-    /// concrete value the result folds to a constant (keeping addresses and
-    /// flag computations concrete); otherwise it builds the expression.
-    /// Machine primitives have at most a handful of operands and the shadow
-    /// evaluates them on every step, so both paths resolve through a stack
-    /// buffer instead of a fresh heap `Vec` per operation.
+    /// Concrete-first block evaluation: walks `block` with concrete values
+    /// only — no expression construction for intermediates, no interning
+    /// per value — and returns `None` the moment any symbolic influence
+    /// appears (a symbolic register shadow, a symbolic memory byte in a
+    /// load, an unconcrete [`IrOp::ExprRef`], or anything the concrete
+    /// folder does not cover). The caller falls back to the full symbolic
+    /// walk.
+    ///
+    /// Real traces are dominated by blocks no input reaches; skipping
+    /// expression building for them is the QSYM-style concolic win. All
+    /// shadow mutations are buffered and committed only on success, so a
+    /// fallback observes untouched state. The committed state matches the
+    /// full walk's for everything it wrote:
+    /// - written registers land as cached constants (expression + concrete
+    ///   pair) exactly as the full walk stores its folded results — the
+    ///   shadow must keep serving reads of registers the image may not
+    ///   know, and diagnostics must stay indistinguishable — and
+    /// - concrete stores land as concrete shadow bytes so later loads in
+    ///   either path read fresh values, never stale ones.
+    ///
+    /// Branch conditions on this path are necessarily concrete, so no
+    /// `SymbolicBranch` is recorded: a concrete condition cannot be
+    /// inverted by any input, and the recorded constraint would be sliced
+    /// out of every solver query anyway (empty dependency cone).
+    ///
+    /// Widths above 128 bits fall back: the concrete carrier is `u128`,
+    /// and folding only its low half would diverge from the full walk.
+    fn try_concrete_block(&mut self, image: &dyn ConcolicImage, block: &IrBlock) -> Option<SymbolicBlockSummary> {
+        // Value slots mirror the full walk's indexing; every stored slot is
+        // concrete by construction (non-concrete production falls back).
+        let mut values: Vec<Option<(u128, IrType)>> = Vec::new();
+        let mut written_registers: Vec<u32> = Vec::new();
+        // (register, stored type, folded value): the constant expression
+        // is interned at commit, through the constants cache.
+        let mut pending_registers: Vec<(u32, IrType, u128)> = Vec::new();
+        let mut pending_memory: Vec<(u64, u8)> = Vec::new();
+        let mut terminated = false;
+
+        for instruction in &block.instructions {
+            let produced: Option<(u128, IrType)> = match &instruction.op {
+                IrOp::Constant { ty, bytes_le } => {
+                    let width = bit_width(*ty).ok()?;
+                    if width > 128 {
+                        return None;
+                    }
+                    let concrete = bytes_le
+                        .iter()
+                        .enumerate()
+                        .take(16)
+                        .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)));
+                    Some((concrete, *ty))
+                }
+                IrOp::ExprRef { expression, ty } => {
+                    // The arena folds constants at intern time, so a
+                    // foldable ExprRef is a Constant node; the negative
+                    // memo keeps repeated probes of the same symbol cheap.
+                    let value = self.constant_value_memo(*expression)?;
+                    Some((u128::from(value), *ty))
+                }
+                IrOp::ReadRegister { register, ty } => {
+                    let width = bit_width(*ty).ok()?;
+                    if width > 128 {
+                        return None;
+                    }
+                    Some((self.concrete_register(image, *register, *ty)?, *ty))
+                }
+                IrOp::Primitive { op, ty, inputs } => {
+                    let output_width = bit_width(*ty).ok()?;
+                    const MAX_INLINE: usize = 4;
+                    if inputs.len() > MAX_INLINE || output_width > 128 {
+                        return None;
+                    }
+                    let mut typed = [(0u128, 0u16); MAX_INLINE];
+                    for (slot, id) in typed.iter_mut().zip(inputs) {
+                        let (value, input_ty) = concrete_value(&values, *id)?;
+                        let input_width = bit_width(input_ty).ok()?;
+                        if input_width > 128 {
+                            return None;
+                        }
+                        *slot = (value, input_width);
+                    }
+                    let result = eval_primitive_concrete(*op, output_width, &typed[..inputs.len()])?;
+                    Some((result, *ty))
+                }
+                IrOp::WriteRegister { register, value, kind } => {
+                    let (concrete, source_ty) = concrete_value(&values, *value)?;
+                    let source_width = bit_width(source_ty).ok()?;
+                    if source_width > 128 {
+                        return None;
+                    }
+                    match kind {
+                        RegisterWriteKind::ReplaceParent => {
+                            pending_registers.push((*register, source_ty, concrete));
+                        }
+                        RegisterWriteKind::ZeroExtendParent => {
+                            let target_ty = self.concrete_register_ty(image, *register)?;
+                            let target_width = bit_width(target_ty).ok()?;
+                            if target_width > 128 {
+                                return None;
+                            }
+                            // Zero-extension leaves the folded value
+                            // unchanged (a degenerate extension relabels
+                            // without narrowing, exactly like the full
+                            // walk; readers normalize on read).
+                            pending_registers.push((*register, target_ty, concrete));
+                        }
+                        RegisterWriteKind::PreserveParent { bit_offset, .. } => {
+                            let parent_ty = self.concrete_register_ty(image, *register)?;
+                            let parent_width = bit_width(parent_ty).ok()?;
+                            if parent_width > 128 {
+                                return None;
+                            }
+                            let parent = self.concrete_register(image, *register, parent_ty)?;
+                            let merged = splice_concrete(parent, parent_width, concrete, *bit_offset, source_width);
+                            pending_registers.push((*register, parent_ty, merged));
+                        }
+                    }
+                    written_registers.push(*register);
+                    None
+                }
+                IrOp::Branch { condition, .. } => {
+                    // All stored slots are concrete; an undefined (never
+                    // produced) condition slot falls back. A concrete
+                    // condition contributes no invertible constraint.
+                    concrete_value(&values, *condition)?;
+                    terminated = true;
+                    None
+                }
+                IrOp::Jump { .. }
+                | IrOp::JumpIndirect { .. }
+                | IrOp::Call { .. }
+                | IrOp::Return
+                | IrOp::Trap { .. } => {
+                    terminated = true;
+                    None
+                }
+                IrOp::Load { address, ty } => {
+                    let width = bit_width(*ty).ok()?;
+                    if width > 128 {
+                        return None;
+                    }
+                    let byte_width = usize::from(width).div_ceil(8);
+                    let (address, _) = concrete_value(&values, *address)?;
+                    let base = u64::try_from(address).ok()?;
+                    const MAX_INLINE_LOAD: usize = 16;
+                    let mut inline = [ByteValue::Concrete(0); MAX_INLINE_LOAD];
+                    let bytes: &mut [ByteValue] = if byte_width <= MAX_INLINE_LOAD {
+                        &mut inline[..byte_width]
+                    } else {
+                        return None;
+                    };
+                    if !image.read_bytes_into(base, bytes) {
+                        // The full walk has a byte-at-a-time fallback for
+                        // span-edge shadow coverage; let it handle it.
+                        return None;
+                    }
+                    let mut concrete = 0u128;
+                    for (offset, slot) in bytes.iter_mut().enumerate() {
+                        let value = match self.memory.get(&(base + offset as u64)) {
+                            Some(ByteValue::Concrete(byte)) => ByteValue::Concrete(*byte),
+                            Some(ByteValue::Symbolic(_)) => return None,
+                            None => *slot,
+                        };
+                        *slot = value;
+                        if offset < 16
+                            && let ByteValue::Concrete(byte) = value
+                        {
+                            concrete |= u128::from(byte) << (8 * offset);
+                        }
+                    }
+                    Some((concrete, *ty))
+                }
+                IrOp::Store { address, value } => {
+                    let (address, _) = concrete_value(&values, *address)?;
+                    let base = u64::try_from(address).ok()?;
+                    let (value, value_ty) = concrete_value(&values, *value)?;
+                    let width = bit_width(value_ty).ok()?;
+                    if width > 128 {
+                        return None;
+                    }
+                    let byte_width = usize::from(width).div_ceil(8);
+                    for offset in 0..byte_width {
+                        let byte = (value >> (8 * offset)) as u8;
+                        pending_memory.push((base + offset as u64, byte));
+                    }
+                    None
+                }
+            };
+
+            if let Some((concrete, ty)) = produced {
+                let result = instruction.result?;
+                let index = usize::try_from(result.0).ok()?;
+                if values.len() <= index {
+                    values.resize(index + 1, None);
+                }
+                values[index] = Some((concrete, ty));
+            }
+
+            if terminated {
+                break;
+            }
+        }
+
+        // Commit phase one — intern the folded constants (cache-backed;
+        // the cache itself stays valid even if a later step falls back).
+        // An intern error here falls back to the full walk untouched.
+        let mut committed = Vec::with_capacity(pending_registers.len());
+        for (register, stored_ty, value) in pending_registers {
+            let width = bit_width(stored_ty).ok()?;
+            let byte_width = usize::from(width).div_ceil(8);
+            let expression = self.constant(stored_ty, &value.to_le_bytes()[..byte_width]).ok()?;
+            committed.push((register, expression, stored_ty, value));
+        }
+        // Commit phase two — infallible map updates.
+        for (register, expression, stored_ty, value) in committed {
+            self.registers.insert(register, (expression, stored_ty));
+            self.register_concretes.insert(register, Some(value));
+        }
+        for (address, byte) in pending_memory {
+            self.memory.insert(address, ByteValue::Concrete(byte));
+        }
+        Some(SymbolicBlockSummary {
+            branch: None,
+            written_registers,
+            terminated,
+            jump_target: None,
+        })
+    }
+
+    /// Concrete view of `register` at `ty` width: the tracked shadow when
+    /// concrete (width-normalized exactly like the full walk's
+    /// `read_register`), else the image's live bytes. `None` means
+    /// symbolic-or-unknown — the caller falls back. Never mutates, so a
+    /// subsequent full walk starts from identical state.
+    fn concrete_register(&self, image: &dyn ConcolicImage, register: u32, ty: IrType) -> Option<u128> {
+        let requested = bit_width(ty).ok()?;
+        if let Some((_, stored_ty)) = self.registers.get(&register) {
+            let concrete = self.register_concretes.get(&register).copied().flatten()?;
+            let stored_width = bit_width(*stored_ty).ok()?;
+            if stored_width > requested {
+                return Some(concrete & mask_u128(requested));
+            }
+            return Some(concrete);
+        }
+        let byte_width = usize::from(requested).div_ceil(8);
+        let mut buffer = [0u8; 16];
+        if byte_width > buffer.len() || !image.read_register_into(register, &mut buffer[..byte_width]) {
+            return None;
+        }
+        Some(
+            buffer[..byte_width]
+                .iter()
+                .enumerate()
+                .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index))),
+        )
+    }
+
+    /// Declared width of `register`: the shadowed type when tracked, else
+    /// the image's declared register width. `None` means unknown — fall
+    /// back.
+    fn concrete_register_ty(&self, image: &dyn ConcolicImage, register: u32) -> Option<IrType> {
+        if let Some((_, ty)) = self.registers.get(&register) {
+            return Some(*ty);
+        }
+        let bits = image.register_width(register)?;
+        Some(IrType::Bits(bits))
+    }
+
     fn primitive_concolic(
         &mut self,
         op: IrPrimitive,
@@ -1864,6 +2153,17 @@ fn get_value_c(
         .copied()
         .flatten()
         .ok_or(SymbolicEvalError::UndefinedValue(id))
+}
+
+/// [`get_value_c`](self) for the concrete-first walk's value table: every
+/// stored slot is concrete by construction, so the expression component
+/// does not exist.
+fn concrete_value(values: &[Option<(u128, IrType)>], id: IrValueId) -> Option<(u128, IrType)> {
+    usize::try_from(id.0)
+        .ok()
+        .and_then(|index| values.get(index))
+        .copied()
+        .flatten()
 }
 
 fn resolve_inputs_c(

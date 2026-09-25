@@ -3291,3 +3291,68 @@ fn z3_interrupt_preempts_check() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("post-interrupt solve: {:?}", result.outcome);
     Ok(())
 }
+
+/// A loop whose trip count and branch condition are immediates and a
+/// counter no input ever touches: with nothing marked symbolic, every
+/// branch is concrete and the concolic fast path records no path
+/// constraints; with the counter marked, the same loop records them.
+#[test]
+fn concolic_concrete_loop_records_no_path_constraints() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    use angryier_expr::ShardedExprArena;
+    use angryier_ir::IrType;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    let Some(_) = fixture() else {
+        eprintln!("skipping: binutils (as/ld) unavailable");
+        return Ok(());
+    };
+    let source = r"
+        .global _start
+        .text
+_start:
+        xor %ecx, %ecx
+1:
+        inc %ecx
+        cmp $5, %ecx
+        jl 1b
+        mov $60, %eax
+        xor %edi, %edi
+        syscall
+    ";
+    let dir = temp_dir("angryier-concrete-loop").ok_or("temp dir unavailable")?;
+    let asm = dir.join("loop.s");
+    let object = dir.join("loop.o");
+    let binary = dir.join("loop.elf");
+    std::fs::write(&asm, source)?;
+    assemble(&asm, &object).ok_or("assemble failed")?;
+    link(&binary, &[&object]).ok_or("link failed")?;
+    let elf = std::fs::read(&binary)?;
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+
+    // Concrete leg: nothing marked — the fast path owns every block.
+    let process = runtime.load_elf(&elf)?;
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+    let mut session = runtime.concolic(process, arena.as_ref());
+    session.run(1000)?;
+    assert!(
+        session.path_constraints().is_empty(),
+        "a loop no input influences must record zero path constraints (got {})",
+        session.path_constraints().len()
+    );
+
+    // Control leg: the counter marked — the same loop's jl is input-derived
+    // and must record constraints through the full walk.
+    let process = runtime.load_elf(&elf)?;
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+    let mut session = runtime.concolic(process, arena.as_ref());
+    session.mark_input_register(register_id::GPR_BASE + 1, IrType::Bits(32))?;
+    session.run(1000)?;
+    assert!(
+        !session.path_constraints().is_empty(),
+        "the marked-counter loop must record its branch constraints"
+    );
+    Ok(())
+}

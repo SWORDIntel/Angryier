@@ -132,10 +132,15 @@ const SEED: u64 = 0x00C0_FFEE_1234_5678;
 ///
 /// Returns `None` when the C toolchain is unavailable or the build fails.
 fn build_fixture() -> Option<(Vec<u8>, PathBuf)> {
-    let dir = temp_dir("angryier-gatea-speed")?;
+    build_fixture_from(FIXTURE_SOURCE, "angryier-gatea-speed")
+}
+
+/// Compiles `source` into a static ELF64 executable under `name`.
+fn build_fixture_from(source_text: &str, name: &str) -> Option<(Vec<u8>, PathBuf)> {
+    let dir = temp_dir(name)?;
     let source = dir.join("looptrace.c");
     let binary = dir.join("looptrace.elf");
-    std::fs::write(&source, FIXTURE_SOURCE).ok()?;
+    std::fs::write(&source, source_text).ok()?;
 
     let compiled = Command::new("cc")
         .arg(FIXTURE_OPT)
@@ -345,5 +350,124 @@ fn concolic_speed_vs_full_symbolic_on_long_trace() -> Result<(), Box<dyn std::er
         "full-symbolic time must be nonzero"
     );
     assert!(sym_steps > 0, "full-symbolic leg must have stepped at least once");
+    Ok(())
+}
+
+/// Sparse-influence counterpart to the dense fixture above: the input
+/// register flows through exactly two operations (the `_start` stash and
+/// one final xor) while thousands of loop iterations of constant-derived
+/// arithmetic never touch it. This is the shape real target programs have
+/// between input uses, and it is where the concolic fast path (skip shadow
+/// evaluation of uninfluenced blocks) pays: the measurable is concolic
+/// overhead versus the concrete floor, not the concolic-vs-symbolic
+/// multiplier (full symbolic on this shape degenerates into fork
+/// management, which the dense fixture already prices).
+const SPARSE_SOURCE: &str = r#"
+#define LOOPS 3000
+
+volatile unsigned long g_input;
+volatile unsigned long g_sink;
+
+static unsigned long mix(unsigned long x, unsigned long i) {
+    unsigned long h = x ^ (i * 0x9E3779B97F4A7C15UL);
+    h ^= h >> 29;
+    h *= 0xBF58476D1CE4E5B9UL;
+    h ^= h >> 32;
+    return h;
+}
+
+#define BASE 0x100000000UL
+
+void run(void) {
+    unsigned long acc = 7;
+    for (unsigned long i = BASE; i < BASE + LOOPS; i++) {
+        unsigned long v = mix(i, i);
+        acc += (v << 3) ^ (v >> 5);
+        acc ^= acc >> 17;
+    }
+    g_sink = acc ^ g_input;
+    __asm__ volatile("mov $60, %%rax\n\txor %%rdi, %%rdi\n\tsyscall\n\t" ::: "rax", "rdi", "memory");
+}
+
+__asm__(
+    ".global _start\n"
+    "_start:\n"
+    "    movq %rax, g_input(%rip)\n"
+    "    call run\n"
+    "    mov $60, %rax\n"
+    "    xor %rdi, %rdi\n"
+    "    syscall\n");
+"#;
+
+/// GATE-A sparse leg: concrete vs concolic on a trace the input barely
+/// influences. The fast path should keep concolic near the concrete floor
+/// and record zero path constraints (no symbolic branch exists).
+#[test]
+#[ignore = "speed measurement (GATE-A sparse): run with --ignored --nocapture"]
+fn concolic_sparse_influence_tracks_concrete_floor() -> Result<(), Box<dyn std::error::Error>> {
+    let Some((elf, native_path)) = build_fixture_from(SPARSE_SOURCE, "angryier-gatea-sparse") else {
+        eprintln!("skipping: C toolchain (cc/ld) unavailable");
+        return Ok(());
+    };
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let input_register = register_id::GPR_BASE; // RAX — stashed to g_input by _start
+
+    match native_exit(&native_path) {
+        Some(code) => assert_eq!(code, 0, "native run of the sparse fixture must exit 0"),
+        None => eprintln!("skipping native exit-code check: fixture could not be executed"),
+    }
+
+    let mut concrete = runtime.load_elf(&elf)?;
+    concrete.write_register(input_register, SEED)?;
+    let concrete_start = Instant::now();
+    runtime.run(&mut concrete, STEP_BUDGET)?;
+    let concrete_elapsed = concrete_start.elapsed();
+    let concrete_steps = concrete.step_count;
+
+    let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
+    let mut process = runtime.load_elf(&elf)?;
+    process.write_register(input_register, SEED)?;
+    let mut session = runtime.concolic(process, arena.as_ref());
+    session.mark_input_register(input_register, IrType::Bits(64))?;
+    let concolic_start = Instant::now();
+    session.run(STEP_BUDGET)?;
+    let concolic_elapsed = concolic_start.elapsed();
+    let concolic_steps = session.process.step_count;
+    let path_constraints = session.path_constraints().len();
+
+    let ms = |elapsed: Duration| elapsed.as_secs_f64() * 1_000.0;
+    let rate = |steps: u64, elapsed: Duration| steps as f64 / ms(elapsed).max(1e-9);
+    let overhead = ms(concolic_elapsed) / ms(concrete_elapsed).max(1e-9);
+
+    println!(
+        "GATE-A sparse: trace {concolic_steps} steps | concrete {:.1} ms ({:.1} steps/ms) | \
+         concolic {:.1} ms ({:.1} steps/ms, {overhead:.2}x concrete) | \
+         path constraints {path_constraints} | arena nodes {} (distinct folded constants only)",
+        ms(concrete_elapsed),
+        rate(concrete_steps, concrete_elapsed),
+        ms(concolic_elapsed),
+        rate(concolic_steps, concolic_elapsed),
+        arena.stats().nodes,
+    );
+    println!(
+        "GATE-A sparse fixture: cc {FIXTURE_OPT}, LOOPS=3000 constant-derived arithmetic, \
+         input consulted once at the end (fast-path shape)"
+    );
+
+    assert!(concrete.terminated && session.process.terminated);
+    assert_eq!(
+        concrete.syscalls.exit_code(),
+        session.process.syscalls.exit_code(),
+        "concolic and concrete runs must agree on the exit code"
+    );
+    assert_eq!(concrete_steps, concolic_steps, "same seed must give the same trace");
+    assert!(
+        concrete_steps >= MIN_STEPS,
+        "trace too short to measure: {concrete_steps} steps"
+    );
+    assert_eq!(
+        path_constraints, 0,
+        "no branch in this trace is input-derived; the shadow must record nothing"
+    );
     Ok(())
 }

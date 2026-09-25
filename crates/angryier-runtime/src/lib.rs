@@ -2701,6 +2701,25 @@ impl ConcolicImage for Process {
         }
     }
 
+    fn register_width(&self, register: u32) -> Option<u16> {
+        self.state
+            .registers
+            .register_width(register)
+            .and_then(|bytes| u16::try_from(bytes * 8).ok())
+    }
+
+    fn read_register_into(&self, register: u32, out: &mut [u8]) -> bool {
+        match self.state.registers.read_value(register) {
+            // An Arc bump and a copy — no heap allocation on the shadow's
+            // per-register hot path.
+            Ok(RegisterValue::Concrete(bytes)) if bytes.len() >= out.len() => {
+                out.copy_from_slice(&bytes[..out.len()]);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn read_bytes(&self, address: u64, length: usize) -> Option<Vec<ByteValue>> {
         self.state.memory.read(address, length).ok()
     }
