@@ -193,11 +193,13 @@ suites require system Z3/XED):
   ~12%; shadow evaluation itself ~9%. Next round: cheap deterministic
   hasher (FxHash-class) for the arena's hash-cons/expression maps, then
   a fixed-size-input dependency-key derivation over cached child keys.
-- Symbolic-evaluator gaps surfaced by the speed benchmark: `ZExt 64→32`
-  unsupported, 32-bit induction-variable init yields width-mismatched
-  `SortMismatch(Ult)`, `RotL/RotR` unsupported symbolically, and concrete
-  division by zero rejects where x87 masked semantics yield ±Inf. (The
-  `cmp $imm16,%dx` and 16-bit imm form-map gaps are fixed.)
+- Symbolic-evaluator gaps surfaced by the speed benchmark — **closed
+  2026-09-25** except one: degenerate `ZExt` truncates via `Extract` with
+  view-width-normalized register reads, comparison operands coerce
+  mismatched widths (unsigned ZExt / signed SExt) with arena folding of
+  `Ult/Ule/Slt/Sle`, and `RotL`/`RotR` work end-to-end (arena, symbolic +
+  concolic evaluation, Z3, Bitwuzla, fuzzy tier). Remaining: concrete
+  division by zero rejects where x87 masked semantics yield ±Inf.
 - Memory is sparse-map backed, not OS-page-table COW; the 10k-live-state
   footprint and depth-500 solver-migration numbers are unmeasured.
 - Concolic fast-path speedup (5–10× target) unmeasured on long traces.
@@ -580,10 +582,12 @@ work-unit serialization (seam only); CLI hygiene — largely fixed
 (2026-09-24): `help` lists `run` (feature-aware), strict flag parsing with
 clear errors (unknown flags, missing values, bad registers/argv/find all
 exit 1), honest `--find` usage, single workspace version source, refreshed
-`crates`/`status` self-reporting, x87 iclasses re-exported from
-`angryier-arch-xed-ffi` with compile-time value pinning. Remaining quirks:
-symbolic width hardcoded 64-bit, CLI-vs-Lua default drift (steps 1024 vs
-256), repeated-positional last-wins.
+  `crates`/`status` self-reporting, x87 iclasses re-exported from
+  `angryier-arch-xed-ffi` with compile-time value pinning. Final quirks
+  closed 2026-09-25: `--steps` flag with CLI/Lua defaults unified through
+  shared constants (256/16), repeated positionals and repeated singular
+  flags exit 1, symbolic register widths flow end-to-end (64/omitted
+  accepted, other widths error honestly, unknown names error).
 
 ### Production 1.0 — validation + reproducible reports
 The checklist in §6; the blocking items are Gate B numbers, ISA breadth,
@@ -644,9 +648,8 @@ and reproducible correctness/performance reports.
    tamper rejection proven. Gate 0's original remainder is closed.
 10. **Polish-and-publish track — round 1 DONE (2026-09-24); release
     profile applied and gate numbers regenerated under it (2026-09-25,
-    `reports/gate-report-2026-09-25.*`).** CLI hygiene quirks in flight
-    (2026-09-25): steps-default unification, repeated-positional error,
-    symbolic-width hardcode. Remaining: stable API; the Production 1.0
+    `reports/gate-report-2026-09-25.*`); CLI hygiene quirks closed
+    (2026-09-25).** Remaining: stable API; the Production 1.0
     validation report.
 11. **Docs hygiene (this file).** ROADMAP.md is the single status source;
     update it in the same commit as any phase-status change (the
