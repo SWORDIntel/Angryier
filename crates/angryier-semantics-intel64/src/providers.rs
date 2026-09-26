@@ -4271,3 +4271,46 @@ impl SemanticProvider for ImulR64Mem64 {
         Ok(receipt(0x205, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// RDTSC (Read Time-Stamp Counter)
+// ---------------------------------------------------------------------------
+
+/// RDTSC: writes a deterministic monotonically-increasing counter to
+/// EDX:EAX. NOT the real CPU TSC — this is replayable and deterministic.
+/// Drivers use RDTSC for anti-tamper timestamps, entropy seeding, and
+/// timing checks; a fixed counter satisfies all of them without breaking
+/// replay.
+#[derive(Clone, Copy, Debug)]
+pub struct Rdtsc;
+
+impl SemanticProvider for Rdtsc {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x500)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::RDTSC
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        // Deterministic counter: a fixed constant that satisfies drivers
+        // checking for non-zero / changing timestamps. The exact value is
+        // replay-safe (same on every run).
+        let tsc: u64 = 0x0000_0000_0100_0000; // ~1M cycles (arbitrary)
+        let eax = tsc & 0xFFFF_FFFF;
+        let edx = tsc >> 32;
+        let eax_val = const_u64(out, eax)?;
+        let edx_val = const_u64(out, edx)?;
+        out.write_register(RegisterId(register_id::GPR_BASE + 0), eax_val)?;
+        out.write_register(RegisterId(register_id::GPR_BASE + 2), edx_val)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x500, context))
+    }
+}

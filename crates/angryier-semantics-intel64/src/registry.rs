@@ -659,6 +659,15 @@ impl Intel64CorpusRegistry {
             Arc::new(FucomipSt0Sti),
             Arc::new(FcomiSt0Sti),
             Arc::new(FcomipSt0Sti),
+            Arc::new(IncMem8),
+            Arc::new(IncMem16),
+            Arc::new(IncMem32),
+            Arc::new(IncMem64),
+            Arc::new(DecMem8),
+            Arc::new(DecMem16),
+            Arc::new(DecMem32),
+            Arc::new(DecMem64),
+            Arc::new(Rdtsc),
         ];
 
         // Build form index from known form IDs. Each provider corresponds to
@@ -749,7 +758,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 634] = [
+const ALL_FORMS: [u32; 643] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -1385,6 +1394,15 @@ const ALL_FORMS: [u32; 634] = [
     crate::forms::FUCOMIP_ST0_STI,
     crate::forms::FCOMI_ST0_STI,
     crate::forms::FCOMIP_ST0_STI,
+    crate::forms::INC_MEM8,
+    crate::forms::INC_MEM16,
+    crate::forms::INC_MEM32,
+    crate::forms::INC_MEM64,
+    crate::forms::DEC_MEM8,
+    crate::forms::DEC_MEM16,
+    crate::forms::DEC_MEM32,
+    crate::forms::DEC_MEM64,
+    crate::forms::RDTSC,
 ];
 
 #[cfg(test)]

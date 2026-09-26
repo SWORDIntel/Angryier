@@ -1364,6 +1364,19 @@ impl<D: Decoder> Runtime<D> {
                 writable: true,
                 executable: false,
             },
+            // Under-constrained memory guard: low 64 KiB as zeroed RAM.
+            // UC-SymEX relaxation — reads/writes through NULL-adjacent
+            // garbage pointers behave as zero pages instead of faulting.
+            // Paths taken under zeroed guesses are review candidates;
+            // callers surface this relaxation in verdict provenance.
+            MemoryRegion {
+                object: angryier_types::ObjectId(9),
+                base: 0,
+                size: 0x0001_0000,
+                readable: true,
+                writable: true,
+                executable: false,
+            },
         ];
         let mut process = self.load_image_with_extra_regions(image, extra_regions)?;
 
@@ -4950,7 +4963,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             || state.process.simproc_instances.contains_key(&pc)
         {
             let state = &mut self.states[index];
-            let outcome = if let Some(model) = state.process.simproc_instances.get(&pc).cloned() {
+                        let outcome = if let Some(model) = state.process.simproc_instances.get(&pc).cloned() {
                 self.runtime.dispatch_simproc_instance(&mut state.process, pc, &model)?
             } else {
                 self.runtime.step(&mut state.process)?

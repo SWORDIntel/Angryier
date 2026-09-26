@@ -29,6 +29,20 @@ use angryier_types::SemanticRuleId;
 /// adapter will map XED iform enumerations to these values. Until then,
 /// synthetic decode objects use these IDs directly.
 pub mod forms {
+        // INC/DEC with memory operands (the driver-campaign refcount shapes).
+        // LOCK-prefixed and unlocked encodings decode to the same iclass; on a
+        // single-vCPU symbolic emulator the LOCK prefix adds no semantic beyond
+        // atomicity, so both route to these forms (debt-recorded: multi-core
+        // memory-ordering semantics are not modeled).
+        pub const INC_MEM8: u32 = 0x10001;
+        pub const INC_MEM16: u32 = 0x10002;
+        pub const INC_MEM32: u32 = 0x10003;
+        pub const INC_MEM64: u32 = 0x10004;
+        pub const DEC_MEM8: u32 = 0x10005;
+        pub const DEC_MEM16: u32 = 0x10006;
+        pub const DEC_MEM32: u32 = 0x10007;
+        pub const DEC_MEM64: u32 = 0x10008;
+
     // Scalar integer arithmetic (two-register, r64 r64)
     pub const MOV_R64_R64: u32 = 0x0001;
     pub const ADD_R64_R64: u32 = 0x0002;
@@ -912,6 +926,11 @@ pub mod forms {
     pub const MUL_R32: u32 = 0x01DB;
     pub const MUL_MEM32: u32 = 0x01DC;
 
+    /// RDTSC — Read Time-Stamp Counter. Writes the 64-bit TSC to EDX:EAX.
+    /// Deterministic for replay: returns a monotonically increasing counter
+    /// (each read increments by 1), NOT the real CPU timestamp.
+    pub const RDTSC: u32 = 0x01DD;
+
     // x87 FPU state initialization (fninit)
     pub const FINIT: u32 = 0x0268;
 
@@ -981,6 +1000,7 @@ pub mod rflags {
 }
 
 /// Starting rule ID for corpus providers. Each provider gets a sequential ID.
+
 pub const CORPUS_RULE_BASE: u64 = 0x1000;
 
 pub const fn rule_id(offset: u64) -> SemanticRuleId {

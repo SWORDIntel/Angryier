@@ -202,7 +202,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem32, Shape::Imm] => Some(forms::MOV_MEM32_IMM32),
             _ => None,
         },
-        iclass::XED_ICLASS_ADD => match shapes {
+        iclass::XED_ICLASS_ADD | iclass::XED_ICLASS_ADD_LOCK => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::ADD_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::ADD_R64_IMM32),
             [Shape::Reg64, Shape::Mem64] => Some(forms::ADD_R64_MEM64),
@@ -222,7 +222,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg8, Shape::Imm] => Some(forms::ADD_R8_IMM8),
             _ => None,
         },
-        iclass::XED_ICLASS_SUB => match shapes {
+        iclass::XED_ICLASS_SUB | iclass::XED_ICLASS_SUB_LOCK => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::SUB_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::SUB_R64_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::SUB_R32_R32),
@@ -267,7 +267,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg8, Shape::Mem8] => Some(forms::CMP_R8_MEM8),
             _ => None,
         },
-        iclass::XED_ICLASS_AND => match shapes {
+        iclass::XED_ICLASS_AND | iclass::XED_ICLASS_AND_LOCK => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::AND_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::AND_R64_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::AND_R32_R32),
@@ -287,7 +287,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg8, Shape::Imm] => Some(forms::AND_R8_IMM8),
             _ => None,
         },
-        iclass::XED_ICLASS_OR => match shapes {
+        iclass::XED_ICLASS_OR | iclass::XED_ICLASS_OR_LOCK => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::OR_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::OR_R64_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::OR_R32_R32),
@@ -307,7 +307,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg8, Shape::Imm] => Some(forms::OR_R8_IMM8),
             _ => None,
         },
-        iclass::XED_ICLASS_XOR => match shapes {
+        iclass::XED_ICLASS_XOR | iclass::XED_ICLASS_XOR_LOCK => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::XOR_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::XOR_R64_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::XOR_R32_R32),
@@ -409,12 +409,36 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg64] => Some(forms::INC_R64),
             [Shape::Reg32] => Some(forms::INC_R32),
             [Shape::Reg8] => Some(forms::INC_R8),
+            // LOCK-prefixed and unlocked memory inc/dec (refcount paths):
+            // single-vCPU RMW semantics are identical.
+            [Shape::Mem64] => Some(forms::INC_MEM64),
+            [Shape::Mem32] => Some(forms::INC_MEM32),
+            [Shape::Mem16] => Some(forms::INC_MEM16),
+            [Shape::Mem8] => Some(forms::INC_MEM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_INC_LOCK => match shapes {
+            [Shape::Mem64] => Some(forms::INC_MEM64),
+            [Shape::Mem32] => Some(forms::INC_MEM32),
+            [Shape::Mem16] => Some(forms::INC_MEM16),
+            [Shape::Mem8] => Some(forms::INC_MEM8),
             _ => None,
         },
         iclass::XED_ICLASS_DEC => match shapes {
             [Shape::Reg64] => Some(forms::DEC_R64),
             [Shape::Reg32] => Some(forms::DEC_R32),
             [Shape::Reg8] => Some(forms::DEC_R8),
+            [Shape::Mem64] => Some(forms::DEC_MEM64),
+            [Shape::Mem32] => Some(forms::DEC_MEM32),
+            [Shape::Mem16] => Some(forms::DEC_MEM16),
+            [Shape::Mem8] => Some(forms::DEC_MEM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_DEC_LOCK => match shapes {
+            [Shape::Mem64] => Some(forms::DEC_MEM64),
+            [Shape::Mem32] => Some(forms::DEC_MEM32),
+            [Shape::Mem16] => Some(forms::DEC_MEM16),
+            [Shape::Mem8] => Some(forms::DEC_MEM8),
             _ => None,
         },
         iclass::XED_ICLASS_NEG => match shapes {
@@ -1265,6 +1289,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_NOP => Some(forms::NOP),
         iclass::XED_ICLASS_HLT => Some(forms::HLT),
         iclass::XED_ICLASS_UD2 => Some(forms::UD2),
+        iclass::XED_ICLASS_RDTSC => Some(forms::RDTSC),
         _ => None,
     }
 }

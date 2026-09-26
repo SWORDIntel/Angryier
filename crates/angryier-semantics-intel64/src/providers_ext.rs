@@ -8339,6 +8339,56 @@ macro_rules! incdec_r8 {
 incdec_r8!(IncR8, forms::INC_R8, PrimitiveOp::Add, 0x305);
 incdec_r8!(DecR8, forms::DEC_R8, PrimitiveOp::Sub, 0x306);
 
+/// INC/DEC with a memory operand (driver refcount shapes). Semantically
+/// identical to the register forms — read operand 0, ±1, write back, with
+/// the CF-preserving flag policy. LOCK-prefixed encodings share these
+/// forms (single-vCPU RMW; ordering semantics debt-recorded).
+macro_rules! incdec_mem {
+    ($name:ident, $form:expr, $op:expr, $rule:expr, $ty:expr, $width:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let operand = out.read_operand(0, $ty)?;
+                let one = const_typed(out, $ty, 1)?;
+                let result = out.emit(SemanticOp::Primitive($op), $ty, &[operand, one])?;
+                if $op == PrimitiveOp::Add {
+                    write_add_flags_preserve_cf(out, result, operand, one, $width)?;
+                } else {
+                    write_sub_flags_preserve_cf(out, result, operand, one, $width)?;
+                }
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+incdec_mem!(IncMem8, forms::INC_MEM8, PrimitiveOp::Add, 0x501, U8, 8);
+incdec_mem!(IncMem16, forms::INC_MEM16, PrimitiveOp::Add, 0x502, U16, 16);
+incdec_mem!(IncMem32, forms::INC_MEM32, PrimitiveOp::Add, 0x503, U32, 32);
+incdec_mem!(IncMem64, forms::INC_MEM64, PrimitiveOp::Add, 0x504, U64, 64);
+incdec_mem!(DecMem8, forms::DEC_MEM8, PrimitiveOp::Sub, 0x505, U8, 8);
+incdec_mem!(DecMem16, forms::DEC_MEM16, PrimitiveOp::Sub, 0x506, U16, 16);
+incdec_mem!(DecMem32, forms::DEC_MEM32, PrimitiveOp::Sub, 0x507, U32, 32);
+incdec_mem!(DecMem64, forms::DEC_MEM64, PrimitiveOp::Sub, 0x508, U64, 64);
+
 // ---------------------------------------------------------------------------
 // NEG/NOT r8
 // ---------------------------------------------------------------------------

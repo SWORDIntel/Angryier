@@ -180,6 +180,16 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
     }
 
+    // Under-constrained memory guard (opt-in, debt-recorded): map the low
+    // 64 KiB as zeroed RAM so reads/writes through NULL-adjacent garbage
+    // pointers behave as zero pages instead of faulting. Standard UC-SymEX
+    // relaxation — paths taken under zeroed guesses are candidates for
+    // review, and callers must surface the relaxation in verdict
+    // provenance. Never changes executable mappings.
+    if opts.get::<bool>("zero_low_pages").unwrap_or(false) {
+        let _ = process.state.memory.load_concrete(0, &vec![0u8; 0x1_0000]);
+    }
+
     // The Z3 backend needs a shared arena reader — keep the arena in Arc.
     let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
         angryier_types::ExpressionNormalizationVersion(1),
