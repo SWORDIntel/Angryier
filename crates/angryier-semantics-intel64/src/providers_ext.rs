@@ -8380,14 +8380,14 @@ macro_rules! incdec_mem {
     };
 }
 
-incdec_mem!(IncMem8, forms::INC_MEM8, PrimitiveOp::Add, 0x501, U8, 8);
-incdec_mem!(IncMem16, forms::INC_MEM16, PrimitiveOp::Add, 0x502, U16, 16);
-incdec_mem!(IncMem32, forms::INC_MEM32, PrimitiveOp::Add, 0x503, U32, 32);
-incdec_mem!(IncMem64, forms::INC_MEM64, PrimitiveOp::Add, 0x504, U64, 64);
-incdec_mem!(DecMem8, forms::DEC_MEM8, PrimitiveOp::Sub, 0x505, U8, 8);
-incdec_mem!(DecMem16, forms::DEC_MEM16, PrimitiveOp::Sub, 0x506, U16, 16);
-incdec_mem!(DecMem32, forms::DEC_MEM32, PrimitiveOp::Sub, 0x507, U32, 32);
-incdec_mem!(DecMem64, forms::DEC_MEM64, PrimitiveOp::Sub, 0x508, U64, 64);
+incdec_mem!(IncMem8, forms::INC_MEM8, PrimitiveOp::Add, 0x540, U8, 8);
+incdec_mem!(IncMem16, forms::INC_MEM16, PrimitiveOp::Add, 0x541, U16, 16);
+incdec_mem!(IncMem32, forms::INC_MEM32, PrimitiveOp::Add, 0x542, U32, 32);
+incdec_mem!(IncMem64, forms::INC_MEM64, PrimitiveOp::Add, 0x543, U64, 64);
+incdec_mem!(DecMem8, forms::DEC_MEM8, PrimitiveOp::Sub, 0x544, U8, 8);
+incdec_mem!(DecMem16, forms::DEC_MEM16, PrimitiveOp::Sub, 0x545, U16, 16);
+incdec_mem!(DecMem32, forms::DEC_MEM32, PrimitiveOp::Sub, 0x546, U32, 32);
+incdec_mem!(DecMem64, forms::DEC_MEM64, PrimitiveOp::Sub, 0x547, U64, 64);
 
 // ---------------------------------------------------------------------------
 // NEG/NOT r8
