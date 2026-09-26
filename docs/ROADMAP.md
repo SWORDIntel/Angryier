@@ -73,7 +73,7 @@ suites require system Z3/XED):
   (ntoskrnl/NDIS/HAL — zero coverage; the environment model is Linux
   syscalls + libc), DriverEntry/IRP state shapes, and an integration
   surface for the external angr-based sweep (no Python API exists).
-  Import-directory parsing, IAT-to-stub resolution, the DriverEntry entry mode, and per-export forced-return hooks landed (2026-09-25) on synthetic importing PEs; real .sys validation plus a Windows kernel API model layer and the sweep integration surface remain. Gate J discipline:
+  Import-directory parsing, IAT-to-stub resolution, the DriverEntry entry mode, and per-export forced-return hooks landed (2026-09-25) on synthetic importing PEs. The Lua/CLI sweep surface now dispatches by magic bytes: `angry.run`/`angry.open` load `MZ` images through `load_pe_driver`/`load_pe` (2026-09-26) — real `.sys` drivers load and execute from DriverEntry (first contact via the byovd-harness escalation contract: 15-24 steps before failing on unmapped forms). Remaining: broad-form ISA coverage for DriverEntry prologues, a Windows kernel API model layer (spec available: byovd-harness `windows_kernel_api_models` manifest), and real-.sys verdict validation. Gate J discipline:
   no cross-engine (angr-vs-Angryier) timing exists, so no driver-
   campaign throughput claim transfers yet.
 - **Dual-mode engine (Phase 6, centerpiece):** `ConcolicSession` shadows

@@ -136,7 +136,15 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     let runtime =
         crate::Runtime::with_native_xed(angryier_types::SemanticVersion(1), angryier_types::TargetProfileId(1));
     let use_dynamic = opts.get::<bool>("dynamic").unwrap_or(false);
-    let process = if use_dynamic {
+    // Format dispatch: an MZ magic means PE32+, which loads in driver mode
+    // (sections mapped, IAT resolved to import stubs, DriverEntry entry
+    // state) — the driver-campaign path. `dynamic` is an ELF-only option.
+    let is_pe = bytes.len() > 1 && bytes[0] == b'M' && bytes[1] == b'Z';
+    let process = if is_pe {
+        runtime
+            .load_pe_driver(&bytes)
+            .map_err(|e| mlua::Error::external(format!("load_pe_driver: {e:?}")))?
+    } else if use_dynamic {
         runtime
             .load_elf_dynamic(&bytes, &[])
             .map_err(|e| mlua::Error::external(format!("load_elf_dynamic: {e:?}")))?
@@ -287,9 +295,16 @@ fn open_session(path: &str) -> mlua::Result<LuaSession> {
     let arena: &'static angryier_expr::ShardedExprArena = Box::leak(Box::new(angryier_expr::ShardedExprArena::new(
         angryier_types::ExpressionNormalizationVersion(1),
     )));
-    let process = runtime
-        .load_elf(&bytes)
-        .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?;
+    let is_pe = bytes.len() > 1 && bytes[0] == b'M' && bytes[1] == b'Z';
+    let process = if is_pe {
+        runtime
+            .load_pe(&bytes)
+            .map_err(|e| mlua::Error::external(format!("load_pe: {e:?}")))?
+    } else {
+        runtime
+            .load_elf(&bytes)
+            .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?
+    };
     Ok(LuaSession {
         session: crate::SymbolicSession::new(runtime, arena, process),
     })

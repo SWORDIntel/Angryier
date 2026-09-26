@@ -64,7 +64,7 @@ usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--
 note: --find ADDR is hexadecimal, 0x prefix optional
 ```
 
-Loads an ELF64 image into the engine and runs it concretely/symbolically. The binary is loaded statically by default (`load_elf`); with `--dynamic` the dynamic-linking environment model is used (`load_elf_dynamic`).
+Loads an ELF64 or PE32+ image into the engine and runs it concretely/symbolically. The loader is chosen by magic bytes: ELF loads statically by default (`load_elf`), with `--dynamic` the dynamic-linking environment model is used (`load_elf_dynamic`), and an `MZ` image loads in **driver mode** (`load_pe_driver`: sections mapped, IAT resolved to import stubs, DriverEntry entry state — `dynamic` is ignored for PE).
 
 ### Flags
 
@@ -126,7 +126,7 @@ Options table (all fields optional):
 | `steps` | integer | `256` | Instruction-step budget. The default is the shared constant `angryier_runtime::script::DEFAULT_STEPS`, which the CLI's `--steps` flag also uses. |
 | `states` | integer | `16` | Maximum live states (`DEFAULT_MAX_STATES`). |
 | `solve` | boolean | `false` | Solve each found state with the native Z3 backend and populate `inputs`. |
-| `dynamic` | boolean | `false` | Dynamic-linking load path instead of static. |
+| `dynamic` | boolean | `false` | Dynamic-linking load path instead of static (ELF only; PE images always load in driver mode). |
 | `argv` | integer | — | Symbolize `argv[0]` as this many bytes. |
 | `files` | table name → `true` | — | Paths whose opens are backed by symbolic bytes (reads yield symbols instead of hitting the host). |
 | `contents` | table name → string | — | Concrete file contents to inject into the environment model. |
