@@ -212,6 +212,50 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                 .map_err(|e| mlua::Error::external(format!("mark_symbolic: {e:?}")))?;
         }
     }
+    // Concrete register seeds: `regs = { rcx = 0x..., rdx = 0x... }` —
+    // dispatch-entry drivers get IRP-shaped pointer arguments.
+    if let Ok(tbl) = opts.get::<Table>("regs") {
+        for pair in tbl.pairs::<String, i64>() {
+            let (name, value) = pair?;
+            let reg = reg_by_name(&name)
+                .ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
+            session.states[0]
+                .process
+                .write_register(reg, value as u64)
+                .map_err(|e| mlua::Error::external(format!("regs[{name}]: {e:?}")))?;
+        }
+    }
+
+    // Concrete memory pokes: `poke = { { addr = 0x..., value = 0x... }, ... }`
+    // — 8-byte little-endian writes (e.g. IRP.CurrentStackLocation pointing
+    // at a symbolic IO_STACK_LOCATION block).
+    if let Ok(tbl) = opts.get::<Table>("poke") {
+        for pair in tbl.pairs::<Value, Table>() {
+            let (_, entry) = pair?;
+            let addr = entry.get::<i64>("addr")? as u64;
+            let value = entry.get::<i64>("value")? as u64;
+            session.states[0].process.state.memory = session.states[0]
+                .process
+                .state
+                .memory
+                .load_concrete(addr, &value.to_le_bytes())
+                .map_err(|e| mlua::Error::external(format!("poke: {e:?}")))?;
+        }
+    }
+
+    // Symbolic memory: `symbolic_memory = { { addr = 0x..., len = 48 }, ... }`
+    // — byte-granular input symbols (IRP/IO_STACK_LOCATION contents).
+    if let Ok(tbl) = opts.get::<Table>("symbolic_memory") {
+        for pair in tbl.pairs::<Value, Table>() {
+            let (_, entry) = pair?;
+            let addr = entry.get::<i64>("addr")? as u64;
+            let len = entry.get::<i64>("len")? as usize;
+            session
+                .mark_memory_symbolic(0, addr, len)
+                .map_err(|e| mlua::Error::external(format!("symbolic_memory: {e:?}")))?;
+        }
+    }
+
     // Symbolic argv: `argv = 8` materializes 8 bytes (7 + NUL) into
     // argv[0]'s stack string.
     if let Ok(argv_len) = opts.get::<u64>("argv") {

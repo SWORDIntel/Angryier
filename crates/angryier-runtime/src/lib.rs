@@ -4834,6 +4834,60 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Ok(())
     }
 
+    /// Marks `length` bytes at `address` as input symbols (one symbolic
+    /// byte each) — under-constrained dispatch-entry analysis seeds
+    /// IRP/IO_STACK_LOCATION blocks this way so handler branches fork on
+    /// request contents instead of zeroed memory.
+    pub fn mark_memory_symbolic(
+        &mut self,
+        index: usize,
+        address: u64,
+        length: usize,
+    ) -> Result<(), RuntimeError> {
+        let state = self
+            .states
+            .get_mut(index)
+            .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
+        let next_symbol = state
+            .symbols
+            .iter()
+            .filter_map(|s| {
+                self.arena.get(s.expression).and_then(|n| {
+                    n.immediate
+                        .get(..8)
+                        .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                })
+            })
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        let mut bytes = Vec::with_capacity(length);
+        for i in 0..length as u64 {
+            let expr = self
+                .arena
+                .intern(angryier_expr::ExprNode {
+                    sort: angryier_expr::ExprSort::BitVec(8),
+                    op: angryier_expr::ExprOp::Symbol,
+                    operands: Vec::new(),
+                    immediate: (next_symbol + i).to_le_bytes().to_vec(),
+                })
+                .map_err(|e| RuntimeError::Symbolic(format!("{e:?}")))?;
+            state.symbols.push(angryier_execution::SymbolBinding {
+                register: register_id::GPR_BASE + 2, // provenance: rdx-ish input
+                expression: expr,
+                width: 8,
+            });
+            bytes.push(ByteValue::Symbolic(expr));
+        }
+        state.process.state.memory = state
+            .process
+            .state
+            .memory
+            .write(address, &bytes)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        Ok(())
+    }
+
     /// Overwrites `argv[0]`'s stack string with `len` symbolic bytes (the
     /// trailing NUL stays concrete) — symbolic argv input for `main(argc,
     /// argv)` programs. `len` includes the NUL: `symbolize_argv0(0, 8)`
