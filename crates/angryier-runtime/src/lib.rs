@@ -60,6 +60,8 @@ pub mod form_map;
 #[cfg(feature = "script")]
 pub mod script;
 
+pub mod function_summaries;
+
 /// Default stack size in bytes (64 KiB).
 const STACK_SIZE: u64 = 0x1_0000;
 
@@ -4280,6 +4282,27 @@ pub struct SymbolicSession<'a, D: Decoder> {
     /// header with a concrete counter/bound collapses the remaining
     /// iterations into one step.
     loop_summaries: BTreeMap<Address, LoopSummary>,
+    /// Pure-function summaries keyed by callee entry — populated by
+    /// [`Self::enable_function_summaries`]; a call whose callee qualifies
+    /// collapses into one step via a cached expression template
+    /// (see [`function_summaries`]). `Arc`-shared so parallel shards clone
+    /// the map by reference count.
+    function_summaries: BTreeMap<Address, std::sync::Arc<function_summaries::FunctionSummary>>,
+    /// Built summary templates keyed by (callee entry, argument widths).
+    function_templates: BTreeMap<(Address, Vec<u16>), function_summaries::FunctionTemplate>,
+    /// Shapes whose template build failed — remembered so the cost is paid
+    /// once per shape (that shape keeps stepping forever after).
+    failed_templates: BTreeSet<(Address, Vec<u16>)>,
+    /// Indirect-call targets whose lazy per-target extraction already ran
+    /// and failed — never retried (the static call-edge pass cannot see
+    /// indirect-only callees, so this is the negative cache for them).
+    lazy_summary_targets: BTreeSet<Address>,
+    /// Placeholder merge-cost model — the summarize-vs-inline seam.
+    /// `Arc`-shared with parallel shards.
+    summary_cost_model: std::sync::Arc<dyn function_summaries::FunctionSummaryCostModel>,
+    /// Evidence counters: template applications and builds.
+    function_summary_hits: u64,
+    function_summary_builds: u64,
 }
 
 impl<'a, D: Decoder> SymbolicSession<'a, D> {
@@ -4321,6 +4344,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             recorder: angryier_provenance::FlightRecorder::new(4096),
             next_prov_node: 0,
             loop_summaries: BTreeMap::new(),
+            function_summaries: BTreeMap::new(),
+            function_templates: BTreeMap::new(),
+            failed_templates: BTreeSet::new(),
+            lazy_summary_targets: BTreeSet::new(),
+            summary_cost_model: std::sync::Arc::new(function_summaries::DepthWidthCostModel::default()),
+            function_summary_hits: 0,
+            function_summary_builds: 0,
         }
     }
 
@@ -5071,6 +5101,26 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .decode(pc, raw)
             .map_err(|e| RuntimeError::Decode(format!("{e:?}")))?;
 
+        // Function summarization: a direct call whose callee qualifies as a
+        // pure function of its arguments collapses the whole callee into one
+        // symbolic step (cached template keyed by entry + argument shape).
+        // `None` keeps stepping — a rejected shape is never approximated.
+        // (The map may be empty: unseen indirect targets earn a lazy
+        // per-target extraction inside `try_function_summary`.)
+        if decoded.form_id == angryier_semantics_intel64::forms::CALL_REL32
+            && let Some(target) = decoded.operands.iter().find_map(|o| {
+                if let angryier_arch::OperandKind::RelativeBranch(rb) = &o.kind {
+                    Some(decoded.relative_target(*rb))
+                } else {
+                    None
+                }
+            })
+            && let Some(outcome) =
+                self.try_function_summary(index, target, pc.wrapping_add(u64::from(decoded.length)))
+        {
+            return Ok(outcome);
+        }
+
         // REP string ops: the concrete engine intercepts them before the
         // semantic registry; the symbolic path needs the same fast path,
         // writing symbolic bytes into the state's store when the fill value
@@ -5362,10 +5412,36 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         }
         let summary = summary.map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
         let post = evaluator.snapshot();
-        let state = &mut self.states[index];
-        state.registers = post.registers;
-        state.expr_concrete = post.expr_concrete;
-        state.symbols = evaluator.symbols().to_vec();
+        {
+            let state = &mut self.states[index];
+            state.registers = post.registers;
+            state.expr_concrete = post.expr_concrete;
+            state.symbols = evaluator.symbols().to_vec();
+        }
+
+        // Function summarization for resolved indirect calls — the
+        // DriverObject-style dispatch shape. Gated on the decoded form being
+        // a call (the IR op conflates `call reg`/`jmp reg`; a jump must not
+        // consume a summary). Sits before the long-lived `state` borrow below
+        // so the &mut session borrow is exclusive; `jump_target` is only set
+        // for JumpIndirect terminators, so this cannot fire on branch blocks.
+        if matches!(
+                decoded.form_id,
+                angryier_semantics_intel64::forms::CALL_INDIRECT_R64
+                    | angryier_semantics_intel64::forms::CALL_INDIRECT_MEM64
+            )
+            && let Some(target_expr) = summary.jump_target
+            && let Some(node) = self.arena.get(target_expr)
+            && node.op == angryier_expr::ExprOp::Constant
+            && let Some(b) = node.immediate.get(..8)
+        {
+            let target = u64::from_le_bytes(b.try_into().unwrap_or([0; 8]));
+            if let Some(outcome) =
+                self.try_function_summary(index, target, pc.wrapping_add(u64::from(decoded.length)))
+            {
+                return Ok(outcome);
+            }
+        }
 
         if let Some(branch) = summary.branch {
             // Fork: this state takes `taken` under `condition`; the child
@@ -5492,39 +5568,44 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 // it folds to a constant; a symbolic target is an
                 // under-constrained exit (honest termination), never the
                 // return-address misread this arm used to do.
-                if let Some(target_expr) = summary.jump_target
-                    && let Some(node) = self.arena.get(target_expr)
-                    && node.op == angryier_expr::ExprOp::Constant
-                    && let Some(b) = node.immediate.get(..8)
-                {
-                    let target = u64::from_le_bytes(b.try_into().unwrap_or([0; 8]));
-                    // CALL-biased stack semantics: the IR conflates
-                    // `call reg` and `jmp reg` into one op, and the
-                    // driver campaign's indirect calls (IAT thunks) need
-                    // the return frame pushed so the callee's ret (and a
-                    // SimProcedure's pop) lands back here. Debt-recorded:
-                    // a true `jmp reg` (jump table) pushes a spurious
-                    // frame — rare on these paths, revisit with a
-                    // distinct CallIndirect op.
-                    let ret_addr = pc.wrapping_add(u64::from(decoded.length));
-                    if let Ok(rsp) = state.process.read_register(register_id::GPR_BASE + 4) {
-                        let frame: Vec<ByteValue> = ret_addr
-                            .to_le_bytes()
-                            .iter()
-                            .map(|b| ByteValue::Concrete(*b))
-                            .collect();
-                        state.process.state.memory = state
-                            .process
-                            .state
-                            .memory
-                            .write(rsp.wrapping_sub(8), &frame)
-                            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
-                        let _ = state
-                            .process
-                            .write_register(register_id::GPR_BASE + 4, rsp.wrapping_sub(8));
+                if let Some(target_expr) = summary.jump_target {
+                    let direct = self
+                        .arena
+                        .get(target_expr)
+                        .filter(|n| n.op == angryier_expr::ExprOp::Constant)
+                        .map(|n| {
+                            let mut buffer = [0u8; 8];
+                            let len = n.immediate.len().min(8);
+                            buffer[..len].copy_from_slice(&n.immediate[..len]);
+                            u64::from_le_bytes(buffer)
+                        });
+                    let target = direct.or_else(|| angryier_execution::constant_value(self.arena, target_expr).ok());
+                    if let Some(target) = target {
+                        // CALL-biased stack semantics: the IR conflates
+                        // `call reg` and `jmp reg` into one op, and the
+                        // driver campaign's indirect calls (IAT thunks) need
+                        // the return frame pushed so the callee's ret (and a
+                        // SimProcedure's pop) lands back here. Debt-recorded:
+                        // a true `jmp reg` (jump table) pushes a spurious
+                        // frame — rare on these paths, revisit with a
+                        // distinct CallIndirect op.
+                        let ret_addr = pc.wrapping_add(u64::from(decoded.length));
+                        if let Ok(rsp) = state.process.read_register(register_id::GPR_BASE + 4) {
+                            let frame: Vec<ByteValue> =
+                                ret_addr.to_le_bytes().iter().map(|b| ByteValue::Concrete(*b)).collect();
+                            state.process.state.memory = state
+                                .process
+                                .state
+                                .memory
+                                .write(rsp.wrapping_sub(8), &frame)
+                                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                            let _ = state
+                                .process
+                                .write_register(register_id::GPR_BASE + 4, rsp.wrapping_sub(8));
+                        }
+                        let _ = state.process.write_pc(target);
+                        return Ok(SymbolicStepOutcome::Stepped { next_pc: target });
                     }
-                    let _ = state.process.write_pc(target);
-                    return Ok(SymbolicStepOutcome::Stepped { next_pc: target });
                 }
                 Ok(SymbolicStepOutcome::Terminated)
             }
@@ -6215,6 +6296,13 @@ where
         let arena = self.arena;
         let runtime = self.runtime;
         let cfg = self.cfg;
+        // Summaries and the cost model are Arc-shared with every shard —
+        // workers reuse the parent's pure-function summaries, and each shard
+        // grows its own template cache (shard hit counters are per-shard and
+        // dropped with the worker; the parent's counters cover the
+        // single-threaded exploration path).
+        let function_summaries = self.function_summaries.clone();
+        let summary_cost_model = std::sync::Arc::clone(&self.summary_cost_model);
         type ShardResult = Result<(SymbolicRunReport, Vec<SymbolicState>, Vec<SymbolicState>), RuntimeError>;
         let results: Vec<ShardResult> = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(workers);
@@ -6222,6 +6310,8 @@ where
                 if shard.is_empty() {
                     continue;
                 }
+                let function_summaries = function_summaries.clone();
+                let summary_cost_model = std::sync::Arc::clone(&summary_cost_model);
                 handles.push(scope.spawn(move || {
                     let mut sub = SymbolicSession {
                         runtime,
@@ -6234,6 +6324,13 @@ where
                         recorder: angryier_provenance::FlightRecorder::new(4096),
                         next_prov_node: 0,
                         loop_summaries: BTreeMap::new(),
+                        function_summaries,
+                        function_templates: BTreeMap::new(),
+                        failed_templates: BTreeSet::new(),
+                        lazy_summary_targets: BTreeSet::new(),
+                        summary_cost_model,
+                        function_summary_hits: 0,
+                        function_summary_builds: 0,
                     };
                     let report = sub.run(max_steps, max_states, None, timeout, false)?;
                     Ok((report, sub.states, sub.dead))

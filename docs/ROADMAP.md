@@ -119,6 +119,35 @@ suites require system Z3/XED):
   nested mixed loops measure ~14× step reduction. Unsummarizable shapes
   (inner branches, mid-body entries, calls, per-iteration effects)
   explicitly fall through.
+- **Function summaries (Phase 10):** `Runtime::function_summaries`
+  extracts pure-function candidates — straight-line bodies ending in
+  `ret`, register-only computation — and
+  `SymbolicSession::enable_function_summaries` collapses calls to them:
+  the body executes once per argument *shape* (callee entry + argument
+  widths) in a scratch evaluator over placeholder symbols, and the
+  resulting expression **template** is substituted with the caller's live
+  arguments on every further call — repeated calls become O(1) expression
+  rewrites (the hash-consed arena folds concrete arguments at intern
+  time). Soundness is layered: a lowered-IR scan rejects any body whose
+  instructions load, store, branch, or partially write a register;
+  a dynamic purity check seeds exactly the argument registers and
+  re-seeds with anything else the lowered IR reads (rflags
+  read-modify-writes are the common discovery), so the template is always
+  an exact function of inputs the caller substitutes; the template
+  carries the exact caller-clobber register delta (rax plus every written
+  GPR — flags are caller-saved per the ABIs and stay uncarried). Direct
+  and constant-folded indirect calls (`call *%rax` — the DriverObject
+  dispatch shape; indirect-only callees get a lazy per-target extraction)
+  summarize. A placeholder **merge-cost model**
+  (`FunctionSummaryCostModel` / `DepthWidthCostModel`, depth × width
+  against a budget) is the summarize-vs-inline seam for the real
+  multifactor model. Differential proof
+  (`tests/function_summaries.rs`): a 50-iteration caller fixture — plain
+  stepping 753 steps vs 304 summarized (2.5×) through direct `call`,
+  803 vs 354 (2.3×) through `call *%rax` — with one template build, 50
+  summary hits, matching exit values, and solver-model replay equivalence
+  for symbolic arguments; impure callees (any memory operand) never
+  summarize and stay exactly correct.
 - **Semantics:** 402 handwritten Intel 64 forms (integer/control-flow,
   bit-scan/popcount, SSE/SSE2/SSSE3/SSE4.1/SSE4.2 scalar+packed, CRC32,
   PTEST, byte shifts, plus a 39-form x87 slice — FLD/FST(P), the
@@ -225,8 +254,19 @@ suites require system Z3/XED):
 - Memory is sparse-map backed, not OS-page-table COW; the 10k-live-state
   footprint and depth-500 solver-migration numbers are unmeasured.
 - Concolic fast-path speedup (5–10× target) unmeasured on long traces.
-- Alpha-equivalence reuse, cache-admission policy, NUMA-pinned queue
-  groups, function summaries, and state economics are not implemented.
+- The Z3 FFI expression translator recurses without a depth guard: a
+  solver-gated symbolic loop long enough to accumulate the per-step
+  flag-composition chain (~118 nodes/iteration, pre-existing engine
+  behavior — identical with or without summaries) overflows the test
+  thread stack around ~40 iterations; the function-summary differentials
+  run those legs on a large-stack thread. An iterative translator (or a
+  depth guard with honest Unknown) is the follow-up.
+- Function-summary current bounds: bodies are straight-line register-only
+  chains (≤64 instructions); calls inside summarized callees, memory
+  operands, and per-iteration-effect shapes fall through to stepping;
+  flags are not carried (caller-saved). Alpha-equivalence reuse beyond
+  the validation-mode tier, cache-admission policy, NUMA-pinned queue
+  groups, and state economics are not implemented.
 - Performance work is still measured on synthetic microbenchmarks plus a
   small set of real fixtures, not broad real execution traces.
 
@@ -296,7 +336,7 @@ crates/
   angryier-arch-xed-ffi/      native XED decoder FFI (opt-in; 11 tests)
   angryier-loader/            ELF64 (static+dynamic) / PE32+ loading
   angryier-runtime/           pipeline glue + concolic/symbolic sessions
-                              + Lua scripting + loop summaries (6.3k lines)
+                              + Lua scripting + loop/function summaries
   angryier-semantics/         provider/builder contracts, sealed block builder
   angryier-semantic-contracts sealed identity + transformation/evidence
   angryier-semantics-gen/     declarative pattern compiler/generator
@@ -567,16 +607,22 @@ spooling fallback, persistence-disabled mode proof.
 ### Phase 10 — search intelligence, state merging, state economics
 **Status: engine real-binary-validated.** CFG recovery (~25k blocks),
 fork/merge/prune, parallel exploration, reconvergence-scheduled Veritesting,
-dominators/loops, and **generalized loop summarization** (concrete and
+dominators/loops, **generalized loop summarization** (concrete and
 symbolic trip counts, Eq/Ne exits, straight-line multi-block bodies —
 differentially proven; landed 2026-09-24, including hardening of the
-concrete closed-form math to signed/unsigned flavors and width masking).
+concrete closed-form math to signed/unsigned flavors and width masking),
+and **function summaries** (landed 2026-09-26: pure-function extraction +
+template reuse keyed by callee entry and argument shape, lowered-IR and
+dynamic-purity soundness gates, direct + constant-indirect call sites,
+placeholder depth × width merge-cost model — differentially proven, one
+build per shape with N O(1) applications).
 **Remaining:** bodies with per-iteration effects (needs merge-based
-composed summaries); function summaries; under-constrained execution;
-multifactor merge-cost model; state economics; CFG function-boundary
-refinement + calling conventions; optional QUBO planner (advisory,
-CUDA→OpenCL→CPU ladder). Exit: merging reduces state
-count on a real binary without solver-expression blowup erasing the gain.
+composed summaries); the real multifactor merge-cost model (the trait
+seam and placeholder heuristic are in); under-constrained execution;
+state economics; CFG function-boundary refinement + calling conventions;
+optional QUBO planner (advisory, CUDA→OpenCL→CPU ladder). Exit: merging
+reduces state count on a real binary without solver-expression blowup
+erasing the gain.
 
 ### Phase 11 — learned fusion retrieval
 **Status: identity/constant encoders + averaging fusion (in-memory).**
@@ -665,11 +711,14 @@ and reproducible correctness/performance reports.
    cancellation via `solve_with_deadline`, proven at 83 ms on a 12 s
    grind, wired through the safe adapter.
 8. **Loop-summary generalization + function summaries (Phase 10) —
-   loop-summary half DONE (2026-09-24).** Symbolic trip counts, Eq/Ne
-   exits, multi-block straight-line bodies — differentially proven
-   (~14× on nested mixed loops; 303→5 steps concrete). Function
-   summaries, merge-cost model, and per-iteration-effect bodies remain
-   (item 7 above in the phase list).
+   DONE (2026-09-24 loop half; 2026-09-26 function half).** Symbolic trip
+   counts, Eq/Ne exits, multi-block straight-line bodies — differentially
+   proven (~14× on nested mixed loops; 303→5 steps concrete). Function
+   summaries landed 2026-09-26: pure callees execute once per argument
+   shape into a substituted expression template (direct and
+   constant-indirect call sites; lowered-IR + dynamic-purity gates;
+   depth × width placeholder cost model as the merge-cost seam).
+   Per-iteration-effect bodies remain (item 7 above in the phase list).
 9. **Replay-capsule integration for recorded native runs (Phase 1
    remainder) — DONE (2026-09-24).** Record → `FileReplayStore` → fresh
    load → deterministic replay matching native ground truth; fail-closed
