@@ -772,6 +772,9 @@ impl SimProcedure for KernelAllocProcedure {
     }
 
     fn apply(&self, _state: &SimState) -> SimResult {
+        // No recording here — the dispatch pre-hook (runtime) is the single
+        // recorder: it alone can capture the true caller return address
+        // from [rsp] and keeps alloc/free counts one-per-call.
         SimResult::Return(self.tracker.fresh_pointer())
     }
 }
@@ -788,6 +791,8 @@ impl SimProcedure for KernelFreeProcedure {
     }
 
     fn apply(&self, _state: &SimState) -> SimResult {
+        // Recording is single-sourced in the dispatch pre-hook (pointer
+        // from RCX + true caller from [rsp]); see KernelAllocProcedure.
         SimResult::Return(0)
     }
 }
