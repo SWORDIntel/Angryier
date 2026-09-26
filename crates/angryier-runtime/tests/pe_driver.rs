@@ -14,7 +14,7 @@
 
 use angryier_arch_intel64::register_id;
 use angryier_memory::{ByteValue, LayeredMemory};
-use angryier_runtime::{PE_DRIVER_SCRATCH_BASE, PE_DRIVER_STUB_BASE, Process, Runtime};
+use angryier_runtime::{PE_DRIVER_CALLBACK_BASE, PE_DRIVER_SCRATCH_BASE, PE_DRIVER_STUB_BASE, Process, Runtime};
 use angryier_types::{SemanticVersion, TargetProfileId};
 
 /// Image base of the fixture driver (same as the loader fixtures).
@@ -223,5 +223,155 @@ fn hook_export_return_unknown_import_errors() -> Result<(), Box<dyn std::error::
     assert!(process.hook_export_return("HAL.dll", "DbgPrint", 1).is_err());
     // Nothing was registered by the failed lookups.
     assert!(process.simproc_instances.is_empty());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Kernel pool model: DRIVER_OBJECT population + alloc/free/double-free
+// ---------------------------------------------------------------------------
+
+/// Builds a fixture driver importing ExAllocatePoolWithTag and
+/// ExFreePoolWithTag whose DriverEntry allocates once and frees the pointer
+/// twice — a double-free on a concrete path.
+fn pool_fixture_image() -> Vec<u8> {
+    // .rdata: two imports from ntoskrnl.exe (alloc, free).
+    let mut rdata = Vec::new();
+    let desc_off = rdata.len();
+    rdata.extend_from_slice(&[0u8; 2 * 20]);
+    let dll_off = rdata.len();
+    rdata.extend_from_slice(b"ntoskrnl.exe\0");
+    while rdata.len() % 8 != 0 {
+        rdata.push(0);
+    }
+    let names = ["ExAllocatePoolWithTag", "ExFreePoolWithTag"];
+    let int_off = rdata.len();
+    rdata.extend_from_slice(&[0u8; 8 * 3]); // INT: 2 + NULL
+    let iat_off = rdata.len();
+    rdata.extend_from_slice(&[0u8; 8 * 3]); // IAT: 2 + NULL
+    for (index, name) in names.iter().enumerate() {
+        let hint_off = rdata.len();
+        rdata.extend_from_slice(&0x42u16.to_le_bytes());
+        rdata.extend_from_slice(name.as_bytes());
+        rdata.push(0);
+        if rdata.len() % 2 != 0 {
+            rdata.push(0);
+        }
+        let thunk = u64::from(RDATA_VA + hint_off as u32);
+        let slot = int_off + 8 * index;
+        rdata[slot..slot + 8].copy_from_slice(&thunk.to_le_bytes());
+        let slot = iat_off + 8 * index;
+        rdata[slot..slot + 8].copy_from_slice(&thunk.to_le_bytes());
+    }
+    let rva = |off: usize| RDATA_VA + off as u32;
+    rdata[desc_off..desc_off + 4].copy_from_slice(&rva(int_off).to_le_bytes());
+    rdata[desc_off + 12..desc_off + 16].copy_from_slice(&rva(dll_off).to_le_bytes());
+    rdata[desc_off + 16..desc_off + 20].copy_from_slice(&rva(iat_off).to_le_bytes());
+
+    // .text: alloc -> free -> free(double) -> marker -> ret.
+    let iat_va = IMAGE_BASE + u64::from(RDATA_VA + iat_off as u32);
+    let slot_alloc = iat_va;
+    let slot_free = iat_va + 8;
+    // rip-relative disp = target - (addr_of_next_instruction).
+    let mut text = Vec::new();
+    let mut emit_mov = |text: &mut Vec<u8>, slot: u64| {
+        text.extend_from_slice(&[0x48, 0x8B, 0x05]);
+        let next = IMAGE_BASE + u64::from(ENTRY_RVA) + text.len() as u64 + 4;
+        text.extend_from_slice(&(slot.wrapping_sub(next) as u32).to_le_bytes());
+    };
+    emit_mov(&mut text, slot_alloc); // mov rax, [iat_alloc]
+    text.extend_from_slice(&[0xFF, 0xD0]); // call rax (alloc)
+    text.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+    emit_mov(&mut text, slot_free); // mov rax, [iat_free]
+    text.extend_from_slice(&[0xFF, 0xD0]); // call rax (free #1)
+    emit_mov(&mut text, slot_free); // mov rax, [iat_free]
+    text.extend_from_slice(&[0xFF, 0xD0]); // call rax (free #2 — the double)
+    text.extend_from_slice(&[0x48, 0xC7, 0xC1, 0x2A, 0x00, 0x00, 0x00]); // mov rcx, 0x2a
+    text.push(0xC3); // ret (into the sentinel exit hook)
+
+    let mut pe = vec![0u8; 0x400];
+    pe[0] = 0x4D;
+    pe[1] = 0x5A;
+    pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    pe[0x80..0x84].copy_from_slice(&[0x50, 0x45, 0, 0]);
+    pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+    pe[0x86..0x88].copy_from_slice(&2u16.to_le_bytes());
+    pe[0x94..0x96].copy_from_slice(&0xF0u16.to_le_bytes());
+    pe[0x98..0x9A].copy_from_slice(&0x20Bu16.to_le_bytes());
+    pe[0xA8..0xAC].copy_from_slice(&ENTRY_RVA.to_le_bytes());
+    pe[0xB0..0xB8].copy_from_slice(&IMAGE_BASE.to_le_bytes());
+    pe[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes());
+    pe[0x104..0x108].copy_from_slice(&16u32.to_le_bytes());
+    pe[0x110..0x114].copy_from_slice(&rva(desc_off).to_le_bytes());
+    pe[0x114..0x118].copy_from_slice(&(rdata.len() as u32).to_le_bytes());
+    pe[0x188..0x190].copy_from_slice(b".text\0\0\0");
+    pe[0x190..0x194].copy_from_slice(&0x100u32.to_le_bytes());
+    pe[0x194..0x198].copy_from_slice(&ENTRY_RVA.to_le_bytes());
+    pe[0x198..0x19C].copy_from_slice(&(text.len() as u32).to_le_bytes());
+    pe[0x19C..0x1A0].copy_from_slice(&0x200u32.to_le_bytes());
+    pe[0x1AC..0x1B0].copy_from_slice(&0x6000_0000u32.to_le_bytes());
+    pe[0x1B0..0x1B8].copy_from_slice(b".rdata\0\0");
+    pe[0x1B8..0x1BC].copy_from_slice(&(rdata.len() as u32).to_le_bytes());
+    pe[0x1BC..0x1C0].copy_from_slice(&RDATA_VA.to_le_bytes());
+    pe[0x1C0..0x1C4].copy_from_slice(&(rdata.len() as u32).to_le_bytes());
+    pe[0x1C4..0x1C8].copy_from_slice(&0x400u32.to_le_bytes());
+    pe[0x1D4..0x1D8].copy_from_slice(&0x4000_0000u32.to_le_bytes());
+    pe[0x200..0x200 + text.len()].copy_from_slice(&text);
+    pe.extend_from_slice(&rdata);
+    pe
+}
+
+/// (c) The DRIVER_OBJECT model is self-consistent: extension reachable,
+/// callback-backed function pointers, well-formed empty name strings.
+#[test]
+fn driver_object_model_is_self_consistent() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let process = runtime.load_pe_driver(&driver_image())?;
+
+    // DriverExtension -> scratch + 0x300; its AddDevice -> callback page.
+    let ext = read_mem_u64(&process, PE_DRIVER_SCRATCH_BASE + 0x30)?;
+    assert_eq!(ext, PE_DRIVER_SCRATCH_BASE + 0x300);
+    assert_eq!(
+        read_mem_u64(&process, ext + 0x08)?, // AddDevice
+        PE_DRIVER_CALLBACK_BASE
+    );
+    // MajorFunction[0] -> callback page.
+    assert_eq!(
+        read_mem_u64(&process, PE_DRIVER_SCRATCH_BASE + 0x70)?,
+        PE_DRIVER_CALLBACK_BASE
+    );
+    // DriverName buffer -> shared string block.
+    let name_buf = read_mem_u64(&process, PE_DRIVER_SCRATCH_BASE + 0x38 + 8)?;
+    assert_eq!(name_buf, PE_DRIVER_SCRATCH_BASE + 0x500);
+    // The universal callback really is `xor eax,eax; ret`.
+    let cb = LayeredMemory::read(&process.state.memory, PE_DRIVER_CALLBACK_BASE, 3)?;
+    assert_eq!(cb.as_slice(), &[ByteValue::Concrete(0x33), ByteValue::Concrete(0xC0), ByteValue::Concrete(0xC3)]);
+    Ok(())
+}
+
+/// (d) End-to-end pool model: alloc once, free twice — the tracker records
+/// the double-free with the concrete caller return address.
+#[test]
+fn pool_model_records_double_free_with_caller() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_pe_driver(&pool_fixture_image())?;
+    let tracker = std::sync::Arc::new(angryier_models::KernelPoolTracker::new());
+    runtime.attach_kernel_pool_model(&mut process, tracker.clone())?;
+
+    let summary = runtime.run(&mut process, 1000)?;
+    assert!(process.terminated);
+    assert!(summary.simproc_dispatches >= 3, "alloc + 2 frees dispatched");
+
+    let report = tracker.snapshot();
+    assert_eq!(report.allocs, 1);
+    assert_eq!(report.frees, 2);
+    assert_eq!(report.double_frees.len(), 1, "second free is the witness");
+    let event = report.double_frees[0];
+    // The pointer is a fresh kernel-range pointer from the allocator model.
+    assert!(event.pointer >= 0xFFFF_8000_0000_0000);
+    // The caller is the return address of the SECOND free call — the last
+    // `call rax` before the `mov rcx, 0x2a` marker.
+    let text_base = IMAGE_BASE + u64::from(ENTRY_RVA);
+    let marker = text_base + 30; // computed instruction layout of the fixture
+    assert_eq!(event.caller, marker, "caller must be the double-free call site");
     Ok(())
 }

@@ -9,8 +9,8 @@
 //! lookup and advisory precision tracking.
 
 use angryier_types::{DependencyKey, EnvironmentModelId, EnvironmentModelVersion, FidelityProfile, SummaryId};
-use std::collections::BTreeMap;
-use std::sync::RwLock;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -659,6 +659,136 @@ impl SimProcedure for KernelReturnStub {
 
     fn apply(&self, _state: &SimState) -> SimResult {
         SimResult::Return(self.value)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows kernel pool model (ntoskrnl allocator/free family)
+// ---------------------------------------------------------------------------
+
+/// First fresh pool pointer handed out by [`KernelAllocProcedure`]. The
+/// classic kernel non-paged range; distinct pointers per call, page-strided
+/// so naive structure walks land in distinct (zeroed) shadow memory rather
+/// than overlapping.
+pub const KERNEL_POOL_FRESH_BASE: u64 = 0xFFFF_8000_0000_0000;
+
+/// One recorded pool event: the pointer involved and the caller return
+/// address captured by the runtime at dispatch time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolEvent {
+    pub pointer: u64,
+    pub caller: u64,
+}
+
+/// Snapshot of [`KernelPoolTracker`] state for reports/scripting.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KernelPoolReport {
+    pub allocs: u64,
+    pub frees: u64,
+    /// frees of an already-freed pointer, chronological.
+    pub double_frees: Vec<PoolEvent>,
+}
+
+/// Shared state behind the kernel allocator/free SimProcedures. The runtime
+/// records every modeled alloc/free (pointer + caller return address) here;
+/// a free of an already-freed pointer is a double-free witness regardless of
+/// who allocated the block — freeing the same pointer twice is the bug class
+/// itself.
+pub struct KernelPoolTracker {
+    next_fresh: AtomicU64,
+    state: Mutex<PoolState>,
+}
+
+#[derive(Default)]
+struct PoolState {
+    allocs: u64,
+    frees: u64,
+    freed: HashSet<u64>,
+    double_frees: Vec<PoolEvent>,
+}
+
+impl KernelPoolTracker {
+    pub fn new() -> Self {
+        Self {
+            next_fresh: AtomicU64::new(KERNEL_POOL_FRESH_BASE),
+            state: Mutex::new(PoolState::default()),
+        }
+    }
+
+    /// Next distinct fresh pool pointer.
+    pub fn fresh_pointer(&self) -> u64 {
+        self.next_fresh.fetch_add(0x1000, Ordering::Relaxed)
+    }
+
+    /// Records a modeled allocation.
+    pub fn record_alloc(&self) {
+        if let Ok(mut st) = self.state.lock() {
+            st.allocs += 1;
+        }
+    }
+
+    /// Records a modeled free of `pointer` from `caller`. A pointer freed
+    /// twice is recorded as a double-free event.
+    pub fn record_free(&self, pointer: u64, caller: u64) {
+        if let Ok(mut st) = self.state.lock() {
+            st.frees += 1;
+            if !st.freed.insert(pointer) {
+                st.double_frees.push(PoolEvent { pointer, caller });
+            }
+        }
+    }
+
+    /// Consistent snapshot for reports.
+    pub fn snapshot(&self) -> KernelPoolReport {
+        match self.state.lock() {
+            Ok(st) => KernelPoolReport {
+                allocs: st.allocs,
+                frees: st.frees,
+                double_frees: st.double_frees.clone(),
+            },
+            Err(_) => KernelPoolReport::default(),
+        }
+    }
+}
+
+impl Default for KernelPoolTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `ExAllocatePool*`: hands out a distinct fresh pool pointer per call and
+/// records the allocation. (The NULL failure arm of the full model —
+/// `symbolic_nonzero_or_null` in the byovd-harness manifest — is deferred
+/// until symbolic SimProcedure inputs exist; concretely the allocator never
+/// fails, which is the standard concolic choice and is debt-recorded.)
+pub struct KernelAllocProcedure {
+    pub tracker: std::sync::Arc<KernelPoolTracker>,
+}
+
+impl SimProcedure for KernelAllocProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_alloc_pool"
+    }
+
+    fn apply(&self, _state: &SimState) -> SimResult {
+        SimResult::Return(self.tracker.fresh_pointer())
+    }
+}
+
+/// `ExFreePool*`: records the free (the runtime captures pointer + caller);
+/// returns success. Void return modeled as 0.
+pub struct KernelFreeProcedure {
+    pub tracker: std::sync::Arc<KernelPoolTracker>,
+}
+
+impl SimProcedure for KernelFreeProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_free_pool"
+    }
+
+    fn apply(&self, _state: &SimState) -> SimResult {
+        SimResult::Return(0)
     }
 }
 

@@ -90,6 +90,26 @@ const PE_DRIVER_STUB_STRIDE: u64 = 16;
 /// points `0x200` into it as a `UNICODE_STRING`-shaped zeroed registry path
 /// — drivers that only store the pointer work; contents are not modeled.
 pub const PE_DRIVER_SCRATCH_BASE: u64 = 0x0000_7000_1000_0000;
+/// Base of the PE-driver universal callback page: one `xor eax, eax; ret`
+/// stub (STATUS_SUCCESS) that every unknown kernel callback/table entry
+/// points at. DriverExtension->AddDevice, DriverStartIo, DriverUnload, and
+/// all 28 MajorFunction dispatch slots land here, so a DriverEntry that
+/// walks `DriverObject->DriverExtension->AddDevice` (the null-dereference
+/// that killed real drivers at step ~10-24) calls a real stub and continues.
+pub const PE_DRIVER_CALLBACK_BASE: u64 = 0x0000_7000_2000_0000;
+/// Size of the universal callback page.
+const PE_DRIVER_CALLBACK_SIZE: u64 = 0x1000;
+/// x64 `DRIVER_OBJECT` layout offsets used by the model (WDK wdm.h):
+pub const DRIVER_OBJECT_OFFSET_DRIVER_EXTENSION: u64 = 0x30;
+pub const DRIVER_OBJECT_OFFSET_DRIVER_NAME: u64 = 0x38;
+pub const DRIVER_OBJECT_OFFSET_MAJOR_FUNCTION0: u64 = 0x70;
+/// `IRP_MJ_MAXIMUM_FUNCTION + 1` dispatch slots.
+const DRIVER_OBJECT_MAJOR_FUNCTION_COUNT: usize = 28;
+/// `DRIVER_EXTENSION` block base inside the scratch region.
+const PE_DRIVER_EXTENSION_OFF: u64 = 0x300;
+/// Shared empty string buffer inside the scratch region (UNICODE_STRING
+/// targets for DriverName / RegistryPath / ServiceKeyName: length 0).
+const PE_DRIVER_STRING_BUF_OFF: u64 = 0x500;
 /// Size of the PE-driver scratch region.
 const PE_DRIVER_SCRATCH_SIZE: u64 = 0x1000;
 /// Sentinel return address pushed for `DriverEntry`: returning from the
@@ -291,6 +311,10 @@ pub struct Process {
     /// before the name-keyed `simproc_hooks` in `step_with`, with
     /// call-correct return semantics (RIP = `[RSP]`; RSP += 8).
     pub simproc_instances: BTreeMap<Address, Arc<dyn SimProcedure>>,
+    /// Windows kernel pool model state when attached
+    /// ([`Runtime::attach_kernel_pool_model`]); the dispatch loop records
+    /// modeled alloc/free events (pointer + caller) into it.
+    pub kernel_pool: Option<std::sync::Arc<angryier_models::KernelPoolTracker>>,
     /// Static symbol table of the loaded image (empty when absent).
     pub symbols: Vec<Symbol>,
     /// Addresses of executed blocks, in execution order (bounded by
@@ -357,6 +381,7 @@ impl Process {
             .insert(address, Arc::new(KernelReturnStub { value }));
         Ok(())
     }
+
 
     /// Iterates the PE-driver import stubs as (stub address, dll, export
     /// name or `#ordinal`) — diagnostics and scripting hooks. Empty for
@@ -461,6 +486,54 @@ pub struct Runtime<D: Decoder> {
 }
 
 impl<D: Decoder> Runtime<D> {
+    /// Attaches the Windows kernel pool model to a PE-driver process:
+    /// binds `ExAllocatePool*` imports to a fresh-pointer allocator and
+    /// `ExFreePool*` to a free stub (both sharing `tracker`), and stores
+    /// the tracker so the dispatch loop records (pointer, caller) events —
+    /// a pointer freed twice lands in
+    /// [`angryier_models::KernelPoolReport::double_frees`].
+    ///
+    /// Matching is case-insensitive on the DLL (Windows export resolution
+    /// is case-insensitive) and exact on the export name. Imports that
+    /// match nothing keep their existing bindings.
+    pub fn attach_kernel_pool_model(
+        &self,
+        process: &mut Process,
+        tracker: std::sync::Arc<angryier_models::KernelPoolTracker>,
+    ) -> Result<(), RuntimeError> {
+        const ALLOC_NAMES: [&str; 5] = [
+            "ExAllocatePool",
+            "ExAllocatePoolWithTag",
+            "ExAllocatePoolWithQuota",
+            "ExAllocatePoolWithTagPriority",
+            "ExAllocatePool2",
+        ];
+        const FREE_NAMES: [&str; 3] =
+            ["ExFreePool", "ExFreePoolWithTag", "ExFreePoolWithQuota"];
+        let alloc: Arc<dyn SimProcedure> =
+            Arc::new(angryier_models::KernelAllocProcedure { tracker: tracker.clone() });
+        let free: Arc<dyn SimProcedure> =
+            Arc::new(angryier_models::KernelFreeProcedure { tracker: tracker.clone() });
+        let stubs: Vec<(Address, String, String)> = process
+            .pe_imports()
+            .map(|(address, dll, export)| (*address, dll.to_string(), export.to_string()))
+            .collect();
+        for (address, dll, export) in stubs {
+            let dll_lower = dll.to_ascii_lowercase();
+            let is_nt = dll_lower == "ntoskrnl.exe" || dll_lower == "hal.dll";
+            if !is_nt {
+                continue;
+            }
+            if ALLOC_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, alloc.clone());
+            } else if FREE_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, free.clone());
+            }
+        }
+        process.kernel_pool = Some(tracker);
+        Ok(())
+    }
+
     /// Creates a new runtime with the given decoder, semantic version, and target profile.
     pub fn new(decoder: D, semantic_version: SemanticVersion, target_profile: TargetProfileId) -> Self {
         Self {
@@ -919,6 +992,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_hooks: BTreeMap::new(),
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
+            kernel_pool: None,
             symbols: Vec::new(),
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
@@ -1075,6 +1149,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_hooks: BTreeMap::new(),
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
+            kernel_pool: None,
             symbols: image.symbols.clone(),
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
@@ -1247,6 +1322,14 @@ impl<D: Decoder> Runtime<D> {
                 writable: true,
                 executable: false,
             },
+            MemoryRegion {
+                object: angryier_types::ObjectId(7),
+                base: PE_DRIVER_CALLBACK_BASE,
+                size: PE_DRIVER_CALLBACK_SIZE,
+                readable: true,
+                writable: false,
+                executable: true,
+            },
         ];
         let mut process = self.load_image_with_extra_regions(image, extra_regions)?;
 
@@ -1299,6 +1382,52 @@ impl<D: Decoder> Runtime<D> {
                 process.pe_import_stubs.insert(stub, (import.dll.clone(), export));
             }
         }
+
+        // Self-consistent DRIVER_OBJECT model (see the offset consts): the
+        // universal success callback backs every function-pointer slot, the
+        // extension block is reachable, and the name strings are well-formed
+        // empty UNICODE_STRINGs. Zero pointers (DeviceObject,
+        // FastIoDispatch, HardwareDatabase) stay null — drivers check those
+        // before use, and a null device walk terminates cleanly.
+        let callback: &[u8] = &[0x33, 0xC0, 0xC3]; // xor eax,eax; ret
+        process.state.memory = process
+            .state
+            .memory
+            .load_concrete(PE_DRIVER_CALLBACK_BASE, callback)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+
+        let write_u64 = |process: &mut Process, address: u64, value: u64| -> Result<(), RuntimeError> {
+            process.state.memory = process
+                .state
+                .memory
+                .load_concrete(address, &value.to_le_bytes())
+                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+            Ok(())
+        };
+        let scratch = PE_DRIVER_SCRATCH_BASE;
+        // DRIVER_OBJECT.
+        write_u64(&mut process, scratch + DRIVER_OBJECT_OFFSET_DRIVER_EXTENSION, scratch + PE_DRIVER_EXTENSION_OFF)?;
+        // DriverName UNICODE_STRING {Length=0, MaximumLength=0, _pad, Buffer}.
+        write_u64(&mut process, scratch + DRIVER_OBJECT_OFFSET_DRIVER_NAME + 8, scratch + PE_DRIVER_STRING_BUF_OFF)?;
+        // DriverInit / DriverStartIo / DriverUnload.
+        write_u64(&mut process, scratch + 0x58, PE_DRIVER_CALLBACK_BASE)?;
+        write_u64(&mut process, scratch + 0x60, PE_DRIVER_CALLBACK_BASE)?;
+        write_u64(&mut process, scratch + 0x68, PE_DRIVER_CALLBACK_BASE)?;
+        // MajorFunction[0..28].
+        for index in 0..DRIVER_OBJECT_MAJOR_FUNCTION_COUNT {
+            write_u64(
+                &mut process,
+                scratch + DRIVER_OBJECT_OFFSET_MAJOR_FUNCTION0 + 8 * index as u64,
+                PE_DRIVER_CALLBACK_BASE,
+            )?;
+        }
+        // DRIVER_EXTENSION at scratch+0x300: DriverObject, AddDevice, Count,
+        // ServiceKeyName {0, 0, _pad, Buffer}.
+        write_u64(&mut process, scratch + PE_DRIVER_EXTENSION_OFF, scratch)?;
+        write_u64(&mut process, scratch + PE_DRIVER_EXTENSION_OFF + 0x08, PE_DRIVER_CALLBACK_BASE)?;
+        write_u64(&mut process, scratch + PE_DRIVER_EXTENSION_OFF + 0x18 + 8, scratch + PE_DRIVER_STRING_BUF_OFF)?;
+        // RegistryPath UNICODE_STRING at scratch+0x200 (RDX target): Buffer.
+        write_u64(&mut process, scratch + 0x200 + 8, scratch + PE_DRIVER_STRING_BUF_OFF)?;
 
         // DriverEntry register state (after load_image's register init):
         // RCX = pDriverObject, RDX = pRegistryPath.
@@ -1460,6 +1589,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_hooks: BTreeMap::new(),
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
+            kernel_pool: None,
             symbols: image.symbols,
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
@@ -2397,9 +2527,24 @@ impl<D: Decoder> Runtime<D> {
             }
         }
 
+        let name = model.name().to_string();
+        // Kernel pool model: record (pointer, caller) for modeled
+        // alloc/free dispatches. The return address is still on the stack
+        // here — `pop_call_return` runs only after `apply`.
+        if let Some(tracker) = process.kernel_pool.as_ref()
+            && (name == "kernel_alloc_pool" || name == "kernel_free_pool")
+        {
+            let pointer = sim_state.get_reg(1); // RCX = first argument
+            let caller = peek_call_return(process).unwrap_or(0);
+            if name == "kernel_alloc_pool" {
+                tracker.record_alloc();
+            } else {
+                tracker.record_free(pointer, caller);
+            }
+        }
+
         let result = model.apply(&sim_state);
         process.simproc_dispatches += 1;
-        let name = model.name().to_string();
 
         match result {
             SimResult::Exit => {
@@ -3598,6 +3743,29 @@ impl<'a, D: Decoder> ConcolicSession<'a, D> {
 /// instance SimProcedure hooks at call targets (see
 /// `Runtime::dispatch_simproc_instance`). Symbolic bytes in the return slot
 /// concretize to 0, matching the fetch path's concrete read.
+/// Reads the return address at RSP WITHOUT advancing the stack — the
+/// caller-site capture for kernel-model events (the modeled stub
+/// terminates the call itself, so the address is the call's return site in
+/// the driver image).
+fn peek_call_return(process: &Process) -> Result<u64, RuntimeError> {
+    let rsp = process.read_register(register_id::GPR_BASE + 4)?;
+    let mut frame = [ByteValue::Concrete(0); 8];
+    process
+        .state
+        .memory
+        .read_into(rsp, &mut frame)
+        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+    let mut target = 0u64;
+    for (i, byte) in frame.iter().enumerate() {
+        let value = match byte {
+            ByteValue::Concrete(b) => *b,
+            ByteValue::Symbolic(_) => 0,
+        };
+        target |= u64::from(value) << (i * 8);
+    }
+    Ok(target)
+}
+
 fn pop_call_return(process: &mut Process) -> Result<u64, RuntimeError> {
     let rsp = process.read_register(register_id::GPR_BASE + 4)?;
     let mut frame = [ByteValue::Concrete(0); 8];
@@ -5516,7 +5684,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 }
                 Ok(SymbolicStepOutcome::Stepped { .. }) => {}
                 Err(error) => {
-                    let _ = error;
+                    report.last_error = Some(match self.states.get(index) {
+                        Some(state) => match state.process.pc() {
+                            Ok(pc) => format!("{error} at pc={pc:#x}"),
+                            Err(_) => error.to_string(),
+                        },
+                        None => error.to_string(),
+                    });
                     if index < self.states.len() {
                         let state = self.states.remove(index);
                         self.dead.push(state);
@@ -5565,6 +5739,9 @@ pub struct SymbolicRunReport {
     pub pruned_states: u64,
     /// States that failed and were moved to `dead`.
     pub failed: u64,
+    /// Description of the most recent step error, if any (errors are
+    /// otherwise counted into `failed` and discarded).
+    pub last_error: Option<String>,
     /// Live states at return.
     pub live_states: u64,
     /// Dead/terminated states accumulated.

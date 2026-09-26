@@ -140,7 +140,15 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // (sections mapped, IAT resolved to import stubs, DriverEntry entry
     // state) — the driver-campaign path. `dynamic` is an ELF-only option.
     let is_pe = bytes.len() > 1 && bytes[0] == b'M' && bytes[1] == b'Z';
-    let process = if is_pe {
+    // Driver-mode PE loads get the kernel pool model: allocators hand out
+    // fresh pointers, frees are tracked with caller capture, and
+    // double-free events surface in `r.kernel`.
+    let kernel_pool = if is_pe {
+        Some(std::sync::Arc::new(angryier_models::KernelPoolTracker::new()))
+    } else {
+        None
+    };
+    let mut process = if is_pe {
         runtime
             .load_pe_driver(&bytes)
             .map_err(|e| mlua::Error::external(format!("load_pe_driver: {e:?}")))?
@@ -153,6 +161,12 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             .load_elf(&bytes)
             .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?
     };
+    if let (Some(tracker), runtime_any) = (&kernel_pool, &runtime) {
+        if let Err(e) = runtime_any.attach_kernel_pool_model(&mut process, tracker.clone()) {
+            return Err(mlua::Error::external(format!("attach_kernel_pool_model: {e:?}")));
+        }
+    }
+
     // The Z3 backend needs a shared arena reader — keep the arena in Arc.
     let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
         angryier_types::ExpressionNormalizationVersion(1),
@@ -243,8 +257,28 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     out.set("merges", report.merges)?;
     out.set("terminated", report.terminated)?;
     out.set("failed", report.failed)?;
+    if let Some(error) = report.last_error.as_deref() {
+        out.set("last_error", error)?;
+    }
     out.set("live_states", report.live_states)?;
     out.set("found", report.found.len())?;
+    // Kernel pool model report (driver-mode PE loads only): allocation /
+    // free counters and the double-free event list.
+    if let Some(tracker) = kernel_pool.as_ref() {
+        let snap = tracker.snapshot();
+        let kernel = lua.create_table()?;
+        kernel.set("allocs", snap.allocs)?;
+        kernel.set("frees", snap.frees)?;
+        let dfs = lua.create_table()?;
+        for (index, event) in snap.double_frees.iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("pointer", event.pointer)?;
+            entry.set("caller", event.caller)?;
+            dfs.set(index + 1, entry)?;
+        }
+        kernel.set("double_frees", dfs)?;
+        out.set("kernel", kernel)?;
+    }
     // `solve = true`: solve each found state; `inputs` is an array of
     // per-state tables mapping symbol index → byte-string.
     if let Some(backend) = backend.as_mut() {
