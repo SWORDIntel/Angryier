@@ -792,6 +792,96 @@ impl SimProcedure for KernelFreeProcedure {
     }
 }
 
+/// Address of the runtime's universal kernel callback page
+/// (`xor eax, eax; ret` → STATUS_SUCCESS). The runtime maps this page for
+/// driver-mode processes; kernel APIs that RESOLVE function pointers
+/// (e.g. `MmGetSystemRoutineAddress`) return this address so later
+/// indirect calls land on a real stub instead of unmapped memory.
+pub const KERNEL_UNIVERSAL_CALLBACK: u64 = 0x0000_7000_2000_0000;
+
+/// `IoCreateDevice(DriverObject, DeviceExtensionSize, DeviceName,
+/// DeviceType, Characteristics, Exclusive, pptrDeviceObject)`:
+/// allocates a zero-backed device object + extension block, populates the
+/// fields drivers read first (Type, DeviceExtension, DeviceType,
+/// ReferenceCount), writes the object pointer through the OUT parameter,
+/// and returns STATUS_SUCCESS. The OUT pointer is a stack argument
+/// (`[rsp+0x38]`) — the runtime's stack-argument shadowing makes it
+/// visible to SimState.
+pub struct KernelCreateDeviceProcedure {
+    pub tracker: std::sync::Arc<KernelPoolTracker>,
+}
+
+impl SimProcedure for KernelCreateDeviceProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_create_device"
+    }
+
+    fn apply(&self, state: &SimState) -> SimResult {
+        // Fresh device object + zeroed extension, both from the pool
+        // arena (the shadow region backs them with zeros).
+        let device = self.tracker.fresh_pointer();
+        let extension = self.tracker.fresh_pointer();
+        let device_type = state.get_reg(9); // r9 = DeviceType (4 register args)
+
+        let mut next = state.clone();
+        // DEVICE_OBJECT header: Type (u16 = 15, IO_TYPE_DEVICE) |
+        // Size (u16 = 0x1030), DeviceExtension (+0x08), DeviceType
+        // (+0x1C u32), ReferenceCount (+0x20 u32 = 1).
+        let type_size = (0x1030u64 << 32) | 15;
+        next.write_memory(device, type_size.to_le_bytes().to_vec());
+        next.write_memory(device + 0x08, extension.to_le_bytes().to_vec());
+        next.write_memory(device + 0x1C, device_type.to_le_bytes()[..4].to_vec());
+        next.write_memory(device + 0x20, 1u32.to_le_bytes().to_vec());
+        // Extension back-pointer to the driver object (rcx).
+        next.write_memory(extension, state.get_reg(1).to_le_bytes().to_vec());
+        // OUT: *pptrDeviceObject = device. pptr at [rsp+0x38] (7th arg).
+        let rsp = state.get_reg(4);
+        let pptr = u64::from_le_bytes(state.read_bytes(rsp + 0x38, 8).try_into().unwrap_or([0; 8]));
+        if pptr != 0 {
+            next.write_memory(pptr, device.to_le_bytes().to_vec());
+        }
+        SimResult::Continue(next)
+    }
+}
+
+/// `IoAttachDevice(DeviceObject, TargetDevice, AttachedDevice)`:
+/// writes a fresh object pointer through the AttachedDevice OUT pointer
+/// (r8, a register argument) and returns STATUS_SUCCESS.
+pub struct KernelAttachDeviceProcedure {
+    pub tracker: std::sync::Arc<KernelPoolTracker>,
+}
+
+impl SimProcedure for KernelAttachDeviceProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_attach_device"
+    }
+
+    fn apply(&self, state: &SimState) -> SimResult {
+        let attached = self.tracker.fresh_pointer();
+        let out_ptr = state.get_reg(8); // r8 = pAttachedDevice
+        let mut next = state.clone();
+        if out_ptr != 0 {
+            next.write_memory(out_ptr, attached.to_le_bytes().to_vec());
+        }
+        SimResult::Continue(next)
+    }
+}
+
+/// `MmGetSystemRoutineAddress(UnicodeString)`: returns the universal
+/// callback address — a resolved "routine" that returns STATUS_SUCCESS.
+/// Calling through it is well-defined; the routine identity is debt.
+pub struct KernelResolveRoutineProcedure;
+
+impl SimProcedure for KernelResolveRoutineProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_resolve_routine"
+    }
+
+    fn apply(&self, _state: &SimState) -> SimResult {
+        SimResult::Return(KERNEL_UNIVERSAL_CALLBACK)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Syscall environment model
 // ---------------------------------------------------------------------------

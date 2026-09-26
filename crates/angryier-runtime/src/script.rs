@@ -167,6 +167,19 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
     }
 
+    // Entry override: start execution at an arbitrary address instead of
+    // the image entry (DriverEntry). Driver-campaign requests target
+    // dispatch routines, which DriverEntry never calls — analysis of those
+    // paths requires entering the handler directly (under-constrained
+    // execution; the caller seeds IRP-shaped symbolic arguments).
+    if let Ok(entry) = opts.get::<i64>("entry") {
+        if entry > 0 {
+            process
+                .write_pc(entry as u64)
+                .map_err(|e| mlua::Error::external(format!("entry override: {e:?}")))?;
+        }
+    }
+
     // The Z3 backend needs a shared arena reader — keep the arena in Arc.
     let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
         angryier_types::ExpressionNormalizationVersion(1),
@@ -232,14 +245,15 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         avoid,
         ..Default::default()
     };
-    let mut backend = if use_solver {
-        Some(
-            angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>)
-                .map_err(|e| mlua::Error::external(format!("z3: {e:?}")))?,
-        )
-    } else {
-        None
-    };
+    // The solver ALWAYS gates forks (`step_state_checked` prunes
+    // concretely-infeasible directions as UNSAT). Without it the explorer
+    // follows phantom paths — e.g. a NULL-check's impossible side — and
+    // crashes deep in driver code that real execution could never reach.
+    // `solve = true` only controls model extraction of found states.
+    let mut backend = Some(
+        angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>)
+            .map_err(|e| mlua::Error::external(format!("z3: {e:?}")))?,
+    );
     let report = session
         .run_with_policy(
             steps,
@@ -262,6 +276,24 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     }
     out.set("live_states", report.live_states)?;
     out.set("found", report.found.len())?;
+    // Executed-path trace: last PCs of the most relevant dead state (the
+    // failed path), else the first live state. Diagnosis aid for model
+    // iteration — every block address the state actually executed.
+    {
+        let candidate = session
+            .dead
+            .last()
+            .or_else(|| session.states.first())
+            .or_else(|| session.dead.first());
+        if let Some(state) = candidate {
+            let trace = lua.create_table()?;
+            for (index, pc) in state.process.trace.iter().enumerate() {
+                trace.set(index + 1, *pc)?;
+            }
+            out.set("trace", trace)?;
+        }
+    }
+
     // Kernel pool model report (driver-mode PE loads only): allocation /
     // free counters and the double-free event list.
     if let Some(tracker) = kernel_pool.as_ref() {

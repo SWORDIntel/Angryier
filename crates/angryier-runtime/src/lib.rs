@@ -96,7 +96,7 @@ pub const PE_DRIVER_SCRATCH_BASE: u64 = 0x0000_7000_1000_0000;
 /// all 28 MajorFunction dispatch slots land here, so a DriverEntry that
 /// walks `DriverObject->DriverExtension->AddDevice` (the null-dereference
 /// that killed real drivers at step ~10-24) calls a real stub and continues.
-pub const PE_DRIVER_CALLBACK_BASE: u64 = 0x0000_7000_2000_0000;
+pub const PE_DRIVER_CALLBACK_BASE: u64 = angryier_models::KERNEL_UNIVERSAL_CALLBACK;
 /// Size of the universal callback page.
 const PE_DRIVER_CALLBACK_SIZE: u64 = 0x1000;
 /// x64 `DRIVER_OBJECT` layout offsets used by the model (WDK wdm.h):
@@ -514,6 +514,15 @@ impl<D: Decoder> Runtime<D> {
             Arc::new(angryier_models::KernelAllocProcedure { tracker: tracker.clone() });
         let free: Arc<dyn SimProcedure> =
             Arc::new(angryier_models::KernelFreeProcedure { tracker: tracker.clone() });
+        let create_device: Arc<dyn SimProcedure> =
+            Arc::new(angryier_models::KernelCreateDeviceProcedure { tracker: tracker.clone() });
+        let attach_device: Arc<dyn SimProcedure> =
+            Arc::new(angryier_models::KernelAttachDeviceProcedure { tracker: tracker.clone() });
+        let resolve: Arc<dyn SimProcedure> =
+            Arc::new(angryier_models::KernelResolveRoutineProcedure);
+        const CREATE_DEVICE_NAMES: [&str; 1] = ["IoCreateDevice"];
+        const ATTACH_DEVICE_NAMES: [&str; 1] = ["IoAttachDevice"];
+        const RESOLVE_NAMES: [&str; 1] = ["MmGetSystemRoutineAddress"];
         let stubs: Vec<(Address, String, String)> = process
             .pe_imports()
             .map(|(address, dll, export)| (*address, dll.to_string(), export.to_string()))
@@ -528,6 +537,20 @@ impl<D: Decoder> Runtime<D> {
                 process.simproc_instances.insert(address, alloc.clone());
             } else if FREE_NAMES.contains(&export.as_str()) {
                 process.simproc_instances.insert(address, free.clone());
+            } else if CREATE_DEVICE_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, create_device.clone());
+            } else if ATTACH_DEVICE_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, attach_device.clone());
+            } else if RESOLVE_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, resolve.clone());
+            } else {
+                // Deterministic default: STATUS_SUCCESS instead of whatever
+                // garbage RAX carries into a naked `ret` stub. Debt-recorded
+                // (manifest tier-2/tier-3): failure paths are unexplored
+                // until symbolic NTSTATUS sets exist.
+                process
+                    .simproc_instances
+                    .insert(address, Arc::new(KernelReturnStub { value: 0 }));
             }
         }
         process.kernel_pool = Some(tracker);
@@ -2535,6 +2558,27 @@ impl<D: Decoder> Runtime<D> {
                 let len = val.len().min(8);
                 buf[..len].copy_from_slice(&val[..len]);
                 sim_state.set_reg(u64::from(index), u64::from_le_bytes(buf));
+            }
+        }
+        // Stack-argument shadowing: mirror [rsp .. rsp+0x40) (return
+        // address + 7 stack-argument slots) into the SimState shadow so
+        // stack-passed OUT/IN parameters (5th argument and beyond, e.g.
+        // IoCreateDevice's pptrDeviceObject at [rsp+0x38]) are readable
+        // through SimState::read_bytes. 5th arg = [rsp+0x08] ... 11th =
+        // [rsp+0x38]; slot 0 is the return address, also useful.
+        {
+            let rsp = sim_state.get_reg(4);
+            if rsp != 0 {
+                if let Ok(bytes) = process.state.memory.read(rsp, 0x40) {
+                    let concrete: Vec<u8> = bytes
+                        .iter()
+                        .map(|b| match b {
+                            ByteValue::Concrete(v) => *v,
+                            ByteValue::Symbolic(_) => 0,
+                        })
+                        .collect();
+                    sim_state.write_memory(rsp, concrete);
+                }
             }
         }
 
@@ -4875,6 +4919,18 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         if terminated {
             return Ok(SymbolicStepOutcome::Terminated);
         }
+        // Executed-block trace (bounded ring on the state's process): the
+        // symbolic path exits this function from many sites, so the record
+        // happens at the top — every stepped block lands in the state's
+        // history for diagnosis and replay.
+        {
+            if let Some(state) = self.states.get_mut(index) {
+                if state.process.trace.len() >= MAX_TRACE {
+                    state.process.trace.remove(0);
+                }
+                state.process.trace.push(pc);
+            }
+        }
 
         // Loop summarization: a summarized header with concrete inputs
         // collapses its remaining iterations into one step.
@@ -4885,10 +4941,20 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         }
         let state = &mut self.states[index];
 
-        // SimProcedure hooks dispatch like they do in concrete mode.
-        if state.process.simproc_hooks.contains_key(&pc) {
+        // SimProcedure hooks dispatch like they do in concrete mode —
+        // BOTH the name-keyed hooks and the instance map (bound by
+        // attach_kernel_pool_model / hook_export_return). Without the
+        // instance check the symbolic stepper decoded the import stub's
+        // bare `ret` and kernel models never fired.
+        if state.process.simproc_hooks.contains_key(&pc)
+            || state.process.simproc_instances.contains_key(&pc)
+        {
             let state = &mut self.states[index];
-            let outcome = self.runtime.step(&mut state.process)?;
+            let outcome = if let Some(model) = state.process.simproc_instances.get(&pc).cloned() {
+                self.runtime.dispatch_simproc_instance(&mut state.process, pc, &model)?
+            } else {
+                self.runtime.step(&mut state.process)?
+            };
             return Ok(match outcome {
                 StepOutcome::Terminated { .. } => SymbolicStepOutcome::Terminated,
                 _ => SymbolicStepOutcome::Stepped {
@@ -5322,12 +5388,81 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         let state = &mut self.states[index];
         let terminator = ir_block.instructions.last().map(|insn| &insn.op);
         match terminator {
-            Some(angryier_ir::IrOp::Jump { target }) | Some(angryier_ir::IrOp::Call { target }) => {
+            Some(angryier_ir::IrOp::Jump { target }) => {
                 let _ = state.process.write_pc(*target);
                 Ok(SymbolicStepOutcome::Stepped { next_pc: *target })
             }
-            Some(angryier_ir::IrOp::JumpIndirect { .. }) | Some(angryier_ir::IrOp::Return) => {
-                // ret/indirect — read the return address off the state's
+            Some(angryier_ir::IrOp::Call { target }) => {
+                // Push the return frame: a symbolic-mode call must behave
+                // like a call — the callee's `ret` (and a SimProcedure's
+                // pop) reads the pushed address. Without this, every
+                // symbolic call leaked the loader's exit sentinel and the
+                // callee "returned" into termination.
+                let ret_addr = pc.wrapping_add(u64::from(decoded.length));
+                if let Some(rsp) = state
+                    .process
+                    .read_register(register_id::GPR_BASE + 4)
+                    .ok()
+                {
+                    let frame: Vec<ByteValue> =
+                        ret_addr.to_le_bytes().iter().map(|b| ByteValue::Concrete(*b)).collect();
+                    state.process.state.memory = state
+                        .process
+                        .state
+                        .memory
+                        .write(rsp.wrapping_sub(8), &frame)
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                    let _ = state
+                        .process
+                        .write_register(register_id::GPR_BASE + 4, rsp.wrapping_sub(8));
+                }
+                let _ = state.process.write_pc(*target);
+                Ok(SymbolicStepOutcome::Stepped { next_pc: *target })
+            }
+            Some(angryier_ir::IrOp::JumpIndirect { .. }) => {
+                // Indirect jump/call: the evaluator resolved the target
+                // expression (e.g. `call rax` — rax, not [rsp]). Jump when
+                // it folds to a constant; a symbolic target is an
+                // under-constrained exit (honest termination), never the
+                // return-address misread this arm used to do.
+                if let Some(target_expr) = summary.jump_target
+                    && let Some(node) = self.arena.get(target_expr)
+                    && node.op == angryier_expr::ExprOp::Constant
+                    && let Some(b) = node.immediate.get(..8)
+                {
+                    let target = u64::from_le_bytes(b.try_into().unwrap_or([0; 8]));
+                    // CALL-biased stack semantics: the IR conflates
+                    // `call reg` and `jmp reg` into one op, and the
+                    // driver campaign's indirect calls (IAT thunks) need
+                    // the return frame pushed so the callee's ret (and a
+                    // SimProcedure's pop) lands back here. Debt-recorded:
+                    // a true `jmp reg` (jump table) pushes a spurious
+                    // frame — rare on these paths, revisit with a
+                    // distinct CallIndirect op.
+                    let ret_addr = pc.wrapping_add(u64::from(decoded.length));
+                    if let Ok(rsp) = state.process.read_register(register_id::GPR_BASE + 4) {
+                        let frame: Vec<ByteValue> = ret_addr
+                            .to_le_bytes()
+                            .iter()
+                            .map(|b| ByteValue::Concrete(*b))
+                            .collect();
+                        state.process.state.memory = state
+                            .process
+                            .state
+                            .memory
+                            .write(rsp.wrapping_sub(8), &frame)
+                            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                        let _ = state
+                            .process
+                            .write_register(register_id::GPR_BASE + 4, rsp.wrapping_sub(8));
+                    }
+                    let _ = state.process.write_pc(target);
+                    return Ok(SymbolicStepOutcome::Stepped { next_pc: target });
+                }
+                Ok(SymbolicStepOutcome::Terminated)
+            }
+            Some(angryier_ir::IrOp::Return) => {
+                // ret — read the return address off the state's
                 // symbolic stack (rsp points at the pushed return target).
                 let rsp = state
                     .registers
