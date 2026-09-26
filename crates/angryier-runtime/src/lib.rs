@@ -1330,6 +1330,17 @@ impl<D: Decoder> Runtime<D> {
                 writable: false,
                 executable: true,
             },
+            // Zero-backed shadow for the kernel pool model's fresh pointers
+            // (declared lazily-sparse; untouched pages cost nothing). Reads
+            // through an allocation see zeros until the driver writes.
+            MemoryRegion {
+                object: angryier_types::ObjectId(8),
+                base: angryier_models::KERNEL_POOL_FRESH_BASE,
+                size: 0x0010_0000, // 1 MiB = 256 model allocations
+                readable: true,
+                writable: true,
+                executable: false,
+            },
         ];
         let mut process = self.load_image_with_extra_regions(image, extra_regions)?;
 
