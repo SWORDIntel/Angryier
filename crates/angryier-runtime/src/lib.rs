@@ -78,8 +78,11 @@ const HEAP_SIZE: u64 = 0x40_0000;
 /// with RAX holding the caller's leftover value: defined, deterministic, zero
 /// modeling.
 pub const PE_DRIVER_STUB_BASE: u64 = 0x0000_7000_0000_0000;
-/// Size of the PE-driver import-stub region (256 stubs at 16-byte stride).
-const PE_DRIVER_STUB_SIZE: u64 = 0x1000;
+/// Size of the PE-driver import-stub region. 1 MiB = 65,536 stubs at the
+/// 16-byte stride — real drivers import in the hundreds (vhdmp.sys: 272),
+/// and the region has the address space to the scratch block
+/// (`PE_DRIVER_SCRATCH_BASE`) entirely free for growth.
+const PE_DRIVER_STUB_SIZE: u64 = 0x0010_0000;
 /// Stride of one import-stub cell.
 const PE_DRIVER_STUB_STRIDE: u64 = 16;
 /// Base of the PE-driver scratch region: the zeroed writable block standing
