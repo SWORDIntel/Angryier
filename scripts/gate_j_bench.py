@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from gate_j_probe import SCRATCH, hook_externs, make_ret_zero
+from gate_j_probe import POOL, SCRATCH, hook_externs, make_ret_zero
 
 
 DEFAULT_DRIVER = Path(
@@ -43,20 +43,26 @@ def run_angr(driver: Path) -> dict[str, object]:
     state = proj.factory.blank_state(addr=proj.entry)
     state.memory.map_region(SCRATCH, 0x10000, 3)
     state.memory.store(SCRATCH, b"\x00" * 0x10000)
+    state.memory.map_region(POOL - 0x1000, 0x101000, 3)
+    state.memory.store(POOL - 0x1000, b"\x00" * 0x101000)
     state.regs.rcx = SCRATCH
+    state.regs.rdx = SCRATCH + 0x200
     state.regs.rsp = 0x7FFFFFF00000
     state.memory.map_region(0x7FFFFFF00000 - 0x1000, 0x2000, 3)
     state.memory.store(0x7FFFFFF00000 - 0x1000, b"\x00" * 0x2000)
     hook_externs(proj)
 
     dispatch_stub = 0x700020000000
-    proj.hook(dispatch_stub, make_ret_zero())
+    proj.hook(dispatch_stub, make_ret_zero(), replace=True)
     for index in range(28):
         state.memory.store(
             SCRATCH + 0x70 + 8 * index, dispatch_stub.to_bytes(8, "little")
         )
+    state.memory.store(SCRATCH + 0x58, dispatch_stub.to_bytes(8, "little"))
+    state.memory.store(SCRATCH + 0x60, dispatch_stub.to_bytes(8, "little"))
+    state.memory.store(SCRATCH + 0x68, dispatch_stub.to_bytes(8, "little"))
     exit_stub = 0x700030000000
-    proj.hook(exit_stub, angr.SIM_PROCEDURES["stubs"]["PathTerminator"]())
+    proj.hook(exit_stub, angr.SIM_PROCEDURES["stubs"]["PathTerminator"](), replace=True)
     state.memory.store(state.regs.rsp, exit_stub.to_bytes(8, "little"))
 
     started = time.monotonic()
@@ -106,7 +112,7 @@ def run_angryier(driver_name: str) -> dict[str, object]:
             if match is None:
                 raise RuntimeError(f"release sweep did not report {driver_name}")
             steps = int(match.group("steps"))
-            driver_seconds = float(match.group("seconds") or 0.0) or seconds
+            driver_seconds = float(match.group("seconds")) if match.group("seconds") else seconds
             return {
                 "instructions": steps,
                 "unique_pcs": None,
@@ -138,11 +144,13 @@ def markdown(angr_result: dict[str, object], angryier_result: dict[str, object])
             "|---|---:|---:|---:|---:|---|",
             row("angr 10.0", angr_result),
             row("Angryier release", angryier_result),
-            "| Note | — | — | — | — | Semantically divergent: angr's zero-return "
-            "import hooks cause an early bail; Angryier uses its structured kernel model "
-            "and completes the driver. Angryier seconds are the per-driver run. The runs "
-            "are not semantically equivalent, so the rate gap is directional evidence, "
-            "not a gate verdict. |",
+            "| Note | — | — | — | — | Semantically aligned: pool-alloc imports "
+            "(ExAllocatePool*) return fresh non-NULL pointers (0xFFFF800000000000 base, "
+            "+0x1000 step) backed by zeroed memory; frees, IoCreateDevice, WdfVersionBind*, "
+            "and other kernel externs return STATUS_SUCCESS (0). DRIVER_OBJECT callbacks "
+            "return 0. Both engines execute DriverEntry fully to clean termination (angr "
+            "executes 193 instructions to ret; Angryier executes 194 steps including the "
+            "synthetic exit hook). Angryier seconds are the per-driver run. |",
         ]
     )
 

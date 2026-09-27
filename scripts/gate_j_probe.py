@@ -30,6 +30,7 @@ POOL_ALLOCS = {
     "ExAllocatePool2",
     "ExAllocatePoolWithTagPriority",
     "ExAllocatePoolWithQuotaTag",
+    "ExAllocatePoolWithQuota",
 }
 POOL_FREES = {
     "ExFreePool",
@@ -39,26 +40,27 @@ POOL_FREES = {
 
 
 def make_ret_zero():
-    def ret_zero(state):
-        state.regs.rax = 0
-        return None
+    import angr
 
-    return ret_zero
+    class RetZero(angr.SimProcedure):
+        def run(self):
+            return 0
+
+    return RetZero()
 
 
 def hook_externs(proj: "angr.Project") -> int:
     """Hook every extern (unresolved import) symbol at its rebased address."""
+    import angr
+
     pool_next = {"v": POOL}
     hooked = 0
 
-    def make_alloc():
-        def alloc(state):
+    class AllocProc(angr.SimProcedure):
+        def run(self):
             ptr = pool_next["v"]
             pool_next["v"] += 0x1000
-            state.regs.rax = ptr
-            return None
-
-        return alloc
+            return ptr
 
     for obj in proj.loader.all_objects:
         for sym in obj.symbols:
@@ -66,9 +68,9 @@ def hook_externs(proj: "angr.Project") -> int:
                 continue
             base = sym.name.rsplit(".", 1)[-1]
             if base in POOL_ALLOCS:
-                proj.hook(sym.rebased_addr, make_alloc())
+                proj.hook(sym.rebased_addr, AllocProc(), replace=True)
             else:
-                proj.hook(sym.rebased_addr, make_ret_zero())
+                proj.hook(sym.rebased_addr, make_ret_zero(), replace=True)
             hooked += 1
     return hooked
 
@@ -96,7 +98,10 @@ def main() -> int:
     # Kernel-mode-ish layout: map the DRIVER_OBJECT scratch zeroed.
     state.memory.map_region(SCRATCH, 0x10000, 3)  # RWX to avoid page faults
     state.memory.store(SCRATCH, b"\x00" * 0x10000)
+    state.memory.map_region(POOL - 0x1000, 0x101000, 3)
+    state.memory.store(POOL - 0x1000, b"\x00" * 0x101000)
     state.regs.rcx = SCRATCH
+    state.regs.rdx = SCRATCH + 0x200
     state.regs.rsp = 0x7FFFFFF00000
     state.memory.map_region(0x7FFFFFF00000 - 0x1000, 0x2000, 3)
     state.memory.store(0x7FFFFFF00000 - 0x1000, b"\x00" * 0x2000)
@@ -107,14 +112,17 @@ def main() -> int:
     # same table with its universal callback; a zeroed table makes the
     # driver call NULL.
     STUB = 0x700020000000
-    proj.hook(STUB, make_ret_zero())
+    proj.hook(STUB, make_ret_zero(), replace=True)
     for i in range(28):
         state.memory.store(SCRATCH + 0x70 + 8 * i, STUB.to_bytes(8, "little"))
+    state.memory.store(SCRATCH + 0x58, STUB.to_bytes(8, "little"))
+    state.memory.store(SCRATCH + 0x60, STUB.to_bytes(8, "little"))
+    state.memory.store(SCRATCH + 0x68, STUB.to_bytes(8, "little"))
     # Seed DriverEntry's return address with a terminating stub: the
     # driver's final `ret` must end the run, not jump to address 0
     # (Angryier's loader points the same slot at its exit hook).
     EXIT = 0x700030000000
-    proj.hook(EXIT, angr.SIM_PROCEDURES["stubs"]["PathTerminator"]())
+    proj.hook(EXIT, angr.SIM_PROCEDURES["stubs"]["PathTerminator"](), replace=True)
     state.memory.store(state.regs.rsp, EXIT.to_bytes(8, "little"))
 
     t1 = time.monotonic()

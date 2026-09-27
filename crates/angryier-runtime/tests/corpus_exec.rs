@@ -186,7 +186,7 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
         if !short.is_empty() && class != "BUDGET" && class != "TERMINATED" {
             line.push_str(&format!("  [{detail}]"));
         }
-        println!("{line} in {seconds:.2}s");
+        println!("{line} in {seconds:.4}s");
     }
     Ok(())
 }
