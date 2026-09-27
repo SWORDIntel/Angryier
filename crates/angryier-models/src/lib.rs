@@ -263,6 +263,8 @@ impl SummaryProvider for InMemorySummaryProvider {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct SimState {
     pub registers: BTreeMap<u64, u64>,
+    /// Read-only memory mirrored by the runtime for procedure arguments.
+    pub memory_reads: Vec<(u64, Vec<u8>)>,
     pub memory_writes: Vec<(u64, Vec<u8>)>,
     pub return_value: Option<u64>,
     pub exited: bool,
@@ -273,6 +275,7 @@ impl SimState {
     pub fn new() -> Self {
         Self {
             registers: BTreeMap::new(),
+            memory_reads: Vec::new(),
             memory_writes: Vec::new(),
             return_value: None,
             exited: false,
@@ -323,6 +326,14 @@ impl SimState {
                 }
             }
         }
+        for (base, bytes) in self.memory_reads.iter().rev() {
+            if addr >= *base {
+                let offset = (addr - *base) as usize;
+                if offset < bytes.len() {
+                    return Some(bytes[offset]);
+                }
+            }
+        }
         None
     }
 
@@ -339,6 +350,11 @@ impl SimState {
     /// Records a memory write starting at `addr`.
     pub fn write_memory(&mut self, addr: u64, data: Vec<u8>) {
         self.memory_writes.push((addr, data));
+    }
+
+    /// Adds a read-only memory snapshot without turning it into an observable write.
+    pub fn shadow_memory(&mut self, addr: u64, data: Vec<u8>) {
+        self.memory_reads.push((addr, data));
     }
 
     /// Reads bytes from memory starting at `addr` until a null byte (`0`) or `max_len` is reached.
@@ -929,6 +945,153 @@ impl SimProcedure for KernelGetDeviceObjectPointerProcedure {
             next.write_memory(p_device, device.to_le_bytes().to_vec());
         }
         SimResult::Return(0) // STATUS_SUCCESS
+    }
+}
+
+/// `EtwRegister(ProviderId, Callback, CallbackContext, RegistrationHandle)`
+/// (4 register args): writes a fresh non-NULL registration handle through
+/// r9 and returns STATUS_SUCCESS. Drivers keep the handle for
+/// EtwUnregister/event writes.
+pub struct KernelEtwRegisterProcedure {
+    pub tracker: std::sync::Arc<KernelPoolTracker>,
+}
+
+impl SimProcedure for KernelEtwRegisterProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_etw_register"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let handle = self.tracker.fresh_pointer();
+        let mut next = state.clone();
+        let p_handle = state.get_reg(9); // RegistrationHandle OUT
+        if p_handle != 0 {
+            next.write_memory(p_handle, handle.to_le_bytes().to_vec());
+        }
+        SimResult::Return(0) // STATUS_SUCCESS
+    }
+}
+
+/// `EtwProviderEnabled`: deterministic "disabled" (0).
+pub struct KernelEtwProviderEnabledProcedure;
+
+impl SimProcedure for KernelEtwProviderEnabledProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_etw_provider_enabled"
+    }
+    fn apply(&self, _state: &SimState) -> SimResult {
+        SimResult::Return(0)
+    }
+}
+
+/// `ZwOpenKey(KeyHandle*, DesiredAccess, ObjectAttributes, ...)`: writes a
+/// fresh non-NULL handle through the first stack argument (Win x64 arg 5
+/// at [rsp+0x28]) and returns STATUS_SUCCESS.
+pub struct KernelZwOpenKeyProcedure {
+    pub tracker: std::sync::Arc<KernelPoolTracker>,
+}
+
+impl SimProcedure for KernelZwOpenKeyProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_zw_open_key"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let handle = self.tracker.fresh_pointer();
+        let mut next = state.clone();
+        // ZwOpenKey(KeyHandle*, DesiredAccess, ObjectAttributes): the
+        // handle OUT pointer is the FIRST argument (RCX = reg 1), not a
+        // stack argument (codex-5.3 review catch).
+        let p_handle = state.get_reg(1);
+        if p_handle != 0 {
+            next.write_memory(p_handle, handle.to_le_bytes().to_vec());
+        }
+        SimResult::Return(0)
+    }
+}
+
+/// `ZwQueryValueKey(KeyHandle, ValueName, KeyValueInformationClass,
+/// KeyValueInformation, Length, ResultLength)`: writes a deterministic
+/// DWORD (0x100) into the caller's value buffer (arg 4 at [rsp+0x30] —
+/// verify; the value buffer is the 4th register arg RDX? No: the signature
+/// is (KeyHandle, ValueName, Class, Info, InfoLength, ResultLength) — the
+/// info buffer is arg 4 = r9, length arg 5 = [rsp+0x28]) and sets the
+/// result-length OUT (arg 6 = [rsp+0x30]) to 4. Returns STATUS_SUCCESS.
+/// NOTE: verify the argument positions against the WDK signature before
+/// finalizing; the exact offsets below assume the standard layout.
+pub struct KernelZwQueryValueKeyProcedure;
+
+impl SimProcedure for KernelZwQueryValueKeyProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_zw_query_value_key"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let mut next = state.clone();
+        let info = state.get_reg(9); // KeyValueInformation buffer
+        if info != 0 {
+            next.write_memory(info, 0x100u32.to_le_bytes().to_vec());
+        }
+        let rsp = state.get_reg(4);
+        let p_result_len = u64::from_le_bytes(state.read_bytes(rsp + 0x30, 8).try_into().unwrap_or([0; 8]));
+        if p_result_len != 0 {
+            next.write_memory(p_result_len, 4u32.to_le_bytes().to_vec());
+        }
+        SimResult::Return(0)
+    }
+}
+
+/// `KeInitializeEvent(Event, Type, State)`: writes an event header into the
+/// caller's buffer: Type u16 at +0x00, SignalState u32 at +0x04.
+pub struct KernelInitializeEventProcedure;
+
+impl SimProcedure for KernelInitializeEventProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_initialize_event"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let event = state.get_reg(1);
+        // KeInitializeEvent(Event, Type, State): State is arg 3 = R8
+        // (reg 8), not RBX (codex-5.3 review catch).
+        let signal = state.get_reg(8) as u32;
+        let mut next = state.clone();
+        if event != 0 {
+            next.write_memory(event, 0u16.to_le_bytes().to_vec()); // Type = NotificationEvent
+            next.write_memory(event + 4, signal.to_le_bytes().to_vec());
+        }
+        SimResult::Return(0)
+    }
+}
+
+/// `KeInitializeMutex(Mutex, Level)`: writes a mutex header: Type u16 = 1
+/// at +0x00, SignalState u32 at +0x04.
+pub struct KernelInitializeMutexProcedure;
+
+impl SimProcedure for KernelInitializeMutexProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_initialize_mutex"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let mutex = state.get_reg(1);
+        let mut next = state.clone();
+        if mutex != 0 {
+            next.write_memory(mutex, 1u16.to_le_bytes().to_vec()); // Type = Mutex
+            next.write_memory(mutex + 4, 1u32.to_le_bytes().to_vec()); // signaled
+        }
+        SimResult::Return(0)
+    }
+}
+
+/// `RtlQueryRegistryValues`: fills the caller's query-table buffers with
+/// deterministic values (DWORD 0x100 per entry) and returns STATUS_SUCCESS.
+/// The query table is a pointer array; the first entry's ValueData pointer
+/// is at [r9+...] — keep this minimal: write 0x100 through the first
+/// query entry's data pointer if present, else just return success.
+pub struct KernelQueryRegistryValuesProcedure;
+
+impl SimProcedure for KernelQueryRegistryValuesProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_query_registry_values"
+    }
+    fn apply(&self, _state: &SimState) -> SimResult {
+        SimResult::Return(0)
     }
 }
 

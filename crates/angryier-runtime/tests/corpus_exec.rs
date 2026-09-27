@@ -66,7 +66,7 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
     all_files.dedup();
 
     let mut totals = Totals::default();
-    let mut rows: Vec<(String, String, u64, String)> = Vec::new();
+    let mut rows: Vec<(String, String, u64, f64, String)> = Vec::new();
 
     for file_path in &all_files {
         let file_name = file_path
@@ -80,7 +80,7 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
         let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
         let Ok(mut process) = runtime.load_pe_driver(&bytes) else {
             totals.load_failed += 1;
-            rows.push((file_name, "LOAD-FAIL".to_string(), 0, String::new()));
+            rows.push((file_name, "LOAD-FAIL".to_string(), 0, 0.0, String::new()));
             continue;
         };
         let tracker = std::sync::Arc::new(angryier_models::KernelPoolTracker::new());
@@ -89,6 +89,7 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
         let mut steps = 0u64;
         let mut blocked = None;
         let mut block_pc = 0u64;
+        let run_start = std::time::Instant::now();
         for _ in 0..STEP_BUDGET {
             match runtime.step(&mut process) {
                 Ok(_) => steps += 1,
@@ -126,10 +127,12 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         totals.total_steps += steps;
+        let run_seconds = run_start.elapsed().as_secs_f64();
         rows.push((
             file_name,
             class.clone(),
             steps,
+            run_seconds,
             if class == "BLOCK-FORM" {
                 let bytes = process.state.memory.read(block_pc, 15).ok().map(|b| {
                     b.iter()
@@ -159,6 +162,7 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let n = rows.len();
+
     println!("\n=== corpus execution sweep ({n} images) ===");
     println!(
         "TERMINATED={} BLOCK-NULL={} BLOCK-FORM={} BLOCK-OTHER={} BUDGET={} LOAD-FAIL={}",
@@ -172,7 +176,7 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
     println!("total steps executed: {}", totals.total_steps);
     println!("\n--- per image (sorted by steps, descending) ---");
     rows.sort_by(|a, b| b.2.cmp(&a.2));
-    for (name, class, steps, detail) in rows {
+    for (name, class, steps, seconds, detail) in rows {
         let short = detail
             .split(|c| c == '(' || c == ' ' || c == ':')
             .next()
@@ -182,7 +186,7 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
         if !short.is_empty() && class != "BUDGET" && class != "TERMINATED" {
             line.push_str(&format!("  [{detail}]"));
         }
-        println!("{line}");
+        println!("{line} in {seconds:.2}s");
     }
     Ok(())
 }

@@ -557,6 +557,17 @@ impl<D: Decoder> Runtime<D> {
                 tracker: tracker.clone(),
             });
         let query_perf: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelQueryPerformanceCounterProcedure);
+        let etw_register: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelEtwRegisterProcedure {
+            tracker: tracker.clone(),
+        });
+        let etw_provider: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelEtwProviderEnabledProcedure);
+        let zw_open_key: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelZwOpenKeyProcedure {
+            tracker: tracker.clone(),
+        });
+        let zw_query: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelZwQueryValueKeyProcedure);
+        let init_event: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelInitializeEventProcedure);
+        let init_mutex: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelInitializeMutexProcedure);
+        let query_registry: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelQueryRegistryValuesProcedure);
         const CREATE_DEVICE_NAMES: [&str; 1] = ["IoCreateDevice"];
         const ATTACH_DEVICE_NAMES: [&str; 1] = ["IoAttachDevice"];
         const RESOLVE_NAMES: [&str; 1] = ["MmGetSystemRoutineAddress"];
@@ -566,6 +577,13 @@ impl<D: Decoder> Runtime<D> {
         const GET_VERSION_NAMES: [&str; 1] = ["RtlGetVersion"];
         const GET_DEVICE_POINTER_NAMES: [&str; 1] = ["IoGetDeviceObjectPointer"];
         const QUERY_PERF_NAMES: [&str; 1] = ["KeQueryPerformanceCounter"];
+        const ETW_REGISTER_NAMES: [&str; 1] = ["EtwRegister"];
+        const ETW_PROVIDER_NAMES: [&str; 1] = ["EtwProviderEnabled"];
+        const ZW_OPEN_KEY_NAMES: [&str; 1] = ["ZwOpenKey"];
+        const ZW_QUERY_VALUE_NAMES: [&str; 1] = ["ZwQueryValueKey"];
+        const INIT_EVENT_NAMES: [&str; 1] = ["KeInitializeEvent"];
+        const INIT_MUTEX_NAMES: [&str; 1] = ["KeInitializeMutex"];
+        const QUERY_REGISTRY_NAMES: [&str; 1] = ["RtlQueryRegistryValues"];
         let stubs: Vec<(Address, String, String)> = process
             .pe_imports()
             .map(|(address, dll, export)| (*address, dll.to_string(), export.to_string()))
@@ -598,6 +616,20 @@ impl<D: Decoder> Runtime<D> {
                 process.simproc_instances.insert(address, get_device_pointer.clone());
             } else if QUERY_PERF_NAMES.contains(&export.as_str()) {
                 process.simproc_instances.insert(address, query_perf.clone());
+            } else if ETW_REGISTER_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, etw_register.clone());
+            } else if ETW_PROVIDER_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, etw_provider.clone());
+            } else if ZW_OPEN_KEY_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, zw_open_key.clone());
+            } else if ZW_QUERY_VALUE_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, zw_query.clone());
+            } else if INIT_EVENT_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, init_event.clone());
+            } else if INIT_MUTEX_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, init_mutex.clone());
+            } else if QUERY_REGISTRY_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, query_registry.clone());
             } else {
                 // Deterministic default: STATUS_SUCCESS instead of whatever
                 // garbage RAX carries into a naked `ret` stub. Debt-recorded
@@ -1671,11 +1703,14 @@ impl<D: Decoder> Runtime<D> {
             },
             // Zero-backed shadow for the kernel pool model's fresh pointers
             // (declared lazily-sparse; untouched pages cost nothing). Reads
-            // through an allocation see zeros until the driver writes.
+            // through an allocation see zeros until the driver writes. The
+            // page BELOW the base models the pool HEADER area: drivers poke
+            // fields before an allocation (e.g. [ptr-2] word reads) that are
+            // mapped on real Windows (libnicm.sys diagnosis).
             MemoryRegion {
                 object: angryier_types::ObjectId(8),
-                base: angryier_models::KERNEL_POOL_FRESH_BASE,
-                size: 0x0010_0000, // 1 MiB = 256 model allocations
+                base: angryier_models::KERNEL_POOL_FRESH_BASE - 0x1000,
+                size: 0x0010_1000, // 4 KiB header + 1 MiB = 256 allocations
                 readable: true,
                 writable: true,
                 executable: false,
