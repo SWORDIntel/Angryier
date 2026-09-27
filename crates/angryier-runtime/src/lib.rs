@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use angryier_arch::{DecodedInstruction, Decoder};
+use angryier_arch::{DecodedInstruction, Decoder, Operand, OperandKind};
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 use angryier_execution::{
     ConcolicEvaluator, ConcolicImage, ConcolicSource, ConcreteInterpreter, ExecutionEngine, ExecutionMode,
@@ -336,6 +336,10 @@ pub struct Process {
     /// ([`Runtime::attach_kernel_pool_model`]); the dispatch loop records
     /// modeled alloc/free events (pointer + caller) into it.
     pub kernel_pool: Option<std::sync::Arc<angryier_models::KernelPoolTracker>>,
+    /// PCI configuration-address register (port 0xCF8 write value): the
+    /// runtime's port-I/O model consults it for config reads at 0xCFC-0xCFF
+    /// (see `execute_port_in`/`execute_port_out`).
+    pub pci_config_address: u32,
     /// Static symbol table of the loaded image (empty when absent).
     pub symbols: Vec<Symbol>,
     /// Addresses of executed blocks, in execution order (bounded by
@@ -721,11 +725,15 @@ impl<D: Decoder> Runtime<D> {
         decoded: &DecodedInstruction,
     ) -> Result<Option<StepOutcome>, RuntimeError> {
         use crate::form_map::{
-            LODSB_FORM_ID, LODSD_FORM_ID, LODSQ_FORM_ID, LODSW_FORM_ID, MOVSB_FORM_ID, MOVSD_FORM_ID, MOVSQ_FORM_ID,
-            MOVSW_FORM_ID, REP_INSB_FORM_ID, REP_INSD_FORM_ID, REP_INSW_FORM_ID, REP_MOVSB_FORM_ID, REP_MOVSD_FORM_ID,
-            REP_MOVSQ_FORM_ID, REP_MOVSW_FORM_ID, REP_OUTSB_FORM_ID, REP_OUTSD_FORM_ID, REP_OUTSW_FORM_ID,
-            REP_STOSB_FORM_ID, REP_STOSD_FORM_ID, REP_STOSQ_FORM_ID, REP_STOSW_FORM_ID, STOSB_FORM_ID, STOSD_FORM_ID,
-            STOSQ_FORM_ID, STOSW_FORM_ID,
+            CMPSB_FORM_ID, CMPSD_FORM_ID, CMPSQ_FORM_ID, CMPSW_FORM_ID, LODSB_FORM_ID, LODSD_FORM_ID, LODSQ_FORM_ID,
+            LODSW_FORM_ID, MOVSB_FORM_ID, MOVSD_FORM_ID, MOVSQ_FORM_ID, MOVSW_FORM_ID, REP_INSB_FORM_ID,
+            REP_INSD_FORM_ID, REP_INSW_FORM_ID, REP_MOVSB_FORM_ID, REP_MOVSD_FORM_ID, REP_MOVSQ_FORM_ID,
+            REP_MOVSW_FORM_ID, REP_OUTSB_FORM_ID, REP_OUTSD_FORM_ID, REP_OUTSW_FORM_ID, REP_STOSB_FORM_ID,
+            REP_STOSD_FORM_ID, REP_STOSQ_FORM_ID, REP_STOSW_FORM_ID, REPE_CMPSB_FORM_ID, REPE_CMPSD_FORM_ID,
+            REPE_CMPSQ_FORM_ID, REPE_CMPSW_FORM_ID, REPE_SCASB_FORM_ID, REPE_SCASD_FORM_ID, REPE_SCASQ_FORM_ID,
+            REPE_SCASW_FORM_ID, REPNE_CMPSB_FORM_ID, REPNE_CMPSD_FORM_ID, REPNE_CMPSQ_FORM_ID, REPNE_CMPSW_FORM_ID,
+            REPNE_SCASB_FORM_ID, REPNE_SCASD_FORM_ID, REPNE_SCASQ_FORM_ID, REPNE_SCASW_FORM_ID, SCASB_FORM_ID,
+            SCASD_FORM_ID, SCASQ_FORM_ID, SCASW_FORM_ID, STOSB_FORM_ID, STOSD_FORM_ID, STOSQ_FORM_ID, STOSW_FORM_ID,
         };
 
         // The REP_/plain iclasses encode whether the prefix is present, so the
@@ -843,6 +851,182 @@ impl<D: Decoder> Runtime<D> {
             }
             process.write_register(register_id::GPR_BASE + 6, rsi)?;
             process.write_register(register_id::GPR_BASE + 1, 0)?;
+            let next_pc = pc.wrapping_add(u64::from(decoded.length));
+            process.write_pc(next_pc)?;
+            process.step_count += 1;
+            return Ok(Some(StepOutcome::Stepped {
+                pc,
+                form_id: decoded.form_id,
+                next_pc,
+                length: decoded.length,
+            }));
+        }
+
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum RepCondition {
+            None,
+            Repe,
+            Repne,
+        }
+
+        let cmps_scas_info = match decoded.form_id {
+            CMPSB_FORM_ID => Some((true, 1usize, RepCondition::None)),
+            CMPSW_FORM_ID => Some((true, 2, RepCondition::None)),
+            CMPSD_FORM_ID => Some((true, 4, RepCondition::None)),
+            CMPSQ_FORM_ID => Some((true, 8, RepCondition::None)),
+            REPE_CMPSB_FORM_ID => Some((true, 1, RepCondition::Repe)),
+            REPE_CMPSW_FORM_ID => Some((true, 2, RepCondition::Repe)),
+            REPE_CMPSD_FORM_ID => Some((true, 4, RepCondition::Repe)),
+            REPE_CMPSQ_FORM_ID => Some((true, 8, RepCondition::Repe)),
+            REPNE_CMPSB_FORM_ID => Some((true, 1, RepCondition::Repne)),
+            REPNE_CMPSW_FORM_ID => Some((true, 2, RepCondition::Repne)),
+            REPNE_CMPSD_FORM_ID => Some((true, 4, RepCondition::Repne)),
+            REPNE_CMPSQ_FORM_ID => Some((true, 8, RepCondition::Repne)),
+            SCASB_FORM_ID => Some((false, 1, RepCondition::None)),
+            SCASW_FORM_ID => Some((false, 2, RepCondition::None)),
+            SCASD_FORM_ID => Some((false, 4, RepCondition::None)),
+            SCASQ_FORM_ID => Some((false, 8, RepCondition::None)),
+            REPE_SCASB_FORM_ID => Some((false, 1, RepCondition::Repe)),
+            REPE_SCASW_FORM_ID => Some((false, 2, RepCondition::Repe)),
+            REPE_SCASD_FORM_ID => Some((false, 4, RepCondition::Repe)),
+            REPE_SCASQ_FORM_ID => Some((false, 8, RepCondition::Repe)),
+            REPNE_SCASB_FORM_ID => Some((false, 1, RepCondition::Repne)),
+            REPNE_SCASW_FORM_ID => Some((false, 2, RepCondition::Repne)),
+            REPNE_SCASD_FORM_ID => Some((false, 4, RepCondition::Repne)),
+            REPNE_SCASQ_FORM_ID => Some((false, 8, RepCondition::Repne)),
+            _ => None,
+        };
+
+        if let Some((is_cmps, size, rep_cond)) = cmps_scas_info {
+            let mut rcx = process.read_register(register_id::GPR_BASE + 1)?;
+            let mut rsi = process.read_register(register_id::GPR_BASE + 6)?;
+            let mut rdi = process.read_register(register_id::GPR_BASE + 7)?;
+            let rax = process.read_register(register_id::GPR_BASE)?;
+            let rflags = process.read_register(register_id::RFLAGS.0)?;
+            let df = (rflags & (1 << 10)) != 0;
+            let delta = if df { (size as u64).wrapping_neg() } else { size as u64 };
+
+            let is_rep = rep_cond != RepCondition::None;
+            let mut count = if is_rep { rcx } else { 1 };
+
+            while count > 0 {
+                let (val1, val2) = if is_cmps {
+                    let mut data_rsi = [ByteValue::Concrete(0); 8];
+                    let mut data_rdi = [ByteValue::Concrete(0); 8];
+                    process
+                        .state
+                        .memory
+                        .read_into(rsi, &mut data_rsi[..size])
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                    process
+                        .state
+                        .memory
+                        .read_into(rdi, &mut data_rdi[..size])
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                    let mut v1 = 0u64;
+                    let mut v2 = 0u64;
+                    for (i, byte) in data_rsi[..size].iter().enumerate() {
+                        let b = match byte {
+                            ByteValue::Concrete(b) => *b,
+                            ByteValue::Symbolic(_) => 0,
+                        };
+                        v1 |= u64::from(b) << (i * 8);
+                    }
+                    for (i, byte) in data_rdi[..size].iter().enumerate() {
+                        let b = match byte {
+                            ByteValue::Concrete(b) => *b,
+                            ByteValue::Symbolic(_) => 0,
+                        };
+                        v2 |= u64::from(b) << (i * 8);
+                    }
+                    (v1, v2)
+                } else {
+                    let mut data_rdi = [ByteValue::Concrete(0); 8];
+                    process
+                        .state
+                        .memory
+                        .read_into(rdi, &mut data_rdi[..size])
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                    let mut v2 = 0u64;
+                    for (i, byte) in data_rdi[..size].iter().enumerate() {
+                        let b = match byte {
+                            ByteValue::Concrete(b) => *b,
+                            ByteValue::Symbolic(_) => 0,
+                        };
+                        v2 |= u64::from(b) << (i * 8);
+                    }
+                    let v1 = match size {
+                        1 => rax & 0xFF,
+                        2 => rax & 0xFFFF,
+                        4 => rax & 0xFFFF_FFFF,
+                        _ => rax,
+                    };
+                    (v1, v2)
+                };
+
+                let bits = size * 8;
+                let mask = if bits == 64 { !0u64 } else { (1u64 << bits) - 1 };
+                let sign_bit = 1u64 << (bits - 1);
+                let a = val1 & mask;
+                let b = val2 & mask;
+                let res = a.wrapping_sub(b) & mask;
+
+                let cf = a < b;
+                let pf = (res as u8).count_ones() % 2 == 0;
+                let af = ((a ^ b ^ res) & 0x10) != 0;
+                let zf = res == 0;
+                let sf = (res & sign_bit) != 0;
+                let of = ((a ^ b) & (a ^ res) & sign_bit) != 0;
+
+                let mut new_flags = 0u64;
+                if cf {
+                    new_flags |= 1 << 0;
+                }
+                if pf {
+                    new_flags |= 1 << 2;
+                }
+                if af {
+                    new_flags |= 1 << 4;
+                }
+                if zf {
+                    new_flags |= 1 << 6;
+                }
+                if sf {
+                    new_flags |= 1 << 7;
+                }
+                if of {
+                    new_flags |= 1 << 11;
+                }
+
+                let cur_rflags = process.read_register(register_id::RFLAGS.0)?;
+                let updated_rflags = (cur_rflags & !0x8D5) | (new_flags & 0x8D5);
+                process.write_register(register_id::RFLAGS.0, updated_rflags)?;
+
+                if is_cmps {
+                    rsi = rsi.wrapping_add(delta);
+                }
+                rdi = rdi.wrapping_add(delta);
+
+                count -= 1;
+
+                if is_rep {
+                    rcx -= 1;
+                    match rep_cond {
+                        RepCondition::Repe if !zf => break,
+                        RepCondition::Repne if zf => break,
+                        _ => {}
+                    }
+                }
+            }
+
+            if is_cmps {
+                process.write_register(register_id::GPR_BASE + 6, rsi)?;
+            }
+            process.write_register(register_id::GPR_BASE + 7, rdi)?;
+            if is_rep {
+                process.write_register(register_id::GPR_BASE + 1, rcx)?;
+            }
+
             let next_pc = pc.wrapping_add(u64::from(decoded.length));
             process.write_pc(next_pc)?;
             process.step_count += 1;
@@ -1135,6 +1319,7 @@ impl<D: Decoder> Runtime<D> {
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
             kernel_pool: None,
+            pci_config_address: 0,
             symbols: Vec::new(),
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
@@ -1292,6 +1477,7 @@ impl<D: Decoder> Runtime<D> {
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
             kernel_pool: None,
+            pci_config_address: 0,
             symbols: image.symbols.clone(),
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
@@ -1845,6 +2031,7 @@ impl<D: Decoder> Runtime<D> {
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
             kernel_pool: None,
+            pci_config_address: 0,
             symbols: image.symbols,
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
@@ -1986,6 +2173,33 @@ impl<D: Decoder> Runtime<D> {
         // directly like a syscall since it has no corpus semantic provider.
         if decoded.form_id == CPUID_FORM_ID {
             return self.execute_cpuid(process, pc, decoded.length);
+        }
+
+        // Port I/O is an environment interaction: the corpus providers model
+        // the generic zero-read/drop-write, but the runtime intercepts the
+        // forms to implement the PCI configuration-space model (0xCF8/0xCFC)
+        // that real drivers probe. The corpus forms remain for other
+        // consumers (symbolic mode reads ports as zero, consistent with the
+        // "no device" direction).
+        use angryier_semantics_intel64::forms as port_forms;
+        match decoded.form_id {
+            port_forms::IN_AL_DX
+            | port_forms::IN_AX_DX
+            | port_forms::IN_EAX_DX
+            | port_forms::IN_AL_IMM8
+            | port_forms::IN_AX_IMM8
+            | port_forms::IN_EAX_IMM8 => {
+                return self.execute_port_in(process, pc, decoded.length, &decoded);
+            }
+            port_forms::OUT_DX_AL
+            | port_forms::OUT_DX_AX
+            | port_forms::OUT_DX_EAX
+            | port_forms::OUT_IMM8_AL
+            | port_forms::OUT_IMM8_AX
+            | port_forms::OUT_IMM8_EAX => {
+                return self.execute_port_out(process, pc, decoded.length, &decoded);
+            }
+            _ => {}
         }
 
         // String instructions encode an internal loop, so they run directly
@@ -2658,6 +2872,105 @@ impl<D: Decoder> Runtime<D> {
         })
     }
 
+    /// Resolves the port number of a decoded IN/OUT instruction: operand 1
+    /// (IN) or operand 0 (OUT) is either DX or an imm8 immediate.
+    fn port_operand_value(&self, process: &Process, operand: &Operand) -> Option<u16> {
+        match &operand.kind {
+            OperandKind::Register(view) => process.read_register(view.parent.0).ok().map(|v| (v & 0xFFFF) as u16),
+            OperandKind::Immediate(imm) => Some((imm.value & 0xFF) as u16),
+            _ => None,
+        }
+    }
+
+    /// `OUT port, r8/16/32`: writes to port 0xCF8 latch the PCI
+    /// configuration-address register (all other port writes are dropped —
+    /// no device model). The latch is consulted by config reads at
+    /// 0xCFC-0xCFF.
+    fn execute_port_out(
+        &self,
+        process: &mut Process,
+        pc: Address,
+        length: u8,
+        decoded: &DecodedInstruction,
+    ) -> Result<StepOutcome, RuntimeError> {
+        // OUT operands: [port, value].
+        if let Some(port) = decoded
+            .operands
+            .first()
+            .and_then(|o| self.port_operand_value(process, o))
+            && port == 0xCF8
+            && let Some(value) = decoded.operands.get(1).and_then(|o| match &o.kind {
+                OperandKind::Register(view) => process.read_register(view.parent.0).ok(),
+                _ => None,
+            })
+        {
+            process.pci_config_address = value as u32;
+        }
+        process.write_pc(pc.wrapping_add(u64::from(length)))?;
+        process.step_count += 1;
+        Ok(StepOutcome::Stepped {
+            pc,
+            next_pc: pc.wrapping_add(u64::from(length)),
+            length,
+            form_id: decoded.form_id,
+        })
+    }
+
+    /// `IN r8/16/32, port`: ports 0xCFC-0xCFF read the PCI configuration
+    /// space at the latched 0xCF8 address (byte-offset addressing: a read
+    /// at 0xCFC+`k` returns the config dword shifted by 8*k); every other
+    /// port reads zero ("device absent"). The config space model exposes a
+    /// minimal AMD FCH: the host bridge (bus 0, device 0, function 0) and
+    /// the SMBus/GPIO controllers at their standard bus-0 slots.
+    fn execute_port_in(
+        &self,
+        process: &mut Process,
+        pc: Address,
+        length: u8,
+        decoded: &DecodedInstruction,
+    ) -> Result<StepOutcome, RuntimeError> {
+        let dest = decoded.operands.first();
+        let width = dest.map(|o| usize::from(o.width_bits)).unwrap_or(32);
+        let port = decoded
+            .operands
+            .get(1)
+            .and_then(|o| self.port_operand_value(process, o));
+        let value = match port {
+            Some(p @ 0xCFC..=0xCFF) => {
+                let addr = process.pci_config_address;
+                let bus = ((addr >> 16) & 0xFF) as u8;
+                let device = ((addr >> 11) & 0x1F) as u8;
+                let function = ((addr >> 8) & 0x07) as u8;
+                let dword_offset = (addr & 0xFC) as u8;
+                let dword = pci_config_read(bus, device, function, dword_offset);
+                (dword >> (8 * (p - 0xCFC))) as u64
+            }
+            _ => 0,
+        };
+        let value = match width {
+            8 => value & 0xFF,
+            16 => value & 0xFFFF,
+            _ => value & 0xFFFF_FFFF,
+        };
+        // Write the destination accumulator: 8/16-bit writes preserve the
+        // upper bits of RAX; 32-bit writes zero-extend (x86 semantics).
+        let rax = process.read_register(register_id::GPR_BASE)?;
+        let merged = match width {
+            8 => (rax & !0xFF) | value,
+            16 => (rax & !0xFFFF) | value,
+            _ => value,
+        };
+        process.write_register(register_id::GPR_BASE, merged)?;
+        process.write_pc(pc.wrapping_add(u64::from(length)))?;
+        process.step_count += 1;
+        Ok(StepOutcome::Stepped {
+            pc,
+            next_pc: pc.wrapping_add(u64::from(length)),
+            length,
+            form_id: decoded.form_id,
+        })
+    }
+
     /// Dispatches a SimProcedure at the given address.
     fn dispatch_simproc(
         &self,
@@ -2902,6 +3215,34 @@ impl Runtime<XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>> {
 /// Loads an ELF64 file from disk.
 pub fn load_elf_file(path: &str) -> Result<Vec<u8>, RuntimeError> {
     std::fs::read(path).map_err(|_| RuntimeError::Loader(angryier_loader::LoaderError::InvalidFormat))
+}
+
+/// Minimal PCI configuration-space model for AMD FCH devices (the surface
+/// real Ryzen-chipset drivers probe via ports 0xCF8/0xCFC). Exposed slots:
+/// the host bridge (bus 0, device 0, function 0; vendor 0x1022, device
+/// 0x1450, class 06/00/00) and the SMBus controller (bus 0, device 0x14,
+/// function 0; device 0x790B, class 0C/05/00). Everything else reads
+/// 0xFFFFFFFF ("no device") so enumeration scans terminate. Deterministic
+/// for replay; debt-recorded (no full config-space or MMIO BAR model).
+fn pci_config_read(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    let present = match (bus, device, function) {
+        (0, 0, 0) => true,    // host bridge
+        (0, 0x14, 0) => true, // SMBus
+        _ => false,
+    };
+    if !present {
+        return 0xFFFF_FFFF;
+    }
+    let (vendor_device, class) = match (bus, device, function) {
+        (0, 0, 0) => (0x1450_1022u32, 0x0600_0000u32), // host bridge class 06/00/00
+        _ => (0x790B_1022u32, 0x0C05_0000u32),         // SMBus class 0C/05/00
+    };
+    match offset & 0xFC {
+        0x00 => vendor_device,
+        0x04 => 0x0010_0006, // status/command (bus mastering on)
+        0x08 => class,
+        _ => 0,
+    }
 }
 
 /// Reads `len` concrete bytes from process memory for a syscall buffer.
@@ -4111,6 +4452,169 @@ mod tests {
         AccessKind, DecodedInstruction, InstructionModifiers, MemoryBase, MemoryOperand, Operand, OperandKind,
         OperandVisibility, RegisterId, RegisterView,
     };
+
+    #[test]
+    fn pci_config_read_model() {
+        // Host bridge: vendor/device at offset 0, class at 8.
+        assert_eq!(pci_config_read(0, 0, 0, 0x00), 0x1450_1022);
+        assert_eq!(pci_config_read(0, 0, 0, 0x08), 0x0600_0000);
+        // SMBus at its standard slot.
+        assert_eq!(pci_config_read(0, 0x14, 0, 0x00), 0x790B_1022);
+        assert_eq!(pci_config_read(0, 0x14, 0, 0x08), 0x0C05_0000);
+        // Every other slot reads "no device" so scans terminate.
+        assert_eq!(pci_config_read(0, 1, 0, 0x00), 0xFFFF_FFFF);
+        assert_eq!(pci_config_read(0, 0, 1, 0x00), 0xFFFF_FFFF);
+        assert_eq!(pci_config_read(1, 0, 0, 0x00), 0xFFFF_FFFF);
+        assert_eq!(pci_config_read(0, 0, 0, 0x10), 0); // BAR reads zero
+    }
+
+    /// IN/OUT port dispatch: 0xCF8 latch, 0xCFC config reads with
+    /// byte-offset addressing, other ports read zero.
+    #[test]
+    fn port_io_pci_latch() -> Result<(), RuntimeError> {
+        let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
+        let mut process = minimal_process()?;
+        let rax = register_id::GPR_BASE;
+        // Build OUT DX, EAX / IN EAX, DX decoded operands by hand.
+        let port_reg = |index: u8| Operand {
+            index,
+            width_bits: 16,
+            access: AccessKind::Read,
+            visibility: OperandVisibility::Explicit,
+            kind: OperandKind::Register(RegisterView {
+                parent: RegisterId(register_id::GPR_BASE + 2),
+                bit_offset: 0,
+                width_bits: 16,
+                write_behavior: angryier_arch::RegisterWriteBehavior::PreserveParent,
+            }),
+        };
+        let out_decoded = DecodedInstruction {
+            address: 0x1000,
+            length: 1,
+            form_id: angryier_semantics_intel64::forms::OUT_DX_EAX,
+            features: vec![],
+            operands: vec![
+                port_reg(0),
+                Operand {
+                    index: 1,
+                    width_bits: 32,
+                    access: AccessKind::Read,
+                    visibility: OperandVisibility::Explicit,
+                    kind: OperandKind::Register(RegisterView {
+                        parent: RegisterId(rax),
+                        bit_offset: 0,
+                        width_bits: 32,
+                        write_behavior: angryier_arch::RegisterWriteBehavior::ZeroExtendParent,
+                    }),
+                },
+            ],
+            modifiers: InstructionModifiers::default(),
+        };
+        let in_decoded = DecodedInstruction {
+            address: 0x1001,
+            length: 1,
+            form_id: angryier_semantics_intel64::forms::IN_EAX_DX,
+            features: vec![],
+            operands: vec![
+                Operand {
+                    index: 0,
+                    width_bits: 32,
+                    access: AccessKind::Write,
+                    visibility: OperandVisibility::Explicit,
+                    kind: OperandKind::Register(RegisterView {
+                        parent: RegisterId(rax),
+                        bit_offset: 0,
+                        width_bits: 32,
+                        write_behavior: angryier_arch::RegisterWriteBehavior::ZeroExtendParent,
+                    }),
+                },
+                port_reg(1),
+            ],
+            modifiers: InstructionModifiers::default(),
+        };
+        // Write the config address for the host bridge offset 0.
+        process.write_register(rax, 0x8000_0000)?; // EAX = addr (enable | bus0 dev0 fn0 off0)
+        process.write_register(register_id::GPR_BASE + 2, 0xCF8)?; // DX
+        let _ = runtime.execute_port_out(&mut process, 0x1000, 1, &out_decoded)?;
+        assert_eq!(process.pci_config_address, 0x8000_0000);
+        // Read vendor/device at 0xCFC.
+        process.write_register(register_id::GPR_BASE + 2, 0xCFC)?; // DX
+        let _ = runtime.execute_port_in(&mut process, 0x1001, 1, &in_decoded)?;
+        assert_eq!(process.read_register(rax)?, 0x1450_1022);
+        // Byte-offset read: 0xCFE returns the high word (class low half).
+        process.write_register(register_id::GPR_BASE + 2, 0xCFE)?;
+        let _ = runtime.execute_port_in(&mut process, 0x1001, 1, &in_decoded)?;
+        assert_eq!(process.read_register(rax)?, 0x1450_1022 >> 16);
+        // Non-PCI port reads zero.
+        process.write_register(register_id::GPR_BASE + 2, 0x80)?;
+        let _ = runtime.execute_port_in(&mut process, 0x1001, 1, &in_decoded)?;
+        assert_eq!(process.read_register(rax)?, 0);
+        Ok(())
+    }
+
+    /// A minimal process with canonical register widths and empty memory,
+    /// sufficient for register-only handler tests.
+    fn minimal_process() -> Result<Process, RuntimeError> {
+        let reg_file = Intel64RegisterFile::canonical();
+        let registers = PersistentRegisters::from_widths(
+            reg_file
+                .architectural_registers
+                .iter()
+                .map(|(id, bits)| (id.0, usize::from(*bits).div_ceil(8))),
+        )
+        .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+        let memory = PersistentMemory::new(Vec::new()).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        Ok(Process {
+            image_id: ImageId(1),
+            target_profile: TargetProfileId(1),
+            entry: 0x1000,
+            entry_state: ExecutionState {
+                id: StateId(1),
+                parent: None,
+                target_profile: TargetProfileId(1),
+                registers: registers.clone(),
+                memory: memory.clone(),
+                constraints: PersistentConstraintLineage::new(),
+                ownership: StateOwnership::default(),
+                fidelity: FidelityLedger::new(FidelityProfile::Prove),
+            },
+            state: ExecutionState {
+                id: StateId(1),
+                parent: None,
+                target_profile: TargetProfileId(1),
+                registers,
+                memory,
+                constraints: PersistentConstraintLineage::new(),
+                ownership: StateOwnership::default(),
+                fidelity: FidelityLedger::new(FidelityProfile::Prove),
+            },
+            block_cache: BTreeMap::new(),
+            step_cache: BTreeMap::new(),
+            simproc_hooks: BTreeMap::new(),
+            pe_import_stubs: BTreeMap::new(),
+            simproc_instances: BTreeMap::new(),
+            kernel_pool: None,
+            pci_config_address: 0,
+            symbols: Vec::new(),
+            trace: Vec::new(),
+            syscalls: SyscallModel::new(),
+            program_break: 0,
+            heap_end: 0,
+            mmap_next: MMAP_BASE,
+            files: BTreeMap::new(),
+            open_fds: BTreeMap::new(),
+            symbolic_files: std::collections::BTreeSet::new(),
+            symbolic_fds: std::collections::BTreeSet::new(),
+            argv0_addr: None,
+            stdin: Vec::new(),
+            stdin_pos: 0,
+            next_fd: 3,
+            next_block_id: 0,
+            step_count: 0,
+            simproc_dispatches: 0,
+            terminated: false,
+        })
+    }
 
     /// A synthetic decoder that maps byte patterns to known instructions.
     /// This lets us test the full pipeline without requiring native XED.

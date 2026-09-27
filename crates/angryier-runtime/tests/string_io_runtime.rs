@@ -434,3 +434,115 @@ fn test_rep_outsd_backward() -> Result<(), BoxError> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// CMPS/SCAS runtime tests (plain, REPE, REPNE)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cmpsb_equal_and_unequal() -> Result<(), BoxError> {
+    // CMPSB: A6 — compare [RSI] vs [RDI], advance both.
+    let pe = make_test_pe(&[0xA6]);
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_pe(&pe)?;
+
+    process.write_register(RSI, BUFFER_VA)?;
+    process.write_register(RDI, BUFFER_VA + 0x10)?;
+    process.state.memory = process
+        .state
+        .memory
+        .load_concrete(BUFFER_VA, &[0x41])
+        .map_err(|e| format!("seed: {e:?}"))?;
+    process.state.memory = process
+        .state
+        .memory
+        .load_concrete(BUFFER_VA + 0x10, &[0x41])
+        .map_err(|e| format!("seed: {e:?}"))?;
+
+    let _ = runtime.step(&mut process)?;
+    let rflags = process.read_register(RFLAGS)?;
+    assert_eq!(rflags & (1 << 6), 1 << 6, "equal bytes set ZF");
+    assert_eq!(process.read_register(RSI)?, BUFFER_VA + 1);
+    assert_eq!(process.read_register(RDI)?, BUFFER_VA + 0x11);
+
+    // Unequal bytes clear ZF.
+    let pe2 = make_test_pe(&[0xA6]);
+    let runtime2 = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut p2 = runtime2.load_pe(&pe2)?;
+    p2.write_register(RSI, BUFFER_VA)?;
+    p2.write_register(RDI, BUFFER_VA + 0x10)?;
+    p2.state.memory = p2
+        .state
+        .memory
+        .load_concrete(BUFFER_VA, &[0x41])
+        .map_err(|e| format!("seed: {e:?}"))?;
+    p2.state.memory = p2
+        .state
+        .memory
+        .load_concrete(BUFFER_VA + 0x10, &[0x42])
+        .map_err(|e| format!("seed: {e:?}"))?;
+    let _ = runtime2.step(&mut p2)?;
+    let rflags2 = p2.read_register(RFLAGS)?;
+    assert_eq!(rflags2 & (1 << 6), 0, "unequal bytes clear ZF");
+    Ok(())
+}
+
+#[test]
+fn test_repe_cmpsb_stops_at_first_mismatch() -> Result<(), BoxError> {
+    // REPE CMPSB: F3 A6 — compare until mismatch or RCX=0.
+    let pe = make_test_pe(&[0xF3, 0xA6]);
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_pe(&pe)?;
+
+    process.write_register(RCX, 4)?;
+    process.write_register(RSI, BUFFER_VA)?;
+    process.write_register(RDI, BUFFER_VA + 0x10)?;
+    // bytes 0-1 equal, byte 2 differs.
+    process.state.memory = process
+        .state
+        .memory
+        .load_concrete(BUFFER_VA, &[0x41, 0x42, 0x43])
+        .map_err(|e| format!("seed: {e:?}"))?;
+    process.state.memory = process
+        .state
+        .memory
+        .load_concrete(BUFFER_VA + 0x10, &[0x41, 0x42, 0x44])
+        .map_err(|e| format!("seed: {e:?}"))?;
+
+    let _ = runtime.step(&mut process)?;
+    // RCX decrements before each compare: mismatch on the 3rd element
+    // leaves RCX=1 and both pointers advanced by 3.
+    assert_eq!(process.read_register(RCX)?, 1, "early exit leaves RCX");
+    assert_eq!(process.read_register(RSI)?, BUFFER_VA + 3);
+    assert_eq!(process.read_register(RDI)?, BUFFER_VA + 0x13);
+    let rflags = process.read_register(RFLAGS)?;
+    assert_eq!(rflags & (1 << 6), 0, "mismatch clears ZF");
+    Ok(())
+}
+
+#[test]
+fn test_repne_scasb_stops_on_match() -> Result<(), BoxError> {
+    // REPNE SCASB: F2 AE — scan for a byte, stop on match or RCX=0.
+    let pe = make_test_pe(&[0xF2, 0xAE]);
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_pe(&pe)?;
+
+    process.write_register(RCX, 4)?;
+    process.write_register(RDI, BUFFER_VA)?;
+    process.write_register(angryier_arch_intel64::register_id::GPR_BASE, 0x44)?; // RAX = needle
+    // buffer: 41 42 43 44 — match at index 3.
+    process.state.memory = process
+        .state
+        .memory
+        .load_concrete(BUFFER_VA, &[0x41, 0x42, 0x43, 0x44])
+        .map_err(|e| format!("seed: {e:?}"))?;
+
+    let _ = runtime.step(&mut process)?;
+    // RCX decrements before each scan: match on the 4th element consumes
+    // all four (RCX=0) and advances RDI by 4.
+    assert_eq!(process.read_register(RCX)?, 0);
+    assert_eq!(process.read_register(RDI)?, BUFFER_VA + 4);
+    let rflags = process.read_register(RFLAGS)?;
+    assert_eq!(rflags & (1 << 6), 1 << 6, "match sets ZF");
+    Ok(())
+}

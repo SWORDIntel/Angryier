@@ -292,7 +292,7 @@ fn scan_unmapped_forms() {
                 // RAX through bare `ret` stubs); the trace must match it.
                 let tracker = std::sync::Arc::new(angryier_models::KernelPoolTracker::new());
                 let _ = runtime.attach_kernel_pool_model(&mut proc, tracker.clone());
-                trace_entry(&runtime, &mut proc, 2000);
+                trace_entry(&runtime, &mut proc, 30000);
             }
             Err(e) => eprintln!("  load failed: {:?}", e),
         }
