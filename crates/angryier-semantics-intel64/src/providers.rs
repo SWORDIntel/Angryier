@@ -37,6 +37,277 @@ pub(crate) fn const_u64(out: &mut dyn SemanticBuilder, value: u64) -> Result<Val
     out.constant(U64, &value.to_le_bytes())
 }
 
+// ---------------------------------------------------------------------------
+// 16-bit integer arithmetic, IMUL, and MOVSXD
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Alu16Kind {
+    Add,
+    Adc,
+    Sbb,
+    Cmp,
+    Or,
+    Xor,
+    Sub,
+}
+
+fn write_adc16_flags(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    right: ValueId,
+    carry: ValueId,
+) -> Result<(), SemanticError> {
+    let left32 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U32, &[left])?;
+    let right32 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U32, &[right])?;
+    let carry32 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U32, &[carry])?;
+    let rhs32 = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U32, &[right32, carry32])?;
+    let full = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U32, &[left32, rhs32])?;
+    let sixteen = const_u32(out, 16)?;
+    let cf32 = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U32,
+        &[full, sixteen],
+    )?;
+    let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf32])?;
+    let result64 = widen_to_u64(out, result, 16)?;
+    let left64 = widen_to_u64(out, left, 16)?;
+    let right64 = widen_to_u64(out, right, 16)?;
+    let mut flags = add_flag_values(out, result64, left64, right64, 16)?;
+    flags.pop();
+    flags.push(cf);
+    compose_rflags(out, &flags, false)
+}
+
+fn write_sbb16_flags(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    left: ValueId,
+    right: ValueId,
+    carry: ValueId,
+) -> Result<(), SemanticError> {
+    let left32 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U32, &[left])?;
+    let right32 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U32, &[right])?;
+    let carry32 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U32, &[carry])?;
+    let rhs32 = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U32, &[right32, carry32])?;
+    let cf1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Ult), U1, &[left32, rhs32])?;
+    let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf1])?;
+    let result64 = widen_to_u64(out, result, 16)?;
+    let left64 = widen_to_u64(out, left, 16)?;
+    let right64 = widen_to_u64(out, right, 16)?;
+    let mut flags = sub_flag_values(out, result64, left64, right64, 16)?;
+    flags.pop();
+    flags.push(cf);
+    compose_rflags(out, &flags, false)
+}
+
+fn emit_alu16(
+    kind: Alu16Kind,
+    context: &SemanticContext,
+    insn: &dyn DecodedInstructionView,
+    out: &mut dyn SemanticBuilder,
+    rule: u64,
+) -> Result<SemanticReceipt, SemanticError> {
+    let left = out.read_operand(0, U16)?;
+    let right = out.read_operand(1, U16)?;
+    let result = match kind {
+        Alu16Kind::Add => {
+            let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U16, &[left, right])?;
+            write_add_flags(out, result, left, right, 16)?;
+            result
+        }
+        Alu16Kind::Adc => {
+            let carry1 = read_flag_set(out, rflags::CF_BIT)?;
+            let carry = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U16, &[carry1])?;
+            let sum = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U16, &[left, right])?;
+            let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U16, &[sum, carry])?;
+            write_adc16_flags(out, result, left, right, carry)?;
+            result
+        }
+        Alu16Kind::Sbb => {
+            let carry1 = read_flag_set(out, rflags::CF_BIT)?;
+            let carry = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U16, &[carry1])?;
+            let diff = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U16, &[left, right])?;
+            let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U16, &[diff, carry])?;
+            write_sbb16_flags(out, result, left, right, carry)?;
+            result
+        }
+        Alu16Kind::Cmp | Alu16Kind::Sub => {
+            let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U16, &[left, right])?;
+            write_sub_flags(out, result, left, right, 16)?;
+            result
+        }
+        Alu16Kind::Or => {
+            let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U16, &[left, right])?;
+            write_logical_flags(out, result, 16)?;
+            result
+        }
+        Alu16Kind::Xor => {
+            let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U16, &[left, right])?;
+            write_logical_flags(out, result, 16)?;
+            result
+        }
+    };
+    if kind != Alu16Kind::Cmp {
+        out.write_operand(0, result)?;
+    }
+    fall_through(out, insn)?;
+    Ok(receipt(rule, context))
+}
+
+macro_rules! alu16_provider {
+    ($name:ident, $form:expr, $kind:ident, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                emit_alu16(Alu16Kind::$kind, context, insn, out, $rule)
+            }
+        }
+    };
+}
+
+alu16_provider!(AddR16Imm16, forms::ADD_R16_IMM16, Add, 0x616);
+alu16_provider!(AddR16Imm8, forms::ADD_R16_IMM8, Add, 0x617);
+alu16_provider!(AddR16Mem16, forms::ADD_R16_MEM16, Add, 0x618);
+alu16_provider!(AddMem16R16, forms::ADD_MEM16_R16, Add, 0x619);
+alu16_provider!(AddMem16Imm16V2, forms::ADD_MEM16_IMM16_V2, Add, 0x61A);
+alu16_provider!(AddMem16Imm8, forms::ADD_MEM16_IMM8, Add, 0x61B);
+alu16_provider!(AdcR16R16, forms::ADC_R16_R16, Adc, 0x61C);
+alu16_provider!(AdcR16Imm16, forms::ADC_R16_IMM16, Adc, 0x61D);
+alu16_provider!(AdcR16Imm8, forms::ADC_R16_IMM8, Adc, 0x61E);
+alu16_provider!(AdcR16Mem16, forms::ADC_R16_MEM16, Adc, 0x61F);
+alu16_provider!(AdcMem16R16, forms::ADC_MEM16_R16, Adc, 0x620);
+alu16_provider!(AdcMem16Imm16, forms::ADC_MEM16_IMM16, Adc, 0x621);
+alu16_provider!(AdcMem16Imm8, forms::ADC_MEM16_IMM8, Adc, 0x622);
+alu16_provider!(SbbR16R16, forms::SBB_R16_R16, Sbb, 0x623);
+alu16_provider!(SbbR16Imm16, forms::SBB_R16_IMM16, Sbb, 0x624);
+alu16_provider!(SbbR16Imm8, forms::SBB_R16_IMM8, Sbb, 0x625);
+alu16_provider!(SbbR16Mem16, forms::SBB_R16_MEM16, Sbb, 0x626);
+alu16_provider!(SbbMem16R16, forms::SBB_MEM16_R16, Sbb, 0x627);
+alu16_provider!(SbbMem16Imm16, forms::SBB_MEM16_IMM16, Sbb, 0x628);
+alu16_provider!(SbbMem16Imm8, forms::SBB_MEM16_IMM8, Sbb, 0x629);
+alu16_provider!(CmpR16R16, forms::CMP_R16_R16, Cmp, 0x62A);
+alu16_provider!(CmpR16Imm16, forms::CMP_R16_IMM16, Cmp, 0x62B);
+alu16_provider!(CmpR16Imm8, forms::CMP_R16_IMM8, Cmp, 0x62C);
+alu16_provider!(CmpR16Mem16, forms::CMP_R16_MEM16, Cmp, 0x62D);
+alu16_provider!(CmpMem16R16V2, forms::CMP_MEM16_R16_V2, Cmp, 0x62E);
+alu16_provider!(CmpMem16Imm16V2, forms::CMP_MEM16_IMM16_V2, Cmp, 0x62F);
+alu16_provider!(CmpMem16Imm8, forms::CMP_MEM16_IMM8, Cmp, 0x630);
+alu16_provider!(OrR16R16, forms::OR_R16_R16, Or, 0x631);
+alu16_provider!(OrR16Imm16, forms::OR_R16_IMM16, Or, 0x632);
+alu16_provider!(OrR16Imm8, forms::OR_R16_IMM8, Or, 0x633);
+alu16_provider!(OrR16Mem16, forms::OR_R16_MEM16, Or, 0x634);
+alu16_provider!(OrMem16R16, forms::OR_MEM16_R16, Or, 0x635);
+alu16_provider!(OrMem16Imm16V2, forms::OR_MEM16_IMM16_V2, Or, 0x636);
+alu16_provider!(OrMem16Imm8, forms::OR_MEM16_IMM8, Or, 0x637);
+alu16_provider!(XorR16R16, forms::XOR_R16_R16, Xor, 0x638);
+alu16_provider!(XorR16Imm16, forms::XOR_R16_IMM16, Xor, 0x639);
+alu16_provider!(XorR16Imm8, forms::XOR_R16_IMM8, Xor, 0x63A);
+alu16_provider!(XorR16Mem16, forms::XOR_R16_MEM16, Xor, 0x63B);
+alu16_provider!(XorMem16R16, forms::XOR_MEM16_R16, Xor, 0x63C);
+alu16_provider!(XorMem16Imm16V2, forms::XOR_MEM16_IMM16_V2, Xor, 0x63D);
+alu16_provider!(XorMem16Imm8, forms::XOR_MEM16_IMM8, Xor, 0x63E);
+alu16_provider!(SubR16R16, forms::SUB_R16_R16, Sub, 0x63F);
+alu16_provider!(SubR16Imm16, forms::SUB_R16_IMM16, Sub, 0x640);
+alu16_provider!(SubR16Imm8, forms::SUB_R16_IMM8, Sub, 0x641);
+alu16_provider!(SubR16Mem16, forms::SUB_R16_MEM16, Sub, 0x642);
+alu16_provider!(SubMem16R16, forms::SUB_MEM16_R16, Sub, 0x643);
+alu16_provider!(SubMem16Imm16V2, forms::SUB_MEM16_IMM16_V2, Sub, 0x644);
+alu16_provider!(SubMem16Imm8, forms::SUB_MEM16_IMM8, Sub, 0x645);
+
+macro_rules! imul_provider {
+    ($name:ident, $form:expr, $ty:expr, $width:expr, $src:expr, $rhs:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let left = out.read_operand($src, $ty)?;
+                let right = out.read_operand($rhs, $ty)?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), $ty, &[left, right])?;
+                write_mul_flags(out, left, right, $width)?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+imul_provider!(ImulR16R16, forms::IMUL_R16_R16, U16, 16, 0, 1, 0x646);
+imul_provider!(ImulR16Mem16, forms::IMUL_R16_MEM16, U16, 16, 0, 1, 0x647);
+imul_provider!(ImulR16R16Imm16, forms::IMUL_R16_R16_IMM16, U16, 16, 1, 2, 0x648);
+imul_provider!(ImulR16R16Imm8, forms::IMUL_R16_R16_IMM8, U16, 16, 1, 2, 0x649);
+imul_provider!(ImulR16Mem16Imm16, forms::IMUL_R16_MEM16_IMM16, U16, 16, 1, 2, 0x64A);
+imul_provider!(ImulR16Mem16Imm8, forms::IMUL_R16_MEM16_IMM8, U16, 16, 1, 2, 0x64B);
+imul_provider!(ImulR32Mem32, forms::IMUL_R32_MEM32, U32, 32, 0, 1, 0x64C);
+imul_provider!(ImulR32Mem32Imm32, forms::IMUL_R32_MEM32_IMM32, U32, 32, 1, 2, 0x64D);
+imul_provider!(ImulR64Mem64Imm32, forms::IMUL_R64_MEM64_IMM32, U64, 64, 1, 2, 0x64E);
+
+macro_rules! movsxd_provider {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let value = read_sign_extend(out, 1, U32)?;
+                out.write_operand(0, value)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+movsxd_provider!(MovsxdR64R32, forms::MOVSXD_R64_R32, 0x64F);
+movsxd_provider!(MovsxdR64Mem32, forms::MOVSXD_R64_MEM32, 0x650);
+imul_provider!(ImulR32Mem32Imm8, forms::IMUL_R32_MEM32_IMM8, U32, 32, 1, 2, 0x651);
+imul_provider!(ImulR64R64Imm8, forms::IMUL_R64_R64_IMM8, U64, 64, 1, 2, 0x652);
+imul_provider!(ImulR64Mem64Imm8, forms::IMUL_R64_MEM64_IMM8, U64, 64, 1, 2, 0x653);
+
 pub(crate) fn const_u32(out: &mut dyn SemanticBuilder, value: u32) -> Result<ValueId, SemanticError> {
     out.constant(U32, &value.to_le_bytes())
 }
@@ -4426,6 +4697,176 @@ port_in!(InEaxDx, forms::IN_EAX_DX, U32, 0x507);
 port_out!(OutDxAl, forms::OUT_DX_AL, U8, 0x508);
 port_out!(OutDxAx, forms::OUT_DX_AX, U16, 0x509);
 port_out!(OutDxEax, forms::OUT_DX_EAX, U32, 0x50A);
+
+macro_rules! port_in_imm {
+    ($name:ident, $form:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let _port = out.read_operand(1, U8)?;
+                let zero = match $ty {
+                    U8 => out.constant(U8, &[0])?,
+                    U16 => out.constant(U16, &0u16.to_le_bytes())?,
+                    U32 => out.constant(U32, &0u32.to_le_bytes())?,
+                    _ => return Err(SemanticError::InvalidWidth),
+                };
+                out.write_operand(0, zero)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+macro_rules! port_out_imm {
+    ($name:ident, $form:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let _port = out.read_operand(0, U8)?;
+                let _value = out.read_operand(1, $ty)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+macro_rules! string_port_in {
+    ($name:ident, $form:expr, $ty:expr, $size:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let _port = out.read_operand(1, U16)?; // DX
+                let zero = match $ty {
+                    U8 => out.constant(U8, &[0])?,
+                    U16 => out.constant(U16, &0u16.to_le_bytes())?,
+                    U32 => out.constant(U32, &0u32.to_le_bytes())?,
+                    _ => return Err(SemanticError::InvalidWidth),
+                };
+                out.write_operand(0, zero)?; // [RDI]
+                let rdi_reg = RegisterId(register_id::GPR_BASE + 7);
+                let rdi = out.read_register(rdi_reg, U64)?;
+                let df = read_flag_set(out, rflags::DF_BIT)?;
+                let step = const_u64(out, $size)?;
+                let rdi_plus = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rdi, step])?;
+                let rdi_minus = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rdi, step])?;
+                let new_rdi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Select),
+                    U64,
+                    &[df, rdi_minus, rdi_plus],
+                )?;
+                out.write_register(rdi_reg, new_rdi)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+macro_rules! string_port_out {
+    ($name:ident, $form:expr, $ty:expr, $size:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let _port = out.read_operand(0, U16)?; // DX
+                let _value = out.read_operand(1, $ty)?; // [RSI]
+                let rsi_reg = RegisterId(register_id::GPR_BASE + 6);
+                let rsi = out.read_register(rsi_reg, U64)?;
+                let df = read_flag_set(out, rflags::DF_BIT)?;
+                let step = const_u64(out, $size)?;
+                let rsi_plus = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsi, step])?;
+                let rsi_minus = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsi, step])?;
+                let new_rsi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Select),
+                    U64,
+                    &[df, rsi_minus, rsi_plus],
+                )?;
+                out.write_register(rsi_reg, new_rsi)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+port_in_imm!(InAlImm8, forms::IN_AL_IMM8, U8, 0x700);
+port_in_imm!(InAxImm8, forms::IN_AX_IMM8, U16, 0x701);
+port_in_imm!(InEaxImm8, forms::IN_EAX_IMM8, U32, 0x702);
+port_out_imm!(OutImm8Al, forms::OUT_IMM8_AL, U8, 0x703);
+port_out_imm!(OutImm8Ax, forms::OUT_IMM8_AX, U16, 0x704);
+port_out_imm!(OutImm8Eax, forms::OUT_IMM8_EAX, U32, 0x705);
+
+string_port_in!(Insb, forms::INSB, U8, 1, 0x706);
+string_port_in!(Insw, forms::INSW, U16, 2, 0x707);
+string_port_in!(Insd, forms::INSD, U32, 4, 0x708);
+string_port_out!(Outsb, forms::OUTSB, U8, 1, 0x709);
+string_port_out!(Outsw, forms::OUTSW, U16, 2, 0x70A);
+string_port_out!(Outsd, forms::OUTSD, U32, 4, 0x70B);
 
 // ---------------------------------------------------------------------------
 // INT imm8 (Software Interrupt / __fastfail)

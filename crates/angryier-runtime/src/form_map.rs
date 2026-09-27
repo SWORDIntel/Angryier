@@ -70,6 +70,12 @@ pub const REP_MOVSB_FORM_ID: u32 = 0xFFFF_000C;
 pub const REP_MOVSW_FORM_ID: u32 = 0xFFFF_000D;
 pub const REP_MOVSD_FORM_ID: u32 = 0xFFFF_000E;
 pub const REP_MOVSQ_FORM_ID: u32 = 0xFFFF_000F;
+pub const REP_INSB_FORM_ID: u32 = 0xFFFF_0014;
+pub const REP_INSW_FORM_ID: u32 = 0xFFFF_0015;
+pub const REP_INSD_FORM_ID: u32 = 0xFFFF_0016;
+pub const REP_OUTSB_FORM_ID: u32 = 0xFFFF_0017;
+pub const REP_OUTSW_FORM_ID: u32 = 0xFFFF_0018;
+pub const REP_OUTSD_FORM_ID: u32 = 0xFFFF_0019;
 
 /// Operand shape used to discriminate forms that share an XED iclass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +183,11 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         .operands
         .iter()
         .any(|operand| operand.visibility == OperandVisibility::Implicit && is_cl(operand));
+    let immediate_width = decoded
+        .operands
+        .iter()
+        .find(|operand| matches!(operand.kind, OperandKind::Immediate(_)))
+        .map(|operand| operand.width_bits);
 
     match decoded.form_id {
         iclass::XED_ICLASS_MOV => match shapes {
@@ -203,6 +214,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_ADD | iclass::XED_ICLASS_ADD_LOCK => match shapes {
+            [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADD_R16_IMM8),
+            [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADD_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::ADD_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::ADD_R64_IMM32),
             [Shape::Reg64, Shape::Mem64] => Some(forms::ADD_R64_MEM64),
@@ -211,28 +224,32 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem32, Shape::Imm] => Some(forms::ADD_MEM32_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::ADD_R32_R32),
             [Shape::Reg16, Shape::Reg16] => Some(forms::ADD_R16_R16),
-            [Shape::Reg16, Shape::Imm] => Some(forms::ADD_MEM16_IMM16),
+            [Shape::Reg16, Shape::Imm] => Some(forms::ADD_R16_IMM16),
             [Shape::Reg32, Shape::Imm] => Some(forms::ADD_R32_IMM8),
             [Shape::Reg32, Shape::Mem32] => Some(forms::ADD_R32_MEM32),
             [Shape::Reg8, Shape::Mem8] => Some(forms::ADD_R8_MEM8),
             [Shape::Mem8, Shape::Reg8] => Some(forms::ADD_MEM8_R8),
             [Shape::Mem8, Shape::Imm] => Some(forms::ADD_MEM8_IMM8),
-            [Shape::Mem16, Shape::Imm] => Some(forms::ADD_MEM16_IMM16),
+            [Shape::Mem16, Shape::Imm] => Some(forms::ADD_MEM16_IMM16_V2),
             [Shape::Reg8, Shape::Reg8] => Some(forms::ADD_R8_R8),
             [Shape::Reg8, Shape::Imm] => Some(forms::ADD_R8_IMM8),
+            [Shape::Reg16, Shape::Mem16] => Some(forms::ADD_R16_MEM16),
+            [Shape::Mem16, Shape::Reg16] => Some(forms::ADD_MEM16_R16),
             _ => None,
         },
         iclass::XED_ICLASS_SUB | iclass::XED_ICLASS_SUB_LOCK => match shapes {
+            [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SUB_R16_IMM8),
+            [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SUB_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::SUB_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::SUB_R64_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::SUB_R32_R32),
             [Shape::Reg32, Shape::Imm] => Some(forms::SUB_R32_IMM8),
             [Shape::Reg32, Shape::Mem32] => Some(forms::SUB_R32_MEM32),
-            [Shape::Reg16, Shape::Imm] => Some(forms::SUB_MEM16_IMM16),
+            [Shape::Reg16, Shape::Imm] => Some(forms::SUB_R16_IMM16),
             [Shape::Reg8, Shape::Mem8] => Some(forms::SUB_R8_MEM8),
             [Shape::Mem8, Shape::Reg8] => Some(forms::SUB_MEM8_R8),
             [Shape::Mem8, Shape::Imm] => Some(forms::SUB_MEM8_IMM8),
-            [Shape::Mem16, Shape::Imm] => Some(forms::SUB_MEM16_IMM16),
+            [Shape::Mem16, Shape::Imm] => Some(forms::SUB_MEM16_IMM16_V2),
             [Shape::Reg8, Shape::Reg8] => Some(forms::SUB_R8_R8),
             [Shape::Reg8, Shape::Imm] => Some(forms::SUB_R8_IMM8),
             [Shape::Mem32, Shape::Imm] => Some(forms::SUB_MEM32_IMM32),
@@ -240,22 +257,27 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg64, Shape::Mem64] => Some(forms::SUB_R64_MEM64),
             [Shape::Mem64, Shape::Reg64] => Some(forms::SUB_MEM64_R64),
             [Shape::Mem32, Shape::Reg32] => Some(forms::SUB_MEM32_R32),
+            [Shape::Reg16, Shape::Reg16] => Some(forms::SUB_R16_R16),
+            [Shape::Reg16, Shape::Mem16] => Some(forms::SUB_R16_MEM16),
+            [Shape::Mem16, Shape::Reg16] => Some(forms::SUB_MEM16_R16),
             _ => None,
         },
         iclass::XED_ICLASS_CMP => match shapes {
+            [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::CMP_R16_IMM8),
+            [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::CMP_MEM16_IMM8),
             [Shape::Reg8, Shape::Reg8] => Some(forms::CMP_R8_R8),
             [Shape::Reg8, Shape::Imm] => Some(forms::CMP_R8_IMM8),
             [Shape::Mem8, Shape::Imm] => Some(forms::CMP_MEM8_IMM8),
             [Shape::Mem64, Shape::Reg64] => Some(forms::CMP_MEM64_R64),
             [Shape::Mem32, Shape::Reg32] => Some(forms::CMP_MEM32_R32),
             [Shape::Mem8, Shape::Reg8] => Some(forms::CMP_MEM8_R8),
-            [Shape::Mem16, Shape::Reg16] => Some(forms::CMP_MEM16_R16),
+            [Shape::Mem16, Shape::Reg16] => Some(forms::CMP_MEM16_R16_V2),
             [Shape::Mem32, Shape::Imm] => Some(forms::CMP_MEM32_IMM32),
-            [Shape::Mem16, Shape::Imm] => Some(forms::CMP_MEM16_IMM16),
+            [Shape::Mem16, Shape::Imm] => Some(forms::CMP_MEM16_IMM16_V2),
             // The 16-bit immediate forms are memory-shaped in the corpus, but
             // their operand-generic providers cover register destinations
             // exactly (same reuse as the CMOV memory shapes above).
-            [Shape::Reg16, Shape::Imm] => Some(forms::CMP_MEM16_IMM16),
+            [Shape::Reg16, Shape::Imm] => Some(forms::CMP_R16_IMM16),
 
             [Shape::Reg64, Shape::Reg64] => Some(forms::CMP_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::CMP_R64_IMM32),
@@ -265,6 +287,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Imm] => Some(forms::CMP_R32_IMM8),
             [Shape::Reg32, Shape::Mem32] => Some(forms::CMP_R32_MEM32),
             [Shape::Reg8, Shape::Mem8] => Some(forms::CMP_R8_MEM8),
+            [Shape::Reg16, Shape::Reg16] => Some(forms::CMP_R16_R16),
+            [Shape::Reg16, Shape::Mem16] => Some(forms::CMP_R16_MEM16),
             _ => None,
         },
         iclass::XED_ICLASS_AND | iclass::XED_ICLASS_AND_LOCK => match shapes {
@@ -288,13 +312,15 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_OR | iclass::XED_ICLASS_OR_LOCK => match shapes {
+            [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::OR_R16_IMM8),
+            [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::OR_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::OR_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::OR_R64_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::OR_R32_R32),
             [Shape::Reg32, Shape::Imm] => Some(forms::OR_R32_IMM32),
             [Shape::Reg32, Shape::Mem32] => Some(forms::OR_R32_MEM32),
             [Shape::Reg64, Shape::Mem64] => Some(forms::OR_R64_MEM64),
-            [Shape::Reg16, Shape::Imm] => Some(forms::OR_MEM16_IMM16),
+            [Shape::Reg16, Shape::Imm] => Some(forms::OR_R16_IMM16),
             [Shape::Reg8, Shape::Mem8] => Some(forms::OR_R8_MEM8),
             [Shape::Mem32, Shape::Imm] => Some(forms::OR_MEM32_IMM32),
             [Shape::Mem64, Shape::Imm] => Some(forms::OR_MEM64_IMM32),
@@ -302,19 +328,24 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem64, Shape::Reg64] => Some(forms::OR_MEM64_R64),
             [Shape::Mem8, Shape::Reg8] => Some(forms::OR_MEM8_R8),
             [Shape::Mem8, Shape::Imm] => Some(forms::OR_MEM8_IMM8),
-            [Shape::Mem16, Shape::Imm] => Some(forms::OR_MEM16_IMM16),
+            [Shape::Mem16, Shape::Imm] => Some(forms::OR_MEM16_IMM16_V2),
             [Shape::Reg8, Shape::Reg8] => Some(forms::OR_R8_R8),
             [Shape::Reg8, Shape::Imm] => Some(forms::OR_R8_IMM8),
+            [Shape::Reg16, Shape::Reg16] => Some(forms::OR_R16_R16),
+            [Shape::Reg16, Shape::Mem16] => Some(forms::OR_R16_MEM16),
+            [Shape::Mem16, Shape::Reg16] => Some(forms::OR_MEM16_R16),
             _ => None,
         },
         iclass::XED_ICLASS_XOR | iclass::XED_ICLASS_XOR_LOCK => match shapes {
+            [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::XOR_R16_IMM8),
+            [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::XOR_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::XOR_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::XOR_R64_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::XOR_R32_R32),
             [Shape::Reg32, Shape::Imm] => Some(forms::XOR_R32_IMM32),
             [Shape::Reg32, Shape::Mem32] => Some(forms::XOR_R32_MEM32),
             [Shape::Reg64, Shape::Mem64] => Some(forms::XOR_R64_MEM64),
-            [Shape::Reg16, Shape::Imm] => Some(forms::XOR_MEM16_IMM16),
+            [Shape::Reg16, Shape::Imm] => Some(forms::XOR_R16_IMM16),
             [Shape::Reg8, Shape::Mem8] => Some(forms::XOR_R8_MEM8),
             [Shape::Mem32, Shape::Imm] => Some(forms::XOR_MEM32_IMM32),
             [Shape::Mem64, Shape::Imm] => Some(forms::XOR_MEM64_IMM32),
@@ -322,9 +353,12 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem64, Shape::Reg64] => Some(forms::XOR_MEM64_R64),
             [Shape::Mem8, Shape::Reg8] => Some(forms::XOR_MEM8_R8),
             [Shape::Mem8, Shape::Imm] => Some(forms::XOR_MEM8_IMM8),
-            [Shape::Mem16, Shape::Imm] => Some(forms::XOR_MEM16_IMM16),
+            [Shape::Mem16, Shape::Imm] => Some(forms::XOR_MEM16_IMM16_V2),
             [Shape::Reg8, Shape::Reg8] => Some(forms::XOR_R8_R8),
             [Shape::Reg8, Shape::Imm] => Some(forms::XOR_R8_IMM8),
+            [Shape::Reg16, Shape::Reg16] => Some(forms::XOR_R16_R16),
+            [Shape::Reg16, Shape::Mem16] => Some(forms::XOR_R16_MEM16),
+            [Shape::Mem16, Shape::Reg16] => Some(forms::XOR_MEM16_R16),
             _ => None,
         },
         iclass::XED_ICLASS_TEST => match shapes {
@@ -454,12 +488,24 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_IMUL => match shapes {
+            [Shape::Reg16, Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::IMUL_R16_R16_IMM8),
+            [Shape::Reg16, Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::IMUL_R16_MEM16_IMM8),
+            [Shape::Reg32, Shape::Mem32, Shape::Imm] if immediate_width == Some(8) => Some(forms::IMUL_R32_MEM32_IMM8),
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] if immediate_width == Some(8) => Some(forms::IMUL_R64_R64_IMM8),
+            [Shape::Reg64, Shape::Mem64, Shape::Imm] if immediate_width == Some(8) => Some(forms::IMUL_R64_MEM64_IMM8),
             [Shape::Reg64] => Some(forms::IMUL_1OP_R64),
             [Shape::Reg64, Shape::Reg64] => Some(forms::IMUL_R64_R64),
             [Shape::Reg64, Shape::Mem64] => Some(forms::IMUL_R64_MEM64),
             [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::IMUL_R64_R64_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::IMUL_R32_R32),
             [Shape::Reg32, Shape::Reg32, Shape::Imm] => Some(forms::IMUL_R32_R32_IMM8),
+            [Shape::Reg16, Shape::Reg16] => Some(forms::IMUL_R16_R16),
+            [Shape::Reg16, Shape::Mem16] => Some(forms::IMUL_R16_MEM16),
+            [Shape::Reg16, Shape::Reg16, Shape::Imm] => Some(forms::IMUL_R16_R16_IMM16),
+            [Shape::Reg16, Shape::Mem16, Shape::Imm] => Some(forms::IMUL_R16_MEM16_IMM16),
+            [Shape::Reg32, Shape::Mem32] => Some(forms::IMUL_R32_MEM32),
+            [Shape::Reg32, Shape::Mem32, Shape::Imm] => Some(forms::IMUL_R32_MEM32_IMM32),
+            [Shape::Reg64, Shape::Mem64, Shape::Imm] => Some(forms::IMUL_R64_MEM64_IMM32),
             _ => None,
         },
         iclass::XED_ICLASS_CQO => Some(forms::CQO),
@@ -545,8 +591,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         iclass::XED_ICLASS_ENDBR32 | iclass::XED_ICLASS_ENDBR64 => Some(forms::NOP2),
         iclass::XED_ICLASS_MOVSXD => match shapes {
-            [Shape::Reg64, Shape::Reg32] => Some(forms::MOVSX_R64_R32),
-            [Shape::Reg64, Shape::Mem32] => Some(forms::MOVSX_R64_MEM32),
+            [Shape::Reg64, Shape::Reg32] => Some(forms::MOVSXD_R64_R32),
+            [Shape::Reg64, Shape::Mem32] => Some(forms::MOVSXD_R64_MEM32),
             _ => None,
         },
         iclass::XED_ICLASS_MOVQ => match shapes {
@@ -1001,11 +1047,25 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_ADC => match shapes {
+            [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADC_R16_IMM8),
+            [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADC_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::ADC_R64_R64),
+            [Shape::Reg16, Shape::Reg16] => Some(forms::ADC_R16_R16),
+            [Shape::Reg16, Shape::Imm] => Some(forms::ADC_R16_IMM16),
+            [Shape::Reg16, Shape::Mem16] => Some(forms::ADC_R16_MEM16),
+            [Shape::Mem16, Shape::Reg16] => Some(forms::ADC_MEM16_R16),
+            [Shape::Mem16, Shape::Imm] => Some(forms::ADC_MEM16_IMM16),
             _ => None,
         },
         iclass::XED_ICLASS_SBB => match shapes {
+            [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SBB_R16_IMM8),
+            [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SBB_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::SBB_R64_R64),
+            [Shape::Reg16, Shape::Reg16] => Some(forms::SBB_R16_R16),
+            [Shape::Reg16, Shape::Imm] => Some(forms::SBB_R16_IMM16),
+            [Shape::Reg16, Shape::Mem16] => Some(forms::SBB_R16_MEM16),
+            [Shape::Mem16, Shape::Reg16] => Some(forms::SBB_MEM16_R16),
+            [Shape::Mem16, Shape::Imm] => Some(forms::SBB_MEM16_IMM16),
             _ => None,
         },
         iclass::XED_ICLASS_BT => match shapes {
@@ -1383,16 +1443,34 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg8, Shape::Reg16] => Some(forms::IN_AL_DX),
             [Shape::Reg16, Shape::Reg16] => Some(forms::IN_AX_DX),
             [Shape::Reg32, Shape::Reg16] => Some(forms::IN_EAX_DX),
+            [Shape::Reg8, Shape::Imm] => Some(forms::IN_AL_IMM8),
+            [Shape::Reg16, Shape::Imm] => Some(forms::IN_AX_IMM8),
+            [Shape::Reg32, Shape::Imm] => Some(forms::IN_EAX_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_OUT => match shapes {
             [Shape::Reg16, Shape::Reg8] => Some(forms::OUT_DX_AL),
             [Shape::Reg16, Shape::Reg16] => Some(forms::OUT_DX_AX),
             [Shape::Reg16, Shape::Reg32] => Some(forms::OUT_DX_EAX),
+            [Shape::Imm, Shape::Reg8] => Some(forms::OUT_IMM8_AL),
+            [Shape::Imm, Shape::Reg16] => Some(forms::OUT_IMM8_AX),
+            [Shape::Imm, Shape::Reg32] => Some(forms::OUT_IMM8_EAX),
             _ => None,
         },
         iclass::XED_ICLASS_INT => Some(forms::INT_IMM8),
         iclass::XED_ICLASS_INT1 | iclass::XED_ICLASS_INT3 => Some(forms::NOP2),
+        iclass::XED_ICLASS_INSB => Some(forms::INSB),
+        iclass::XED_ICLASS_INSW => Some(forms::INSW),
+        iclass::XED_ICLASS_INSD => Some(forms::INSD),
+        iclass::XED_ICLASS_OUTSB => Some(forms::OUTSB),
+        iclass::XED_ICLASS_OUTSW => Some(forms::OUTSW),
+        iclass::XED_ICLASS_OUTSD => Some(forms::OUTSD),
+        iclass::XED_ICLASS_REP_INSB => Some(REP_INSB_FORM_ID),
+        iclass::XED_ICLASS_REP_INSW => Some(REP_INSW_FORM_ID),
+        iclass::XED_ICLASS_REP_INSD => Some(REP_INSD_FORM_ID),
+        iclass::XED_ICLASS_REP_OUTSB => Some(REP_OUTSB_FORM_ID),
+        iclass::XED_ICLASS_REP_OUTSW => Some(REP_OUTSW_FORM_ID),
+        iclass::XED_ICLASS_REP_OUTSD => Some(REP_OUTSD_FORM_ID),
         _ => None,
     }
 }
@@ -1446,7 +1524,7 @@ mod tests {
         assert_eq!(mapped(&[0x48, 0xF7, 0xD0])?, Some(forms::NOT_R64));
         // imul %rbx, %rax / imul $5, %rbx, %rax
         assert_eq!(mapped(&[0x48, 0x0F, 0xAF, 0xC3])?, Some(forms::IMUL_R64_R64));
-        assert_eq!(mapped(&[0x48, 0x6B, 0xC3, 0x05])?, Some(forms::IMUL_R64_R64_IMM32));
+        assert_eq!(mapped(&[0x48, 0x6B, 0xC3, 0x05])?, Some(forms::IMUL_R64_R64_IMM8));
         // lea 0x10(%rbx), %rax
         assert_eq!(mapped(&[0x48, 0x8D, 0x43, 0x10])?, Some(forms::LEA_R64_MEM));
         // push %rbp / pop %rbp
@@ -1544,14 +1622,14 @@ mod tests {
     #[test]
     fn maps_16bit_immediate_forms() -> Result<(), Box<dyn std::error::Error>> {
         // cmp $imm16, %dx (imm16 and sign-extended imm8 encodings)
-        assert_eq!(mapped(&[0x66, 0x81, 0xFA, 0x34, 0x12])?, Some(forms::CMP_MEM16_IMM16));
-        assert_eq!(mapped(&[0x66, 0x83, 0xFA, 0x7F])?, Some(forms::CMP_MEM16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x81, 0xFA, 0x34, 0x12])?, Some(forms::CMP_R16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x83, 0xFA, 0x7F])?, Some(forms::CMP_R16_IMM8));
         // The remaining 16-bit ALU immediate siblings.
-        assert_eq!(mapped(&[0x66, 0x81, 0xC2, 0x34, 0x12])?, Some(forms::ADD_MEM16_IMM16));
-        assert_eq!(mapped(&[0x66, 0x81, 0xEA, 0x34, 0x12])?, Some(forms::SUB_MEM16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x81, 0xC2, 0x34, 0x12])?, Some(forms::ADD_R16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x81, 0xEA, 0x34, 0x12])?, Some(forms::SUB_R16_IMM16));
         assert_eq!(mapped(&[0x66, 0x81, 0xE2, 0x34, 0x12])?, Some(forms::AND_MEM16_IMM16));
-        assert_eq!(mapped(&[0x66, 0x81, 0xCA, 0x34, 0x12])?, Some(forms::OR_MEM16_IMM16));
-        assert_eq!(mapped(&[0x66, 0x81, 0xF2, 0x34, 0x12])?, Some(forms::XOR_MEM16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x81, 0xCA, 0x34, 0x12])?, Some(forms::OR_R16_IMM16));
+        assert_eq!(mapped(&[0x66, 0x81, 0xF2, 0x34, 0x12])?, Some(forms::XOR_R16_IMM16));
         // test $imm16, %dx was already mapped.
         assert_eq!(mapped(&[0x66, 0xF7, 0xC2, 0x34, 0x12])?, Some(forms::TEST_R16_IMM16));
         Ok(())

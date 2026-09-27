@@ -952,6 +952,70 @@ pub mod forms {
     pub const VORPS_YMM_YMM_YMM: u32 = 0x0414;
     pub const VORPS_YMM_YMM_MEM: u32 = 0x0415;
 
+    // 16-bit integer arithmetic, IMUL, and MOVSXD expansion.
+    pub const ADD_R16_IMM16: u32 = 0x0420;
+    pub const ADD_R16_IMM8: u32 = 0x0421;
+    pub const ADD_R16_MEM16: u32 = 0x0422;
+    pub const ADD_MEM16_R16: u32 = 0x0423;
+    pub const ADD_MEM16_IMM16_V2: u32 = 0x0424;
+    pub const ADD_MEM16_IMM8: u32 = 0x0425;
+    pub const ADC_R16_R16: u32 = 0x0426;
+    pub const ADC_R16_IMM16: u32 = 0x0427;
+    pub const ADC_R16_IMM8: u32 = 0x0428;
+    pub const ADC_R16_MEM16: u32 = 0x0429;
+    pub const ADC_MEM16_R16: u32 = 0x042A;
+    pub const ADC_MEM16_IMM16: u32 = 0x042B;
+    pub const ADC_MEM16_IMM8: u32 = 0x042C;
+    pub const SBB_R16_R16: u32 = 0x042D;
+    pub const SBB_R16_IMM16: u32 = 0x042E;
+    pub const SBB_R16_IMM8: u32 = 0x042F;
+    pub const SBB_R16_MEM16: u32 = 0x0430;
+    pub const SBB_MEM16_R16: u32 = 0x0431;
+    pub const SBB_MEM16_IMM16: u32 = 0x0432;
+    pub const SBB_MEM16_IMM8: u32 = 0x0433;
+    pub const CMP_R16_R16: u32 = 0x0434;
+    pub const CMP_R16_IMM16: u32 = 0x0435;
+    pub const CMP_R16_IMM8: u32 = 0x0436;
+    pub const CMP_R16_MEM16: u32 = 0x0437;
+    pub const CMP_MEM16_R16_V2: u32 = 0x0438;
+    pub const CMP_MEM16_IMM16_V2: u32 = 0x0439;
+    pub const CMP_MEM16_IMM8: u32 = 0x043A;
+    pub const OR_R16_R16: u32 = 0x043B;
+    pub const OR_R16_IMM16: u32 = 0x043C;
+    pub const OR_R16_IMM8: u32 = 0x043D;
+    pub const OR_R16_MEM16: u32 = 0x043E;
+    pub const OR_MEM16_R16: u32 = 0x043F;
+    pub const OR_MEM16_IMM16_V2: u32 = 0x0440;
+    pub const OR_MEM16_IMM8: u32 = 0x0441;
+    pub const XOR_R16_R16: u32 = 0x0442;
+    pub const XOR_R16_IMM16: u32 = 0x0443;
+    pub const XOR_R16_IMM8: u32 = 0x0444;
+    pub const XOR_R16_MEM16: u32 = 0x0445;
+    pub const XOR_MEM16_R16: u32 = 0x0446;
+    pub const XOR_MEM16_IMM16_V2: u32 = 0x0447;
+    pub const XOR_MEM16_IMM8: u32 = 0x0448;
+    pub const SUB_R16_R16: u32 = 0x0449;
+    pub const SUB_R16_IMM16: u32 = 0x044A;
+    pub const SUB_R16_IMM8: u32 = 0x044B;
+    pub const SUB_R16_MEM16: u32 = 0x044C;
+    pub const SUB_MEM16_R16: u32 = 0x044D;
+    pub const SUB_MEM16_IMM16_V2: u32 = 0x044E;
+    pub const SUB_MEM16_IMM8: u32 = 0x044F;
+    pub const IMUL_R16_R16: u32 = 0x0450;
+    pub const IMUL_R16_MEM16: u32 = 0x0451;
+    pub const IMUL_R16_R16_IMM16: u32 = 0x0452;
+    pub const IMUL_R16_R16_IMM8: u32 = 0x0453;
+    pub const IMUL_R16_MEM16_IMM16: u32 = 0x0454;
+    pub const IMUL_R16_MEM16_IMM8: u32 = 0x0455;
+    pub const IMUL_R32_MEM32: u32 = 0x0456;
+    pub const IMUL_R32_MEM32_IMM32: u32 = 0x0457;
+    pub const IMUL_R64_MEM64_IMM32: u32 = 0x0458;
+    pub const MOVSXD_R64_R32: u32 = 0x0459;
+    pub const MOVSXD_R64_MEM32: u32 = 0x045A;
+    pub const IMUL_R32_MEM32_IMM8: u32 = 0x045B;
+    pub const IMUL_R64_R64_IMM8: u32 = 0x045C;
+    pub const IMUL_R64_MEM64_IMM8: u32 = 0x045D;
+
     // push/pop memory operand
     pub const PUSH_MEM64: u32 = 0x0257;
     pub const PUSH_MEM16: u32 = 0x0258;
@@ -997,6 +1061,22 @@ pub mod forms {
     pub const OUT_DX_AL: u32 = 0x0303;
     pub const OUT_DX_AX: u32 = 0x0304;
     pub const OUT_DX_EAX: u32 = 0x0305;
+
+    // Port I/O immediate-port forms (IN AL/AX/EAX, imm8 / OUT imm8, AL/AX/EAX).
+    pub const IN_AL_IMM8: u32 = 0x0500;
+    pub const IN_AX_IMM8: u32 = 0x0501;
+    pub const IN_EAX_IMM8: u32 = 0x0502;
+    pub const OUT_IMM8_AL: u32 = 0x0503;
+    pub const OUT_IMM8_AX: u32 = 0x0504;
+    pub const OUT_IMM8_EAX: u32 = 0x0505;
+
+    // String port I/O forms (INSB/INSW/INSD / OUTSB/OUTSW/OUTSD).
+    pub const INSB: u32 = 0x0506;
+    pub const INSW: u32 = 0x0507;
+    pub const INSD: u32 = 0x0508;
+    pub const OUTSB: u32 = 0x0509;
+    pub const OUTSW: u32 = 0x050A;
+    pub const OUTSD: u32 = 0x050B;
 
     /// INT imm8 — Software interrupt. On Windows, `int 0x29` is `__fastfail`
     /// (security check failure → immediate termination). Semantic reads the
@@ -1062,6 +1142,7 @@ pub mod rflags {
     pub const AF_BIT: u8 = 4;
     pub const ZF_BIT: u8 = 6;
     pub const SF_BIT: u8 = 7;
+    pub const DF_BIT: u8 = 10;
     pub const OF_BIT: u8 = 11;
 
     /// Mask with all corpus-computed flag bits cleared (preserves reserved/other bits).

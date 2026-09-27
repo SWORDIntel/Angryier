@@ -722,7 +722,8 @@ impl<D: Decoder> Runtime<D> {
     ) -> Result<Option<StepOutcome>, RuntimeError> {
         use crate::form_map::{
             LODSB_FORM_ID, LODSD_FORM_ID, LODSQ_FORM_ID, LODSW_FORM_ID, MOVSB_FORM_ID, MOVSD_FORM_ID, MOVSQ_FORM_ID,
-            MOVSW_FORM_ID, REP_MOVSB_FORM_ID, REP_MOVSD_FORM_ID, REP_MOVSQ_FORM_ID, REP_MOVSW_FORM_ID,
+            MOVSW_FORM_ID, REP_INSB_FORM_ID, REP_INSD_FORM_ID, REP_INSW_FORM_ID, REP_MOVSB_FORM_ID, REP_MOVSD_FORM_ID,
+            REP_MOVSQ_FORM_ID, REP_MOVSW_FORM_ID, REP_OUTSB_FORM_ID, REP_OUTSD_FORM_ID, REP_OUTSW_FORM_ID,
             REP_STOSB_FORM_ID, REP_STOSD_FORM_ID, REP_STOSQ_FORM_ID, REP_STOSW_FORM_ID, STOSB_FORM_ID, STOSD_FORM_ID,
             STOSQ_FORM_ID, STOSW_FORM_ID,
         };
@@ -764,6 +765,84 @@ impl<D: Decoder> Runtime<D> {
             };
             process.write_register(register_id::GPR_BASE, preserved | value)?;
             process.write_register(register_id::GPR_BASE + 6, rsi.wrapping_add(lod_size as u64))?;
+            let next_pc = pc.wrapping_add(u64::from(decoded.length));
+            process.write_pc(next_pc)?;
+            process.step_count += 1;
+            return Ok(Some(StepOutcome::Stepped {
+                pc,
+                form_id: decoded.form_id,
+                next_pc,
+                length: decoded.length,
+            }));
+        }
+
+        let rep_in_size = match decoded.form_id {
+            REP_INSB_FORM_ID => 1usize,
+            REP_INSW_FORM_ID => 2,
+            REP_INSD_FORM_ID => 4,
+            _ => 0,
+        };
+        if rep_in_size > 0 {
+            let mut rcx = process.read_register(register_id::GPR_BASE + 1)?;
+            let mut rdi = process.read_register(register_id::GPR_BASE + 7)?;
+            let rflags = process.read_register(register_id::RFLAGS.0)?;
+            let df = (rflags & (1 << 10)) != 0;
+            let delta = if df {
+                (rep_in_size as u64).wrapping_neg()
+            } else {
+                rep_in_size as u64
+            };
+            let zeros = [ByteValue::Concrete(0); 4];
+            while rcx > 0 {
+                process.state.memory = process
+                    .state
+                    .memory
+                    .write(rdi, &zeros[..rep_in_size])
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                rdi = rdi.wrapping_add(delta);
+                rcx -= 1;
+            }
+            process.write_register(register_id::GPR_BASE + 7, rdi)?;
+            process.write_register(register_id::GPR_BASE + 1, 0)?;
+            let next_pc = pc.wrapping_add(u64::from(decoded.length));
+            process.write_pc(next_pc)?;
+            process.step_count += 1;
+            return Ok(Some(StepOutcome::Stepped {
+                pc,
+                form_id: decoded.form_id,
+                next_pc,
+                length: decoded.length,
+            }));
+        }
+
+        let rep_out_size = match decoded.form_id {
+            REP_OUTSB_FORM_ID => 1usize,
+            REP_OUTSW_FORM_ID => 2,
+            REP_OUTSD_FORM_ID => 4,
+            _ => 0,
+        };
+        if rep_out_size > 0 {
+            let mut rcx = process.read_register(register_id::GPR_BASE + 1)?;
+            let mut rsi = process.read_register(register_id::GPR_BASE + 6)?;
+            let rflags = process.read_register(register_id::RFLAGS.0)?;
+            let df = (rflags & (1 << 10)) != 0;
+            let delta = if df {
+                (rep_out_size as u64).wrapping_neg()
+            } else {
+                rep_out_size as u64
+            };
+            let mut buf = [ByteValue::Concrete(0); 4];
+            while rcx > 0 {
+                process
+                    .state
+                    .memory
+                    .read_into(rsi, &mut buf[..rep_out_size])
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                rsi = rsi.wrapping_add(delta);
+                rcx -= 1;
+            }
+            process.write_register(register_id::GPR_BASE + 6, rsi)?;
+            process.write_register(register_id::GPR_BASE + 1, 0)?;
             let next_pc = pc.wrapping_add(u64::from(decoded.length));
             process.write_pc(next_pc)?;
             process.step_count += 1;
