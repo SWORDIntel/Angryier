@@ -1392,6 +1392,49 @@ pub mod forms {
     pub const VPBROADCASTD_YMM_R32: u32 = 0x0A3C;
     pub const VPBROADCASTQ_YMM_R64: u32 = 0x0A3D;
 
+    // Census-tail completion: 8-bit shifts/rotates (CL and mem-imm8),
+    // ADC/SBB r8/m8 imm8, ADD mem32-r32, MOVSXD r32, BTS/BTR/BTC mem-imm8.
+    pub const MOVSXD_R32_MEM32: u32 = 0x0E81;
+    pub const ADC_R8_IMM8: u32 = 0x0E82;
+    pub const ADC_MEM8_IMM8: u32 = 0x0E83;
+    pub const SBB_R8_IMM8: u32 = 0x0E84;
+    pub const SBB_MEM8_IMM8: u32 = 0x0E85;
+    pub const BTS_MEM32_IMM8: u32 = 0x0E86;
+    pub const BTS_MEM64_IMM8: u32 = 0x0E87;
+    pub const BTR_MEM32_IMM8: u32 = 0x0E88;
+    pub const BTR_MEM64_IMM8: u32 = 0x0E89;
+    pub const BTC_MEM32_IMM8: u32 = 0x0E8A;
+    pub const BTC_MEM64_IMM8: u32 = 0x0E8B;
+    pub const SHL_R8_CL: u32 = 0x0E8C;
+    pub const SHR_R8_CL: u32 = 0x0E8D;
+    pub const SAR_R8_CL: u32 = 0x0E8E;
+    pub const ROL_R8_CL: u32 = 0x0E8F;
+    pub const ROR_R8_CL: u32 = 0x0E90;
+    pub const RCL_R8_CL: u32 = 0x0E91;
+    pub const RCR_R8_CL: u32 = 0x0E92;
+    pub const SHL_MEM8_IMM8: u32 = 0x0E93;
+    pub const SHR_MEM8_IMM8: u32 = 0x0E94;
+    pub const SAR_MEM8_IMM8: u32 = 0x0E95;
+    pub const ROL_MEM8_IMM8: u32 = 0x0E96;
+    pub const ROR_MEM8_IMM8: u32 = 0x0E97;
+    pub const RCL_MEM8_IMM8: u32 = 0x0E98;
+    pub const RCR_MEM8_IMM8: u32 = 0x0E99;
+    pub const SHL_MEM8_CL: u32 = 0x0E9A;
+    pub const SHR_MEM8_CL: u32 = 0x0E9B;
+    pub const SAR_MEM8_CL: u32 = 0x0E9C;
+    pub const ROL_MEM8_CL: u32 = 0x0E9D;
+    pub const ROR_MEM8_CL: u32 = 0x0E9E;
+    pub const RCL_MEM8_CL: u32 = 0x0E9F;
+    pub const RCR_MEM8_CL: u32 = 0x0EA0;
+    pub const ADC_R8_R8: u32 = 0x0EA1;
+    pub const ADC_MEM8_R8: u32 = 0x0EA2;
+    pub const SBB_R8_R8: u32 = 0x0EA3;
+    pub const SBB_MEM8_R8: u32 = 0x0EA4;
+    pub const BT_MEM32_IMM8: u32 = 0x0EA6;
+    pub const BT_MEM64_IMM8: u32 = 0x0EA7;
+    pub const FWAIT: u32 = 0x0EA8;
+    pub const CLTS: u32 = 0x0EA9;
+
     // SBB width completion and scalar D1 shifts/rotates (agent band).
     pub const SBB_R32_R32: u32 = 0x0E00;
     pub const SBB_R32_MEM32: u32 = 0x0E01;

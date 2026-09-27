@@ -485,7 +485,11 @@ fn compose_rflags_masked(
 
 /// Folds shifted flag values into RFLAGS, preserving the non-corpus bits.
 /// `preserve_cf` keeps the incoming CF (INC/DEC semantics).
-fn compose_rflags(out: &mut dyn SemanticBuilder, flags: &[ValueId], preserve_cf: bool) -> Result<(), SemanticError> {
+pub(crate) fn compose_rflags(
+    out: &mut dyn SemanticBuilder,
+    flags: &[ValueId],
+    preserve_cf: bool,
+) -> Result<(), SemanticError> {
     let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
     let mask_value = if preserve_cf {
         rflags::CORPUS_FLAG_MASK | (1 << rflags::CF_BIT)
@@ -501,7 +505,7 @@ fn compose_rflags(out: &mut dyn SemanticBuilder, flags: &[ValueId], preserve_cf:
     Ok(())
 }
 
-fn add_flag_values(
+pub(crate) fn add_flag_values(
     out: &mut dyn SemanticBuilder,
     result: ValueId,
     left: ValueId,
@@ -719,7 +723,7 @@ pub(crate) fn write_rotate_flags(
     write_rotate_flags_width(out, result, kind, 64)
 }
 
-fn sub_flag_values(
+pub(crate) fn sub_flag_values(
     out: &mut dyn SemanticBuilder,
     result: ValueId,
     left: ValueId,
@@ -837,7 +841,7 @@ fn read_zf_not_set(out: &mut dyn SemanticBuilder) -> Result<ValueId, SemanticErr
 }
 
 /// Extracts a flag bit from RFLAGS. Returns a 1-bit value: 1 if the flag is set.
-fn read_flag_set(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, SemanticError> {
+pub(crate) fn read_flag_set(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, SemanticError> {
     let rflags_val = out.read_register(register_id::RFLAGS, U64)?;
     let bit_val = const_u64(out, u64::from(bit))?;
     let shifted = out.emit(
@@ -866,7 +870,7 @@ fn read_flag_not_set(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, 
     out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[flag_64, zero])
 }
 
-fn receipt(offset: u64, context: &SemanticContext) -> SemanticReceipt {
+pub(crate) fn receipt(offset: u64, context: &SemanticContext) -> SemanticReceipt {
     SemanticReceipt {
         rule_id: rule_id(offset),
         origin: SemanticOrigin::HandwrittenOverride,
@@ -2830,6 +2834,14 @@ bit_test_reg!(BtrMem32R32, forms::BTR_MEM32_R32, U32, U32, 0x1F, Reset, 0x92C);
 bit_test_reg!(BtrMem64R64, forms::BTR_MEM64_R64, U64, U64, 0x3F, Reset, 0x92D);
 bit_test_reg!(BtcMem32R32, forms::BTC_MEM32_R32, U32, U32, 0x1F, Complement, 0x92E);
 bit_test_reg!(BtcMem64R64, forms::BTC_MEM64_R64, U64, U64, 0x3F, Complement, 0x92F);
+bit_test_reg!(BtsMem32Imm8, forms::BTS_MEM32_IMM8, U32, U64, 0x1F, Set, 0x121B);
+bit_test_reg!(BtsMem64Imm8, forms::BTS_MEM64_IMM8, U64, U64, 0x3F, Set, 0x121C);
+bit_test_reg!(BtrMem32Imm8, forms::BTR_MEM32_IMM8, U32, U64, 0x1F, Reset, 0x121D);
+bit_test_reg!(BtrMem64Imm8, forms::BTR_MEM64_IMM8, U64, U64, 0x3F, Reset, 0x121E);
+bit_test_reg!(BtcMem32Imm8, forms::BTC_MEM32_IMM8, U32, U64, 0x1F, Complement, 0x121F);
+bit_test_reg!(BtcMem64Imm8, forms::BTC_MEM64_IMM8, U64, U64, 0x3F, Complement, 0x1220);
+bit_test_reg!(BtMem32Imm8, forms::BT_MEM32_IMM8, U32, U64, 0x1F, Test, 0x1228);
+bit_test_reg!(BtMem64Imm8, forms::BT_MEM64_IMM8, U64, U64, 0x3F, Test, 0x1229);
 
 // ---------------------------------------------------------------------------
 // CMOVZ r64, r64 (conditional move if ZF=1)
@@ -5271,7 +5283,7 @@ memory_rotate!(
     0x91D
 );
 
-fn emit_memory_rotate_carry(
+pub(crate) fn emit_memory_rotate_carry(
     out: &mut dyn SemanticBuilder,
     value: ValueId,
     ty: SemanticType,
@@ -5424,6 +5436,110 @@ memory_rotate_carry!(RcrMem32Imm8, forms::RCR_MEM32_IMM8, U32, 32, false, false,
 memory_rotate_carry!(RcrMem32Cl, forms::RCR_MEM32_CL, U32, 32, true, false, 0x927);
 memory_rotate_carry!(RcrMem64Imm8, forms::RCR_MEM64_IMM8, U64, 64, false, false, 0x928);
 memory_rotate_carry!(RcrMem64Cl, forms::RCR_MEM64_CL, U64, 64, true, false, 0x929);
+memory_shift!(
+    ShlMem8Imm8,
+    forms::SHL_MEM8_IMM8,
+    U8,
+    8,
+    false,
+    PrimitiveOp::ShiftLeft,
+    ShiftKind::Left,
+    0x120D
+);
+memory_shift!(
+    ShrMem8Imm8,
+    forms::SHR_MEM8_IMM8,
+    U8,
+    8,
+    false,
+    PrimitiveOp::LogicalShiftRight,
+    ShiftKind::RightLogical,
+    0x120E
+);
+memory_shift!(
+    SarMem8Imm8,
+    forms::SAR_MEM8_IMM8,
+    U8,
+    8,
+    false,
+    PrimitiveOp::ArithmeticShiftRight,
+    ShiftKind::RightArith,
+    0x120F
+);
+memory_rotate!(
+    RolMem8Imm8,
+    forms::ROL_MEM8_IMM8,
+    U8,
+    8,
+    false,
+    PrimitiveOp::RotateLeft,
+    ShiftKind::RotateLeft,
+    0x1210
+);
+memory_rotate!(
+    RorMem8Imm8,
+    forms::ROR_MEM8_IMM8,
+    U8,
+    8,
+    false,
+    PrimitiveOp::RotateRight,
+    ShiftKind::RotateRight,
+    0x1211
+);
+memory_rotate_carry!(RclMem8Imm8, forms::RCL_MEM8_IMM8, U8, 8, false, true, 0x1212);
+memory_rotate_carry!(RcrMem8Imm8, forms::RCR_MEM8_IMM8, U8, 8, false, false, 0x1213);
+memory_shift!(
+    ShlMem8Cl,
+    forms::SHL_MEM8_CL,
+    U8,
+    8,
+    true,
+    PrimitiveOp::ShiftLeft,
+    ShiftKind::Left,
+    0x1214
+);
+memory_shift!(
+    ShrMem8Cl,
+    forms::SHR_MEM8_CL,
+    U8,
+    8,
+    true,
+    PrimitiveOp::LogicalShiftRight,
+    ShiftKind::RightLogical,
+    0x1215
+);
+memory_shift!(
+    SarMem8Cl,
+    forms::SAR_MEM8_CL,
+    U8,
+    8,
+    true,
+    PrimitiveOp::ArithmeticShiftRight,
+    ShiftKind::RightArith,
+    0x1216
+);
+memory_rotate!(
+    RolMem8Cl,
+    forms::ROL_MEM8_CL,
+    U8,
+    8,
+    true,
+    PrimitiveOp::RotateLeft,
+    ShiftKind::RotateLeft,
+    0x1217
+);
+memory_rotate!(
+    RorMem8Cl,
+    forms::ROR_MEM8_CL,
+    U8,
+    8,
+    true,
+    PrimitiveOp::RotateRight,
+    ShiftKind::RotateRight,
+    0x1218
+);
+memory_rotate_carry!(RclMem8Cl, forms::RCL_MEM8_CL, U8, 8, true, true, 0x1219);
+memory_rotate_carry!(RcrMem8Cl, forms::RCR_MEM8_CL, U8, 8, true, false, 0x121A);
 
 macro_rules! simple_store {
     ($name:ident, $form:expr, $ty:expr, $rule:expr) => {

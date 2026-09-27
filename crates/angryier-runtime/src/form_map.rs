@@ -247,6 +247,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_ADD | iclass::XED_ICLASS_ADD_LOCK => match shapes {
+            [Shape::Mem32, Shape::Reg32] => Some(forms::ADD_MEM32_R32),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADD_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADD_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::ADD_R64_R64),
@@ -400,6 +401,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_TEST => match shapes {
+            [Shape::Mem32, Shape::Reg32] => Some(forms::TEST_MEM32_R32),
             [Shape::Reg64, Shape::Reg64] => Some(forms::TEST_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::TEST_R64_IMM32),
             [Shape::Reg32, Shape::Reg32] => Some(forms::TEST_R32_R32),
@@ -417,6 +419,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_SHL => match shapes {
+            [Shape::Mem8, Shape::Imm] => Some(forms::SHL_MEM8_IMM8),
+            [Shape::Mem8] if has_cl => Some(forms::SHL_MEM8_CL),
+            [Shape::Reg8] if has_cl => Some(forms::SHL_R8_CL),
             [Shape::Mem16, Shape::Imm] => Some(forms::SHL_MEM16_IMM8),
             [Shape::Mem16] if has_cl => Some(forms::SHL_MEM16_CL),
             [Shape::Mem32, Shape::Imm] => Some(forms::SHL_MEM32_IMM8),
@@ -435,6 +440,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_SHR => match shapes {
+            [Shape::Mem8, Shape::Imm] => Some(forms::SHR_MEM8_IMM8),
+            [Shape::Mem8] if has_cl => Some(forms::SHR_MEM8_CL),
+            [Shape::Reg8] if has_cl => Some(forms::SHR_R8_CL),
             [Shape::Mem16, Shape::Imm] => Some(forms::SHR_MEM16_IMM8),
             [Shape::Mem16] if has_cl => Some(forms::SHR_MEM16_CL),
             [Shape::Mem32, Shape::Imm] => Some(forms::SHR_MEM32_IMM8),
@@ -452,6 +460,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_SAR => match shapes {
+            [Shape::Mem8, Shape::Imm] => Some(forms::SAR_MEM8_IMM8),
+            [Shape::Mem8] if has_cl => Some(forms::SAR_MEM8_CL),
+            [Shape::Reg8] if has_cl => Some(forms::SAR_R8_CL),
             [Shape::Mem16, Shape::Imm] => Some(forms::SAR_MEM16_IMM8),
             [Shape::Mem16] if has_cl => Some(forms::SAR_MEM16_CL),
             [Shape::Mem32, Shape::Imm] => Some(forms::SAR_MEM32_IMM8),
@@ -469,6 +480,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_ROL => match shapes {
+            [Shape::Mem8, Shape::Imm] => Some(forms::ROL_MEM8_IMM8),
+            [Shape::Mem8] if has_cl => Some(forms::ROL_MEM8_CL),
+            [Shape::Reg8] if has_cl => Some(forms::ROL_R8_CL),
             [Shape::Mem16, Shape::Imm] => Some(forms::ROL_MEM16_IMM8),
             [Shape::Mem16] if has_cl => Some(forms::ROL_MEM16_CL),
             [Shape::Mem32, Shape::Imm] => Some(forms::ROL_MEM32_IMM8),
@@ -485,6 +499,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_ROR => match shapes {
+            [Shape::Mem8, Shape::Imm] => Some(forms::ROR_MEM8_IMM8),
+            [Shape::Mem8] if has_cl => Some(forms::ROR_MEM8_CL),
+            [Shape::Reg8] if has_cl => Some(forms::ROR_R8_CL),
             [Shape::Mem16, Shape::Imm] => Some(forms::ROR_MEM16_IMM8),
             [Shape::Mem16] if has_cl => Some(forms::ROR_MEM16_CL),
             [Shape::Mem32, Shape::Imm] => Some(forms::ROR_MEM32_IMM8),
@@ -501,6 +518,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_RCL => match shapes {
+            [Shape::Mem8, Shape::Imm] => Some(forms::RCL_MEM8_IMM8),
+            [Shape::Mem8] if has_cl => Some(forms::RCL_MEM8_CL),
+            [Shape::Reg8] if has_cl => Some(forms::RCL_R8_CL),
             [Shape::Mem16, Shape::Imm] => Some(forms::RCL_MEM16_IMM8),
             [Shape::Mem16] if has_cl => Some(forms::RCL_MEM16_CL),
             [Shape::Mem32, Shape::Imm] => Some(forms::RCL_MEM32_IMM8),
@@ -515,6 +535,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_RCR => match shapes {
+            [Shape::Mem8, Shape::Imm] => Some(forms::RCR_MEM8_IMM8),
+            [Shape::Mem8] if has_cl => Some(forms::RCR_MEM8_CL),
+            [Shape::Reg8] if has_cl => Some(forms::RCR_R8_CL),
             [Shape::Mem16, Shape::Imm] => Some(forms::RCR_MEM16_IMM8),
             [Shape::Mem16] if has_cl => Some(forms::RCR_MEM16_CL),
             [Shape::Mem32, Shape::Imm] => Some(forms::RCR_MEM32_IMM8),
@@ -680,6 +703,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         iclass::XED_ICLASS_ENDBR32 | iclass::XED_ICLASS_ENDBR64 => Some(forms::NOP2),
         iclass::XED_ICLASS_MOVSXD => match shapes {
+            [Shape::Reg32, Shape::Mem32] => Some(forms::MOVSXD_R32_MEM32),
             [Shape::Reg64, Shape::Reg32] => Some(forms::MOVSXD_R64_R32),
             [Shape::Reg64, Shape::Mem32] => Some(forms::MOVSXD_R64_MEM32),
             _ => None,
@@ -1149,6 +1173,10 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_ADC => match shapes {
+            [Shape::Reg8, Shape::Imm] => Some(forms::ADC_R8_IMM8),
+            [Shape::Mem8, Shape::Imm] => Some(forms::ADC_MEM8_IMM8),
+            [Shape::Reg8, Shape::Reg8] => Some(forms::ADC_R8_R8),
+            [Shape::Mem8, Shape::Reg8] => Some(forms::ADC_MEM8_R8),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADC_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADC_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::ADC_R64_R64),
@@ -1160,6 +1188,10 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_SBB => match shapes {
+            [Shape::Reg8, Shape::Imm] => Some(forms::SBB_R8_IMM8),
+            [Shape::Mem8, Shape::Imm] => Some(forms::SBB_MEM8_IMM8),
+            [Shape::Reg8, Shape::Reg8] => Some(forms::SBB_R8_R8),
+            [Shape::Mem8, Shape::Reg8] => Some(forms::SBB_MEM8_R8),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SBB_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SBB_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::SBB_R64_R64),
@@ -1176,6 +1208,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_BT => match shapes {
+            [Shape::Mem32, Shape::Imm] => Some(forms::BT_MEM32_IMM8),
+            [Shape::Mem64, Shape::Imm] => Some(forms::BT_MEM64_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::BT_R64_R64),
             [Shape::Reg32, Shape::Reg32] => Some(forms::BT_R32_R32),
             [Shape::Reg64, Shape::Imm] => Some(forms::BT_R64_IMM8),
@@ -1183,6 +1217,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_BTS => match shapes {
+            [Shape::Mem32, Shape::Imm] => Some(forms::BTS_MEM32_IMM8),
+            [Shape::Mem64, Shape::Imm] => Some(forms::BTS_MEM64_IMM8),
             [Shape::Mem32, Shape::Reg32] => Some(forms::BTS_MEM32_R32),
             [Shape::Mem64, Shape::Reg64] => Some(forms::BTS_MEM64_R64),
             [Shape::Reg64, Shape::Reg64] => Some(forms::BTS_R64_R64),
@@ -1192,6 +1228,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_BTR => match shapes {
+            [Shape::Mem32, Shape::Imm] => Some(forms::BTR_MEM32_IMM8),
+            [Shape::Mem64, Shape::Imm] => Some(forms::BTR_MEM64_IMM8),
             [Shape::Mem32, Shape::Reg32] => Some(forms::BTR_MEM32_R32),
             [Shape::Mem64, Shape::Reg64] => Some(forms::BTR_MEM64_R64),
             [Shape::Reg64, Shape::Reg64] => Some(forms::BTR_R64_R64),
@@ -1201,6 +1239,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_BTC => match shapes {
+            [Shape::Mem32, Shape::Imm] => Some(forms::BTC_MEM32_IMM8),
+            [Shape::Mem64, Shape::Imm] => Some(forms::BTC_MEM64_IMM8),
             [Shape::Mem32, Shape::Reg32] => Some(forms::BTC_MEM32_R32),
             [Shape::Mem64, Shape::Reg64] => Some(forms::BTC_MEM64_R64),
             [Shape::Reg64, Shape::Reg64] => Some(forms::BTC_R64_R64),
@@ -1241,6 +1281,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         iclass::XED_ICLASS_CLC => Some(forms::CLC),
         iclass::XED_ICLASS_STC => Some(forms::STC),
+        iclass::XED_ICLASS_FWAIT => Some(forms::FWAIT),
+        iclass::XED_ICLASS_CLTS => Some(forms::CLTS),
         iclass::XED_ICLASS_CMC => Some(forms::CMC),
         iclass::XED_ICLASS_CBW => Some(forms::CBW),
         iclass::XED_ICLASS_CWDE => Some(forms::CWDE),
@@ -2021,8 +2063,10 @@ mod tests {
 
     #[test]
     fn unmapped_x87_reports_none() -> Result<(), Box<dyn std::error::Error>> {
-        // fstsw %ax needs the status word, which no register models.
-        assert_eq!(mapped(&[0x9B, 0xDF, 0xE0])?, None);
+        // `9B` is FWAIT (now mapped); the following FSTSW still needs a
+        // status-word register the engine does not model.
+        assert_eq!(mapped(&[0x9B, 0xDF, 0xE0])?, Some(forms::FWAIT));
+        assert_eq!(mapped(&[0xDF, 0xE0])?, None);
         // fst %st(1) has no corpus form.
         assert_eq!(mapped(&[0xDD, 0xD1])?, None);
         // fnop is XED's decoding of the `fst %st(0)` alias; outside the 39
