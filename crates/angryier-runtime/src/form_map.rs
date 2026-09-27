@@ -297,6 +297,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_CMP => match shapes {
+            [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::CMP_MEM16_IMM8),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::CMP_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::CMP_MEM16_IMM8),
             [Shape::Reg8, Shape::Reg8] => Some(forms::CMP_R8_R8),
@@ -552,6 +553,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_INC => match shapes {
+            [Shape::Reg16] => Some(forms::INC_R16),
             [Shape::Reg64] => Some(forms::INC_R64),
             [Shape::Reg32] => Some(forms::INC_R32),
             [Shape::Reg8] => Some(forms::INC_R8),
@@ -1289,6 +1291,22 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_CDQE => Some(forms::CDQE),
         iclass::XED_ICLASS_CWD => Some(forms::CWD),
         iclass::XED_ICLASS_CDQ => Some(forms::CDQ),
+        iclass::XED_ICLASS_CMOVO => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CMOVO_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CMOVNO => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CMOVNO_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CMOVP => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CMOVP_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CMOVNP => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CMOVNP_R64_R64),
+            _ => None,
+        },
         iclass::XED_ICLASS_CMOVZ => match shapes {
             [Shape::Reg16, Shape::Reg16 | Shape::Mem16] => Some(forms::CMOVZ_R16_R16),
             [Shape::Reg32, Shape::Reg32] => Some(forms::CMOVZ_R32_R32),

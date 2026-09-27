@@ -133,7 +133,7 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
             class.clone(),
             steps,
             run_seconds,
-            if class == "BLOCK-FORM" {
+            if class == "BLOCK-FORM" || class == "BLOCK-OTHER" {
                 let bytes = process.state.memory.read(block_pc, 15).ok().map(|b| {
                     b.iter()
                         .map(|x| match x {

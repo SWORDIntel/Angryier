@@ -1709,8 +1709,9 @@ impl<D: Decoder> Runtime<D> {
             // mapped on real Windows (libnicm.sys diagnosis).
             MemoryRegion {
                 object: angryier_types::ObjectId(8),
-                base: angryier_models::KERNEL_POOL_FRESH_BASE - 0x1000,
-                size: 0x0010_1000, // 4 KiB header + 1 MiB = 256 allocations
+                base: angryier_models::KERNEL_POOL_FRESH_BASE - 0x1_0000,
+                size: 0x0011_0000, // 64 KiB pre-allocation (pool headers +
+                // driver-observed ptr-0x1002/0x3002 pokes) + 1 MiB allocs
                 readable: true,
                 writable: true,
                 executable: false,

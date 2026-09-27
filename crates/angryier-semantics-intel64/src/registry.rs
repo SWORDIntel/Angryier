@@ -1075,6 +1075,11 @@ impl Intel64CorpusRegistry {
             Arc::new(BtMem64Imm8),
             Arc::new(Fwait),
             Arc::new(Clts),
+            Arc::new(IncR16),
+            Arc::new(CmovOR64R64),
+            Arc::new(CmovNoR64R64),
+            Arc::new(CmovPR64R64),
+            Arc::new(CmovNpR64R64),
             Arc::new(SbbR32R32),
             Arc::new(SbbR32Mem32),
             Arc::new(SbbMem32R32),
@@ -1183,7 +1188,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1063] = [
+const ALL_FORMS: [u32; 1068] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2234,6 +2239,11 @@ const ALL_FORMS: [u32; 1063] = [
     crate::forms::BT_MEM64_IMM8,
     crate::forms::FWAIT,
     crate::forms::CLTS,
+    crate::forms::INC_R16,
+    crate::forms::CMOVO_R64_R64,
+    crate::forms::CMOVNO_R64_R64,
+    crate::forms::CMOVP_R64_R64,
+    crate::forms::CMOVNP_R64_R64,
     crate::forms::SBB_R32_R32,
     crate::forms::SBB_R32_MEM32,
     crate::forms::SBB_MEM32_R32,

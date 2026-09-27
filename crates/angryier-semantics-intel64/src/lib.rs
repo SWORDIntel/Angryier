@@ -1434,6 +1434,11 @@ pub mod forms {
     pub const BT_MEM64_IMM8: u32 = 0x0EA7;
     pub const FWAIT: u32 = 0x0EA8;
     pub const CLTS: u32 = 0x0EA9;
+    pub const INC_R16: u32 = 0x0EAB;
+    pub const CMOVO_R64_R64: u32 = 0x0EAC;
+    pub const CMOVNO_R64_R64: u32 = 0x0EAD;
+    pub const CMOVP_R64_R64: u32 = 0x0EAE;
+    pub const CMOVNP_R64_R64: u32 = 0x0EAF;
 
     // SBB width completion and scalar D1 shifts/rotates (agent band).
     pub const SBB_R32_R32: u32 = 0x0E00;

@@ -11672,3 +11672,57 @@ impl SemanticProvider for Clts {
         Ok(receipt(0x1227, context))
     }
 }
+
+/// INC r16 (`66 FF /0` — the deeper AMD-style drivers hit this).
+#[derive(Clone, Copy, Debug)]
+pub struct IncR16;
+impl SemanticProvider for IncR16 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x122A)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::INC_R16
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let operand = out.read_operand(0, U16)?;
+        let one = out.constant(U16, &1u16.to_le_bytes())?;
+        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U16, &[operand, one])?;
+        write_add_flags_preserve_cf(out, result, operand, one, 16)?;
+        out.write_operand(0, result)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x122A, context))
+    }
+}
+
+cmovcc_r64!(
+    CmovOR64R64,
+    forms::CMOVO_R64_R64,
+    0x122B,
+    |out: &mut dyn SemanticBuilder| { read_flag_set(out, rflags::OF_BIT) }
+);
+cmovcc_r64!(
+    CmovNoR64R64,
+    forms::CMOVNO_R64_R64,
+    0x122C,
+    |out: &mut dyn SemanticBuilder| { read_flag_not_set(out, rflags::OF_BIT) }
+);
+cmovcc_r64!(
+    CmovPR64R64,
+    forms::CMOVP_R64_R64,
+    0x122D,
+    |out: &mut dyn SemanticBuilder| { read_flag_set(out, rflags::PF_BIT) }
+);
+cmovcc_r64!(
+    CmovNpR64R64,
+    forms::CMOVNP_R64_R64,
+    0x122E,
+    |out: &mut dyn SemanticBuilder| { read_flag_not_set(out, rflags::PF_BIT) }
+);
