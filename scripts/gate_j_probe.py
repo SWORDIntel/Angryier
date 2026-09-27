@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Gate J first datapoint: run a real .sys driver through angr and report
-wall-time / instruction / unique-PC counts for comparison with Angryier.
+"""Gate J cross-engine probe: run a real .sys driver through angr and
+report wall-time / instruction / unique-PC counts vs Angryier.
 
 Setup for a minimal kernel-driver environment so angr can actually execute:
 - the DRIVER_OBJECT scratch region is mapped and zeroed,
-- the ntoskrnl/HAL imports are hooked to concrete returns (pool alloc
-  returns a fresh pointer, frees are no-ops, everything else returns 0),
+- the ntoskrnl/HAL imports (CLE externs) are hooked at their REBASED
+  ADDRESSES with concrete returns (pool alloc -> fresh pointer, frees and
+  everything else -> 0) — hooking by name fails for many PE imports,
 - stepping is instruction-by-instruction (`num_inst=1`).
 
 This is a probe, not the final benchmark: angr is user-mode-focused and the
 comparison targets the ENGINE loop mechanics and coverage, not semantic
-fidelity. Run Angryier's equivalent on the same driver via:
-  cargo test -p angryry-runtime --features xed --test isa_coverage ...
+fidelity. Angryier's equivalent on the same driver runs via:
+  cargo test -p angryier-runtime --features xed --test corpus_exec -- --nocapture
 
 Usage: python3 scripts/gate_j_probe.py <driver.sys> [--max-inst N] [--timeout S]
 """
@@ -23,55 +24,53 @@ import time
 
 SCRATCH = 0x700010000000
 POOL = 0xFFFF800000000000
+POOL_ALLOCS = {
+    "ExAllocatePool",
+    "ExAllocatePoolWithTag",
+    "ExAllocatePool2",
+    "ExAllocatePoolWithTagPriority",
+    "ExAllocatePoolWithQuotaTag",
+}
+POOL_FREES = {
+    "ExFreePool",
+    "ExFreePoolWithTag",
+    "ExFreePoolWithQuota",
+}
 
 
-def hook_imports(proj: "angr.Project") -> None:
-    """Hook the imports a .sys driver references with concrete returns."""
-    # The loader records unresolved imports as hooks by name when available.
+def make_ret_zero():
+    def ret_zero(state):
+        state.regs.rax = 0
+        return None
+
+    return ret_zero
+
+
+def hook_externs(proj: "angr.Project") -> int:
+    """Hook every extern (unresolved import) symbol at its rebased address."""
     pool_next = {"v": POOL}
+    hooked = 0
 
-    def alloc(state, pool_type=None, size=0x100):  # noqa: ANN001
-        ptr = pool_next["v"]
-        pool_next["v"] += 0x1000
-        state.regs.rax = ptr
-        return None
+    def make_alloc():
+        def alloc(state):
+            ptr = pool_next["v"]
+            pool_next["v"] += 0x1000
+            state.regs.rax = ptr
+            return None
 
-    def free(state, ptr=None):  # noqa: ANN001
-        state.regs.rax = 0
-        return None
+        return alloc
 
-    def ret_zero(state, *args):  # noqa: ANN001, ANN002
-        state.regs.rax = 0
-        return None
-
-    for name in [
-        "ExAllocatePool",
-        "ExAllocatePoolWithTag",
-        "ExAllocatePool2",
-        "ExAllocatePoolWithTagPriority",
-    ]:
-        proj.hook_symbol(name, alloc, kwargs={"size": 0x100})
-    for name in ["ExFreePool", "ExFreePoolWithTag", "ExFreePoolWithQuota"]:
-        proj.hook_symbol(name, free)
-    for name in [
-        "RtlInitUnicodeString",
-        "RtlGetVersion",
-        "IoCreateDevice",
-        "IoDeleteDevice",
-        "IoAttachDevice",
-        "IoBuildDeviceIoControlRequest",
-        "IofCompleteRequest",
-        "KeInitializeEvent",
-        "KeWaitForSingleObject",
-        "KeSetEvent",
-        "KeQueryPerformanceCounter",
-        "MmGetSystemRoutineAddress",
-        "PsCreateSystemThread",
-        "RtlCopyMemory",
-        "memcpy",
-        "memset",
-    ]:
-        proj.hook_symbol(name, ret_zero)
+    for obj in proj.loader.all_objects:
+        for sym in obj.symbols:
+            if not sym.is_extern or not sym.name or sym.rebased_addr is None:
+                continue
+            base = sym.name.rsplit(".", 1)[-1]
+            if base in POOL_ALLOCS:
+                proj.hook(sym.rebased_addr, make_alloc())
+            else:
+                proj.hook(sym.rebased_addr, make_ret_zero())
+            hooked += 1
+    return hooked
 
 
 def main() -> int:
@@ -102,21 +101,38 @@ def main() -> int:
     state.memory.map_region(0x7FFFFFF00000 - 0x1000, 0x2000, 3)
     state.memory.store(0x7FFFFFF00000 - 0x1000, b"\x00" * 0x2000)
 
-    hook_imports(proj)
+    hooked = hook_externs(proj)
+    # Populate the DRIVER_OBJECT MajorFunction table (offset 0x70, 28
+    # slots) with a hooked ret-zero stub — Angryier's loader fills the
+    # same table with its universal callback; a zeroed table makes the
+    # driver call NULL.
+    STUB = 0x700020000000
+    proj.hook(STUB, make_ret_zero())
+    for i in range(28):
+        state.memory.store(SCRATCH + 0x70 + 8 * i, STUB.to_bytes(8, "little"))
+    # Seed DriverEntry's return address with a terminating stub: the
+    # driver's final `ret` must end the run, not jump to address 0
+    # (Angryier's loader points the same slot at its exit hook).
+    EXIT = 0x700030000000
+    proj.hook(EXIT, angr.SIM_PROCEDURES["stubs"]["PathTerminator"]())
+    state.memory.store(state.regs.rsp, EXIT.to_bytes(8, "little"))
 
     t1 = time.monotonic()
     insts = 0
     seen_pcs = set()
+    last_pcs = []
     deadline = t1 + args.timeout
-    succ = None
     try:
         while insts < args.max_inst and time.monotonic() < deadline:
+            prev = state.addr
             succ = state.step(num_inst=1)
             if not succ.successors:
                 break
             state = succ.successors[0]
             insts += 1
             seen_pcs.add(state.addr)
+            last_pcs.append(prev)
+            last_pcs = last_pcs[-10:]
             if state.addr == 0:
                 break
     except Exception as exc:  # noqa: BLE001 - probe survives engine edges
@@ -125,9 +141,10 @@ def main() -> int:
 
     print(
         f"angr probe: load={t_load:.3f}s run={t_run:.3f}s insts={insts} "
-        f"unique_pcs={len(seen_pcs)} entry={entry:#x} steps_per_s="
-        f"{insts / t_run:.1f}"
+        f"unique_pcs={len(seen_pcs)} entry={entry:#x} hooks={hooked} "
+        f"steps_per_s={insts / t_run:.1f} last_pc={state.addr:#x}"
     )
+    print("last pcs:", " ".join(f"{p:#x}" for p in last_pcs))
     return 0
 
 

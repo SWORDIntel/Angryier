@@ -10492,6 +10492,137 @@ packed_int_ymm!(
     I8X16,
     0x0B00
 );
+
+// ---------------------------------------------------------------------------
+// Privileged control/debug register moves
+// ---------------------------------------------------------------------------
+
+fn system_register_selector(insn: &dyn DecodedInstructionView) -> Result<u64, SemanticError> {
+    match insn.operand(1).map(|operand| operand.kind) {
+        Some(OperandKind::Immediate(immediate)) => Ok(immediate.value),
+        _ => Err(SemanticError::InvalidOperand),
+    }
+}
+
+/// Deterministic CR reads. These fixed values are semantic debt until the
+/// execution state grows explicit control-register state.
+#[derive(Debug)]
+pub struct MovR64Cr;
+
+impl SemanticProvider for MovR64Cr {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x1100)
+    }
+
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::MOV_R64_CR
+    }
+
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let value = match system_register_selector(insn)? {
+            0 => 0x8001_0033,
+            2 | 3 | 8 => 0,
+            4 => 0x0000_06F8,
+            _ => 0,
+        };
+        let value = const_u64(out, value)?;
+        out.write_operand(0, value)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x1100, context))
+    }
+}
+
+#[derive(Debug)]
+pub struct MovCrR64;
+
+impl SemanticProvider for MovCrR64 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x1101)
+    }
+
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::MOV_CR_R64
+    }
+
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        fall_through(out, insn)?;
+        Ok(receipt(0x1101, context))
+    }
+}
+
+#[derive(Debug)]
+pub struct MovR64Dr;
+
+impl SemanticProvider for MovR64Dr {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x1102)
+    }
+
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::MOV_R64_DR
+    }
+
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let zero = const_u64(out, 0)?;
+        out.write_operand(0, zero)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x1102, context))
+    }
+}
+
+#[derive(Debug)]
+pub struct MovDrR64;
+
+impl SemanticProvider for MovDrR64 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x1103)
+    }
+
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::MOV_DR_R64
+    }
+
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        fall_through(out, insn)?;
+        Ok(receipt(0x1103, context))
+    }
+}
 packed_int_ymm!(
     VpaddwYmmYmmYmm,
     forms::VPADDW_YMM_YMM_YMM,

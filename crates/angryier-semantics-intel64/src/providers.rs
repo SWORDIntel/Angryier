@@ -3697,16 +3697,7 @@ impl SemanticProvider for SbbR64R64 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let left = out.read_operand(0, U64)?;
-        let right = out.read_operand(1, U64)?;
-        let cf_1 = read_flag_set(out, rflags::CF_BIT)?;
-        let cf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf_1])?;
-        let diff = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[left, right])?;
-        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[diff, cf_64])?;
-        write_sub_flags(out, result, left, right, 64)?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
-        Ok(receipt(75, context))
+        emit_sbb_width(context, insn, out, U64, 64, 75)
     }
 }
 
@@ -6315,3 +6306,216 @@ impl SemanticProvider for Std {
         Ok(receipt(0x080B, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Agent band 0x1000..0x10ff: SBB width completion and D1 register forms.
+// ---------------------------------------------------------------------------
+
+fn emit_sbb_width(
+    context: &SemanticContext,
+    insn: &dyn DecodedInstructionView,
+    out: &mut dyn SemanticBuilder,
+    ty: SemanticType,
+    width: u16,
+    rule: u64,
+) -> Result<SemanticReceipt, SemanticError> {
+    let left = out.read_operand(0, ty)?;
+    let right = out.read_operand(1, ty)?;
+    let carry1 = read_flag_set(out, rflags::CF_BIT)?;
+    let carry = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), ty, &[carry1])?;
+    let diff = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), ty, &[left, right])?;
+    let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), ty, &[diff, carry])?;
+    let left64 = widen_to_u64(out, left, width)?;
+    let right64 = widen_to_u64(out, right, width)?;
+    let result64 = widen_to_u64(out, result, width)?;
+    let lt = out.emit(SemanticOp::Primitive(PrimitiveOp::Ult), U1, &[left, right])?;
+    let eq = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[left, right])?;
+    let eq_and_carry = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U1, &[eq, carry1])?;
+    let borrow1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U1, &[lt, eq_and_carry])?;
+    let borrow = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[borrow1])?;
+    let mut flags = sub_flag_values(out, result64, left64, right64, width)?;
+    flags.pop();
+    flags.push(borrow);
+    compose_rflags(out, &flags, false)?;
+    out.write_operand(0, result)?;
+    fall_through(out, insn)?;
+    Ok(receipt(rule, context))
+}
+
+macro_rules! sbb_width_provider {
+    ($name:ident, $form:expr, $ty:expr, $width:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                emit_sbb_width(context, insn, out, $ty, $width, $rule)
+            }
+        }
+    };
+}
+
+sbb_width_provider!(SbbR32R32, forms::SBB_R32_R32, U32, 32, 0x1000);
+sbb_width_provider!(SbbR32Mem32, forms::SBB_R32_MEM32, U32, 32, 0x1001);
+sbb_width_provider!(SbbMem32R32, forms::SBB_MEM32_R32, U32, 32, 0x1002);
+sbb_width_provider!(SbbR64Mem64, forms::SBB_R64_MEM64, U64, 64, 0x1003);
+sbb_width_provider!(SbbMem64R64, forms::SBB_MEM64_R64, U64, 64, 0x1004);
+
+macro_rules! d1_shift_provider {
+    ($name:ident, $form:expr, $ty:expr, $width:expr, $op:expr, $kind:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let value = out.read_operand(0, $ty)?;
+                let count8 = out.read_operand(1, U8)?;
+                let count = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), $ty, &[count8])?;
+                let result = out.emit(SemanticOp::Primitive($op), $ty, &[value, count])?;
+                write_shift_flags(out, value, count, result, $kind, $width)?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+macro_rules! d1_rotate_provider {
+    ($name:ident, $form:expr, $ty:expr, $width:expr, $op:expr, $kind:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let value = out.read_operand(0, $ty)?;
+                let count8 = out.read_operand(1, U8)?;
+                let count = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), $ty, &[count8])?;
+                let result = out.emit(SemanticOp::Primitive($op), $ty, &[value, count])?;
+                write_rotate_flags_width(out, result, $kind, $width)?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+macro_rules! d1_rotate_carry_provider {
+    ($name:ident, $form:expr, $ty:expr, $width:expr, $left:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let value = out.read_operand(0, $ty)?;
+                let result = emit_memory_rotate_carry(out, value, $ty, $width, false, $left)?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+d1_shift_provider!(
+    ShlR16Imm8,
+    forms::SHL_R16_IMM8,
+    U16,
+    16,
+    PrimitiveOp::ShiftLeft,
+    ShiftKind::Left,
+    0x1005
+);
+d1_shift_provider!(
+    ShrR16Imm8,
+    forms::SHR_R16_IMM8,
+    U16,
+    16,
+    PrimitiveOp::LogicalShiftRight,
+    ShiftKind::RightLogical,
+    0x1006
+);
+d1_shift_provider!(
+    SarR16Imm8,
+    forms::SAR_R16_IMM8,
+    U16,
+    16,
+    PrimitiveOp::ArithmeticShiftRight,
+    ShiftKind::RightArith,
+    0x1007
+);
+d1_rotate_provider!(
+    RolR16Imm8,
+    forms::ROL_R16_IMM8,
+    U16,
+    16,
+    PrimitiveOp::RotateLeft,
+    ShiftKind::RotateLeft,
+    0x1008
+);
+d1_rotate_provider!(
+    RorR16Imm8,
+    forms::ROR_R16_IMM8,
+    U16,
+    16,
+    PrimitiveOp::RotateRight,
+    ShiftKind::RotateRight,
+    0x1009
+);
+d1_rotate_carry_provider!(RclR16Imm8, forms::RCL_R16_IMM8, U16, 16, true, 0x100A);
+d1_rotate_carry_provider!(RcrR16Imm8, forms::RCR_R16_IMM8, U16, 16, false, 0x100B);
+d1_rotate_carry_provider!(RclR32Imm8, forms::RCL_R32_IMM8, U32, 32, true, 0x100C);
+d1_rotate_carry_provider!(RcrR32Imm8, forms::RCR_R32_IMM8, U32, 32, false, 0x100D);

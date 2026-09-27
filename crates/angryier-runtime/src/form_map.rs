@@ -431,6 +431,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg8, Shape::Imm] => Some(forms::SHL_R8_IMM8),
             [Shape::Reg32] if has_cl => Some(forms::SHL_R32_CL),
             [Shape::Reg32] => Some(forms::SHL_R32_IMM8),
+            [Shape::Reg16, Shape::Imm] => Some(forms::SHL_R16_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_SHR => match shapes {
@@ -447,6 +448,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Imm] => Some(forms::SHR_R32_IMM8),
             [Shape::Reg32] if has_cl => Some(forms::SHR_R32_CL),
             [Shape::Reg32] => Some(forms::SHR_R32_IMM8),
+            [Shape::Reg16, Shape::Imm] => Some(forms::SHR_R16_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_SAR => match shapes {
@@ -463,6 +465,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Imm] => Some(forms::SAR_R32_IMM8),
             [Shape::Reg32] if has_cl => Some(forms::SAR_R32_CL),
             [Shape::Reg32] => Some(forms::SAR_R32_IMM8),
+            [Shape::Reg16, Shape::Imm] => Some(forms::SAR_R16_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_ROL => match shapes {
@@ -478,6 +481,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Imm] => Some(forms::ROL_R32_IMM8),
             [Shape::Reg32] if has_cl => Some(forms::ROL_R32_CL),
             [Shape::Reg32] => Some(forms::ROL_R32_IMM8),
+            [Shape::Reg16, Shape::Imm] => Some(forms::ROL_R16_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_ROR => match shapes {
@@ -493,6 +497,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Imm] => Some(forms::ROR_R32_IMM8),
             [Shape::Reg32] if has_cl => Some(forms::ROR_R32_CL),
             [Shape::Reg32] => Some(forms::ROR_R32_IMM8),
+            [Shape::Reg16, Shape::Imm] => Some(forms::ROR_R16_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_RCL => match shapes {
@@ -505,6 +510,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg64, Shape::Imm] => Some(forms::RCL_R64_IMM8),
             [Shape::Reg64] if has_cl => Some(forms::RCL_R64_CL),
             [Shape::Reg64] => Some(forms::RCL_R64_IMM8),
+            [Shape::Reg16, Shape::Imm] => Some(forms::RCL_R16_IMM8),
+            [Shape::Reg32, Shape::Imm] => Some(forms::RCL_R32_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_RCR => match shapes {
@@ -517,6 +524,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg64, Shape::Imm] => Some(forms::RCR_R64_IMM8),
             [Shape::Reg64] if has_cl => Some(forms::RCR_R64_CL),
             [Shape::Reg64] => Some(forms::RCR_R64_IMM8),
+            [Shape::Reg16, Shape::Imm] => Some(forms::RCR_R16_IMM8),
+            [Shape::Reg32, Shape::Imm] => Some(forms::RCR_R32_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_INC => match shapes {
@@ -1159,6 +1168,11 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg16, Shape::Mem16] => Some(forms::SBB_R16_MEM16),
             [Shape::Mem16, Shape::Reg16] => Some(forms::SBB_MEM16_R16),
             [Shape::Mem16, Shape::Imm] => Some(forms::SBB_MEM16_IMM16),
+            [Shape::Reg32, Shape::Reg32] => Some(forms::SBB_R32_R32),
+            [Shape::Reg32, Shape::Mem32] => Some(forms::SBB_R32_MEM32),
+            [Shape::Mem32, Shape::Reg32] => Some(forms::SBB_MEM32_R32),
+            [Shape::Reg64, Shape::Mem64] => Some(forms::SBB_R64_MEM64),
+            [Shape::Mem64, Shape::Reg64] => Some(forms::SBB_MEM64_R64),
             _ => None,
         },
         iclass::XED_ICLASS_BT => match shapes {
@@ -1857,6 +1871,16 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         iclass::XED_ICLASS_JMP_FAR => match shapes {
             [Shape::Mem] | [Shape::Mem64] | [Shape::Mem32] | [Shape::Mem16] => Some(forms::JMP_FAR_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_MOV_CR => match decoded.operands.first().map(|operand| operand.access) {
+            Some(angryier_arch::AccessKind::Write) => Some(forms::MOV_R64_CR),
+            Some(angryier_arch::AccessKind::Read) => Some(forms::MOV_CR_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_MOV_DR => match decoded.operands.first().map(|operand| operand.access) {
+            Some(angryier_arch::AccessKind::Write) => Some(forms::MOV_R64_DR),
+            Some(angryier_arch::AccessKind::Read) => Some(forms::MOV_DR_R64),
             _ => None,
         },
         _ => None,

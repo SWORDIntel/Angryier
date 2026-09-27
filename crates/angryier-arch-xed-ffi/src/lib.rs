@@ -120,6 +120,7 @@ pub mod iclass {
         XED_ICLASS_VZEROUPPER, XED_ICLASS_WRMSR, XED_ICLASS_XADD, XED_ICLASS_XADD_LOCK, XED_ICLASS_XCHG,
         XED_ICLASS_XOR, XED_ICLASS_XOR_LOCK, XED_ICLASS_XORPD, XED_ICLASS_XORPS,
     };
+    pub use xed_sys::{XED_ICLASS_MOV_CR, XED_ICLASS_MOV_DR};
 }
 
 use angryier_arch::{DecodedInstruction, Decoder};
@@ -237,8 +238,43 @@ impl Decoder for XedDecoder {
     type Error = XedAdapterError;
 
     fn decode(&self, address: Address, bytes: &[u8]) -> Result<DecodedInstruction, Self::Error> {
-        self.inner.decode(address, bytes)
+        let mut decoded = self.inner.decode(address, bytes)?;
+        append_system_register_operand(&mut decoded, bytes);
+        Ok(decoded)
     }
+}
+
+/// Retain the encoded CR/DR selector, whose XED register class is outside
+/// Angryier's architectural register file, as a synthetic immediate operand.
+fn append_system_register_operand(decoded: &mut DecodedInstruction, bytes: &[u8]) {
+    if !matches!(decoded.form_id, xed_sys::XED_ICLASS_MOV_CR | xed_sys::XED_ICLASS_MOV_DR) {
+        return;
+    }
+    let Some(opcode_pos) = bytes
+        .windows(2)
+        .position(|window| window[0] == 0x0f && matches!(window[1], 0x20..=0x23))
+    else {
+        return;
+    };
+    let Some(&modrm) = bytes.get(opcode_pos + 2) else {
+        return;
+    };
+    let rex_r = bytes[..opcode_pos]
+        .iter()
+        .rev()
+        .find(|byte| (0x40..=0x4f).contains(*byte))
+        .map_or(0, |rex| (rex >> 2) & 1);
+    let selector = u64::from(((modrm >> 3) & 7) | (rex_r << 3));
+    decoded.operands.push(angryier_arch::Operand {
+        index: 1,
+        width_bits: 4,
+        access: angryier_arch::AccessKind::Read,
+        visibility: angryier_arch::OperandVisibility::Explicit,
+        kind: angryier_arch::OperandKind::Immediate(angryier_arch::ImmediateOperand {
+            value: selector,
+            signed: false,
+        }),
+    });
 }
 
 #[cfg(test)]

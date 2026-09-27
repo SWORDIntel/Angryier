@@ -1391,6 +1391,29 @@ pub mod forms {
     pub const VPBROADCASTW_YMM_R32: u32 = 0x0A3B;
     pub const VPBROADCASTD_YMM_R32: u32 = 0x0A3C;
     pub const VPBROADCASTQ_YMM_R64: u32 = 0x0A3D;
+
+    // SBB width completion and scalar D1 shifts/rotates (agent band).
+    pub const SBB_R32_R32: u32 = 0x0E00;
+    pub const SBB_R32_MEM32: u32 = 0x0E01;
+    pub const SBB_MEM32_R32: u32 = 0x0E02;
+    pub const SBB_R64_MEM64: u32 = 0x0E03;
+    pub const SBB_MEM64_R64: u32 = 0x0E04;
+    pub const SHL_R16_IMM8: u32 = 0x0E05;
+    pub const SHR_R16_IMM8: u32 = 0x0E06;
+    pub const SAR_R16_IMM8: u32 = 0x0E07;
+    pub const ROL_R16_IMM8: u32 = 0x0E08;
+    pub const ROR_R16_IMM8: u32 = 0x0E09;
+    pub const RCL_R16_IMM8: u32 = 0x0E0A;
+    pub const RCR_R16_IMM8: u32 = 0x0E0B;
+    pub const RCL_R32_IMM8: u32 = 0x0E0C;
+    pub const RCR_R32_IMM8: u32 = 0x0E0D;
+
+    // Privileged system-register moves. CR/DR state is intentionally absent
+    // from the deterministic execution model.
+    pub const MOV_R64_CR: u32 = 0x0F00;
+    pub const MOV_CR_R64: u32 = 0x0F01;
+    pub const MOV_R64_DR: u32 = 0x0F02;
+    pub const MOV_DR_R64: u32 = 0x0F03;
 }
 
 /// RFLAGS bit positions used by the corpus.
