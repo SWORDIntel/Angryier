@@ -6399,7 +6399,9 @@ fn roundps_xmm_xmm_imm8_round_nearest() -> Result<(), Box<dyn std::error::Error>
 
     let (executed, _outcome) = run_pipeline(&decoded, &initial)?;
     let bytes = read_bytes(&executed, XMM0)?;
-    let expected: [f32; 4] = [1.0, 3.0, 4.0, -1.0];
+    // x86 mode 0 is round-to-nearest-EVEN: 2.5 -> 2.0, -0.5 -> -0.0
+    // (the SSE4 hardware differential validates this).
+    let expected: [f32; 4] = [1.0, 2.0, 4.0, -0.0];
     for (i, &exp) in expected.iter().enumerate() {
         let mut buf = [0u8; 4];
         buf.copy_from_slice(&bytes[i * 4..(i + 1) * 4]);

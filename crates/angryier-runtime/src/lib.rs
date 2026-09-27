@@ -552,6 +552,11 @@ impl<D: Decoder> Runtime<D> {
             tracker: tracker.clone(),
         });
         let get_version: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelGetVersionProcedure);
+        let get_device_pointer: Arc<dyn SimProcedure> =
+            Arc::new(angryier_models::KernelGetDeviceObjectPointerProcedure {
+                tracker: tracker.clone(),
+            });
+        let query_perf: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelQueryPerformanceCounterProcedure);
         const CREATE_DEVICE_NAMES: [&str; 1] = ["IoCreateDevice"];
         const ATTACH_DEVICE_NAMES: [&str; 1] = ["IoAttachDevice"];
         const RESOLVE_NAMES: [&str; 1] = ["MmGetSystemRoutineAddress"];
@@ -559,6 +564,8 @@ impl<D: Decoder> Runtime<D> {
         const CREATE_THREAD_NAMES: [&str; 1] = ["PsCreateSystemThread"];
         const BUILD_IRP_NAMES: [&str; 1] = ["IoBuildDeviceIoControlRequest"];
         const GET_VERSION_NAMES: [&str; 1] = ["RtlGetVersion"];
+        const GET_DEVICE_POINTER_NAMES: [&str; 1] = ["IoGetDeviceObjectPointer"];
+        const QUERY_PERF_NAMES: [&str; 1] = ["KeQueryPerformanceCounter"];
         let stubs: Vec<(Address, String, String)> = process
             .pe_imports()
             .map(|(address, dll, export)| (*address, dll.to_string(), export.to_string()))
@@ -587,6 +594,10 @@ impl<D: Decoder> Runtime<D> {
                 process.simproc_instances.insert(address, build_irp.clone());
             } else if GET_VERSION_NAMES.contains(&export.as_str()) {
                 process.simproc_instances.insert(address, get_version.clone());
+            } else if GET_DEVICE_POINTER_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, get_device_pointer.clone());
+            } else if QUERY_PERF_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, query_perf.clone());
             } else {
                 // Deterministic default: STATUS_SUCCESS instead of whatever
                 // garbage RAX carries into a naked `ret` stub. Debt-recorded

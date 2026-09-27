@@ -887,6 +887,65 @@ impl SimProcedure for KernelResolveRoutineProcedure {
     }
 }
 
+/// `IoGetDeviceObjectPointer(DeviceName, DesiredAccess, FileObject,
+/// DeviceObject)`: writes a fresh device object through r9 and a matching
+/// file object through r8, returning STATUS_SUCCESS. The device object's
+/// MajorFunction table (+0x70, 28 slots) points at the universal callback
+/// (STATUS_SUCCESS), so drivers that submit IRPs through it proceed; its
+/// DriverObject (+0x08) points at a fresh object. The previous default stub
+/// returned NULL, sending drivers down "no target device" paths.
+pub struct KernelGetDeviceObjectPointerProcedure {
+    pub tracker: std::sync::Arc<KernelPoolTracker>,
+}
+
+impl SimProcedure for KernelGetDeviceObjectPointerProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_get_device_object_pointer"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let device = self.tracker.fresh_pointer();
+        let file = self.tracker.fresh_pointer();
+        let driver = self.tracker.fresh_pointer();
+        let mut next = state.clone();
+        // DEVICE_OBJECT: Type=15 | Size=0x1030, DriverObject=+0x08,
+        // MajorFunction[0..28] at +0x70 -> universal callback.
+        let type_size = (0x1030u64 << 32) | 15;
+        next.write_memory(device, type_size.to_le_bytes().to_vec());
+        next.write_memory(device + 0x08, driver.to_le_bytes().to_vec());
+        for i in 0..28u64 {
+            next.write_memory(device + 0x70 + 8 * i, KERNEL_UNIVERSAL_CALLBACK.to_le_bytes().to_vec());
+        }
+        // FILE_OBJECT: Type=5 | Size=0x98, DeviceObject=+0x08.
+        let file_type_size = (0x98u64 << 32) | 5;
+        next.write_memory(file, file_type_size.to_le_bytes().to_vec());
+        next.write_memory(file + 0x08, device.to_le_bytes().to_vec());
+        // OUT: *r8 = FileObject, *r9 = DeviceObject (register args).
+        let p_file = state.get_reg(8);
+        let p_device = state.get_reg(9);
+        if p_file != 0 {
+            next.write_memory(p_file, file.to_le_bytes().to_vec());
+        }
+        if p_device != 0 {
+            next.write_memory(p_device, device.to_le_bytes().to_vec());
+        }
+        SimResult::Return(0) // STATUS_SUCCESS
+    }
+}
+
+/// `KeQueryPerformanceCounter()`: returns a deterministic non-zero counter
+/// value in RAX (the HAL export). Drivers use it for timing and entropy;
+/// mirroring the RDTSC model (fixed constant, replay-safe).
+pub struct KernelQueryPerformanceCounterProcedure;
+
+impl SimProcedure for KernelQueryPerformanceCounterProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_query_performance_counter"
+    }
+    fn apply(&self, _state: &SimState) -> SimResult {
+        SimResult::Return(0x0000_0000_0100_0000) // ~16M counts (arbitrary)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Syscall environment model
 // ---------------------------------------------------------------------------

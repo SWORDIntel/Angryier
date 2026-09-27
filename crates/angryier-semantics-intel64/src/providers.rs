@@ -3927,16 +3927,12 @@ impl SemanticProvider for CmpxchgR64R64 {
             out.write_register(RegisterId(register_id::GPR_BASE), new_rax)?;
         }
 
-        // Set ZF from eq (1-bit): ZF=1 if equal, ZF=0 if not equal.
-        let old_rflags = out.read_register(register_id::RFLAGS, U64)?;
-        let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
-        let zf_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[eq])?;
-        let zf_shifted = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[zf_64, zf_bit])?;
-        let zf_clear_mask = !(1u64 << rflags::ZF_BIT);
-        let mask = out.constant(U64, &zf_clear_mask.to_le_bytes())?;
-        let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[old_rflags, mask])?;
-        let new_rflags = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[cleared, zf_shifted])?;
-        out.write_register(register_id::RFLAGS, new_rflags)?;
+        // CMPXCHG sets the full CMP flag set; the oracle shows the flags
+        // come from (rax - dest) on real hardware — the reverse of the
+        // SDM's stated (dest - rax). Verified across value pairs on the
+        // differential host; debt-note: documented deviation.
+        let diff = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rax, dest])?;
+        write_sub_flags(out, diff, rax, dest, 64)?;
 
         fall_through(out, insn)?;
         Ok(receipt(81, context))

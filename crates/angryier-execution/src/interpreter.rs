@@ -2421,7 +2421,22 @@ fn encode_float_lane(lane_bits: u16, value: f64) -> u128 {
 /// Rounds a float according to imm8 bits[1:0]: 0=nearest, 1=down, 2=up, 3=truncate.
 fn round_float(value: f64, mode: u8) -> f64 {
     match mode {
-        0 => value.round(),
+        // Mode 0: round to nearest, ties to even (x86 ROUND* / RNDSCALE).
+        // `f64::round` rounds half away from zero, which differs at ties
+        // (-2.5 -> -2.0 here, -3.0 with round()).
+        0 => {
+            let floor = value.floor();
+            let frac = value - floor;
+            if frac < 0.5 {
+                floor
+            } else if frac > 0.5 {
+                floor + 1.0
+            } else if floor % 2.0 == 0.0 {
+                floor
+            } else {
+                floor + 1.0
+            }
+        }
         1 => value.floor(),
         2 => value.ceil(),
         _ => value.trunc(),

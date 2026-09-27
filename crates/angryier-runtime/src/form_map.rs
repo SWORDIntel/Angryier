@@ -1619,6 +1619,246 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_REPNE_SCASW => Some(REPNE_SCASW_FORM_ID),
         iclass::XED_ICLASS_REPNE_SCASD => Some(REPNE_SCASD_FORM_ID),
         iclass::XED_ICLASS_REPNE_SCASQ => Some(REPNE_SCASQ_FORM_ID),
+        iclass::XED_ICLASS_FCOM => match shapes {
+            [.., Shape::Mem32] => Some(forms::FCOM_M32),
+            [.., Shape::Mem64] => Some(forms::FCOM_M64),
+            _ => Some(forms::FCOM_STI),
+        },
+        iclass::XED_ICLASS_FCOMP => match shapes {
+            [.., Shape::Mem32] => Some(forms::FCOMP_M32),
+            [.., Shape::Mem64] => Some(forms::FCOMP_M64),
+            _ => Some(forms::FCOMP_STI),
+        },
+        iclass::XED_ICLASS_FCOMPP => Some(forms::FCOMPP),
+        iclass::XED_ICLASS_FIADD => match shapes {
+            [.., Shape::Mem16] => Some(forms::FIADD_M16),
+            [.., Shape::Mem32] => Some(forms::FIADD_M32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FISUB => match shapes {
+            [.., Shape::Mem16] => Some(forms::FISUB_M16),
+            [.., Shape::Mem32] => Some(forms::FISUB_M32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FISUBR => match shapes {
+            [.., Shape::Mem16] => Some(forms::FISUBR_M16),
+            [.., Shape::Mem32] => Some(forms::FISUBR_M32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FIMUL => match shapes {
+            [.., Shape::Mem16] => Some(forms::FIMUL_M16),
+            [.., Shape::Mem32] => Some(forms::FIMUL_M32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FIDIV => match shapes {
+            [.., Shape::Mem16] => Some(forms::FIDIV_M16),
+            [.., Shape::Mem32] => Some(forms::FIDIV_M32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FIDIVR => match shapes {
+            [.., Shape::Mem16] => Some(forms::FIDIVR_M16),
+            [.., Shape::Mem32] => Some(forms::FIDIVR_M32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FICOM => match shapes {
+            [.., Shape::Mem16] => Some(forms::FICOM_M16),
+            [.., Shape::Mem32] => Some(forms::FICOM_M32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FICOMP => match shapes {
+            [.., Shape::Mem16] => Some(forms::FICOMP_M16),
+            [.., Shape::Mem32] => Some(forms::FICOMP_M32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FILD => match shapes {
+            [.., Shape::Mem16] => Some(forms::FILD_M16),
+            [.., Shape::Mem32] => Some(forms::FILD_M32),
+            [.., Shape::Mem64] => Some(forms::FILD_M64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FIST => match shapes {
+            [Shape::Mem16, ..] => Some(forms::FIST_M16),
+            [Shape::Mem32, ..] => Some(forms::FIST_M32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FISTP => match shapes {
+            [Shape::Mem16, ..] => Some(forms::FISTP_M16),
+            [Shape::Mem32, ..] => Some(forms::FISTP_M32),
+            [Shape::Mem64, ..] => Some(forms::FISTP_M64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FABS => Some(forms::FABS),
+        iclass::XED_ICLASS_FCHS => Some(forms::FCHS),
+        iclass::XED_ICLASS_FSQRT => Some(forms::FSQRT),
+        iclass::XED_ICLASS_FXCH => match shapes {
+            [] => Some(forms::FXCH),
+            [Shape::Stack] => Some(forms::FXCH_STI),
+            [Shape::Stack, Shape::Stack] => Some(forms::FXCH_STI),
+            _ => Some(forms::FXCH),
+        },
+        iclass::XED_ICLASS_ADDSS => Some(forms::ADDSS_XMM_XMM),
+        iclass::XED_ICLASS_SUBSS => Some(forms::SUBSS_XMM_XMM),
+        iclass::XED_ICLASS_MULSS => Some(forms::MULSS_XMM_XMM),
+        iclass::XED_ICLASS_DIVSS => Some(forms::DIVSS_XMM_XMM),
+        iclass::XED_ICLASS_SQRTSS => Some(forms::SQRTSS_XMM_XMM),
+        iclass::XED_ICLASS_SQRTSD => Some(forms::SQRTSD_XMM_XMM),
+        iclass::XED_ICLASS_COMISS => Some(forms::COMISS_XMM_XMM),
+        iclass::XED_ICLASS_COMISD => Some(forms::COMISD_XMM_XMM),
+        iclass::XED_ICLASS_UCOMISS => Some(forms::UCOMISS_XMM_XMM),
+        iclass::XED_ICLASS_CVTSS2SD => Some(forms::CVTSS2SD_XMM_XMM),
+        iclass::XED_ICLASS_CVTSD2SS => Some(forms::CVTSD2SS_XMM_XMM),
+        iclass::XED_ICLASS_MAXSS => Some(forms::MAXSS_XMM_XMM),
+        iclass::XED_ICLASS_MAXSD => Some(forms::MAXSD_XMM_XMM),
+        iclass::XED_ICLASS_MINSS => Some(forms::MINSS_XMM_XMM),
+        iclass::XED_ICLASS_MINSD => Some(forms::MINSD_XMM_XMM),
+        iclass::XED_ICLASS_PEXTRD => match shapes {
+            [Shape::Reg32, Shape::Xmm, Shape::Imm] => Some(forms::PEXTRD_R32_XMM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PEXTRQ => match shapes {
+            [Shape::Reg64, Shape::Xmm, Shape::Imm] => Some(forms::PEXTRQ_R64_XMM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PINSRD => match shapes {
+            [Shape::Xmm, Shape::Reg32, Shape::Imm] => Some(forms::PINSRD_XMM_R32_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PINSRQ => match shapes {
+            [Shape::Xmm, Shape::Reg64, Shape::Imm] => Some(forms::PINSRQ_XMM_R64_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMAXUD => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMAXUD_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMINSD => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMINSD_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_ROUNDPS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Imm] => Some(forms::ROUNDPS_XMM_XMM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_ROUNDPD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Imm] => Some(forms::ROUNDPD_XMM_XMM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_ROUNDSS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Imm] => Some(forms::ROUNDSS_XMM_XMM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_ROUNDSD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Imm] => Some(forms::ROUNDSD_XMM_XMM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_BLENDVPS => match shapes {
+            [Shape::Xmm, Shape::Xmm] | [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::BLENDVPS_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_BLENDVPD => match shapes {
+            [Shape::Xmm, Shape::Xmm] | [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::BLENDVPD_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_INSERTPS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Imm] => Some(forms::INSERTPS_XMM_XMM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_EXTRACTPS => match shapes {
+            [Shape::Reg32, Shape::Xmm, Shape::Imm] => Some(forms::EXTRACTPS_R32_XMM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_MOVNTDQA => match shapes {
+            [Shape::Xmm, Shape::Mem128] => Some(forms::MOVNTDQA_XMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVSXBW => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVSXBW_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVZXBW => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVZXBW_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVSXBD => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVSXBD_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVSXWD => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVSXWD_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVZXWD => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVZXWD_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVSXDQ => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVSXDQ_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVZXDQ => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVZXDQ_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVSXWQ => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVSXWQ_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVZXWQ => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVZXWQ_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVSXBQ => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVSXBQ_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PMOVZXBQ => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::PMOVZXBQ_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_XADD_LOCK => match shapes {
+            [Shape::Mem32, Shape::Reg32] => Some(forms::XADD_MEM32_R32),
+            [Shape::Mem64, Shape::Reg64] => Some(forms::XADD_MEM64_R64),
+            [Shape::Mem16, Shape::Reg16] => Some(forms::XADD_MEM16_R16),
+            [Shape::Mem8, Shape::Reg8] => Some(forms::XADD_MEM8_R8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_SETO => match shapes {
+            [Shape::Reg8] => Some(forms::SETO_R8),
+            [Shape::Mem8] => Some(forms::SETO_MEM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_SETNO => match shapes {
+            [Shape::Reg8] => Some(forms::SETNO_R8),
+            [Shape::Mem8] => Some(forms::SETNO_MEM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_SETP => match shapes {
+            [Shape::Reg8] => Some(forms::SETP_R8),
+            [Shape::Mem8] => Some(forms::SETP_MEM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_SETNP => match shapes {
+            [Shape::Reg8] => Some(forms::SETNP_R8),
+            [Shape::Mem8] => Some(forms::SETNP_MEM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CLFLUSH => match shapes {
+            [Shape::Mem] | [Shape::Mem8] | [Shape::Mem16] | [Shape::Mem32] | [Shape::Mem64] => Some(forms::CLFLUSH_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_MOVBE => match shapes {
+            [Shape::Reg16, Shape::Mem16] => Some(forms::MOVBE_R16_MEM16),
+            [Shape::Reg32, Shape::Mem32] => Some(forms::MOVBE_R32_MEM32),
+            [Shape::Reg64, Shape::Mem64] => Some(forms::MOVBE_R64_MEM64),
+            [Shape::Mem16, Shape::Reg16] => Some(forms::MOVBE_MEM16_R16),
+            [Shape::Mem32, Shape::Reg32] => Some(forms::MOVBE_MEM32_R32),
+            [Shape::Mem64, Shape::Reg64] => Some(forms::MOVBE_MEM64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_JMP_FAR => match shapes {
+            [Shape::Mem] | [Shape::Mem64] | [Shape::Mem32] | [Shape::Mem16] => Some(forms::JMP_FAR_MEM),
+            _ => None,
+        },
         _ => None,
     }
 }

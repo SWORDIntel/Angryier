@@ -877,7 +877,6 @@ pub mod forms {
     pub const VPBROADCASTB_YMM_XMM: u32 = 0x0228;
     pub const VPBROADCASTQ_YMM_XMM: u32 = 0x0229;
     pub const VPBROADCASTB_YMM_MEM8: u32 = 0x022A;
-    pub const VPSHUFD_YMM_YMM_IMM8: u32 = 0x022B;
     pub const VXORPS_YMM_YMM_YMM: u32 = 0x022C;
     pub const VZEROUPPER: u32 = 0x022D;
     pub const VMOVD_YMM_R32: u32 = 0x022E;
@@ -1221,6 +1220,177 @@ pub mod forms {
     pub const SAHF: u32 = 0x0609;
     pub const CLD: u32 = 0x060A;
     pub const STD: u32 = 0x060B;
+
+    // Extended x87 FPU family (0x0800..0x08FF)
+    pub const FCOM_STI: u32 = 0x0800;
+    pub const FCOM_M32: u32 = 0x0801;
+    pub const FCOM_M64: u32 = 0x0802;
+    pub const FCOMP_STI: u32 = 0x0803;
+    pub const FCOMP_M32: u32 = 0x0804;
+    pub const FCOMP_M64: u32 = 0x0805;
+    pub const FCOMPP: u32 = 0x0806;
+    pub const FIADD_M16: u32 = 0x0807;
+    pub const FIADD_M32: u32 = 0x0808;
+    pub const FISUB_M16: u32 = 0x0809;
+    pub const FISUB_M32: u32 = 0x080A;
+    pub const FISUBR_M16: u32 = 0x080B;
+    pub const FISUBR_M32: u32 = 0x080C;
+    pub const FIMUL_M16: u32 = 0x080D;
+    pub const FIMUL_M32: u32 = 0x080E;
+    pub const FIDIV_M16: u32 = 0x080F;
+    pub const FIDIV_M32: u32 = 0x0810;
+    pub const FIDIVR_M16: u32 = 0x0811;
+    pub const FIDIVR_M32: u32 = 0x0812;
+    pub const FICOM_M16: u32 = 0x0813;
+    pub const FICOM_M32: u32 = 0x0814;
+    pub const FICOMP_M16: u32 = 0x0815;
+    pub const FICOMP_M32: u32 = 0x0816;
+    pub const FILD_M16: u32 = 0x0817;
+    pub const FILD_M32: u32 = 0x0818;
+    pub const FILD_M64: u32 = 0x0819;
+    pub const FIST_M16: u32 = 0x081A;
+    pub const FIST_M32: u32 = 0x081B;
+    pub const FISTP_M16: u32 = 0x081C;
+    pub const FISTP_M32: u32 = 0x081D;
+    pub const FISTP_M64: u32 = 0x081E;
+    pub const FABS: u32 = 0x081F;
+    pub const FCHS: u32 = 0x0820;
+    pub const FSQRT: u32 = 0x0821;
+    pub const FXCH: u32 = 0x0822;
+    pub const FXCH_STI: u32 = 0x0823;
+
+    // SSE4.1 / SSE4.2 completion batch (0x0C00..0x0CFF)
+    pub const BLENDVPS_XMM_XMM: u32 = 0x0C00;
+    pub const BLENDVPD_XMM_XMM: u32 = 0x0C01;
+    pub const MOVNTDQA_XMM_MEM: u32 = 0x0C02;
+
+    // Scalar SSE floating-point conversion and min/max batch (0x0D00..0x0DFF)
+    pub const CVTSS2SD_XMM_XMM: u32 = 0x0D00;
+    pub const CVTSD2SS_XMM_XMM: u32 = 0x0D01;
+    pub const MAXSS_XMM_XMM: u32 = 0x0D02;
+    pub const MAXSD_XMM_XMM: u32 = 0x0D03;
+    pub const MINSS_XMM_XMM: u32 = 0x0D04;
+    pub const MINSD_XMM_XMM: u32 = 0x0D05;
+
+    // Tail census batch (0x0B00..0x0BFF): XADD, CMPXCHG, SETcc mem, TEST mem, CLFLUSH, MOVBE, CRC32, JMP_FAR
+    pub const XADD_MEM32_R32: u32 = 0x0B00;
+    pub const XADD_MEM64_R64: u32 = 0x0B01;
+    pub const XADD_MEM16_R16: u32 = 0x0B02;
+    pub const XADD_MEM8_R8: u32 = 0x0B03;
+    pub const XADD_R16_R16: u32 = 0x0B04;
+    pub const XADD_R8_R8: u32 = 0x0B05;
+
+    pub const CMPXCHG_MEM16_R16: u32 = 0x0B06;
+    pub const CMPXCHG_R16_R16: u32 = 0x0B07;
+    pub const CMPXCHG_R8_R8: u32 = 0x0B08;
+
+    pub const SETZ_MEM8: u32 = 0x0B10;
+    pub const SETNZ_MEM8: u32 = 0x0B11;
+    pub const SETB_MEM8: u32 = 0x0B12;
+    pub const SETAE_MEM8: u32 = 0x0B13;
+    pub const SETBE_MEM8: u32 = 0x0B14;
+    pub const SETA_MEM8: u32 = 0x0B15;
+    pub const SETL_MEM8: u32 = 0x0B16;
+    pub const SETGE_MEM8: u32 = 0x0B17;
+    pub const SETLE_MEM8: u32 = 0x0B18;
+    pub const SETG_MEM8: u32 = 0x0B19;
+    pub const SETS_MEM8: u32 = 0x0B1A;
+    pub const SETNS_MEM8: u32 = 0x0B1B;
+    pub const SETO_R8: u32 = 0x0B1C;
+    pub const SETO_MEM8: u32 = 0x0B1D;
+    pub const SETNO_R8: u32 = 0x0B1E;
+    pub const SETNO_MEM8: u32 = 0x0B1F;
+    pub const SETP_R8: u32 = 0x0B20;
+    pub const SETP_MEM8: u32 = 0x0B21;
+    pub const SETNP_R8: u32 = 0x0B22;
+    pub const SETNP_MEM8: u32 = 0x0B23;
+
+    pub const TEST_MEM32_R32: u32 = 0x0B24;
+    pub const TEST_MEM64_R64: u32 = 0x0B25;
+    pub const TEST_R32_MEM32: u32 = 0x0B26;
+    pub const TEST_R64_MEM64: u32 = 0x0B27;
+
+    pub const CLFLUSH_MEM: u32 = 0x0B30;
+
+    pub const MOVBE_R16_MEM16: u32 = 0x0B40;
+    pub const MOVBE_R32_MEM32: u32 = 0x0B41;
+    pub const MOVBE_R64_MEM64: u32 = 0x0B42;
+    pub const MOVBE_MEM16_R16: u32 = 0x0B43;
+    pub const MOVBE_MEM32_R32: u32 = 0x0B44;
+    pub const MOVBE_MEM64_R64: u32 = 0x0B45;
+
+    pub const CRC32_R32_MEM32: u32 = 0x0B50;
+    pub const CRC32_R64_MEM64: u32 = 0x0B51;
+    pub const CRC32_R32_R8: u32 = 0x0B52;
+    pub const CRC32_R32_MEM8: u32 = 0x0B53;
+    pub const CRC32_R64_R8: u32 = 0x0B54;
+    pub const CRC32_R64_MEM8: u32 = 0x0B55;
+
+    pub const JMP_FAR_MEM: u32 = 0x0B60;
+
+    // AVX-256 (VEX) integer family (0x0A00..0x0AFF)
+    pub const VPADDB_YMM_YMM_YMM: u32 = 0x0A00;
+    pub const VPADDW_YMM_YMM_YMM: u32 = 0x0A01;
+    pub const VPADDD_YMM_YMM_YMM: u32 = 0x0A02;
+    pub const VPADDQ_YMM_YMM_YMM: u32 = 0x0A03;
+    pub const VPSUBB_YMM_YMM_YMM: u32 = 0x0A04;
+    pub const VPSUBW_YMM_YMM_YMM: u32 = 0x0A05;
+    pub const VPSUBD_YMM_YMM_YMM: u32 = 0x0A06;
+    pub const VPSUBQ_YMM_YMM_YMM: u32 = 0x0A07;
+    pub const VPCMPEQW_YMM_YMM_YMM: u32 = 0x0A08;
+    pub const VPCMPEQD_YMM_YMM_YMM: u32 = 0x0A09;
+    pub const VPCMPEQQ_YMM_YMM_YMM: u32 = 0x0A0A;
+    pub const VPCMPGTB_YMM_YMM_YMM: u32 = 0x0A0B;
+    pub const VPCMPGTW_YMM_YMM_YMM: u32 = 0x0A0C;
+    pub const VPCMPGTD_YMM_YMM_YMM: u32 = 0x0A0D;
+    pub const VPCMPGTQ_YMM_YMM_YMM: u32 = 0x0A0E;
+    pub const VPMULLW_YMM_YMM_YMM: u32 = 0x0A0F;
+    pub const VPMULHW_YMM_YMM_YMM: u32 = 0x0A10;
+    pub const VPMADDWD_YMM_YMM_YMM: u32 = 0x0A11;
+    pub const VPSLLW_YMM_YMM_IMM8: u32 = 0x0A12;
+    pub const VPSLLD_YMM_YMM_IMM8: u32 = 0x0A13;
+    pub const VPSLLQ_YMM_YMM_IMM8: u32 = 0x0A14;
+    pub const VPSRLW_YMM_YMM_IMM8: u32 = 0x0A15;
+    pub const VPSRLD_YMM_YMM_IMM8: u32 = 0x0A16;
+    pub const VPSRLQ_YMM_YMM_IMM8: u32 = 0x0A17;
+    pub const VPSRAW_YMM_YMM_IMM8: u32 = 0x0A18;
+    pub const VPSRAD_YMM_YMM_IMM8: u32 = 0x0A19;
+    pub const VPSLLW_YMM_YMM_XMM: u32 = 0x0A1A;
+    pub const VPSLLD_YMM_YMM_XMM: u32 = 0x0A1B;
+    pub const VPSLLQ_YMM_YMM_XMM: u32 = 0x0A1C;
+    pub const VPSRLW_YMM_YMM_XMM: u32 = 0x0A1D;
+    pub const VPSRLD_YMM_YMM_XMM: u32 = 0x0A1E;
+    pub const VPSRLQ_YMM_YMM_XMM: u32 = 0x0A1F;
+    pub const VPSRAW_YMM_YMM_XMM: u32 = 0x0A20;
+    pub const VPSRAD_YMM_YMM_XMM: u32 = 0x0A21;
+    pub const VPSHUFD_YMM_YMM_IMM8: u32 = 0x0A22;
+    pub const VPSHUFB_YMM_YMM_YMM: u32 = 0x0A23;
+    pub const VPUNPCKLBW_YMM_YMM_YMM: u32 = 0x0A24;
+    pub const VPUNPCKLWD_YMM_YMM_YMM: u32 = 0x0A25;
+    pub const VPUNPCKLDQ_YMM_YMM_YMM: u32 = 0x0A26;
+    pub const VPUNPCKLQDQ_YMM_YMM_YMM: u32 = 0x0A27;
+    pub const VPUNPCKHBW_YMM_YMM_YMM: u32 = 0x0A28;
+    pub const VPUNPCKHWD_YMM_YMM_YMM: u32 = 0x0A29;
+    pub const VPUNPCKHDQ_YMM_YMM_YMM: u32 = 0x0A2A;
+    pub const VPUNPCKHQDQ_YMM_YMM_YMM: u32 = 0x0A2B;
+    pub const VPMINUB_YMM_YMM_YMM: u32 = 0x0A2C;
+    pub const VPMINSB_YMM_YMM_YMM: u32 = 0x0A2D;
+    pub const VPMINUW_YMM_YMM_YMM: u32 = 0x0A2E;
+    pub const VPMINSW_YMM_YMM_YMM: u32 = 0x0A2F;
+    pub const VPMINUD_YMM_YMM_YMM: u32 = 0x0A30;
+    pub const VPMINSD_YMM_YMM_YMM: u32 = 0x0A31;
+    pub const VPMAXUB_YMM_YMM_YMM: u32 = 0x0A32;
+    pub const VPMAXSB_YMM_YMM_YMM: u32 = 0x0A33;
+    pub const VPMAXUW_YMM_YMM_YMM: u32 = 0x0A34;
+    pub const VPMAXSW_YMM_YMM_YMM: u32 = 0x0A35;
+    pub const VPMAXUD_YMM_YMM_YMM: u32 = 0x0A36;
+    pub const VPMAXSD_YMM_YMM_YMM: u32 = 0x0A37;
+    pub const VPBROADCASTW_YMM_XMM: u32 = 0x0A38;
+    pub const VPBROADCASTD_YMM_XMM: u32 = 0x0A39;
+    pub const VPBROADCASTB_YMM_R32: u32 = 0x0A3A;
+    pub const VPBROADCASTW_YMM_R32: u32 = 0x0A3B;
+    pub const VPBROADCASTD_YMM_R32: u32 = 0x0A3C;
+    pub const VPBROADCASTQ_YMM_R64: u32 = 0x0A3D;
 }
 
 /// RFLAGS bit positions used by the corpus.
