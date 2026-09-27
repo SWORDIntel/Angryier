@@ -757,12 +757,9 @@ fn evaluate_primitive<R, M>(
                 IrPrimitive::FAdd => left + right,
                 IrPrimitive::FSub => left - right,
                 IrPrimitive::FMul => left * right,
-                IrPrimitive::FDiv => {
-                    if right == 0.0 {
-                        return Err(ConcreteExecutionError::DivisionByZero);
-                    }
-                    left / right
-                }
+                // IEEE-754: x/0 is +-Inf (NaN for 0/0); Rust's f64 division
+                // already yields the correct bit patterns, so no guard.
+                IrPrimitive::FDiv => left / right,
                 _ => unreachable!(),
             };
             return Ok(write_float(ty, result));
@@ -837,12 +834,8 @@ fn evaluate_primitive<R, M>(
                     IrPrimitive::VecLaneFAdd => lf + rf,
                     IrPrimitive::VecLaneFSub => lf - rf,
                     IrPrimitive::VecLaneFMul => lf * rf,
-                    IrPrimitive::VecLaneFDiv => {
-                        if rf == 0.0 {
-                            return Err(ConcreteExecutionError::DivisionByZero);
-                        }
-                        lf / rf
-                    }
+                    // IEEE-754: x/0 is +-Inf (NaN for 0/0).
+                    IrPrimitive::VecLaneFDiv => lf / rf,
                     _ => unreachable!(),
                 };
                 let lane_result = encode_float_lane(lane_bits as u16, lane_result_f);

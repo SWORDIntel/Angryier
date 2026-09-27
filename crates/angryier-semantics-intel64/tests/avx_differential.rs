@@ -415,12 +415,11 @@ fn avx_family_differential() -> Result<(), BoxError> {
     Ok(())
 }
 
-/// The concrete interpreter currently treats floating division by zero as an
-/// execution error instead of producing the architectural IEEE-754 result.
-/// Keep a native probe in this oracle so the requested boundary case executes
-/// on the host and the limitation cannot silently disappear or change shape.
+/// `vdivps` by a zero divisor must produce the architectural IEEE-754
+/// result (+Inf for 1.0/0.0, -Inf for -1.0/0.0), matching the host CPU
+/// byte-for-byte. The concrete interpreter previously rejected the divide.
 #[test]
-fn avx_divide_by_zero_interpreter_limitation() -> Result<(), BoxError> {
+fn avx_divide_by_zero_matches_hardware() -> Result<(), BoxError> {
     let Some(dir) = temp_dir("vdivps_zero_probe") else {
         eprintln!("SKIP: binutils unavailable");
         return Ok(());
@@ -440,13 +439,15 @@ fn avx_divide_by_zero_interpreter_limitation() -> Result<(), BoxError> {
         return Err(format!("divide-by-zero native probe wrote {} bytes", native.len()).into());
     }
     let code = extract_text(&dir, &binary).ok_or("objcopy failed")?;
-    let error = match run_engine(&code, &Intel64CorpusRegistry::new(SEMANTIC_VERSION)) {
-        Ok(value) => return Err(format!("divide-by-zero unexpectedly executed as {value:02x?}").into()),
-        Err(error) => error,
-    };
-    if !error.to_string().contains("division by zero") {
-        return Err(format!("unexpected divide-by-zero engine error: {error}").into());
+    let engine = run_engine(&code, &Intel64CorpusRegistry::new(SEMANTIC_VERSION))
+        .map_err(|e| format!("engine failed to execute vdivps-by-zero: {e}"))?;
+    if native != engine {
+        return Err(format!("vdivps-by-zero mismatch: native={native:02x?} engine={engine:02x?}").into());
     }
-    eprintln!("AVX divide-by-zero: 1 native case ran; interpreter limitation confirmed");
+    let lane = u32::from_le_bytes(native[..4].try_into()?);
+    if lane != 0x7f80_0000 {
+        return Err(format!("expected +Inf lane 0x7f800000, got {lane:#x}").into());
+    }
+    eprintln!("AVX divide-by-zero: 1 native case matched (+Inf lanes)");
     Ok(())
 }

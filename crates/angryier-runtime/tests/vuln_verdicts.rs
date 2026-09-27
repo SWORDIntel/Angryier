@@ -1,27 +1,41 @@
 //! Verdict validation: run IMPORT-BASED variants of the byovd-harness vuln
-//! fixtures through the kernel pool model and report reachable
-//! alloc/free/double-free events.
+//! fixtures through the kernel pool model and assert the expected pool
+//! verdicts (double-free detected where the source frees the same pointer
+//! twice on one path; balanced elsewhere).
 //!
 //! The stock fixtures link stubs.c (local bump allocator + no-op free) so
-//! their pool calls are NOT imports; build the import variants with:
-//!   x86_64-w64-mingw32-dlltool -d crates/angryier-runtime/tests/fixtures/ntoskrnl.def -l /tmp/libntoskrnl.a
-//!   x86_64-w64-mingw32-gcc -g -O2 -nodefaultlibs -nostartfiles -fno-stack-protector \
-//!       -fno-builtin -shared -Wl,--entry,DriverEntry -o /tmp/fixture_import/<name>_import_O2.sys \
-//!       <harness>/fixtures/src/<name>.c -L/tmp -lntoskrnl
-//! The test skips when the fixtures are absent.
+//! their pool calls are NOT imports; build the import variants in the
+//! byovd-harness fixtures dir with:
+//!   make -C <harness>/ghidra_pipeline/fixtures import
+//! The test skips fixtures that are absent.
+
 #![cfg(feature = "xed")]
 use angryier_runtime::Runtime;
 use angryier_types::{SemanticVersion, TargetProfileId};
 
+/// Fixture name -> expected pool verdict: (min_allocs, min_frees,
+/// expected_double_frees). Expectations are execution-shaped: e.g. the
+/// pointer-reassign vuln is a use-after-free WRITE (both frees target
+/// distinct pointers -> df=0; UAF writes are not pool-tracker-visible),
+/// and the allocsize-safe fixture exits in validation before allocating.
+const EXPECTED: &[(&str, u64, u64, usize)] = &[
+    ("double_free_vuln_import_O2.sys", 1, 2, 1),
+    ("safe_double_free_import_O2.sys", 1, 1, 0),
+    ("pointer_reassign_vuln_import_O2.sys", 2, 2, 0),
+    ("probe_missing_vuln_import_O2.sys", 2, 1, 0),
+    ("allocsize_overflow_vuln_import_O2.sys", 1, 1, 0),
+    ("allocsize_overflow_safe_import_O2.sys", 0, 0, 0),
+    ("nonatomic_refcount_vuln_import_O2.sys", 1, 1, 0),
+    ("pointer_reassign_safe_import_O2.sys", 2, 2, 0),
+    ("probe_missing_safe_import_O2.sys", 2, 2, 0),
+];
+
 #[test]
 fn vuln_fixture_verdicts() {
-    let dir = "/tmp/fixture_import";
-    let fixtures = [
-        "double_free_vuln_import_O2.sys",
-        "allocsize_overflow_vuln_import_O2.sys",
-        "nonatomic_refcount_vuln_import_O2.sys",
-    ];
-    for name in fixtures {
+    let dir = "/home/john/Documents/byovd-harness/ghidra_pipeline/fixtures/bin";
+    let mut ran = 0;
+    let mut failures = 0;
+    for &(name, want_allocs, want_frees, want_df) in EXPECTED {
         let path = format!("{dir}/{name}");
         let Ok(image) = std::fs::read(&path) else {
             eprintln!("SKIP {name}");
@@ -30,20 +44,22 @@ fn vuln_fixture_verdicts() {
         let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
         let Ok(mut process) = runtime.load_pe_driver(&image) else {
             eprintln!("{name}: LOAD FAILED");
+            failures += 1;
             continue;
         };
         let tracker = std::sync::Arc::new(angryier_models::KernelPoolTracker::new());
         if runtime.attach_kernel_pool_model(&mut process, tracker.clone()).is_err() {
             eprintln!("{name}: ATTACH FAILED");
+            failures += 1;
             continue;
         }
         let mut steps = 0;
-        let mut blocked = None;
+        let mut blocked = false;
         for _ in 0..5000 {
             match runtime.step(&mut process) {
                 Ok(_) => steps += 1,
-                Err(e) => {
-                    blocked = Some(format!("{e:?}"));
+                Err(_) => {
+                    blocked = true;
                     break;
                 }
             }
@@ -51,23 +67,34 @@ fn vuln_fixture_verdicts() {
                 break;
             }
         }
+        ran += 1;
         let report = tracker.snapshot();
-        let status = if blocked.is_some() {
-            format!("BLOCKED({})", blocked.as_deref().unwrap_or(""))
+        let status = if blocked {
+            "BLOCKED"
         } else if process.terminated {
-            "TERMINATED".to_string()
+            "TERMINATED"
         } else {
-            "BUDGET".to_string()
+            "BUDGET"
         };
+        let ok = report.allocs >= want_allocs && report.frees >= want_frees && report.double_frees.len() == want_df;
+        if !ok {
+            failures += 1;
+        }
         eprintln!(
-            "{name}: steps={steps} {status} simprocs={} pool: a={} f={} df={}",
+            "{name}: steps={steps} {status} simprocs={} pool: a={} f={} df={} (expected a>={} f>={} df={}) {}",
             process.simproc_dispatches,
             report.allocs,
             report.frees,
-            report.double_frees.len()
+            report.double_frees.len(),
+            want_allocs,
+            want_frees,
+            want_df,
+            if ok { "OK" } else { "MISMATCH" }
         );
         for event in &report.double_frees {
             eprintln!("  DOUBLE-FREE ptr={:#x} caller={:#x}", event.pointer, event.caller);
         }
     }
+    assert!(ran > 0 || failures == 0, "no fixtures ran");
+    assert_eq!(failures, 0, "{failures} fixture verdict(s) mismatched");
 }
