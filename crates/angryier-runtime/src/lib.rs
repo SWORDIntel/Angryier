@@ -128,7 +128,12 @@ const PE_DRIVER_DEFAULT_COOKIE: u64 = 0x0000_2B99_2DDF_A232;
 /// DEFAULT value; without the same load-time patch, drivers whose init
 /// fastfails on `cookie == 0 || cookie == DEFAULT` (`int 29h`) terminate
 /// after ~15 steps. Non-zero, non-DEFAULT, and constant for replay.
-const PE_DRIVER_SECURITY_COOKIE: u64 = 0x4A97_B3D5_E1F2_603C;
+///
+/// The top 16 bits are ZERO because some driver builds' `__security_check_cookie`
+/// is the old-CRT shape that succeeds only when `(cookie >> 48) == 0`
+/// (`rol rcx,16; test cx,0xFFFF; jnz fastfail`) — real Windows init cookies
+/// are 48-bit random values. TbtBusDrv's epilogue proved the requirement.
+const PE_DRIVER_SECURITY_COOKIE: u64 = 0x0000_B3D5_E1F2_603C;
 /// GS-relative cookie slot offset (`gs:[0x30]`): the x64 kernel-mode frame
 /// check reads and compares this slot.
 const PE_DRIVER_GS_COOKIE_OFF: u64 = 0x30;

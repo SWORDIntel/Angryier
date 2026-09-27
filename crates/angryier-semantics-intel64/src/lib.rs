@@ -851,6 +851,12 @@ pub mod forms {
     // movhlps/movlhps register lane moves (SSE)
     pub const MOVHLPS_XMM_XMM: u32 = 0x0217;
     pub const MOVLHPS_XMM_XMM: u32 = 0x0218;
+    // xorps/xorpd packed bitwise XOR (SSE/SSE2; lane-wise byte XOR is the
+    // bitwise XOR regardless of the interpreted element type)
+    pub const XORPS_XMM_XMM: u32 = 0x02FC;
+    pub const XORPS_XMM_MEM128: u32 = 0x02FD;
+    pub const XORPD_XMM_XMM: u32 = 0x02FE;
+    pub const XORPD_XMM_MEM128: u32 = 0x02FF;
 
     // YMM (VEX.256) moves and lane-wise ops
     pub const VMOVDQA_YMM_MEM: u32 = 0x0219;
@@ -945,6 +951,28 @@ pub mod forms {
     /// Deterministic for replay: returns a monotonically increasing counter
     /// (each read increments by 1), NOT the real CPU timestamp.
     pub const RDTSC: u32 = 0x01DD;
+
+    /// RDMSR — Read Model-Specific Register (ECX selector → EDX:EAX).
+    /// The model returns zero for every MSR (debt-recorded: no MSR state is
+    /// tracked), deterministic for replay.
+    pub const RDMSR: u32 = 0x01DF;
+
+    /// WRMSR — Write Model-Specific Register (EDX:EAX → ECX selector).
+    /// No-op in the model (debt-recorded: writes are not observable state).
+    pub const WRMSR: u32 = 0x01E0;
+
+    /// LFENCE/SFENCE/MFENCE — memory-ordering fences. No-ops on a
+    /// single-vCPU emulator (debt-recorded: no memory-ordering semantics).
+    pub const FENCE: u32 = 0x01E1;
+
+    // Port I/O (x86 IN/OUT). Reads return zero (device absent) and writes
+    // are dropped (debt-recorded: no device model).
+    pub const IN_AL_DX: u32 = 0x0300;
+    pub const IN_AX_DX: u32 = 0x0301;
+    pub const IN_EAX_DX: u32 = 0x0302;
+    pub const OUT_DX_AL: u32 = 0x0303;
+    pub const OUT_DX_AX: u32 = 0x0304;
+    pub const OUT_DX_EAX: u32 = 0x0305;
 
     /// INT imm8 — Software interrupt. On Windows, `int 0x29` is `__fastfail`
     /// (security check failure → immediate termination). Semantic reads the

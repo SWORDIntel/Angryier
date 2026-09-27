@@ -208,6 +208,10 @@ impl Intel64CorpusRegistry {
             Arc::new(PandXmmXmm),
             Arc::new(PorXmmXmm),
             Arc::new(PxorXmmXmm),
+            Arc::new(XorpsXmmXmm),
+            Arc::new(XorpsXmmMem128),
+            Arc::new(XorpdXmmXmm),
+            Arc::new(XorpdXmmMem128),
             Arc::new(PsllwXmmImm8),
             Arc::new(PsrlwXmmImm8),
             Arc::new(PsrawXmmImm8),
@@ -315,16 +319,16 @@ impl Intel64CorpusRegistry {
             Arc::new(PinsrqXmmR64Imm8),
             Arc::new(InsertpsXmmXmmImm8),
             Arc::new(ExtractpsR32XmmImm8),
-            Arc::new(ShlR32Imm8),
-            Arc::new(ShrR32Imm8),
-            Arc::new(SarR32Imm8),
-            Arc::new(ShlR32Cl),
-            Arc::new(ShrR32Cl),
-            Arc::new(SarR32Cl),
-            Arc::new(RolR32Imm8),
-            Arc::new(RorR32Imm8),
-            Arc::new(RolR32Cl),
-            Arc::new(RorR32Cl),
+            Arc::new(ShlR32Imm8Masked),
+            Arc::new(ShrR32Imm8Masked),
+            Arc::new(SarR32Imm8Masked),
+            Arc::new(ShlR32ClMasked),
+            Arc::new(ShrR32ClMasked),
+            Arc::new(SarR32ClMasked),
+            Arc::new(RolR32Imm8Masked),
+            Arc::new(RorR32Imm8Masked),
+            Arc::new(RolR32ClMasked),
+            Arc::new(RorR32ClMasked),
             Arc::new(MovR32Mem32),
             Arc::new(MovMem32R32),
             Arc::new(AddR32Mem32),
@@ -682,6 +686,15 @@ impl Intel64CorpusRegistry {
             Arc::new(DecMem32),
             Arc::new(DecMem64),
             Arc::new(Rdtsc),
+            Arc::new(Rdmsr),
+            Arc::new(Wrmsr),
+            Arc::new(Fence),
+            Arc::new(InAlDx),
+            Arc::new(InAxDx),
+            Arc::new(InEaxDx),
+            Arc::new(OutDxAl),
+            Arc::new(OutDxAx),
+            Arc::new(OutDxEax),
             Arc::new(IntImm8),
         ];
 
@@ -773,7 +786,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 658] = [
+const ALL_FORMS: [u32; 671] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -959,6 +972,10 @@ const ALL_FORMS: [u32; 658] = [
     crate::forms::PAND_XMM_XMM,
     crate::forms::POR_XMM_XMM,
     crate::forms::PXOR_XMM_XMM,
+    crate::forms::XORPS_XMM_XMM,
+    crate::forms::XORPS_XMM_MEM128,
+    crate::forms::XORPD_XMM_XMM,
+    crate::forms::XORPD_XMM_MEM128,
     crate::forms::PSLLW_XMM_IMM8,
     crate::forms::PSRLW_XMM_IMM8,
     crate::forms::PSRAW_XMM_IMM8,
@@ -1432,6 +1449,15 @@ const ALL_FORMS: [u32; 658] = [
     crate::forms::DEC_MEM32,
     crate::forms::DEC_MEM64,
     crate::forms::RDTSC,
+    crate::forms::RDMSR,
+    crate::forms::WRMSR,
+    crate::forms::FENCE,
+    crate::forms::IN_AL_DX,
+    crate::forms::IN_AX_DX,
+    crate::forms::IN_EAX_DX,
+    crate::forms::OUT_DX_AL,
+    crate::forms::OUT_DX_AX,
+    crate::forms::OUT_DX_EAX,
     crate::forms::INT_IMM8,
 ];
 
@@ -1458,6 +1484,19 @@ mod tests {
             vector_representation: angryier_semantics::VectorRepresentation::HybridLazy,
             tile_representation: angryier_semantics::TileRepresentation::LazyChunked,
             floating_point_policy: angryier_semantics::FloatingPointPolicy::SmtFpPreferred,
+        }
+    }
+
+    #[test]
+    fn form_ids_are_unique() {
+        // The form index is keyed by form id, so a duplicate silently routes
+        // a decoded form to the wrong provider (the IN_AL_DX / MOVDQU_MEM_XMM
+        // 0x01E2 collision class). The provider list is positional, so the
+        // check must cover both ALL_FORMS and the providers' matches.
+        let mut seen = std::collections::BTreeMap::new();
+        for (index, form) in ALL_FORMS.iter().enumerate() {
+            let previous = seen.insert(*form, index);
+            assert!(previous.is_none(), "duplicate form id {form:#x} at index {index}");
         }
     }
 

@@ -3208,6 +3208,53 @@ impl SemanticProvider for PxorXmmXmm {
 }
 
 // ---------------------------------------------------------------------------
+// xorps/xorpd xmm, xmm/m128 — packed bitwise XOR. Lane-wise byte XOR is the
+// bitwise XOR regardless of the interpreted element type (float vs double
+// vs integer), so the PXOR shape carries the whole family.
+// ---------------------------------------------------------------------------
+
+macro_rules! xor_packed {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, I8X16)?;
+                let src = out.read_operand(1, I8X16)?;
+                let result = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)),
+                    I8X16,
+                    &[dst, src],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+xor_packed!(XorpsXmmXmm, forms::XORPS_XMM_XMM, 0x2EC);
+xor_packed!(XorpsXmmMem128, forms::XORPS_XMM_MEM128, 0x2ED);
+xor_packed!(XorpdXmmXmm, forms::XORPD_XMM_XMM, 0x2F0);
+xor_packed!(XorpdXmmMem128, forms::XORPD_XMM_MEM128, 0x2F1);
+
+// ---------------------------------------------------------------------------
 // Phase 4b: SSE2 packed shift providers (imm8)
 // ---------------------------------------------------------------------------
 
@@ -6757,8 +6804,18 @@ macro_rules! div_form {
                 let zero = const_u64(out, 0)?;
                 let quot_n = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[quot, zero])?;
                 let rem_n = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[rem, zero])?;
-                out.write_register(RegisterId(register_id::GPR_BASE), quot_n)?;
-                out.write_register(RegisterId(register_id::GPR_BASE + 2), rem_n)?;
+                // 32-bit results write back zero-extended (x86 semantics);
+                // the interpreter rejects a 4-byte write to an 8-byte GPR.
+                let (quot_w, rem_w) = match $ty {
+                    U32 => {
+                        let q = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[quot_n])?;
+                        let r = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[rem_n])?;
+                        (q, r)
+                    }
+                    _ => (quot_n, rem_n),
+                };
+                out.write_register(RegisterId(register_id::GPR_BASE), quot_w)?;
+                out.write_register(RegisterId(register_id::GPR_BASE + 2), rem_w)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }
@@ -6809,8 +6866,18 @@ macro_rules! idiv_form {
                 let zero = const_u64(out, 0)?;
                 let quot_n = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[quot, zero])?;
                 let rem_n = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[rem, zero])?;
-                out.write_register(RegisterId(register_id::GPR_BASE), quot_n)?;
-                out.write_register(RegisterId(register_id::GPR_BASE + 2), rem_n)?;
+                // 32-bit results write back zero-extended (x86 semantics);
+                // the interpreter rejects a 4-byte write to an 8-byte GPR.
+                let (quot_w, rem_w) = match $ty {
+                    U32 => {
+                        let q = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[quot_n])?;
+                        let r = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[rem_n])?;
+                        (q, r)
+                    }
+                    _ => (quot_n, rem_n),
+                };
+                out.write_register(RegisterId(register_id::GPR_BASE), quot_w)?;
+                out.write_register(RegisterId(register_id::GPR_BASE + 2), rem_w)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }

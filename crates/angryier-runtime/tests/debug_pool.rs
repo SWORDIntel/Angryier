@@ -32,7 +32,10 @@ fn debug_pool_tracker() {
     }
 
     // Run and check
-    let Ok(summary) = runtime.run(&mut process, 1000) else { eprintln!("RUN FAILED"); return; };
+    let Ok(summary) = runtime.run(&mut process, 1000) else {
+        eprintln!("RUN FAILED");
+        return;
+    };
     eprintln!(
         "simproc_dispatches={} terminated={}",
         summary.simproc_dispatches, process.terminated
@@ -79,7 +82,10 @@ fn gvcidrv_dispatch_detail() {
     }
 
     // Run and check
-    let Ok(summary) = runtime.run(&mut process, 1000) else { eprintln!("RUN FAILED"); return; };
+    let Ok(summary) = runtime.run(&mut process, 1000) else {
+        eprintln!("RUN FAILED");
+        return;
+    };
     eprintln!(
         "dispatches={} terminated={}",
         summary.simproc_dispatches, process.terminated

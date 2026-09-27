@@ -247,9 +247,10 @@ fn rip_relative_ir_forensics() {
         }
     }
     // Execute the block concretely and check rax.
-    let Ok((state, _outcome)) = runtime
-        .interpreter
-        .execute_block(&process.state, &block, angryier_execution::ExecutionMode::Concrete)
+    let Ok((state, _outcome)) =
+        runtime
+            .interpreter
+            .execute_block(&process.state, &block, angryier_execution::ExecutionMode::Concrete)
     else {
         eprintln!("execute failed");
         return;
@@ -286,7 +287,12 @@ fn scan_unmapped_forms() {
                 );
                 sweep_entry(&runtime, &p);
                 let mut proc = p;
-                trace_entry(&runtime, &mut proc, 200);
+                // The campaign path attaches the kernel pool model (imports
+                // then dispatch SimProcedures instead of returning leftover
+                // RAX through bare `ret` stubs); the trace must match it.
+                let tracker = std::sync::Arc::new(angryier_models::KernelPoolTracker::new());
+                let _ = runtime.attach_kernel_pool_model(&mut proc, tracker.clone());
+                trace_entry(&runtime, &mut proc, 2000);
             }
             Err(e) => eprintln!("  load failed: {:?}", e),
         }
