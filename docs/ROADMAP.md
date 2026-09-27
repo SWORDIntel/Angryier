@@ -832,7 +832,7 @@ GUI, other ISAs, CUDA/OpenCL planning.
   "angr, but Rust and multicore." **Open — the thesis gate.** Reality
   check 2026-09-24: concolic measured at ~0.9× full-symbolic — until the
   fast path is materially faster than full symbolic, the dual-mode speed
-  thesis is unproven.
+  thesis is unproven. **2026-09-27 update:** concolic-vs-symbolic on a real driver (GVCIDrv64, release) measured at ~2.6-2.9x (dual_mode_driver_bench.rs), with concolic at 82-88% of concrete — progress toward the 5-10x target, symbolic evaluator still the bottleneck. **Census tail closed (0.08% unmapped, 1063 forms):** 8-bit shifts/rotates (CL + memory imm8), ADC/SBB r8/m8, BT/BTS/BTR/BTC memory-imm8, TEST mem32-r32, ADD mem32-r32, MOVSXD r32, FWAIT/CLTS. **Use-after-free WRITE detection:** the pool tracker records writes into freed pool pages; the pointer-reassign fixture's stale-pointer write is detected dynamically (uaf=1) — the verdict suite covers double-free AND UAF classes with zero false positives.
 
 ---
 
