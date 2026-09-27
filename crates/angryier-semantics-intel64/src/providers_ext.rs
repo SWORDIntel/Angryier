@@ -7659,6 +7659,10 @@ const I8X32: SemanticType = SemanticType::Vector {
     lanes: 32,
     lane: ScalarType::BitVec(8),
 };
+const F32X8: SemanticType = SemanticType::Vector {
+    lanes: 8,
+    lane: ScalarType::Float(FloatFormat::F32),
+};
 const I64X4: SemanticType = SemanticType::Vector {
     lanes: 4,
     lane: ScalarType::BitVec(64),
@@ -7775,6 +7779,298 @@ logic_ymm!(VpxorYmmYmmYmm, forms::VPXOR_YMM_YMM_YMM, PrimitiveOp::Xor, 0x2BA);
 logic_ymm!(VporYmmYmmYmm, forms::VPOR_YMM_YMM_YMM, PrimitiveOp::Or, 0x2BB);
 logic_ymm!(VpandYmmYmmYmm, forms::VPAND_YMM_YMM_YMM, PrimitiveOp::And, 0x2BC);
 logic_ymm!(VxorpsYmmYmmYmm, forms::VXORPS_YMM_YMM_YMM, PrimitiveOp::Xor, 0x2BD);
+
+/// VEX.256 packed single-precision arithmetic, with a register or memory
+/// third operand represented uniformly by the decoder.
+macro_rules! packed_float_ymm {
+    ($name:ident, $form:expr, $op:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let left = out.read_operand(1, F32X8)?;
+                let right = out.read_operand(2, F32X8)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let left_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32X4, &[left, zero])?;
+                let left_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    F32X4,
+                    &[left, high_offset],
+                )?;
+                let right_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32X4, &[right, zero])?;
+                let right_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    F32X4,
+                    &[right, high_offset],
+                )?;
+                let low = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat($op)),
+                    F32X4,
+                    &[left_low, right_low],
+                )?;
+                let high = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat($op)),
+                    F32X4,
+                    &[left_high, right_high],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), F32X8, &[low, high])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_float_ymm!(VaddpsYmmYmmYmm, forms::VADDPS_YMM_YMM_YMM, FloatingOp::Add, 0x600);
+packed_float_ymm!(VaddpsYmmYmmMem, forms::VADDPS_YMM_YMM_MEM, FloatingOp::Add, 0x601);
+packed_float_ymm!(VsubpsYmmYmmYmm, forms::VSUBPS_YMM_YMM_YMM, FloatingOp::Sub, 0x602);
+packed_float_ymm!(VsubpsYmmYmmMem, forms::VSUBPS_YMM_YMM_MEM, FloatingOp::Sub, 0x603);
+packed_float_ymm!(VmulpsYmmYmmYmm, forms::VMULPS_YMM_YMM_YMM, FloatingOp::Mul, 0x604);
+packed_float_ymm!(VmulpsYmmYmmMem, forms::VMULPS_YMM_YMM_MEM, FloatingOp::Mul, 0x605);
+packed_float_ymm!(VdivpsYmmYmmYmm, forms::VDIVPS_YMM_YMM_YMM, FloatingOp::Div, 0x606);
+packed_float_ymm!(VdivpsYmmYmmMem, forms::VDIVPS_YMM_YMM_MEM, FloatingOp::Div, 0x607);
+
+macro_rules! scalar_float_xmm {
+    ($name:ident, $form:expr, $op:expr, $memory:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, F32X4)?;
+                let zero = const_u64(out, 0)?;
+                let thirty_two = const_u64(out, 32)?;
+                let left = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32, &[src1, zero])?;
+                let right = if $memory {
+                    out.read_operand(2, F32)?
+                } else {
+                    let src2 = out.read_operand(2, F32X4)?;
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32, &[src2, zero])?
+                };
+                let low = out.emit(SemanticOp::Float($op), F32, &[left, right])?;
+                let upper = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U96,
+                    &[src1, thirty_two],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), F32X4, &[low, upper])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+scalar_float_xmm!(
+    VaddssXmmXmmXmm,
+    forms::VADDSS_XMM_XMM_XMM,
+    FloatingOp::Add,
+    false,
+    0x608
+);
+scalar_float_xmm!(
+    VaddssXmmXmmMem32,
+    forms::VADDSS_XMM_XMM_MEM32,
+    FloatingOp::Add,
+    true,
+    0x609
+);
+scalar_float_xmm!(
+    VsubssXmmXmmXmm,
+    forms::VSUBSS_XMM_XMM_XMM,
+    FloatingOp::Sub,
+    false,
+    0x60A
+);
+scalar_float_xmm!(
+    VsubssXmmXmmMem32,
+    forms::VSUBSS_XMM_XMM_MEM32,
+    FloatingOp::Sub,
+    true,
+    0x60B
+);
+scalar_float_xmm!(
+    VmulssXmmXmmXmm,
+    forms::VMULSS_XMM_XMM_XMM,
+    FloatingOp::Mul,
+    false,
+    0x60C
+);
+scalar_float_xmm!(
+    VmulssXmmXmmMem32,
+    forms::VMULSS_XMM_XMM_MEM32,
+    FloatingOp::Mul,
+    true,
+    0x60D
+);
+scalar_float_xmm!(
+    VdivssXmmXmmXmm,
+    forms::VDIVSS_XMM_XMM_XMM,
+    FloatingOp::Div,
+    false,
+    0x60E
+);
+scalar_float_xmm!(
+    VdivssXmmXmmMem32,
+    forms::VDIVSS_XMM_XMM_MEM32,
+    FloatingOp::Div,
+    true,
+    0x60F
+);
+
+macro_rules! logic_ps_ymm {
+    ($name:ident, $form:expr, $op:ident, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let left = out.read_operand(1, U256)?;
+                let right = out.read_operand(2, U256)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let left_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[left, zero])?;
+                let left_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[left, high_offset],
+                )?;
+                let right_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[right, zero])?;
+                let right_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[right, high_offset],
+                )?;
+                let low = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::$op),
+                    U128,
+                    &[left_low, right_low],
+                )?;
+                let high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::$op),
+                    U128,
+                    &[left_high, right_high],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[low, high])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+logic_ps_ymm!(VandpsYmmYmmYmm, forms::VANDPS_YMM_YMM_YMM, And, 0x610);
+logic_ps_ymm!(VandpsYmmYmmMem, forms::VANDPS_YMM_YMM_MEM, And, 0x611);
+logic_ps_ymm!(VorpsYmmYmmYmm, forms::VORPS_YMM_YMM_YMM, Or, 0x614);
+logic_ps_ymm!(VorpsYmmYmmMem, forms::VORPS_YMM_YMM_MEM, Or, 0x615);
+
+macro_rules! andn_ps_ymm {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let left = out.read_operand(1, U256)?;
+                let right = out.read_operand(2, U256)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let left_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[left, zero])?;
+                let left_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[left, high_offset],
+                )?;
+                let right_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[right, zero])?;
+                let right_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[right, high_offset],
+                )?;
+                let inverted_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U128, &[left_low])?;
+                let inverted_high = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U128, &[left_high])?;
+                let low = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::And),
+                    U128,
+                    &[inverted_low, right_low],
+                )?;
+                let high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::And),
+                    U128,
+                    &[inverted_high, right_high],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[low, high])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+andn_ps_ymm!(VandnpsYmmYmmYmm, forms::VANDNPS_YMM_YMM_YMM, 0x612);
+andn_ps_ymm!(VandnpsYmmYmmMem, forms::VANDNPS_YMM_YMM_MEM, 0x613);
 
 /// `vpcmpeqb ymm, ymm, ymm` — per-byte equality mask (0xFF where equal).
 #[derive(Clone, Copy, Debug)]

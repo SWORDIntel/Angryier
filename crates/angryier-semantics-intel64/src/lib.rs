@@ -928,6 +928,30 @@ pub mod forms {
     pub const VMOVQ_XMM_MEM64: u32 = 0x0255;
     pub const VMOVQ_MEM64_XMM: u32 = 0x0256;
 
+    // AVX packed-single arithmetic, scalar-single arithmetic, and packed logic.
+    pub const VADDPS_YMM_YMM_YMM: u32 = 0x0400;
+    pub const VADDPS_YMM_YMM_MEM: u32 = 0x0401;
+    pub const VSUBPS_YMM_YMM_YMM: u32 = 0x0402;
+    pub const VSUBPS_YMM_YMM_MEM: u32 = 0x0403;
+    pub const VMULPS_YMM_YMM_YMM: u32 = 0x0404;
+    pub const VMULPS_YMM_YMM_MEM: u32 = 0x0405;
+    pub const VDIVPS_YMM_YMM_YMM: u32 = 0x0406;
+    pub const VDIVPS_YMM_YMM_MEM: u32 = 0x0407;
+    pub const VADDSS_XMM_XMM_XMM: u32 = 0x0408;
+    pub const VADDSS_XMM_XMM_MEM32: u32 = 0x0409;
+    pub const VSUBSS_XMM_XMM_XMM: u32 = 0x040A;
+    pub const VSUBSS_XMM_XMM_MEM32: u32 = 0x040B;
+    pub const VMULSS_XMM_XMM_XMM: u32 = 0x040C;
+    pub const VMULSS_XMM_XMM_MEM32: u32 = 0x040D;
+    pub const VDIVSS_XMM_XMM_XMM: u32 = 0x040E;
+    pub const VDIVSS_XMM_XMM_MEM32: u32 = 0x040F;
+    pub const VANDPS_YMM_YMM_YMM: u32 = 0x0410;
+    pub const VANDPS_YMM_YMM_MEM: u32 = 0x0411;
+    pub const VANDNPS_YMM_YMM_YMM: u32 = 0x0412;
+    pub const VANDNPS_YMM_YMM_MEM: u32 = 0x0413;
+    pub const VORPS_YMM_YMM_YMM: u32 = 0x0414;
+    pub const VORPS_YMM_YMM_MEM: u32 = 0x0415;
+
     // push/pop memory operand
     pub const PUSH_MEM64: u32 = 0x0257;
     pub const PUSH_MEM16: u32 = 0x0258;

@@ -1,0 +1,12 @@
+LIBRARY ntoskrnl.exe
+EXPORTS
+    ExAllocatePool
+    ExAllocatePoolWithTag
+    ExFreePool
+    ExFreePoolWithTag
+    RtlCopyMemory
+    RtlZeroMemory
+    memset
+    memcpy
+    KeInitializeEvent
+    IoCreateDevice

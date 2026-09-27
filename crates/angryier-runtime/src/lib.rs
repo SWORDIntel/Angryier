@@ -544,11 +544,17 @@ impl<D: Decoder> Runtime<D> {
         let resolve: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelResolveRoutineProcedure);
         let init_unicode: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelInitUnicodeStringProcedure);
         let create_thread: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelCreateSystemThreadProcedure);
+        let build_irp: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelBuildIrpProcedure {
+            tracker: tracker.clone(),
+        });
+        let get_version: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelGetVersionProcedure);
         const CREATE_DEVICE_NAMES: [&str; 1] = ["IoCreateDevice"];
         const ATTACH_DEVICE_NAMES: [&str; 1] = ["IoAttachDevice"];
         const RESOLVE_NAMES: [&str; 1] = ["MmGetSystemRoutineAddress"];
         const INIT_UNICODE_NAMES: [&str; 1] = ["RtlInitUnicodeString"];
         const CREATE_THREAD_NAMES: [&str; 1] = ["PsCreateSystemThread"];
+        const BUILD_IRP_NAMES: [&str; 1] = ["IoBuildDeviceIoControlRequest"];
+        const GET_VERSION_NAMES: [&str; 1] = ["RtlGetVersion"];
         let stubs: Vec<(Address, String, String)> = process
             .pe_imports()
             .map(|(address, dll, export)| (*address, dll.to_string(), export.to_string()))
@@ -573,6 +579,10 @@ impl<D: Decoder> Runtime<D> {
                 process.simproc_instances.insert(address, init_unicode.clone());
             } else if CREATE_THREAD_NAMES.contains(&export.as_str()) {
                 process.simproc_instances.insert(address, create_thread.clone());
+            } else if BUILD_IRP_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, build_irp.clone());
+            } else if GET_VERSION_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, get_version.clone());
             } else {
                 // Deterministic default: STATUS_SUCCESS instead of whatever
                 // garbage RAX carries into a naked `ret` stub. Debt-recorded
