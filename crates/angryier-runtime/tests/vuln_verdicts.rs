@@ -14,20 +14,20 @@ use angryier_runtime::Runtime;
 use angryier_types::{SemanticVersion, TargetProfileId};
 
 /// Fixture name -> expected pool verdict: (min_allocs, min_frees,
-/// expected_double_frees). Expectations are execution-shaped: e.g. the
-/// pointer-reassign vuln is a use-after-free WRITE (both frees target
-/// distinct pointers -> df=0; UAF writes are not pool-tracker-visible),
-/// and the allocsize-safe fixture exits in validation before allocating.
-const EXPECTED: &[(&str, u64, u64, usize)] = &[
-    ("double_free_vuln_import_O2.sys", 1, 2, 1),
-    ("safe_double_free_import_O2.sys", 1, 1, 0),
-    ("pointer_reassign_vuln_import_O2.sys", 2, 2, 0),
-    ("probe_missing_vuln_import_O2.sys", 2, 1, 0),
-    ("allocsize_overflow_vuln_import_O2.sys", 1, 1, 0),
-    ("allocsize_overflow_safe_import_O2.sys", 0, 0, 0),
-    ("nonatomic_refcount_vuln_import_O2.sys", 1, 1, 0),
-    ("pointer_reassign_safe_import_O2.sys", 2, 2, 0),
-    ("probe_missing_safe_import_O2.sys", 2, 2, 0),
+/// expected_double_frees, min_uaf_writes). The pointer-reassign vuln is a
+/// use-after-free WRITE (both frees target distinct pointers -> df=0, but
+/// the write through the stale pointer must be detected as UAF); the
+/// allocsize-safe fixture exits in validation before allocating.
+const EXPECTED: &[(&str, u64, u64, usize, u64)] = &[
+    ("double_free_vuln_import_O2.sys", 1, 2, 1, 0),
+    ("safe_double_free_import_O2.sys", 1, 1, 0, 0),
+    ("pointer_reassign_vuln_import_O2.sys", 2, 2, 0, 1),
+    ("probe_missing_vuln_import_O2.sys", 2, 1, 0, 0),
+    ("allocsize_overflow_vuln_import_O2.sys", 1, 1, 0, 0),
+    ("allocsize_overflow_safe_import_O2.sys", 0, 0, 0, 0),
+    ("nonatomic_refcount_vuln_import_O2.sys", 1, 1, 0, 0),
+    ("pointer_reassign_safe_import_O2.sys", 2, 2, 0, 0),
+    ("probe_missing_safe_import_O2.sys", 2, 2, 0, 0),
 ];
 
 #[test]
@@ -35,7 +35,7 @@ fn vuln_fixture_verdicts() {
     let dir = "/home/john/Documents/byovd-harness/ghidra_pipeline/fixtures/bin";
     let mut ran = 0;
     let mut failures = 0;
-    for &(name, want_allocs, want_frees, want_df) in EXPECTED {
+    for &(name, want_allocs, want_frees, want_df, want_uaf) in EXPECTED {
         let path = format!("{dir}/{name}");
         let Ok(image) = std::fs::read(&path) else {
             eprintln!("SKIP {name}");
@@ -76,23 +76,31 @@ fn vuln_fixture_verdicts() {
         } else {
             "BUDGET"
         };
-        let ok = report.allocs >= want_allocs && report.frees >= want_frees && report.double_frees.len() == want_df;
+        let ok = report.allocs >= want_allocs
+            && report.frees >= want_frees
+            && report.double_frees.len() == want_df
+            && report.uaf_writes.len() as u64 >= want_uaf;
         if !ok {
             failures += 1;
         }
         eprintln!(
-            "{name}: steps={steps} {status} simprocs={} pool: a={} f={} df={} (expected a>={} f>={} df={}) {}",
+            "{name}: steps={steps} {status} simprocs={} pool: a={} f={} df={} uaf={} (expected a>={} f>={} df={} uaf>={}) {}",
             process.simproc_dispatches,
             report.allocs,
             report.frees,
             report.double_frees.len(),
+            report.uaf_writes.len(),
             want_allocs,
             want_frees,
             want_df,
+            want_uaf,
             if ok { "OK" } else { "MISMATCH" }
         );
         for event in &report.double_frees {
             eprintln!("  DOUBLE-FREE ptr={:#x} caller={:#x}", event.pointer, event.caller);
+        }
+        for event in &report.uaf_writes {
+            eprintln!("  UAF-WRITE addr={:#x} caller={:#x}", event.pointer, event.caller);
         }
     }
     assert!(ran > 0 || failures == 0, "no fixtures ran");

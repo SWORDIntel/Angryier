@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use angryier_arch::{DecodedInstruction, Decoder, Operand, OperandKind};
+use angryier_arch::{AccessKind, DecodedInstruction, Decoder, MemoryBase, MemoryIndex, Operand, OperandKind};
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 use angryier_execution::{
     ConcolicEvaluator, ConcolicImage, ConcolicSource, ConcreteInterpreter, ExecutionEngine, ExecutionMode,
@@ -2248,6 +2248,30 @@ impl<D: Decoder> Runtime<D> {
             _ => {}
         }
 
+        // Use-after-free write detection: when the kernel pool model is
+        // attached, a memory STORE whose effective address falls inside a
+        // freed pool page is recorded as a UAF witness (the runtime can
+        // compute concrete addresses for register-based operands).
+        if process.kernel_pool.is_some() {
+            for operand in &decoded.operands {
+                if operand.access != AccessKind::Write {
+                    continue;
+                }
+                let OperandKind::Memory(mem) = &operand.kind else {
+                    continue;
+                };
+                let Some(address) = self.memory_operand_address(process, pc, mem) else {
+                    continue;
+                };
+                let Some(tracker) = &process.kernel_pool else {
+                    continue;
+                };
+                if tracker.is_freed_page(address) {
+                    tracker.record_uaf(address, pc);
+                }
+            }
+        }
+
         // String instructions encode an internal loop, so they run directly
         // against the process state rather than through straight-line corpus
         // semantics.
@@ -2926,6 +2950,31 @@ impl<D: Decoder> Runtime<D> {
             OperandKind::Immediate(imm) => Some((imm.value & 0xFF) as u16),
             _ => None,
         }
+    }
+
+    /// Computes the effective address of a memory operand whose base and
+    /// index are concrete registers (None for VSIB/unknown bases).
+    fn memory_operand_address(
+        &self,
+        process: &Process,
+        pc: Address,
+        mem: &angryier_arch::MemoryOperand,
+    ) -> Option<u64> {
+        let base = match &mem.base {
+            Some(MemoryBase::Register(view)) => process.read_register(view.parent.0).ok()?,
+            Some(MemoryBase::InstructionPointer { .. }) => pc,
+            None => 0,
+        };
+        let index = match &mem.index {
+            Some(MemoryIndex::Register(view)) => {
+                let value = process.read_register(view.parent.0).ok()?;
+                value.wrapping_mul(u64::from(mem.scale))
+            }
+            Some(MemoryIndex::Vsib { .. }) => return None,
+            None => 0,
+        };
+        let displacement = mem.displacement as u64;
+        Some(base.wrapping_add(index).wrapping_add(displacement))
     }
 
     /// `OUT port, r8/16/32`: writes to port 0xCF8 latch the PCI

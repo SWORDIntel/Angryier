@@ -703,6 +703,8 @@ pub struct KernelPoolReport {
     pub frees: u64,
     /// frees of an already-freed pointer, chronological.
     pub double_frees: Vec<PoolEvent>,
+    /// writes into a freed pool page (use-after-free witnesses).
+    pub uaf_writes: Vec<PoolEvent>,
 }
 
 /// Shared state behind the kernel allocator/free SimProcedures. The runtime
@@ -721,6 +723,7 @@ struct PoolState {
     frees: u64,
     freed: HashSet<u64>,
     double_frees: Vec<PoolEvent>,
+    uaf_writes: Vec<PoolEvent>,
 }
 
 impl KernelPoolTracker {
@@ -754,6 +757,28 @@ impl KernelPoolTracker {
         }
     }
 
+    /// Records a write into a freed pool page (use-after-free witness).
+    pub fn record_uaf(&self, address: u64, caller: u64) {
+        if let Ok(mut st) = self.state.lock() {
+            st.uaf_writes.push(PoolEvent {
+                pointer: address,
+                caller,
+            });
+        }
+    }
+
+    /// True when `address` falls inside a freed model pool page (freed
+    /// pointers are 0x1000-aligned; the whole page is considered freed —
+    /// writes into the pool header area are also UAF).
+    pub fn is_freed_page(&self, address: u64) -> bool {
+        if let Ok(st) = self.state.lock() {
+            let page = address & !0xFFF;
+            st.freed.contains(&page)
+        } else {
+            false
+        }
+    }
+
     /// Consistent snapshot for reports.
     pub fn snapshot(&self) -> KernelPoolReport {
         match self.state.lock() {
@@ -761,6 +786,7 @@ impl KernelPoolTracker {
                 allocs: st.allocs,
                 frees: st.frees,
                 double_frees: st.double_frees.clone(),
+                uaf_writes: st.uaf_writes.clone(),
             },
             Err(_) => KernelPoolReport::default(),
         }
