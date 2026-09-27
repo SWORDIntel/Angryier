@@ -569,10 +569,11 @@ primitive directly (2026-09-25) — the rewiring exposed and fixed two
 latent r32 bugs (`roll $imm` was a udiv no-op; r32-CL read at the wrong
 width and never executed on real decodes) and r32-CL rotates are now
 routed in the runtime form map.**
-**Remaining:** FSTSW AX needs an FPU status-word register; **SHL/SHR/SAR
-r32 count masking has the same bug class the rotate rewiring fixed
-(unmasked counts vs x86 mod-32 → `shl $33, %eax` diverges)**; r32 rotate
-flag modeling (CF) and r64-CL OF; then
+**Remaining (superseded by 2026-09-27 rounds):** FSTSW AX needs an FPU
+status-word register; **SHL/SHR/SAR r32 count masking — CLOSED 2026-09-27
+(r32 shifts/rotates now mask counts mod width; 318 hardware differential
+cases)**; r32 rotate flag modeling (CF) — CLOSED with the same round; and
+r64-CL OF; then
 expand families in order — AVX → AVX2 → AVX-512 →
 VNNI/AVX10 → AMX → CET/APX (AES/SHA/BMI interleaved); CI regeneration/diff
 gate; documented undefined-flag behavior (AF/PF/OF-on-shift-by-zero).
