@@ -7,13 +7,19 @@ use angryier_types::{SemanticVersion, TargetProfileId};
 fn test_driver(name: &str, path: &str) {
     let image = match std::fs::read(path) {
         Ok(b) => b,
-        Err(_) => { eprintln!("SKIP {}", name); return; }
+        Err(_) => {
+            eprintln!("SKIP {}", name);
+            return;
+        }
     };
 
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
     let mut process = match runtime.load_pe_driver(&image) {
         Ok(p) => p,
-        Err(e) => { eprintln!("{}: LOAD FAILED {:?}", name, e); return; }
+        Err(e) => {
+            eprintln!("{}: LOAD FAILED {:?}", name, e);
+            return;
+        }
     };
     let tracker = std::sync::Arc::new(angryier_models::KernelPoolTracker::new());
     let _ = runtime.attach_kernel_pool_model(&mut process, tracker.clone());
@@ -29,8 +35,15 @@ fn test_driver(name: &str, path: &str) {
         }
         if process.terminated {
             let report = tracker.snapshot();
-            eprintln!("{}: {} steps, TERMINATED, pool: a={} f={} df={}",
-                name, steps, report.allocs, report.frees, report.double_frees.len());
+            eprintln!(
+                "{}: {} steps, TERMINATED, simprocs={}, pool: a={} f={} df={}",
+                name,
+                steps,
+                process.simproc_dispatches,
+                report.allocs,
+                report.frees,
+                report.double_frees.len()
+            );
             return;
         }
     }

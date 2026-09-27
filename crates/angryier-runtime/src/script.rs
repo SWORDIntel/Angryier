@@ -177,6 +177,21 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             process
                 .write_pc(entry as u64)
                 .map_err(|e| mlua::Error::external(format!("entry override: {e:?}")))?;
+            // Push the exit sentinel: an entry-overridden function has no
+            // caller frame, so its `ret` (and a SimProcedure's pop) would
+            // otherwise read stale stack and land in unmapped padding.
+            let rsp = process
+                .read_register(crate::register_id::GPR_BASE + 4)
+                .map_err(|e| mlua::Error::external(format!("entry rsp: {e:?}")))?;
+            process.state.memory = process
+                .state
+                .memory
+                .load_concrete(rsp.wrapping_sub(8), &crate::EXIT_HOOK.to_le_bytes())
+                .map_err(|e| mlua::Error::external(format!("entry frame: {e:?}")))?;
+            process
+                .write_register(crate::register_id::GPR_BASE + 4, rsp.wrapping_sub(8))
+                .map_err(|e| mlua::Error::external(format!("entry rsp set: {e:?}")))?;
+            process.hook_simproc(crate::EXIT_HOOK, "exit");
         }
     }
 
@@ -217,8 +232,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     if let Ok(tbl) = opts.get::<Table>("regs") {
         for pair in tbl.pairs::<String, i64>() {
             let (name, value) = pair?;
-            let reg = reg_by_name(&name)
-                .ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
+            let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
             session.states[0]
                 .process
                 .write_register(reg, value as u64)
@@ -521,7 +535,7 @@ mod tests {
 
     #[test]
     fn registers_resolve_by_gpr_name() {
-        let base = angryier_arch_intel64::register_id::GPR_BASE;
+        let base = angryier_arch_intel64::crate::register_id::GPR_BASE;
         assert_eq!(reg_by_name("rdi"), Some(base + 7));
         assert_eq!(reg_by_name("r15"), Some(base + 15));
         assert_eq!(reg_by_name("xmm0"), None);

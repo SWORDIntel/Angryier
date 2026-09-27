@@ -33,17 +33,30 @@ fn test_driver(path: &str, max_steps: usize) {
             Ok(_) => steps += 1,
             Err(e) => {
                 let name = path.rsplit('/').next().unwrap_or("?");
-                eprintln!("{}: {} steps, blocked at pc={:#x}: {:?}", name, steps,
-                    process.pc().unwrap_or(0), e);
+                eprintln!(
+                    "{}: {} steps, blocked at pc={:#x}: {:?}",
+                    name,
+                    steps,
+                    process.pc().unwrap_or(0),
+                    e
+                );
                 return;
             }
         }
         if process.terminated {
-            eprintln!("{}: {} steps, TERMINATED cleanly", path.rsplit('/').next().unwrap_or("?"), steps);
+            eprintln!(
+                "{}: {} steps, TERMINATED cleanly",
+                path.rsplit('/').next().unwrap_or("?"),
+                steps
+            );
             return;
         }
     }
-    eprintln!("{}: {} steps (step limit reached)", path.rsplit('/').next().unwrap_or("?"), steps);
+    eprintln!(
+        "{}: {} steps (step limit reached)",
+        path.rsplit('/').next().unwrap_or("?"),
+        steps
+    );
 }
 
 #[test]

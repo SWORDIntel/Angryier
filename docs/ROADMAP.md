@@ -73,7 +73,7 @@ suites require system Z3/XED):
   (ntoskrnl/NDIS/HAL — zero coverage; the environment model is Linux
   syscalls + libc), DriverEntry/IRP state shapes, and an integration
   surface for the external angr-based sweep (no Python API exists).
-  Import-directory parsing, IAT-to-stub resolution, the DriverEntry entry mode, and per-export forced-return hooks landed (2026-09-25) on synthetic importing PEs. The Lua/CLI sweep surface now dispatches by magic bytes: `angry.run`/`angry.open` load `MZ` images through `load_pe_driver`/`load_pe` (2026-09-26) — real `.sys` drivers load and execute from DriverEntry (first contact via the byovd-harness escalation contract: 15-24 steps before failing on unmapped forms). Remaining: broad-form ISA coverage for DriverEntry prologues, a Windows kernel API model layer (spec available: byovd-harness `windows_kernel_api_models` manifest), and real-.sys verdict validation. Gate J discipline:
+  Import-directory parsing, IAT-to-stub resolution, the DriverEntry entry mode, and per-export forced-return hooks landed (2026-09-25) on synthetic importing PEs. The Lua/CLI sweep surface now dispatches by magic bytes: `angry.run`/`angry.open` load `MZ` images through `load_pe_driver`/`load_pe` (2026-09-26) — real `.sys` drivers load and execute from DriverEntry (first contact via the byovd-harness escalation contract: 15-24 steps before failing on unmapped forms). **2026-09-27: the ~15-step wall was diagnosed as the MSVC security-cookie fastfail** — drivers ship the linker's DEFAULT `__security_cookie` (or zero) in `.data`, and their `__security_init_cookie` executes `int 29h` (`__fastfail`) unless the loader has randomized it first (real Win10+ loader behavior). `load_pe_driver` now scans writable sections for the DEFAULT cookie and its complement and overwrites both with a deterministic engine cookie, and seeds `gs:[0x30]` with the same value so `/GS` frame checks compare consistently — `__security_init_cookie` short-circuits and DriverEntry proceeds. **TbtBusDrv executes 200+ steps (was 15), AMDRyzenMaster 172 (was 15), and GVCIDrv64 completes DriverEntry and terminates cleanly.** The first ISA gaps the real prologues hit are closed: MOVHLPS/MOVLHPS lane moves and BT/BTS/BTR/BTC r32/r64 × reg/imm8 (14 new forms, hardware-oracle validated — the oracle caught a pre-existing `1 << 64` wrap in the write-back bit-test forms, now index-masked mod width). Remaining: broad-form ISA coverage for DriverEntry prologues, a Windows kernel API model layer (spec available: byovd-harness `windows_kernel_api_models` manifest), and real-.sys verdict validation. Gate J discipline:
   no cross-engine (angr-vs-Angryier) timing exists, so no driver-
   campaign throughput claim transfers yet.
 - **Dual-mode engine (Phase 6, centerpiece):** `ConcolicSession` shadows
@@ -148,19 +148,21 @@ suites require system Z3/XED):
   summary hits, matching exit values, and solver-model replay equivalence
   for symbolic arguments; impure callees (any memory operand) never
   summarize and stay exactly correct.
-- **Semantics:** 402 handwritten Intel 64 forms (integer/control-flow,
-  bit-scan/popcount, SSE/SSE2/SSSE3/SSE4.1/SSE4.2 scalar+packed, CRC32,
-  PTEST, byte shifts, plus a 39-form x87 slice — FLD/FST(P), the
-  FADD/FSUB/FMUL/FDIV families, FUCOMI/FCOMI branch flags, FINIT — with a
-  tag-in-data-plane stack model that fits the existing register file) plus
-  a live declarative generator
+- **Semantics:** 416 handwritten Intel 64 forms (integer/control-flow,
+  bit-scan/popcount, bit-test family — BT/BTS/BTR/BTC r32/r64 × reg/imm8
+  with mod-width index masking — SSE/SSE2/SSSE3/SSE4.1/SSE4.2 scalar+packed
+  incl. MOVHLPS/MOVLHPS lane moves, CRC32, PTEST, byte shifts, plus a
+  39-form x87 slice — FLD/FST(P), the FADD/FSUB/FMUL/FDIV families,
+  FUCOMI/FCOMI branch flags, FINIT — with a tag-in-data-plane stack model
+  that fits the existing register file) plus a live declarative generator
   (`angryier-semantics-gen` patterns → `DeclarativeProvider` in
   `angryier-semantics-intel64`, layered over handwritten in a 0x10000+
   rule-id band). **Hardware differential oracle validates 856 integer/SSE +
   462 x87 boundary cases** against the host CPU on defined flag bits and
   has caught real corpus bugs (rcl/rcr carry formula, cmpxchg aliasing,
   pshufd operand order, crc32 accumulate, mpsadbw imm fields, shift SF at
-  sub-64 widths, an inverted x87 stack-full select).
+  sub-64 widths, an inverted x87 stack-full select, and a `1 << 64` wrap
+  in the write-back bit-test forms whose index now masks mod width).
 - **Solver stack:** real Z3 and Bitwuzla FFI (SAT/UNSAT/UNKNOWN with model
   extraction); portfolio router with per-query `QueryShape` dispatch,
   `CrossCheckPolicy`, hard timeouts; `angryier-solver-fuzzy` mutation tier
@@ -740,7 +742,7 @@ and reproducible correctness/performance reports.
 1. ELF64 + PE32+ loading — **done** (static, dynamic, PE32+).
 2. XED decoding with explicit semantic-support manifest — **done**.
 3. Production semantic coverage for declared families — **partial**
-   (402 handwritten incl. 39 x87 forms executing end-to-end + generator;
+   (416 handwritten incl. 39 x87 forms executing end-to-end + generator;
    AVX* pending; oracle live).
 4. Dual-mode execution — **done** (concolic + full symbolic, shared
    AngryIR, per-state promotion).

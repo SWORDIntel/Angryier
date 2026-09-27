@@ -5,7 +5,10 @@ fn gvcidrv64_execution() -> Result<(), Box<dyn std::error::Error>> {
     let path = "/home/john/Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic/GVCIDrv64.sys";
     let image = match std::fs::read(path) {
         Ok(b) => b,
-        Err(_) => { eprintln!("SKIP: driver not found"); return Ok(()); }
+        Err(_) => {
+            eprintln!("SKIP: driver not found");
+            return Ok(());
+        }
     };
 
     let runtime = angryier_runtime::Runtime::with_native_xed(
@@ -16,8 +19,11 @@ fn gvcidrv64_execution() -> Result<(), Box<dyn std::error::Error>> {
     let tracker = std::sync::Arc::new(angryier_models::KernelPoolTracker::new());
     runtime.attach_kernel_pool_model(&mut process, tracker.clone())?;
 
-    eprintln!("loaded GVCIDrv64.sys ({} bytes), entry={:#x}",
-        image.len(), process.pc()?);
+    eprintln!(
+        "loaded GVCIDrv64.sys ({} bytes), entry={:#x}",
+        image.len(),
+        process.pc()?
+    );
 
     let mut steps = 0;
     let mut last_pc = 0;
@@ -38,8 +44,12 @@ fn gvcidrv64_execution() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("executed {} steps (last pc={:#x})", steps, last_pc);
 
     let report = tracker.snapshot();
-    eprintln!("pool: allocs={} frees={} double_frees={}",
-        report.allocs, report.frees, report.double_frees.len());
+    eprintln!(
+        "pool: allocs={} frees={} double_frees={}",
+        report.allocs,
+        report.frees,
+        report.double_frees.len()
+    );
 
     // List which imports are hooked
     let imports: Vec<_> = process.pe_imports().collect();

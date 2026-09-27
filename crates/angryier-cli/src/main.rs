@@ -360,11 +360,15 @@ mod run_cmd {
         /// Defaults to the Lua API's own default so the two cannot drift.
         pub steps: u64,
         pub dynamic: bool,
+        /// PE driver mode: load via `load_pe_driver`, attach kernel models,
+        /// execute DriverEntry, and report pool/kernel events.
+        pub driver: bool,
     }
 
     pub fn usage() -> String {
-        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--steps N] [--dynamic]\n\
-         note: --find ADDR is hexadecimal, 0x prefix optional"
+        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--steps N] [--dynamic] [--driver]\n\
+         note: --find ADDR is hexadecimal, 0x prefix optional\n\
+         note: --driver loads PE32+ drivers with kernel models and reports pool events"
             .to_string()
     }
 
@@ -389,6 +393,7 @@ mod run_cmd {
         let mut argv = None;
         let mut steps: Option<u64> = None;
         let mut dynamic = false;
+        let mut driver = false;
         let mut i = 0;
         while i < args.len() {
             let arg = args[i].as_str();
@@ -450,6 +455,11 @@ mod run_cmd {
                     return Err("duplicate --dynamic flag (may only be given once)".to_string());
                 }
                 dynamic = true;
+            } else if arg == "--driver" {
+                if driver {
+                    return Err("duplicate --driver flag (may only be given once)".to_string());
+                }
+                driver = true;
             } else if !arg.starts_with('-') {
                 if path.replace(arg.to_string()).is_some() {
                     return Err(format!(
@@ -471,6 +481,7 @@ mod run_cmd {
             // Default shared with the Lua API (`angry.run` opts.steps).
             steps: steps.unwrap_or(angryier_runtime::script::DEFAULT_STEPS),
             dynamic,
+            driver,
         })
     }
 
@@ -497,6 +508,11 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
     }
 
     pub fn execute(config: &RunConfig) -> i32 {
+        // Driver mode: direct Rust execution with kernel models, no Lua.
+        if config.driver {
+            return execute_driver_mode(config);
+        }
+
         let lua = mlua::Lua::new();
         if let Err(e) = angryier_runtime::script::register(&lua) {
             eprintln!("script init: {e}");
@@ -520,6 +536,80 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
                 1
             }
         }
+    }
+
+    /// PE driver mode: load, attach kernel models, execute DriverEntry,
+    /// and report pool/kernel events. No Lua — direct Rust execution.
+    fn execute_driver_mode(config: &RunConfig) -> i32 {
+        use angryier_runtime::Runtime;
+        use angryier_types::{SemanticVersion, TargetProfileId};
+
+        let bytes = match std::fs::read(&config.path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("read {}: {e}", config.path);
+                return 1;
+            }
+        };
+        println!("driver: {} ({} bytes)", config.path, bytes.len());
+
+        let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+        let mut process = match runtime.load_pe_driver(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("load_pe_driver failed: {e:?}");
+                return 1;
+            }
+        };
+        let tracker = std::sync::Arc::new(angryier_models::KernelPoolTracker::new());
+        if let Err(e) = runtime.attach_kernel_pool_model(&mut process, tracker.clone()) {
+            eprintln!("attach_kernel_pool_model failed: {e:?}");
+            return 1;
+        }
+
+        let imports: Vec<_> = process.pe_imports().collect();
+        println!(
+            "entry={:#x}, imports={}, hooks={}",
+            process.pc().unwrap_or(0),
+            imports.len(),
+            imports.len()
+        );
+
+        let budget = config.steps;
+        let mut steps: u64 = 0;
+        loop {
+            if steps >= budget {
+                println!("step budget exhausted ({budget})");
+                break;
+            }
+            match runtime.step(&mut process) {
+                Ok(_) => steps += 1,
+                Err(e) => {
+                    eprintln!("blocked at step {steps} pc={:#x}: {e:?}", process.pc().unwrap_or(0));
+                    break;
+                }
+            }
+            if process.terminated {
+                println!("terminated cleanly at step {steps}");
+                break;
+            }
+        }
+
+        println!("steps={steps}, simproc_dispatches={}", process.simproc_dispatches);
+        let report = tracker.snapshot();
+        println!(
+            "pool: allocs={} frees={} double_frees={}",
+            report.allocs,
+            report.frees,
+            report.double_frees.len()
+        );
+        if !report.double_frees.is_empty() {
+            println!("DOUBLE-FREE EVENTS:");
+            for event in &report.double_frees {
+                println!("  ptr={:#x} caller={:#x}", event.pointer, event.caller);
+            }
+        }
+        0
     }
 
     #[cfg(test)]

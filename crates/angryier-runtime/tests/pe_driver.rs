@@ -344,7 +344,14 @@ fn driver_object_model_is_self_consistent() -> Result<(), Box<dyn std::error::Er
     assert_eq!(name_buf, PE_DRIVER_SCRATCH_BASE + 0x500);
     // The universal callback really is `xor eax,eax; ret`.
     let cb = LayeredMemory::read(&process.state.memory, PE_DRIVER_CALLBACK_BASE, 3)?;
-    assert_eq!(cb.as_slice(), &[ByteValue::Concrete(0x33), ByteValue::Concrete(0xC0), ByteValue::Concrete(0xC3)]);
+    assert_eq!(
+        cb.as_slice(),
+        &[
+            ByteValue::Concrete(0x33),
+            ByteValue::Concrete(0xC0),
+            ByteValue::Concrete(0xC3)
+        ]
+    );
     Ok(())
 }
 
@@ -399,35 +406,25 @@ fn real_driver_call_ret_returns_to_caller() -> Result<(), Box<dyn std::error::Er
 
     // Parse the fixture to find the actual .text file offset and entry RVA.
     let entry_rva = {
-        let e_lfanew = u32::from_le_bytes(
-            original[0x3C..0x40].try_into().unwrap(),
-        ) as usize;
+        let e_lfanew = u32::from_le_bytes(original[0x3C..0x40].try_into().unwrap()) as usize;
         let opt = e_lfanew + 4 + 20; // COFF is 20 bytes
         u32::from_le_bytes(original[opt + 16..opt + 20].try_into().unwrap())
     };
     let image_base = {
-        let e_lfanew = u32::from_le_bytes(
-            original[0x3C..0x40].try_into().unwrap(),
-        ) as usize;
+        let e_lfanew = u32::from_le_bytes(original[0x3C..0x40].try_into().unwrap()) as usize;
         let opt = e_lfanew + 4 + 20;
         u64::from_le_bytes(original[opt + 24..opt + 32].try_into().unwrap())
     };
 
     // Find .text section file offset
     let text_raw_ptr = {
-        let e_lfanew = u32::from_le_bytes(
-            original[0x3C..0x40].try_into().unwrap(),
-        ) as usize;
+        let e_lfanew = u32::from_le_bytes(original[0x3C..0x40].try_into().unwrap()) as usize;
         let coff = e_lfanew + 4;
-        let num_sections =
-            u16::from_le_bytes(original[coff + 2..coff + 4].try_into().unwrap()) as usize;
-        let opt_size =
-            u16::from_le_bytes(original[coff + 16..coff + 18].try_into().unwrap()) as usize;
+        let num_sections = u16::from_le_bytes(original[coff + 2..coff + 4].try_into().unwrap()) as usize;
+        let opt_size = u16::from_le_bytes(original[coff + 16..coff + 18].try_into().unwrap()) as usize;
         let sec_base = coff + 20 + opt_size;
         // First section should be .text
-        let raw = u32::from_le_bytes(
-            original[sec_base + 20..sec_base + 24].try_into().unwrap(),
-        );
+        let raw = u32::from_le_bytes(original[sec_base + 20..sec_base + 24].try_into().unwrap());
         raw as usize
     };
 
@@ -436,12 +433,9 @@ fn real_driver_call_ret_returns_to_caller() -> Result<(), Box<dyn std::error::Er
 
     // Patch: call +0x10; xor eax,eax; ret; (pad); func: xor eax,eax; ret
     let mut image = original.clone();
-    image[entry_file_offset..entry_file_offset + 5]
-        .copy_from_slice(&[0xE8, 0x10, 0x00, 0x00, 0x00]); // call rel32=+0x10
-    image[entry_file_offset + 5..entry_file_offset + 8]
-        .copy_from_slice(&[0x31, 0xC0, 0xC3]); // xor eax,eax; ret
-    image[entry_file_offset + 0x15..entry_file_offset + 0x18]
-        .copy_from_slice(&[0x31, 0xC0, 0xC3]); // func: xor eax,eax; ret
+    image[entry_file_offset..entry_file_offset + 5].copy_from_slice(&[0xE8, 0x10, 0x00, 0x00, 0x00]); // call rel32=+0x10
+    image[entry_file_offset + 5..entry_file_offset + 8].copy_from_slice(&[0x31, 0xC0, 0xC3]); // xor eax,eax; ret
+    image[entry_file_offset + 0x15..entry_file_offset + 0x18].copy_from_slice(&[0x31, 0xC0, 0xC3]); // func: xor eax,eax; ret
 
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
     let mut process = runtime.load_pe_driver(&image)?;
@@ -468,7 +462,8 @@ fn real_driver_call_ret_returns_to_caller() -> Result<(), Box<dyn std::error::Er
     // Step 3: ret (should pop caller_return_va and jump there)
     runtime.step(&mut process)?;
     assert_eq!(
-        process.pc()?, caller_return_va,
+        process.pc()?,
+        caller_return_va,
         "ret must return to the instruction after the call"
     );
 
@@ -567,11 +562,18 @@ fn real_driver_double_free_detected() -> Result<(), Box<dyn std::error::Error>> 
 
     // Run DriverEntry to completion (the exit hook terminates it)
     let summary = runtime.run(&mut process, 1000)?;
-    eprintln!("terminated={}, simproc_dispatches={}", process.terminated, summary.simproc_dispatches);
+    eprintln!(
+        "terminated={}, simproc_dispatches={}",
+        process.terminated, summary.simproc_dispatches
+    );
 
     let report = tracker.snapshot();
-    eprintln!("pool report: allocs={} frees={} double_frees={}",
-              report.allocs, report.frees, report.double_frees.len());
+    eprintln!(
+        "pool report: allocs={} frees={} double_frees={}",
+        report.allocs,
+        report.frees,
+        report.double_frees.len()
+    );
 
     // The fixture's DriverEntry calls its bump allocator (not ExAllocatePool),
     // then calls ExFreePool twice on the result — the double-free.
@@ -611,8 +613,12 @@ fn real_inbox_driver_execution() -> Result<(), Box<dyn std::error::Error>> {
         match runtime.step(&mut process) {
             Ok(_) => steps += 1,
             Err(e) => {
-                eprintln!("stopped at step {}: pc={:#x} err={:?}", i + 1,
-                    process.pc().unwrap_or(0), e);
+                eprintln!(
+                    "stopped at step {}: pc={:#x} err={:?}",
+                    i + 1,
+                    process.pc().unwrap_or(0),
+                    e
+                );
                 break;
             }
         }
@@ -620,7 +626,12 @@ fn real_inbox_driver_execution() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("executed {} steps, terminated={}", steps, process.terminated);
 
     let report = tracker.snapshot();
-    eprintln!("pool: allocs={} frees={} df={}", report.allocs, report.frees, report.double_frees.len());
+    eprintln!(
+        "pool: allocs={} frees={} df={}",
+        report.allocs,
+        report.frees,
+        report.double_frees.len()
+    );
 
     Ok(())
 }

@@ -10,8 +10,8 @@
 
 use angryier_types::{DependencyKey, EnvironmentModelId, EnvironmentModelVersion, FidelityProfile, SummaryId};
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 
 // ---------------------------------------------------------------------------
 // Summary precision and model key
@@ -1446,5 +1446,58 @@ mod tests {
         assert_eq!(syscall::READ, 0);
         assert_eq!(syscall::WRITE, 1);
         assert_eq!(syscall::EXIT, 60);
+    }
+}
+
+/// `RtlInitUnicodeString(Destination, Source)`: writes a UNICODE_STRING
+/// {Length, MaximumLength, _pad, Buffer} describing the Source PCWSTR.
+/// Void return; the model writes through RCX (Destination).
+pub struct KernelInitUnicodeStringProcedure;
+
+impl SimProcedure for KernelInitUnicodeStringProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_init_unicode_string"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let dest = state.get_reg(1); // RCX = PUNICODE_STRING Destination
+        let src = state.get_reg(2); // RDX = PCWSTR Source
+        let mut next = state.clone();
+        if dest != 0 && src != 0 {
+            // Compute length by scanning for null terminator (max 510 chars)
+            let mut len: u16 = 0;
+            let mut addr = src;
+            loop {
+                let bytes = state.read_bytes(addr, 2);
+                if bytes.len() < 2 {
+                    break;
+                }
+                let ch = u16::from_le_bytes([bytes[0], bytes[1]]);
+                if ch == 0 || len >= 510 {
+                    break;
+                }
+                len += 2;
+                addr += 2;
+            }
+            next.write_memory(dest, len.to_le_bytes().to_vec());
+            next.write_memory(dest + 2, (len + 2).to_le_bytes().to_vec());
+            next.write_memory(dest + 8, src.to_le_bytes().to_vec());
+        }
+        SimResult::Continue(next)
+    }
+}
+
+/// `PsCreateSystemThread(ThreadHandle, DesiredAccess, ObjectAttributes,
+/// ProcessHandle, ClientId, StartRoutine, StartContext)`:
+/// returns a non-NULL pseudo-handle so the driver thinks the thread was
+/// created. The thread body is NOT executed (debt-recorded).
+pub struct KernelCreateSystemThreadProcedure;
+
+impl SimProcedure for KernelCreateSystemThreadProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_create_system_thread"
+    }
+    fn apply(&self, _state: &SimState) -> SimResult {
+        // A non-zero handle: drivers check for NULL/INVALID_HANDLE_VALUE
+        SimResult::Return(0xFFFF_FFFF_0000_0042)
     }
 }

@@ -113,11 +113,25 @@ const PE_DRIVER_EXTENSION_OFF: u64 = 0x300;
 /// targets for DriverName / RegistryPath / ServiceKeyName: length 0).
 const PE_DRIVER_STRING_BUF_OFF: u64 = 0x500;
 /// Size of the PE-driver scratch region.
-const PE_DRIVER_SCRATCH_SIZE: u64 = 0x1000;
+const PE_DRIVER_SCRATCH_SIZE: u64 = 0x10000; // 64KB: DRIVER_OBJECT + GS segment
 /// Sentinel return address pushed for `DriverEntry`: returning from the
 /// driver entry lands on the shared `exit` SimProcedure hook and terminates
 /// cleanly — the same pattern `libc_start_main` uses.
-const EXIT_HOOK: u64 = 0xdead_beef_0000;
+pub const EXIT_HOOK: u64 = 0xdead_beef_0000;
+
+/// The MSVC linker's DEFAULT `__security_cookie` value (`/GS` builds that
+/// never ran `__security_init_cookie` ship this in `.data`).
+const PE_DRIVER_DEFAULT_COOKIE: u64 = 0x0000_2B99_2DDF_A232;
+/// Deterministic replacement cookie applied at driver load time. The real
+/// Windows loader (Win10+) randomizes `__security_cookie` before running
+/// any driver code, so `__security_init_cookie` never observes zero or the
+/// DEFAULT value; without the same load-time patch, drivers whose init
+/// fastfails on `cookie == 0 || cookie == DEFAULT` (`int 29h`) terminate
+/// after ~15 steps. Non-zero, non-DEFAULT, and constant for replay.
+const PE_DRIVER_SECURITY_COOKIE: u64 = 0x4A97_B3D5_E1F2_603C;
+/// GS-relative cookie slot offset (`gs:[0x30]`): the x64 kernel-mode frame
+/// check reads and compares this slot.
+const PE_DRIVER_GS_COOKIE_OFF: u64 = 0x30;
 
 /// Maximum x86-64 instruction length in bytes.
 const MAX_INSN_LEN: usize = 15;
@@ -384,7 +398,6 @@ impl Process {
         Ok(())
     }
 
-
     /// Iterates the PE-driver import stubs as (stub address, dll, export
     /// name or `#ordinal`) — diagnostics and scripting hooks. Empty for
     /// processes not loaded through [`Runtime::load_pe_driver`].
@@ -510,21 +523,27 @@ impl<D: Decoder> Runtime<D> {
             "ExAllocatePoolWithTagPriority",
             "ExAllocatePool2",
         ];
-        const FREE_NAMES: [&str; 3] =
-            ["ExFreePool", "ExFreePoolWithTag", "ExFreePoolWithQuota"];
-        let alloc: Arc<dyn SimProcedure> =
-            Arc::new(angryier_models::KernelAllocProcedure { tracker: tracker.clone() });
-        let free: Arc<dyn SimProcedure> =
-            Arc::new(angryier_models::KernelFreeProcedure { tracker: tracker.clone() });
-        let create_device: Arc<dyn SimProcedure> =
-            Arc::new(angryier_models::KernelCreateDeviceProcedure { tracker: tracker.clone() });
-        let attach_device: Arc<dyn SimProcedure> =
-            Arc::new(angryier_models::KernelAttachDeviceProcedure { tracker: tracker.clone() });
-        let resolve: Arc<dyn SimProcedure> =
-            Arc::new(angryier_models::KernelResolveRoutineProcedure);
+        const FREE_NAMES: [&str; 3] = ["ExFreePool", "ExFreePoolWithTag", "ExFreePoolWithQuota"];
+        let alloc: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelAllocProcedure {
+            tracker: tracker.clone(),
+        });
+        let free: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelFreeProcedure {
+            tracker: tracker.clone(),
+        });
+        let create_device: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelCreateDeviceProcedure {
+            tracker: tracker.clone(),
+        });
+        let attach_device: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelAttachDeviceProcedure {
+            tracker: tracker.clone(),
+        });
+        let resolve: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelResolveRoutineProcedure);
+        let init_unicode: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelInitUnicodeStringProcedure);
+        let create_thread: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelCreateSystemThreadProcedure);
         const CREATE_DEVICE_NAMES: [&str; 1] = ["IoCreateDevice"];
         const ATTACH_DEVICE_NAMES: [&str; 1] = ["IoAttachDevice"];
         const RESOLVE_NAMES: [&str; 1] = ["MmGetSystemRoutineAddress"];
+        const INIT_UNICODE_NAMES: [&str; 1] = ["RtlInitUnicodeString"];
+        const CREATE_THREAD_NAMES: [&str; 1] = ["PsCreateSystemThread"];
         let stubs: Vec<(Address, String, String)> = process
             .pe_imports()
             .map(|(address, dll, export)| (*address, dll.to_string(), export.to_string()))
@@ -545,6 +564,10 @@ impl<D: Decoder> Runtime<D> {
                 process.simproc_instances.insert(address, attach_device.clone());
             } else if RESOLVE_NAMES.contains(&export.as_str()) {
                 process.simproc_instances.insert(address, resolve.clone());
+            } else if INIT_UNICODE_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, init_unicode.clone());
+            } else if CREATE_THREAD_NAMES.contains(&export.as_str()) {
+                process.simproc_instances.insert(address, create_thread.clone());
             } else {
                 // Deterministic default: STATUS_SUCCESS instead of whatever
                 // garbage RAX carries into a naked `ret` stub. Debt-recorded
@@ -1382,6 +1405,59 @@ impl<D: Decoder> Runtime<D> {
         ];
         let mut process = self.load_image_with_extra_regions(image, extra_regions)?;
 
+        // Security-cookie randomization (Windows loader behavior since
+        // Win10): scan the mapped writable regions for the linker's DEFAULT
+        // `__security_cookie` and its complement, and overwrite both with a
+        // deterministic engine cookie. MSVC-built drivers ship the DEFAULT
+        // value in `.data`; their `__security_init_cookie` fastfails
+        // (`int 29h`, ~15 steps into DriverEntry) unless the loader has
+        // replaced it first. Per-build random cookies (already non-zero and
+        // non-DEFAULT) are untouched and pass the init check as-is.
+        let security_cookie_le = PE_DRIVER_SECURITY_COOKIE.to_le_bytes();
+        let security_complement_le = (!PE_DRIVER_SECURITY_COOKIE).to_le_bytes();
+        let mapped_regions: Vec<MemoryRegion> = process.state.memory.regions().to_vec();
+        for region in mapped_regions {
+            if !region.readable || !region.writable {
+                continue;
+            }
+            let mut addr = region.base;
+            let end = region.base.saturating_add(region.size);
+            while addr + 8 <= end {
+                let Ok(slot) = process.state.memory.read(addr, 8) else {
+                    break;
+                };
+                let mut bytes = [0u8; 8];
+                let mut is_cookie = true;
+                for (offset, byte) in slot.iter().enumerate() {
+                    match byte {
+                        ByteValue::Concrete(value) => bytes[offset] = *value,
+                        ByteValue::Symbolic(_) => {
+                            is_cookie = false;
+                            break;
+                        }
+                    }
+                }
+                if !is_cookie {
+                    break;
+                }
+                let value = u64::from_le_bytes(bytes);
+                if value == PE_DRIVER_DEFAULT_COOKIE {
+                    process.state.memory = process
+                        .state
+                        .memory
+                        .load_concrete(addr, &security_cookie_le)
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                } else if value == !PE_DRIVER_DEFAULT_COOKIE {
+                    process.state.memory = process
+                        .state
+                        .memory
+                        .load_concrete(addr, &security_complement_le)
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                }
+                addr += 8;
+            }
+        }
+
         // IAT patching: stub i lives at STUB_BASE + 16*i and holds a single
         // `ret` byte. Skipped wholesale for images without imports.
         if !imports.is_empty() {
@@ -1455,9 +1531,17 @@ impl<D: Decoder> Runtime<D> {
         };
         let scratch = PE_DRIVER_SCRATCH_BASE;
         // DRIVER_OBJECT.
-        write_u64(&mut process, scratch + DRIVER_OBJECT_OFFSET_DRIVER_EXTENSION, scratch + PE_DRIVER_EXTENSION_OFF)?;
+        write_u64(
+            &mut process,
+            scratch + DRIVER_OBJECT_OFFSET_DRIVER_EXTENSION,
+            scratch + PE_DRIVER_EXTENSION_OFF,
+        )?;
         // DriverName UNICODE_STRING {Length=0, MaximumLength=0, _pad, Buffer}.
-        write_u64(&mut process, scratch + DRIVER_OBJECT_OFFSET_DRIVER_NAME + 8, scratch + PE_DRIVER_STRING_BUF_OFF)?;
+        write_u64(
+            &mut process,
+            scratch + DRIVER_OBJECT_OFFSET_DRIVER_NAME + 8,
+            scratch + PE_DRIVER_STRING_BUF_OFF,
+        )?;
         // DriverInit / DriverStartIo / DriverUnload.
         write_u64(&mut process, scratch + 0x58, PE_DRIVER_CALLBACK_BASE)?;
         write_u64(&mut process, scratch + 0x60, PE_DRIVER_CALLBACK_BASE)?;
@@ -1473,8 +1557,16 @@ impl<D: Decoder> Runtime<D> {
         // DRIVER_EXTENSION at scratch+0x300: DriverObject, AddDevice, Count,
         // ServiceKeyName {0, 0, _pad, Buffer}.
         write_u64(&mut process, scratch + PE_DRIVER_EXTENSION_OFF, scratch)?;
-        write_u64(&mut process, scratch + PE_DRIVER_EXTENSION_OFF + 0x08, PE_DRIVER_CALLBACK_BASE)?;
-        write_u64(&mut process, scratch + PE_DRIVER_EXTENSION_OFF + 0x18 + 8, scratch + PE_DRIVER_STRING_BUF_OFF)?;
+        write_u64(
+            &mut process,
+            scratch + PE_DRIVER_EXTENSION_OFF + 0x08,
+            PE_DRIVER_CALLBACK_BASE,
+        )?;
+        write_u64(
+            &mut process,
+            scratch + PE_DRIVER_EXTENSION_OFF + 0x18 + 8,
+            scratch + PE_DRIVER_STRING_BUF_OFF,
+        )?;
         // RegistryPath UNICODE_STRING at scratch+0x200 (RDX target): Buffer.
         write_u64(&mut process, scratch + 0x200 + 8, scratch + PE_DRIVER_STRING_BUF_OFF)?;
 
@@ -1498,6 +1590,26 @@ impl<D: Decoder> Runtime<D> {
             .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
         process.write_register(register_id::GPR_BASE + 4, rsp)?;
         process.hook_simproc(EXIT_HOOK, "exit");
+
+        // GS segment base for kernel-mode drivers: MSVC security cookies
+        // read from gs:[offset]. Pointing GS_BASE at the zeroed scratch
+        // (well past the DRIVER_OBJECT at +0x000 and RegistryPath at +0x200)
+        // and seeding gs:[0x30] with the deterministic security cookie makes
+        // the /GS frame check read a stable non-zero value: the prologue
+        // saves cookie^RSP, the epilogue un-xors and compares against the
+        // same slot — consistent by construction, and `cookie == 0` guards
+        // (some inits fastfail on a zero GS cookie) pass.
+        process.write_register(register_id::GS_BASE.0, PE_DRIVER_SCRATCH_BASE + 0x8000)?;
+        let gs_cookie: Vec<ByteValue> = PE_DRIVER_SECURITY_COOKIE
+            .to_le_bytes()
+            .iter()
+            .map(|b| ByteValue::Concrete(*b))
+            .collect();
+        process.state.memory = process
+            .state
+            .memory
+            .write(PE_DRIVER_SCRATCH_BASE + 0x8000 + PE_DRIVER_GS_COOKIE_OFF, &gs_cookie)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
 
         // The patches above are load-time state: keep restart-from-entry
         // (`reset_to_entry`) meaningful for drivers too.
@@ -4868,12 +4980,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     /// byte each) — under-constrained dispatch-entry analysis seeds
     /// IRP/IO_STACK_LOCATION blocks this way so handler branches fork on
     /// request contents instead of zeroed memory.
-    pub fn mark_memory_symbolic(
-        &mut self,
-        index: usize,
-        address: u64,
-        length: usize,
-    ) -> Result<(), RuntimeError> {
+    pub fn mark_memory_symbolic(&mut self, index: usize, address: u64, length: usize) -> Result<(), RuntimeError> {
         let state = self
             .states
             .get_mut(index)
@@ -4909,12 +5016,16 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             });
             bytes.push(ByteValue::Symbolic(expr));
         }
-        state.process.state.memory = state
-            .process
-            .state
+        state
             .memory
-            .write(address, &bytes)
+            .write_bytes(address, &bytes)
             .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        if std::env::var("ANGRYIER_DBG_MEM").is_ok() {
+            eprintln!(
+                "DBG mark_memory_symbolic idx={index} addr={address:#x} len={length} first={:?}",
+                bytes.first()
+            );
+        }
         Ok(())
     }
 
@@ -5043,11 +5154,9 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         // attach_kernel_pool_model / hook_export_return). Without the
         // instance check the symbolic stepper decoded the import stub's
         // bare `ret` and kernel models never fired.
-        if state.process.simproc_hooks.contains_key(&pc)
-            || state.process.simproc_instances.contains_key(&pc)
-        {
+        if state.process.simproc_hooks.contains_key(&pc) || state.process.simproc_instances.contains_key(&pc) {
             let state = &mut self.states[index];
-                        let outcome = if let Some(model) = state.process.simproc_instances.get(&pc).cloned() {
+            let outcome = if let Some(model) = state.process.simproc_instances.get(&pc).cloned() {
                 self.runtime.dispatch_simproc_instance(&mut state.process, pc, &model)?
             } else {
                 self.runtime.step(&mut state.process)?
@@ -5115,8 +5224,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     None
                 }
             })
-            && let Some(outcome) =
-                self.try_function_summary(index, target, pc.wrapping_add(u64::from(decoded.length)))
+            && let Some(outcome) = self.try_function_summary(index, target, pc.wrapping_add(u64::from(decoded.length)))
         {
             return Ok(outcome);
         }
@@ -5426,18 +5534,16 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         // so the &mut session borrow is exclusive; `jump_target` is only set
         // for JumpIndirect terminators, so this cannot fire on branch blocks.
         if matches!(
-                decoded.form_id,
-                angryier_semantics_intel64::forms::CALL_INDIRECT_R64
-                    | angryier_semantics_intel64::forms::CALL_INDIRECT_MEM64
-            )
-            && let Some(target_expr) = summary.jump_target
+            decoded.form_id,
+            angryier_semantics_intel64::forms::CALL_INDIRECT_R64
+                | angryier_semantics_intel64::forms::CALL_INDIRECT_MEM64
+        ) && let Some(target_expr) = summary.jump_target
             && let Some(node) = self.arena.get(target_expr)
             && node.op == angryier_expr::ExprOp::Constant
             && let Some(b) = node.immediate.get(..8)
         {
             let target = u64::from_le_bytes(b.try_into().unwrap_or([0; 8]));
-            if let Some(outcome) =
-                self.try_function_summary(index, target, pc.wrapping_add(u64::from(decoded.length)))
+            if let Some(outcome) = self.try_function_summary(index, target, pc.wrapping_add(u64::from(decoded.length)))
             {
                 return Ok(outcome);
             }
@@ -5542,11 +5648,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 // symbolic call leaked the loader's exit sentinel and the
                 // callee "returned" into termination.
                 let ret_addr = pc.wrapping_add(u64::from(decoded.length));
-                if let Some(rsp) = state
-                    .process
-                    .read_register(register_id::GPR_BASE + 4)
-                    .ok()
-                {
+                if let Some(rsp) = state.process.read_register(register_id::GPR_BASE + 4).ok() {
                     let frame: Vec<ByteValue> =
                         ret_addr.to_le_bytes().iter().map(|b| ByteValue::Concrete(*b)).collect();
                     state.process.state.memory = state
@@ -5564,10 +5666,16 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             }
             Some(angryier_ir::IrOp::JumpIndirect { .. }) => {
                 // Indirect jump/call: the evaluator resolved the target
-                // expression (e.g. `call rax` — rax, not [rsp]). Jump when
-                // it folds to a constant; a symbolic target is an
-                // under-constrained exit (honest termination), never the
-                // return-address misread this arm used to do.
+                // expression (e.g. `call rax` — rax, not [rsp]; `ret` — the
+                // popped [rsp]). Jump when it folds to a constant; a
+                // symbolic target is an under-constrained exit (honest
+                // termination), never the return-address misread this arm
+                // used to do. The fold accepts both a bare Constant and a
+                // composed-but-concrete expression — the `ret` path's target
+                // is a Concat of per-byte frame reads, which the session
+                // byte store materializes as constant extracts, so folding
+                // (not just the Constant shape test) is what makes an
+                // internal call return.
                 if let Some(target_expr) = summary.jump_target {
                     let direct = self
                         .arena
