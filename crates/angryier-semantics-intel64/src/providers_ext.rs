@@ -7442,6 +7442,76 @@ macro_rules! mov_mem_hl {
 mov_mem_hl!(MovhpsMem64Xmm, forms::MOVHPS_MEM64_XMM, true, 0x2A8);
 mov_mem_hl!(MovlpsMem64Xmm, forms::MOVLPS_MEM64_XMM, false, 0x2A9);
 
+/// `movhlps xmm1, xmm2` — dest[63:0] = src[127:64]; dest[127:64] unchanged.
+/// `movlhps xmm1, xmm2` — dest[127:64] = src[63:0]; dest[63:0] unchanged.
+macro_rules! mov_lane_reg {
+    ($name:ident, $form:expr, $high_to_low:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let old = out.read_operand(0, U128)?;
+                let src = out.read_operand(1, U128)?;
+                let start = const_u64(out, if $high_to_low { 64 } else { 0 })?;
+                let lane = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src, start])?;
+                let lane128 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U128, &[lane])?;
+                let low_mask = const_u64(out, 0xFFFF_FFFF_FFFF_FFFF)?;
+                let low_mask128 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U128, &[low_mask])?;
+                let sixty_four = const_u64(out, 64)?;
+                let (kept, placed) = if $high_to_low {
+                    // MOVHLPS: dest[63:0] = src[127:64], dest[127:64]
+                    // unchanged — keep the destination's HIGH half and let
+                    // the extracted source high half replace the low half.
+                    let high_mask = out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
+                        U128,
+                        &[low_mask128, sixty_four],
+                    )?;
+                    let kept = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U128, &[old, high_mask])?;
+                    (kept, lane128)
+                } else {
+                    // Keep the destination's low half; the extracted source
+                    // low half lands in the high half.
+                    let high_mask = out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
+                        U128,
+                        &[low_mask128, sixty_four],
+                    )?;
+                    let kept = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U128, &[old, high_mask])?;
+                    let placed = out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
+                        U128,
+                        &[lane128, sixty_four],
+                    )?;
+                    (kept, placed)
+                };
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U128, &[kept, placed])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+mov_lane_reg!(MovhlpsXmmXmm, forms::MOVHLPS_XMM_XMM, true, 0x2AE);
+mov_lane_reg!(MovlhpsXmmXmm, forms::MOVLHPS_XMM_XMM, false, 0x2AF);
+
 /// `movss xmm, m32` — zero-extends a 32-bit scalar into the destination.
 macro_rules! mov_scalar_mem {
     ($name:ident, $form:expr, $mem_ty:expr, $rule:expr) => {

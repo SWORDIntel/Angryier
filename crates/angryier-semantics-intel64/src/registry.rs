@@ -86,6 +86,18 @@ impl Intel64CorpusRegistry {
             Arc::new(BtsR64R64),
             Arc::new(BtrR64R64),
             Arc::new(BtcR64R64),
+            Arc::new(BtR32R32),
+            Arc::new(BtsR32R32),
+            Arc::new(BtrR32R32),
+            Arc::new(BtcR32R32),
+            Arc::new(BtR64Imm8),
+            Arc::new(BtsR64Imm8),
+            Arc::new(BtrR64Imm8),
+            Arc::new(BtcR64Imm8),
+            Arc::new(BtR32Imm8),
+            Arc::new(BtsR32Imm8),
+            Arc::new(BtrR32Imm8),
+            Arc::new(BtcR32Imm8),
             Arc::new(RolR64Cl),
             Arc::new(RorR64Cl),
             Arc::new(RclR64Cl),
@@ -541,6 +553,8 @@ impl Intel64CorpusRegistry {
             Arc::new(MovlpdXmmMem64),
             Arc::new(MovhpsMem64Xmm),
             Arc::new(MovlpsMem64Xmm),
+            Arc::new(MovhlpsXmmXmm),
+            Arc::new(MovlhpsXmmXmm),
             Arc::new(MovssXmmMem32),
             Arc::new(MovsdXmmMem64),
             Arc::new(MovssMem32Xmm),
@@ -668,6 +682,7 @@ impl Intel64CorpusRegistry {
             Arc::new(DecMem32),
             Arc::new(DecMem64),
             Arc::new(Rdtsc),
+            Arc::new(IntImm8),
         ];
 
         // Build form index from known form IDs. Each provider corresponds to
@@ -758,7 +773,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 643] = [
+const ALL_FORMS: [u32; 658] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -822,6 +837,18 @@ const ALL_FORMS: [u32; 643] = [
     crate::forms::BTS_R64_R64,
     crate::forms::BTR_R64_R64,
     crate::forms::BTC_R64_R64,
+    crate::forms::BT_R32_R32,
+    crate::forms::BTS_R32_R32,
+    crate::forms::BTR_R32_R32,
+    crate::forms::BTC_R32_R32,
+    crate::forms::BT_R64_IMM8,
+    crate::forms::BTS_R64_IMM8,
+    crate::forms::BTR_R64_IMM8,
+    crate::forms::BTC_R64_IMM8,
+    crate::forms::BT_R32_IMM8,
+    crate::forms::BTS_R32_IMM8,
+    crate::forms::BTR_R32_IMM8,
+    crate::forms::BTC_R32_IMM8,
     crate::forms::ROL_R64_CL,
     crate::forms::ROR_R64_CL,
     crate::forms::RCL_R64_CL,
@@ -1277,6 +1304,8 @@ const ALL_FORMS: [u32; 643] = [
     crate::forms::MOVLPD_XMM_MEM64,
     crate::forms::MOVHPS_MEM64_XMM,
     crate::forms::MOVLPS_MEM64_XMM,
+    crate::forms::MOVHLPS_XMM_XMM,
+    crate::forms::MOVLHPS_XMM_XMM,
     crate::forms::MOVSS_XMM_MEM32,
     crate::forms::MOVSD_XMM_MEM64,
     crate::forms::MOVSS_MEM32_XMM,
@@ -1403,6 +1432,7 @@ const ALL_FORMS: [u32; 643] = [
     crate::forms::DEC_MEM32,
     crate::forms::DEC_MEM64,
     crate::forms::RDTSC,
+    crate::forms::INT_IMM8,
 ];
 
 #[cfg(test)]

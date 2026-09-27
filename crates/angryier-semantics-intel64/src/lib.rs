@@ -29,19 +29,19 @@ use angryier_types::SemanticRuleId;
 /// adapter will map XED iform enumerations to these values. Until then,
 /// synthetic decode objects use these IDs directly.
 pub mod forms {
-        // INC/DEC with memory operands (the driver-campaign refcount shapes).
-        // LOCK-prefixed and unlocked encodings decode to the same iclass; on a
-        // single-vCPU symbolic emulator the LOCK prefix adds no semantic beyond
-        // atomicity, so both route to these forms (debt-recorded: multi-core
-        // memory-ordering semantics are not modeled).
-        pub const INC_MEM8: u32 = 0x10001;
-        pub const INC_MEM16: u32 = 0x10002;
-        pub const INC_MEM32: u32 = 0x10003;
-        pub const INC_MEM64: u32 = 0x10004;
-        pub const DEC_MEM8: u32 = 0x10005;
-        pub const DEC_MEM16: u32 = 0x10006;
-        pub const DEC_MEM32: u32 = 0x10007;
-        pub const DEC_MEM64: u32 = 0x10008;
+    // INC/DEC with memory operands (the driver-campaign refcount shapes).
+    // LOCK-prefixed and unlocked encodings decode to the same iclass; on a
+    // single-vCPU symbolic emulator the LOCK prefix adds no semantic beyond
+    // atomicity, so both route to these forms (debt-recorded: multi-core
+    // memory-ordering semantics are not modeled).
+    pub const INC_MEM8: u32 = 0x10001;
+    pub const INC_MEM16: u32 = 0x10002;
+    pub const INC_MEM32: u32 = 0x10003;
+    pub const INC_MEM64: u32 = 0x10004;
+    pub const DEC_MEM8: u32 = 0x10005;
+    pub const DEC_MEM16: u32 = 0x10006;
+    pub const DEC_MEM32: u32 = 0x10007;
+    pub const DEC_MEM64: u32 = 0x10008;
 
     // Scalar integer arithmetic (two-register, r64 r64)
     pub const MOV_R64_R64: u32 = 0x0001;
@@ -145,6 +145,18 @@ pub mod forms {
     pub const BTS_R64_R64: u32 = 0x0041;
     pub const BTR_R64_R64: u32 = 0x0042;
     pub const BTC_R64_R64: u32 = 0x0043;
+    pub const BT_R32_R32: u32 = 0x02F0;
+    pub const BTS_R32_R32: u32 = 0x02F1;
+    pub const BTR_R32_R32: u32 = 0x02F2;
+    pub const BTC_R32_R32: u32 = 0x02F3;
+    pub const BT_R64_IMM8: u32 = 0x02F4;
+    pub const BTS_R64_IMM8: u32 = 0x02F5;
+    pub const BTR_R64_IMM8: u32 = 0x02F6;
+    pub const BTC_R64_IMM8: u32 = 0x02F7;
+    pub const BT_R32_IMM8: u32 = 0x02F8;
+    pub const BTS_R32_IMM8: u32 = 0x02F9;
+    pub const BTR_R32_IMM8: u32 = 0x02FA;
+    pub const BTC_R32_IMM8: u32 = 0x02FB;
 
     // Flag manipulation
     pub const CLC: u32 = 0x0044;
@@ -836,6 +848,9 @@ pub mod forms {
     pub const MOVSS_MEM32_XMM: u32 = 0x0214;
     pub const MOVSD_XMM_MEM64: u32 = 0x0215;
     pub const MOVSD_MEM64_XMM: u32 = 0x0216;
+    // movhlps/movlhps register lane moves (SSE)
+    pub const MOVHLPS_XMM_XMM: u32 = 0x0217;
+    pub const MOVLHPS_XMM_XMM: u32 = 0x0218;
 
     // YMM (VEX.256) moves and lane-wise ops
     pub const VMOVDQA_YMM_MEM: u32 = 0x0219;
@@ -931,6 +946,11 @@ pub mod forms {
     /// (each read increments by 1), NOT the real CPU timestamp.
     pub const RDTSC: u32 = 0x01DD;
 
+    /// INT imm8 — Software interrupt. On Windows, `int 0x29` is `__fastfail`
+    /// (security check failure → immediate termination). Semantic reads the
+    /// vector and terminates, preserving the vector in RAX for diagnostics.
+    pub const INT_IMM8: u32 = 0x01DE;
+
     // x87 FPU state initialization (fninit)
     pub const FINIT: u32 = 0x0268;
 
@@ -1000,7 +1020,6 @@ pub mod rflags {
 }
 
 /// Starting rule ID for corpus providers. Each provider gets a sequential ID.
-
 pub const CORPUS_RULE_BASE: u64 = 0x1000;
 
 pub const fn rule_id(offset: u64) -> SemanticRuleId {

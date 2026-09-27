@@ -2408,166 +2408,122 @@ impl SemanticProvider for XaddR64R64 {
 }
 
 // ---------------------------------------------------------------------------
-// BT r64, r64 (bit test: CF = bit(operand0, operand1), no write to operand 0)
+// BT/BTS/BTR/BTC — bit-test family, register and immediate forms at 32 and
+// 64 bits. CF = bit(value, index); BTS/BTR/BTC additionally set/reset/
+// complement the tested bit in the destination. The index is masked mod the
+// operand width (architectural normalization; the imm8 and r32 indices are
+// read at U64 and masked before use — the rotate-family idiom). The oracle
+// (bit_test_differential.rs) proved masking matters for write-back forms:
+// `bts r64, 64` must set bit 0, not wrap `1 << 64` to zero.
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
-pub struct BtR64R64;
-
-impl SemanticProvider for BtR64R64 {
-    fn rule_id(&self) -> SemanticRuleId {
-        rule_id(63)
-    }
-    fn origin(&self) -> SemanticOrigin {
-        SemanticOrigin::HandwrittenOverride
-    }
-    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
-        insn.form_id() == forms::BT_R64_R64
-    }
-    fn emit(
-        &self,
-        context: &SemanticContext,
-        insn: &dyn DecodedInstructionView,
-        out: &mut dyn SemanticBuilder,
-    ) -> Result<SemanticReceipt, SemanticError> {
-        let value = out.read_operand(0, U64)?;
-        let bit_index = out.read_operand(1, U64)?;
-        let one = const_u64(out, 1)?;
-        let shifted = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-            U64,
-            &[value, bit_index],
-        )?;
-        let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[shifted, one])?;
-        write_cf_only(out, cf)?;
-        fall_through(out, insn)?;
-        Ok(receipt(63, context))
-    }
+/// Bit-test write-back behavior (BT tests only).
+#[derive(Clone, Copy)]
+enum BitTestOp {
+    Test,
+    Set,
+    Reset,
+    Complement,
 }
 
-// ---------------------------------------------------------------------------
-// BTS r64, r64 (bit test and set: CF = bit, then set that bit in operand 0)
-// ---------------------------------------------------------------------------
+macro_rules! bit_test_reg {
+    ($name:ident, $form:expr, $width:expr, $index_ty:expr, $mask_bits:expr, $op:ident, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
 
-#[derive(Clone, Copy, Debug)]
-pub struct BtsR64R64;
-
-impl SemanticProvider for BtsR64R64 {
-    fn rule_id(&self) -> SemanticRuleId {
-        rule_id(64)
-    }
-    fn origin(&self) -> SemanticOrigin {
-        SemanticOrigin::HandwrittenOverride
-    }
-    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
-        insn.form_id() == forms::BTS_R64_R64
-    }
-    fn emit(
-        &self,
-        context: &SemanticContext,
-        insn: &dyn DecodedInstructionView,
-        out: &mut dyn SemanticBuilder,
-    ) -> Result<SemanticReceipt, SemanticError> {
-        let value = out.read_operand(0, U64)?;
-        let bit_index = out.read_operand(1, U64)?;
-        let one = const_u64(out, 1)?;
-        let shifted = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-            U64,
-            &[value, bit_index],
-        )?;
-        let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[shifted, one])?;
-        write_cf_only(out, cf)?;
-        let mask = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[one, bit_index])?;
-        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[value, mask])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
-        Ok(receipt(64, context))
-    }
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let value = out.read_operand(0, $width)?;
+                // Register indices are read at their natural width (the
+                // lowerer rejects widening a register view), then widened;
+                // immediate indices read at U64 directly.
+                let index = out.read_operand(1, $index_ty)?;
+                let index = match $index_ty {
+                    U64 => index,
+                    _ => out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[index])?,
+                };
+                let mask = const_u64(out, $mask_bits)?;
+                let index_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[index, mask])?;
+                let one = match $width {
+                    U32 => out.constant(U32, &1u32.to_le_bytes())?,
+                    U64 => out.constant(U64, &1u64.to_le_bytes())?,
+                    _ => return Err(SemanticError::InvalidWidth),
+                };
+                let shifted = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+                    $width,
+                    &[value, index_masked],
+                )?;
+                let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), $width, &[shifted, one])?;
+                // CF is defined at the operand width; widen only the 32-bit
+                // forms for the U64 flag composition.
+                let cf64 = match $width {
+                    U64 => cf,
+                    _ => out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[cf])?,
+                };
+                write_cf_only(out, cf64)?;
+                let bit_mask = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
+                    $width,
+                    &[one, index_masked],
+                )?;
+                let result = match BitTestOp::$op {
+                    BitTestOp::Test => value,
+                    BitTestOp::Set => out.emit(SemanticOp::Primitive(PrimitiveOp::Or), $width, &[value, bit_mask])?,
+                    BitTestOp::Reset => {
+                        let not_mask = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), $width, &[bit_mask])?;
+                        out.emit(
+                            SemanticOp::Primitive(PrimitiveOp::And),
+                            $width,
+                            &[value, not_mask],
+                        )?
+                    }
+                    BitTestOp::Complement => out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::Xor),
+                        $width,
+                        &[value, bit_mask],
+                    )?,
+                };
+                if !matches!(BitTestOp::$op, BitTestOp::Test) {
+                    out.write_operand(0, result)?;
+                }
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
 }
 
-// ---------------------------------------------------------------------------
-// BTR r64, r64 (bit test and reset: CF = bit, then clear that bit in operand 0)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug)]
-pub struct BtrR64R64;
-
-impl SemanticProvider for BtrR64R64 {
-    fn rule_id(&self) -> SemanticRuleId {
-        rule_id(65)
-    }
-    fn origin(&self) -> SemanticOrigin {
-        SemanticOrigin::HandwrittenOverride
-    }
-    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
-        insn.form_id() == forms::BTR_R64_R64
-    }
-    fn emit(
-        &self,
-        context: &SemanticContext,
-        insn: &dyn DecodedInstructionView,
-        out: &mut dyn SemanticBuilder,
-    ) -> Result<SemanticReceipt, SemanticError> {
-        let value = out.read_operand(0, U64)?;
-        let bit_index = out.read_operand(1, U64)?;
-        let one = const_u64(out, 1)?;
-        let shifted = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-            U64,
-            &[value, bit_index],
-        )?;
-        let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[shifted, one])?;
-        write_cf_only(out, cf)?;
-        let mask = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[one, bit_index])?;
-        let not_mask = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U64, &[mask])?;
-        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[value, not_mask])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
-        Ok(receipt(65, context))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BTC r64, r64 (bit test and complement: CF = bit, then complement that bit in operand 0)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug)]
-pub struct BtcR64R64;
-
-impl SemanticProvider for BtcR64R64 {
-    fn rule_id(&self) -> SemanticRuleId {
-        rule_id(66)
-    }
-    fn origin(&self) -> SemanticOrigin {
-        SemanticOrigin::HandwrittenOverride
-    }
-    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
-        insn.form_id() == forms::BTC_R64_R64
-    }
-    fn emit(
-        &self,
-        context: &SemanticContext,
-        insn: &dyn DecodedInstructionView,
-        out: &mut dyn SemanticBuilder,
-    ) -> Result<SemanticReceipt, SemanticError> {
-        let value = out.read_operand(0, U64)?;
-        let bit_index = out.read_operand(1, U64)?;
-        let one = const_u64(out, 1)?;
-        let shifted = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
-            U64,
-            &[value, bit_index],
-        )?;
-        let cf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[shifted, one])?;
-        write_cf_only(out, cf)?;
-        let mask = out.emit(SemanticOp::Primitive(PrimitiveOp::ShiftLeft), U64, &[one, bit_index])?;
-        let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U64, &[value, mask])?;
-        out.write_operand(0, result)?;
-        fall_through(out, insn)?;
-        Ok(receipt(66, context))
-    }
-}
+bit_test_reg!(BtR64R64, forms::BT_R64_R64, U64, U64, 0x3F, Test, 63);
+bit_test_reg!(BtsR64R64, forms::BTS_R64_R64, U64, U64, 0x3F, Set, 64);
+bit_test_reg!(BtrR64R64, forms::BTR_R64_R64, U64, U64, 0x3F, Reset, 65);
+bit_test_reg!(BtcR64R64, forms::BTC_R64_R64, U64, U64, 0x3F, Complement, 66);
+bit_test_reg!(BtR32R32, forms::BT_R32_R32, U32, U32, 0x1F, Test, 0x530);
+bit_test_reg!(BtsR32R32, forms::BTS_R32_R32, U32, U32, 0x1F, Set, 0x531);
+bit_test_reg!(BtrR32R32, forms::BTR_R32_R32, U32, U32, 0x1F, Reset, 0x532);
+bit_test_reg!(BtcR32R32, forms::BTC_R32_R32, U32, U32, 0x1F, Complement, 0x533);
+bit_test_reg!(BtR64Imm8, forms::BT_R64_IMM8, U64, U64, 0x3F, Test, 0x534);
+bit_test_reg!(BtsR64Imm8, forms::BTS_R64_IMM8, U64, U64, 0x3F, Set, 0x535);
+bit_test_reg!(BtrR64Imm8, forms::BTR_R64_IMM8, U64, U64, 0x3F, Reset, 0x536);
+bit_test_reg!(BtcR64Imm8, forms::BTC_R64_IMM8, U64, U64, 0x3F, Complement, 0x537);
+bit_test_reg!(BtR32Imm8, forms::BT_R32_IMM8, U32, U64, 0x1F, Test, 0x538);
+bit_test_reg!(BtsR32Imm8, forms::BTS_R32_IMM8, U32, U64, 0x1F, Set, 0x539);
+bit_test_reg!(BtrR32Imm8, forms::BTR_R32_IMM8, U32, U64, 0x1F, Reset, 0x53A);
+bit_test_reg!(BtcR32Imm8, forms::BTC_R32_IMM8, U32, U64, 0x1F, Complement, 0x53B);
 
 // ---------------------------------------------------------------------------
 // CMOVZ r64, r64 (conditional move if ZF=1)
@@ -4308,9 +4264,52 @@ impl SemanticProvider for Rdtsc {
         let edx = tsc >> 32;
         let eax_val = const_u64(out, eax)?;
         let edx_val = const_u64(out, edx)?;
-        out.write_register(RegisterId(register_id::GPR_BASE + 0), eax_val)?;
+        out.write_register(RegisterId(register_id::GPR_BASE), eax_val)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 2), edx_val)?;
         fall_through(out, insn)?;
         Ok(receipt(0x500, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// INT imm8 (Software Interrupt / __fastfail)
+// ---------------------------------------------------------------------------
+
+/// INT imm8: reads the interrupt vector from operand 0, stores it in RAX
+/// for diagnostics, and terminates execution. On Windows, `int 0x29` is
+/// `__fastfail` — the driver detected a security condition and would
+/// bugcheck on real hardware. The semantic treats all interrupts as
+/// terminal (debt-recorded: INT 3/1 debug interrupts could be no-ops).
+#[derive(Clone, Copy, Debug)]
+pub struct IntImm8;
+
+impl SemanticProvider for IntImm8 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x501)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::INT_IMM8
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        _insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        // Read the interrupt vector from operand 0 (imm8)
+        let vector = out.read_operand(0, U64)?;
+        // Store in RAX for diagnostics: which interrupt fired
+        out.write_register(RegisterId(register_id::GPR_BASE), vector)?;
+        // Terminate: on real hardware, __fastfail (int 0x29) is an immediate
+        // unrecoverable termination. The code after it is unreachable
+        // (padding/data), and executing it as instructions produces garbage.
+        // The security cookie check that triggers __fastfail depends on a
+        // properly initialized GS segment — future work.
+        let exit = const_u64(out, 0xdead_beef_0000)?;
+        out.jump(exit)?;
+        Ok(receipt(0x501, context))
     }
 }

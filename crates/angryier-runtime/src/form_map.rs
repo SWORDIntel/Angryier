@@ -797,6 +797,14 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem64, Shape::Xmm] => Some(forms::MOVLPS_MEM64_XMM),
             _ => None,
         },
+        iclass::XED_ICLASS_MOVHLPS => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::MOVHLPS_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_MOVLHPS => match shapes {
+            [Shape::Xmm, Shape::Xmm] => Some(forms::MOVLHPS_XMM_XMM),
+            _ => None,
+        },
         iclass::XED_ICLASS_MOVSS => match shapes {
             [Shape::Xmm, Shape::Mem32] => Some(forms::MOVSS_XMM_MEM32),
             [Shape::Mem32, Shape::Xmm] => Some(forms::MOVSS_MEM32_XMM),
@@ -937,18 +945,30 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         iclass::XED_ICLASS_BT => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::BT_R64_R64),
+            [Shape::Reg32, Shape::Reg32] => Some(forms::BT_R32_R32),
+            [Shape::Reg64, Shape::Imm] => Some(forms::BT_R64_IMM8),
+            [Shape::Reg32, Shape::Imm] => Some(forms::BT_R32_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_BTS => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::BTS_R64_R64),
+            [Shape::Reg32, Shape::Reg32] => Some(forms::BTS_R32_R32),
+            [Shape::Reg64, Shape::Imm] => Some(forms::BTS_R64_IMM8),
+            [Shape::Reg32, Shape::Imm] => Some(forms::BTS_R32_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_BTR => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::BTR_R64_R64),
+            [Shape::Reg32, Shape::Reg32] => Some(forms::BTR_R32_R32),
+            [Shape::Reg64, Shape::Imm] => Some(forms::BTR_R64_IMM8),
+            [Shape::Reg32, Shape::Imm] => Some(forms::BTR_R32_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_BTC => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::BTC_R64_R64),
+            [Shape::Reg32, Shape::Reg32] => Some(forms::BTC_R32_R32),
+            [Shape::Reg64, Shape::Imm] => Some(forms::BTC_R64_IMM8),
+            [Shape::Reg32, Shape::Imm] => Some(forms::BTC_R32_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_BSF => match shapes {
@@ -1290,6 +1310,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_HLT => Some(forms::HLT),
         iclass::XED_ICLASS_UD2 => Some(forms::UD2),
         iclass::XED_ICLASS_RDTSC => Some(forms::RDTSC),
+        iclass::XED_ICLASS_INT => Some(forms::INT_IMM8),
+        iclass::XED_ICLASS_INT1 | iclass::XED_ICLASS_INT3 => Some(forms::NOP2),
         _ => None,
     }
 }
