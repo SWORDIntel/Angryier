@@ -99,7 +99,7 @@ fn harness_source(instruction: &str, left: [u32; 8], right: [u32; 8]) -> String 
         }
     }
     body.push_str(&format!(
-        "    vmovdqu {SCRATCH:#x}, %ymm1\n    vmovdqu {:#x}, %ymm2\n    {instruction}\n    vmovdqu %ymm0, {RESULT:#x}\n    mov $1, %rax\n    mov $1, %rdi\n    mov ${RESULT:#x}, %rsi\n    mov $32, %rdx\n    syscall\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall\n        .data\n        .space 0x400\n",
+        "    vmovdqu {SCRATCH:#x}, %ymm1\n    vmovdqu {:#x}, %ymm2\n    vmovdqu {SCRATCH:#x}, %ymm3\n    {instruction}\n    vmovdqu %ymm0, {RESULT:#x}\n    mov $1, %rax\n    mov $1, %rdi\n    mov ${RESULT:#x}, %rsi\n    mov $32, %rdx\n    syscall\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall\n        .data\n        .space 0x400\n",
         SCRATCH + 32
     ));
     body
@@ -171,6 +171,45 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
         xed::XED_ICLASS_VANDNPD => packed_form(&shapes, forms::VANDNPD_YMM_YMM_YMM, forms::VANDNPD_YMM_YMM_MEM),
         xed::XED_ICLASS_VORPD => packed_form(&shapes, forms::VORPD_YMM_YMM_YMM, forms::VORPD_YMM_YMM_MEM),
         xed::XED_ICLASS_VXORPD => packed_form(&shapes, forms::VXORPD_YMM_YMM_YMM, forms::VXORPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VCVTSS2SD => scalar_form(&shapes, forms::VCVTSS2SD_XMM_XMM_XMM, forms::VCVTSS2SD_XMM_XMM_MEM32),
+        xed::XED_ICLASS_VCVTSD2SS => {
+            scalar_double_form(&shapes, forms::VCVTSD2SS_XMM_XMM_XMM, forms::VCVTSD2SS_XMM_XMM_MEM64)
+        }
+        xed::XED_ICLASS_VBLENDPS => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VBLENDPS_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VBLENDPS_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        xed::XED_ICLASS_VBLENDPD => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VBLENDPD_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VBLENDPD_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        xed::XED_ICLASS_VBLENDVPS => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VBLENDVPS_YMM_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Ymm] => Some(forms::VBLENDVPS_YMM_YMM_MEM_YMM),
+            _ => None,
+        },
+        xed::XED_ICLASS_VBLENDVPD => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VBLENDVPD_YMM_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Ymm] => Some(forms::VBLENDVPD_YMM_YMM_MEM_YMM),
+            _ => None,
+        },
+        xed::XED_ICLASS_VPERM2F128 => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPERM2F128_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERM2F128_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        xed::XED_ICLASS_VPERMILPS => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPERMILPS_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERMILPS_YMM_MEM_IMM8),
+            _ => None,
+        },
+        xed::XED_ICLASS_VPERMILPD => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPERMILPD_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERMILPD_YMM_MEM_IMM8),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -608,5 +647,46 @@ fn avx_double_divide_by_zero_matches_hardware() -> Result<(), BoxError> {
         return Err(format!("expected +Inf lane 0x7ff0000000000000, got {lane:#x}").into());
     }
     eprintln!("AVX double divide-by-zero: 1 native case matched (+Inf lanes)");
+    Ok(())
+}
+
+#[test]
+fn avx_blend_cvt_perm_differential() -> Result<(), BoxError> {
+    let forms = [
+        ("vcvtss2sd_reg", "vcvtss2sd %xmm2, %xmm1, %xmm0"),
+        ("vcvtss2sd_mem", "vcvtss2sd 0x500020, %xmm1, %xmm0"),
+        ("vcvtsd2ss_reg", "vcvtsd2ss %xmm2, %xmm1, %xmm0"),
+        ("vcvtsd2ss_mem", "vcvtsd2ss 0x500020, %xmm1, %xmm0"),
+        ("vblendps_reg", "vblendps $0x55, %ymm2, %ymm1, %ymm0"),
+        ("vblendps_mem", "vblendps $0x55, 0x500020, %ymm1, %ymm0"),
+        ("vblendpd_reg", "vblendpd $0x0a, %ymm2, %ymm1, %ymm0"),
+        ("vblendpd_mem", "vblendpd $0x0a, 0x500020, %ymm1, %ymm0"),
+        ("vblendvps_reg", "vblendvps %ymm3, %ymm2, %ymm1, %ymm0"),
+        ("vblendvps_mem", "vblendvps %ymm3, 0x500020, %ymm1, %ymm0"),
+        ("vblendvpd_reg", "vblendvpd %ymm3, %ymm2, %ymm1, %ymm0"),
+        ("vblendvpd_mem", "vblendvpd %ymm3, 0x500020, %ymm1, %ymm0"),
+        ("vperm2f128_reg", "vperm2f128 $0x31, %ymm2, %ymm1, %ymm0"),
+        ("vperm2f128_mem", "vperm2f128 $0x31, 0x500020, %ymm1, %ymm0"),
+        ("vpermilps_reg", "vpermilps $0x4e, %ymm1, %ymm0"),
+        ("vpermilps_mem", "vpermilps $0x4e, 0x500000, %ymm0"),
+        ("vpermilpd_reg", "vpermilpd $0x05, %ymm1, %ymm0"),
+        ("vpermilpd_mem", "vpermilpd $0x05, 0x500000, %ymm0"),
+    ];
+    let mut count = 0usize;
+    for (pattern, (left, right)) in PATTERNS.into_iter().enumerate() {
+        for (name, instruction) in forms {
+            if differential_case(&format!("{name}_{pattern}"), instruction, left, right)? {
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        eprintln!("SKIP: binutils unavailable");
+    } else {
+        eprintln!("AVX blend/cvt/perm differential: {count} native cases passed");
+    }
+    if count != 0 && count != 36 {
+        return Err(format!("expected 36 native cases, ran {count}").into());
+    }
     Ok(())
 }

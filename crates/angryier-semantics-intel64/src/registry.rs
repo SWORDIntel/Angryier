@@ -1147,6 +1147,24 @@ impl Intel64CorpusRegistry {
             Arc::new(VorpdYmmYmmMem),
             Arc::new(VxorpdYmmYmmYmm),
             Arc::new(VxorpdYmmYmmMem),
+            Arc::new(Vcvtss2sdXmmXmmXmm),
+            Arc::new(Vcvtss2sdXmmXmmMem32),
+            Arc::new(Vcvtsd2ssXmmXmmXmm),
+            Arc::new(Vcvtsd2ssXmmXmmMem64),
+            Arc::new(VblendpsYmmYmmYmmImm8),
+            Arc::new(VblendpsYmmYmmMemImm8),
+            Arc::new(VblendpdYmmYmmYmmImm8),
+            Arc::new(VblendpdYmmYmmMemImm8),
+            Arc::new(VblendvpsYmmYmmYmmYmm),
+            Arc::new(VblendvpsYmmYmmMemYmm),
+            Arc::new(VblendvpdYmmYmmYmmYmm),
+            Arc::new(VblendvpdYmmYmmMemYmm),
+            Arc::new(Vperm2f128YmmYmmYmmImm8),
+            Arc::new(Vperm2f128YmmYmmMemImm8),
+            Arc::new(VpermilpsYmmYmmImm8),
+            Arc::new(VpermilpsYmmMemImm8),
+            Arc::new(VpermilpdYmmYmmImm8),
+            Arc::new(VpermilpdYmmMemImm8),
         ];
 
         // Build form index from known form IDs. Each provider corresponds to
@@ -1237,7 +1255,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1117] = [
+const ALL_FORMS: [u32; 1135] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2360,6 +2378,24 @@ const ALL_FORMS: [u32; 1117] = [
     crate::forms::VORPD_YMM_YMM_MEM,
     crate::forms::VXORPD_YMM_YMM_YMM,
     crate::forms::VXORPD_YMM_YMM_MEM,
+    crate::forms::VCVTSS2SD_XMM_XMM_XMM,
+    crate::forms::VCVTSS2SD_XMM_XMM_MEM32,
+    crate::forms::VCVTSD2SS_XMM_XMM_XMM,
+    crate::forms::VCVTSD2SS_XMM_XMM_MEM64,
+    crate::forms::VBLENDPS_YMM_YMM_YMM_IMM8,
+    crate::forms::VBLENDPS_YMM_YMM_MEM_IMM8,
+    crate::forms::VBLENDPD_YMM_YMM_YMM_IMM8,
+    crate::forms::VBLENDPD_YMM_YMM_MEM_IMM8,
+    crate::forms::VBLENDVPS_YMM_YMM_YMM_YMM,
+    crate::forms::VBLENDVPS_YMM_YMM_MEM_YMM,
+    crate::forms::VBLENDVPD_YMM_YMM_YMM_YMM,
+    crate::forms::VBLENDVPD_YMM_YMM_MEM_YMM,
+    crate::forms::VPERM2F128_YMM_YMM_YMM_IMM8,
+    crate::forms::VPERM2F128_YMM_YMM_MEM_IMM8,
+    crate::forms::VPERMILPS_YMM_YMM_IMM8,
+    crate::forms::VPERMILPS_YMM_MEM_IMM8,
+    crate::forms::VPERMILPD_YMM_YMM_IMM8,
+    crate::forms::VPERMILPD_YMM_MEM_IMM8,
 ];
 
 #[cfg(test)]

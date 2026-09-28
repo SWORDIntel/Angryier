@@ -8423,6 +8423,711 @@ logic_ps_ymm!(VorpdYmmYmmMem, forms::VORPD_YMM_YMM_MEM, Or, 0x1425);
 logic_ps_ymm!(VxorpdYmmYmmYmm, forms::VXORPD_YMM_YMM_YMM, Xor, 0x1426);
 logic_ps_ymm!(VxorpdYmmYmmMem, forms::VXORPD_YMM_YMM_MEM, Xor, 0x1427);
 
+// ---------------------------------------------------------------------------
+// AVX conversion, blend, and permutation providers (0x1428..0x1439)
+// ---------------------------------------------------------------------------
+
+/// VCVTSS2SD xmm1, xmm2, xmm3/m32: convert scalar single to double, upper 64 bits from xmm2.
+macro_rules! vcvt_ss2sd {
+    ($name:ident, $form:expr, $memory:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, F64X2)?;
+                let zero = const_u64(out, 0)?;
+                let sixty_four = const_u64(out, 64)?;
+                let src2 = if $memory {
+                    out.read_operand(2, F32)?
+                } else {
+                    let v = out.read_operand(2, F32X4)?;
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32, &[v, zero])?
+                };
+                let converted = out.emit(SemanticOp::Float(FloatingOp::Convert), F64, &[src2])?;
+                let upper = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src1, sixty_four],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    F64X2,
+                    &[converted, upper],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vcvt_ss2sd!(Vcvtss2sdXmmXmmXmm, forms::VCVTSS2SD_XMM_XMM_XMM, false, 0x1428);
+vcvt_ss2sd!(Vcvtss2sdXmmXmmMem32, forms::VCVTSS2SD_XMM_XMM_MEM32, true, 0x1429);
+
+/// VCVTSD2SS xmm1, xmm2, xmm3/m64: convert scalar double to single, upper 96 bits from xmm2.
+macro_rules! vcvt_sd2ss {
+    ($name:ident, $form:expr, $memory:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, F32X4)?;
+                let zero = const_u64(out, 0)?;
+                let thirty_two = const_u64(out, 32)?;
+                let src2 = if $memory {
+                    out.read_operand(2, F64)?
+                } else {
+                    let v = out.read_operand(2, F64X2)?;
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64, &[v, zero])?
+                };
+                let converted = out.emit(SemanticOp::Float(FloatingOp::Convert), F32, &[src2])?;
+                let upper = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U96,
+                    &[src1, thirty_two],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    F32X4,
+                    &[converted, upper],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vcvt_sd2ss!(Vcvtsd2ssXmmXmmXmm, forms::VCVTSD2SS_XMM_XMM_XMM, false, 0x142A);
+vcvt_sd2ss!(Vcvtsd2ssXmmXmmMem64, forms::VCVTSD2SS_XMM_XMM_MEM64, true, 0x142B);
+
+/// VBLENDPS ymm1, ymm2, ymm3/m256, imm8: conditional blend of 8 single-precision floats based on imm8 bits.
+macro_rules! vblend_ps {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, U256)?;
+                let src2 = out.read_operand(2, U256)?;
+                let imm = insn
+                    .operand(3)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0) as u8;
+                let mut mask_bytes = [0u8; 32];
+                for i in 0..8 {
+                    if (imm >> i) & 1 == 1 {
+                        mask_bytes[i * 4..i * 4 + 4].fill(0xFF);
+                    }
+                }
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let src1_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[src1, zero])?;
+                let src1_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[src1, high_offset],
+                )?;
+                let src2_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[src2, zero])?;
+                let src2_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[src2, high_offset],
+                )?;
+                let mask_lo = out.constant(U128, &mask_bytes[..16])?;
+                let mask_hi = out.constant(U128, &mask_bytes[16..])?;
+                let diff_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U128, &[src1_lo, src2_lo])?;
+                let diff_hi = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U128, &[src1_hi, src2_hi])?;
+                let diff_masked_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U128, &[diff_lo, mask_lo])?;
+                let diff_masked_hi = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U128, &[diff_hi, mask_hi])?;
+                let res_lo = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Xor),
+                    U128,
+                    &[src1_lo, diff_masked_lo],
+                )?;
+                let res_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Xor),
+                    U128,
+                    &[src1_hi, diff_masked_hi],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    U256,
+                    &[res_lo, res_hi],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vblend_ps!(VblendpsYmmYmmYmmImm8, forms::VBLENDPS_YMM_YMM_YMM_IMM8, 0x142C);
+vblend_ps!(VblendpsYmmYmmMemImm8, forms::VBLENDPS_YMM_YMM_MEM_IMM8, 0x142D);
+
+/// VBLENDPD ymm1, ymm2, ymm3/m256, imm8: conditional blend of 4 double-precision floats based on imm8 bits.
+macro_rules! vblend_pd {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, U256)?;
+                let src2 = out.read_operand(2, U256)?;
+                let imm = insn
+                    .operand(3)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0) as u8;
+                let mut mask_bytes = [0u8; 32];
+                for i in 0..4 {
+                    if (imm >> i) & 1 == 1 {
+                        mask_bytes[i * 8..i * 8 + 8].fill(0xFF);
+                    }
+                }
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let src1_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[src1, zero])?;
+                let src1_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[src1, high_offset],
+                )?;
+                let src2_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[src2, zero])?;
+                let src2_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[src2, high_offset],
+                )?;
+                let mask_lo = out.constant(U128, &mask_bytes[..16])?;
+                let mask_hi = out.constant(U128, &mask_bytes[16..])?;
+                let diff_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U128, &[src1_lo, src2_lo])?;
+                let diff_hi = out.emit(SemanticOp::Primitive(PrimitiveOp::Xor), U128, &[src1_hi, src2_hi])?;
+                let diff_masked_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U128, &[diff_lo, mask_lo])?;
+                let diff_masked_hi = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U128, &[diff_hi, mask_hi])?;
+                let res_lo = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Xor),
+                    U128,
+                    &[src1_lo, diff_masked_lo],
+                )?;
+                let res_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Xor),
+                    U128,
+                    &[src1_hi, diff_masked_hi],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    U256,
+                    &[res_lo, res_hi],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vblend_pd!(VblendpdYmmYmmYmmImm8, forms::VBLENDPD_YMM_YMM_YMM_IMM8, 0x142E);
+vblend_pd!(VblendpdYmmYmmMemImm8, forms::VBLENDPD_YMM_YMM_MEM_IMM8, 0x142F);
+
+/// VBLENDVPS ymm1, ymm2, ymm3/m256, ymm4: variable blend of 8 single-precision floats based on mask sign bits.
+macro_rules! vblendv_ps {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, U256)?;
+                let src2 = out.read_operand(2, U256)?;
+                let mask_ymm = out.read_operand(3, U256)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let src1_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), I32X4, &[src1, zero])?;
+                let src1_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I32X4,
+                    &[src1, high_offset],
+                )?;
+                let src2_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), I32X4, &[src2, zero])?;
+                let src2_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I32X4,
+                    &[src2, high_offset],
+                )?;
+                let mask_lo = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I32X4,
+                    &[mask_ymm, zero],
+                )?;
+                let mask_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I32X4,
+                    &[mask_ymm, high_offset],
+                )?;
+                let count_val = 31u128 | (31u128 << 32) | (31u128 << 64) | (31u128 << 96);
+                let count = out.constant(I32X4, &count_val.to_le_bytes())?;
+                let mask_dwords_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::ArithmeticShiftRight)),
+                    I32X4,
+                    &[mask_lo, count],
+                )?;
+                let mask_dwords_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::ArithmeticShiftRight)),
+                    I32X4,
+                    &[mask_hi, count],
+                )?;
+                let diff_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)),
+                    I32X4,
+                    &[src1_lo, src2_lo],
+                )?;
+                let diff_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)),
+                    I32X4,
+                    &[src1_hi, src2_hi],
+                )?;
+                let diff_masked_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::And)),
+                    I32X4,
+                    &[diff_lo, mask_dwords_lo],
+                )?;
+                let diff_masked_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::And)),
+                    I32X4,
+                    &[diff_hi, mask_dwords_hi],
+                )?;
+                let res_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)),
+                    I32X4,
+                    &[src1_lo, diff_masked_lo],
+                )?;
+                let res_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)),
+                    I32X4,
+                    &[src1_hi, diff_masked_hi],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    U256,
+                    &[res_lo, res_hi],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vblendv_ps!(VblendvpsYmmYmmYmmYmm, forms::VBLENDVPS_YMM_YMM_YMM_YMM, 0x1430);
+vblendv_ps!(VblendvpsYmmYmmMemYmm, forms::VBLENDVPS_YMM_YMM_MEM_YMM, 0x1431);
+
+/// VBLENDVPD ymm1, ymm2, ymm3/m256, ymm4: variable blend of 4 double-precision floats based on mask sign bits.
+macro_rules! vblendv_pd {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, U256)?;
+                let src2 = out.read_operand(2, U256)?;
+                let mask_ymm = out.read_operand(3, U256)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let src1_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), I64X2, &[src1, zero])?;
+                let src1_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I64X2,
+                    &[src1, high_offset],
+                )?;
+                let src2_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), I64X2, &[src2, zero])?;
+                let src2_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I64X2,
+                    &[src2, high_offset],
+                )?;
+                let mask_lo = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I64X2,
+                    &[mask_ymm, zero],
+                )?;
+                let mask_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I64X2,
+                    &[mask_ymm, high_offset],
+                )?;
+                let count_val = 63u128 | (63u128 << 64);
+                let count = out.constant(I64X2, &count_val.to_le_bytes())?;
+                let mask_qwords_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::ArithmeticShiftRight)),
+                    I64X2,
+                    &[mask_lo, count],
+                )?;
+                let mask_qwords_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::ArithmeticShiftRight)),
+                    I64X2,
+                    &[mask_hi, count],
+                )?;
+                let diff_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)),
+                    I64X2,
+                    &[src1_lo, src2_lo],
+                )?;
+                let diff_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)),
+                    I64X2,
+                    &[src1_hi, src2_hi],
+                )?;
+                let diff_masked_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::And)),
+                    I64X2,
+                    &[diff_lo, mask_qwords_lo],
+                )?;
+                let diff_masked_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::And)),
+                    I64X2,
+                    &[diff_hi, mask_qwords_hi],
+                )?;
+                let res_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)),
+                    I64X2,
+                    &[src1_lo, diff_masked_lo],
+                )?;
+                let res_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise(PrimitiveOp::Xor)),
+                    I64X2,
+                    &[src1_hi, diff_masked_hi],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    U256,
+                    &[res_lo, res_hi],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vblendv_pd!(VblendvpdYmmYmmYmmYmm, forms::VBLENDVPD_YMM_YMM_YMM_YMM, 0x1432);
+vblendv_pd!(VblendvpdYmmYmmMemYmm, forms::VBLENDVPD_YMM_YMM_MEM_YMM, 0x1433);
+
+/// VPERM2F128 ymm1, ymm2, ymm3/m256, imm8: permute 128-bit floating-point fields.
+macro_rules! vperm2f128 {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, U256)?;
+                let src2 = out.read_operand(2, U256)?;
+                let imm = insn
+                    .operand(3)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0) as u8;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let src1_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[src1, zero])?;
+                let src1_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[src1, high_offset],
+                )?;
+                let src2_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U128, &[src2, zero])?;
+                let src2_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U128,
+                    &[src2, high_offset],
+                )?;
+                let zero_128 = out.constant(U128, &[0u8; 16])?;
+
+                let lo_part = if (imm & 0x08) != 0 {
+                    zero_128
+                } else {
+                    match imm & 0x03 {
+                        0 => src1_lo,
+                        1 => src1_hi,
+                        2 => src2_lo,
+                        _ => src2_hi,
+                    }
+                };
+                let hi_part = if (imm & 0x80) != 0 {
+                    zero_128
+                } else {
+                    match (imm >> 4) & 0x03 {
+                        0 => src1_lo,
+                        1 => src1_hi,
+                        2 => src2_lo,
+                        _ => src2_hi,
+                    }
+                };
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    U256,
+                    &[lo_part, hi_part],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vperm2f128!(Vperm2f128YmmYmmYmmImm8, forms::VPERM2F128_YMM_YMM_YMM_IMM8, 0x1434);
+vperm2f128!(Vperm2f128YmmYmmMemImm8, forms::VPERM2F128_YMM_YMM_MEM_IMM8, 0x1435);
+
+/// VPERMILPS ymm1, ymm2/m256, imm8: in-lane permute of single-precision floats within 128-bit halves.
+macro_rules! vpermil_ps {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src = out.read_operand(1, U256)?;
+                let imm = insn
+                    .operand(2)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                let imm_const = const_u64(out, imm)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let src_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), I32X4, &[src, zero])?;
+                let src_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I32X4,
+                    &[src, high_offset],
+                )?;
+                let lo = out.emit(
+                    SemanticOp::Vector(VectorOp::Shuffle32),
+                    I32X4,
+                    &[src_lo, imm_const],
+                )?;
+                let hi = out.emit(
+                    SemanticOp::Vector(VectorOp::Shuffle32),
+                    I32X4,
+                    &[src_hi, imm_const],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[lo, hi])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vpermil_ps!(VpermilpsYmmYmmImm8, forms::VPERMILPS_YMM_YMM_IMM8, 0x1436);
+vpermil_ps!(VpermilpsYmmMemImm8, forms::VPERMILPS_YMM_MEM_IMM8, 0x1437);
+
+/// VPERMILPD ymm1, ymm2/m256, imm8: in-lane permute of double-precision floats within 128-bit halves.
+macro_rules! vpermil_pd {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src = out.read_operand(1, U256)?;
+                let imm = insn
+                    .operand(2)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0) as u8;
+                let zero = const_u64(out, 0)?;
+                let sixty_four = const_u64(out, 64)?;
+                let one_twenty_eight = const_u64(out, 128)?;
+                let one_ninety_two = const_u64(out, 192)?;
+
+                let q0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src, zero])?;
+                let q1 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src, sixty_four],
+                )?;
+                let q2 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src, one_twenty_eight],
+                )?;
+                let q3 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src, one_ninety_two],
+                )?;
+
+                let lo_q0 = if (imm & 1) == 0 { q0 } else { q1 };
+                let lo_q1 = if (imm & 2) == 0 { q0 } else { q1 };
+                let hi_q0 = if (imm & 4) == 0 { q2 } else { q3 };
+                let hi_q1 = if (imm & 8) == 0 { q2 } else { q3 };
+
+                let low = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U128, &[lo_q0, lo_q1])?;
+                let high = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U128, &[hi_q0, hi_q1])?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[low, high])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vpermil_pd!(VpermilpdYmmYmmImm8, forms::VPERMILPD_YMM_YMM_IMM8, 0x1438);
+vpermil_pd!(VpermilpdYmmMemImm8, forms::VPERMILPD_YMM_MEM_IMM8, 0x1439);
+
 /// `vpcmpeqb ymm, ymm, ymm` — per-byte equality mask (0xFF where equal).
 #[derive(Clone, Copy, Debug)]
 pub struct VpcmpeqbYmmYmmYmm;

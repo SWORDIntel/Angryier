@@ -977,6 +977,26 @@ pub mod forms {
     pub const VXORPD_YMM_YMM_YMM: u32 = 0x0F5E;
     pub const VXORPD_YMM_YMM_MEM: u32 = 0x0F5F;
 
+    // AVX conversion, blend, and permutation family.
+    pub const VCVTSS2SD_XMM_XMM_XMM: u32 = 0x0F60;
+    pub const VCVTSS2SD_XMM_XMM_MEM32: u32 = 0x0F61;
+    pub const VCVTSD2SS_XMM_XMM_XMM: u32 = 0x0F62;
+    pub const VCVTSD2SS_XMM_XMM_MEM64: u32 = 0x0F63;
+    pub const VBLENDPS_YMM_YMM_YMM_IMM8: u32 = 0x0F64;
+    pub const VBLENDPS_YMM_YMM_MEM_IMM8: u32 = 0x0F65;
+    pub const VBLENDPD_YMM_YMM_YMM_IMM8: u32 = 0x0F66;
+    pub const VBLENDPD_YMM_YMM_MEM_IMM8: u32 = 0x0F67;
+    pub const VBLENDVPS_YMM_YMM_YMM_YMM: u32 = 0x0F68;
+    pub const VBLENDVPS_YMM_YMM_MEM_YMM: u32 = 0x0F69;
+    pub const VBLENDVPD_YMM_YMM_YMM_YMM: u32 = 0x0F6A;
+    pub const VBLENDVPD_YMM_YMM_MEM_YMM: u32 = 0x0F6B;
+    pub const VPERM2F128_YMM_YMM_YMM_IMM8: u32 = 0x0F6C;
+    pub const VPERM2F128_YMM_YMM_MEM_IMM8: u32 = 0x0F6D;
+    pub const VPERMILPS_YMM_YMM_IMM8: u32 = 0x0F6E;
+    pub const VPERMILPS_YMM_MEM_IMM8: u32 = 0x0F6F;
+    pub const VPERMILPD_YMM_YMM_IMM8: u32 = 0x0F70;
+    pub const VPERMILPD_YMM_MEM_IMM8: u32 = 0x0F71;
+
     // 16-bit integer arithmetic, IMUL, and MOVSXD expansion.
     pub const ADD_R16_IMM16: u32 = 0x0420;
     pub const ADD_R16_IMM8: u32 = 0x0421;

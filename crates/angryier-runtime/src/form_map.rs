@@ -961,6 +961,51 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VXORPD_YMM_YMM_MEM),
             _ => None,
         },
+        iclass::XED_ICLASS_VCVTSS2SD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VCVTSS2SD_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem32] => Some(forms::VCVTSS2SD_XMM_XMM_MEM32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VCVTSD2SS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VCVTSD2SS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem64] => Some(forms::VCVTSD2SS_XMM_XMM_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VBLENDPS => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VBLENDPS_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VBLENDPS_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VBLENDPD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VBLENDPD_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VBLENDPD_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VBLENDVPS => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VBLENDVPS_YMM_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Ymm] => Some(forms::VBLENDVPS_YMM_YMM_MEM_YMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VBLENDVPD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VBLENDVPD_YMM_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Ymm] => Some(forms::VBLENDVPD_YMM_YMM_MEM_YMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPERM2F128 => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPERM2F128_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERM2F128_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPERMILPS => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPERMILPS_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERMILPS_YMM_MEM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPERMILPD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPERMILPD_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERMILPD_YMM_MEM_IMM8),
+            _ => None,
+        },
         iclass::XED_ICLASS_VPCMPEQB => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPEQB_YMM_YMM_YMM),
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VPCMPEQB_XMM_XMM_XMM),
@@ -2229,6 +2274,40 @@ mod tests {
         assert_eq!(mapped(&[0xC5, 0xF5, 0x54, 0xC2])?, Some(forms::VANDPD_YMM_YMM_YMM));
         // vxorpd %ymm2, %ymm1, %ymm0
         assert_eq!(mapped(&[0xC5, 0xF5, 0x57, 0xC2])?, Some(forms::VXORPD_YMM_YMM_YMM));
+        Ok(())
+    }
+
+    #[test]
+    fn maps_avx_blend_cvt_perm_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // vcvtss2sd %xmm2, %xmm1, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xF3, 0x5A, 0xC2])?, Some(forms::VCVTSS2SD_XMM_XMM_XMM));
+        // vcvtsd2ss %xmm2, %xmm1, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xF7, 0x5A, 0xC2])?, Some(forms::VCVTSD2SS_XMM_XMM_XMM));
+        // vblendps $0x03, %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE3, 0x75, 0x0C, 0xC2, 0x03])?,
+            Some(forms::VBLENDPS_YMM_YMM_YMM_IMM8)
+        );
+        // vblendpd $0x03, %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE3, 0x75, 0x0D, 0xC2, 0x03])?,
+            Some(forms::VBLENDPD_YMM_YMM_YMM_IMM8)
+        );
+        // vperm2f128 $0x03, %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE3, 0x75, 0x06, 0xC2, 0x03])?,
+            Some(forms::VPERM2F128_YMM_YMM_YMM_IMM8)
+        );
+        // vpermilps $0x1b, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE3, 0x7D, 0x04, 0xC1, 0x1B])?,
+            Some(forms::VPERMILPS_YMM_YMM_IMM8)
+        );
+        // vpermilpd $0x05, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE3, 0x7D, 0x05, 0xC1, 0x05])?,
+            Some(forms::VPERMILPD_YMM_YMM_IMM8)
+        );
         Ok(())
     }
 }
