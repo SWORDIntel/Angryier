@@ -104,6 +104,9 @@ pub mod register_id {
     /// C0/C1/C2/C3 (bits 8/9/10/14). Exception and summary flags stay 0 in
     /// the masked-exceptions model.
     pub const X87_SW: RegisterId = RegisterId(0x0211);
+    /// x87 FPU control word: precision, rounding control, exception masks.
+    /// Default reset value is 0x037F.
+    pub const X87_CW: RegisterId = RegisterId(0x0212);
 }
 
 pub const GPR_COUNT: u8 = 32;
@@ -112,7 +115,7 @@ pub const OPMASK_COUNT: u8 = 8;
 pub const X87_COUNT: u8 = 8;
 pub const TILE_COUNT: u8 = 8;
 pub const TMM_MAX_BITS: u16 = 8192;
-pub const INTEL64_PARENT_REGISTER_COUNT: usize = 95;
+pub const INTEL64_PARENT_REGISTER_COUNT: usize = 96;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GprViewKind {
@@ -314,6 +317,7 @@ impl Intel64RegisterFile {
         registers.push((register_id::TILECFG, 512));
         registers.push((register_id::MXCSR, 32));
         registers.push((register_id::X87_SW, 16));
+        registers.push((register_id::X87_CW, 16));
 
         Self {
             architectural_registers: registers,
@@ -347,7 +351,7 @@ pub const fn canonical_parent_width(register: RegisterId) -> Option<u16> {
         Some(512)
     } else if raw == register_id::MXCSR.0 {
         Some(32)
-    } else if raw == register_id::X87_SW.0 {
+    } else if raw == register_id::X87_SW.0 || raw == register_id::X87_CW.0 {
         Some(16)
     } else {
         None

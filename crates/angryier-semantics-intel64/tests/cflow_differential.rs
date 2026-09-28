@@ -36,12 +36,17 @@ const TARGET_PROFILE: TargetProfileId = TargetProfileId(3);
 
 const RSP: u32 = register_id::GPR_BASE + 4;
 
+#[allow(dead_code)]
 const CF: u64 = 1 << 0;
+#[allow(dead_code)]
 const PF: u64 = 1 << 2;
+#[allow(dead_code)]
 const AF: u64 = 1 << 4;
 const ZF: u64 = 1 << 6;
+#[allow(dead_code)]
 const SF: u64 = 1 << 7;
 const DF: u64 = 1 << 10;
+#[allow(dead_code)]
 const OF: u64 = 1 << 11;
 
 type BoxError = Box<dyn std::error::Error>;
@@ -145,6 +150,21 @@ fn shape_of(operand: &angryier_arch::Operand) -> Option<Shape> {
     }
 }
 
+fn cc_cmov(r64: u32, r32: u32, shapes: &[Shape]) -> Option<u32> {
+    match shapes {
+        [Shape::Reg64, Shape::Reg64] => Some(r64),
+        [Shape::Reg32, Shape::Reg32] => Some(r32),
+        _ => None,
+    }
+}
+
+fn cc_setcc(r8: u32, shapes: &[Shape]) -> Option<u32> {
+    match shapes {
+        [Shape::Reg8] => Some(r8),
+        _ => None,
+    }
+}
+
 fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
     use xed_sys as xed;
 
@@ -175,7 +195,65 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
         xed::XED_ICLASS_CALL_NEAR => Some(forms::CALL_REL32),
         xed::XED_ICLASS_JMP => Some(forms::JMP_REL32),
         xed::XED_ICLASS_JZ => Some(forms::JZ_REL32),
+        xed::XED_ICLASS_JNZ => Some(forms::JNZ_REL32),
+        xed::XED_ICLASS_JO => Some(forms::JO_REL32),
+        xed::XED_ICLASS_JNO => Some(forms::JNO_REL32),
+        xed::XED_ICLASS_JP => Some(forms::JPE_REL32),
+        xed::XED_ICLASS_JNP => Some(forms::JPO_REL32),
+        xed::XED_ICLASS_JS => Some(forms::JS_REL32),
+        xed::XED_ICLASS_JNS => Some(forms::JNS_REL32),
+        xed::XED_ICLASS_JB => Some(forms::JB_REL32),
+        xed::XED_ICLASS_JNB => Some(forms::JAE_REL32),
+        xed::XED_ICLASS_JBE => Some(forms::JBE_REL32),
+        xed::XED_ICLASS_JNBE => Some(forms::JA_REL32),
+        xed::XED_ICLASS_JL => Some(forms::JL_REL32),
+        xed::XED_ICLASS_JNL => Some(forms::JGE_REL32),
+        xed::XED_ICLASS_JLE => Some(forms::JLE_REL32),
+        xed::XED_ICLASS_JNLE => Some(forms::JG_REL32),
+        xed::XED_ICLASS_STC => Some(forms::STC),
+        xed::XED_ICLASS_CLC => Some(forms::CLC),
+        xed::XED_ICLASS_OR => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::OR_R64_R64),
+            _ => None,
+        },
+        xed::XED_ICLASS_SHL => match shapes {
+            [Shape::Reg64, Shape::Imm] => Some(forms::SHL_R64_IMM8),
+            _ => None,
+        },
+        xed::XED_ICLASS_CMOVO => cc_cmov(forms::CMOVO_R64_R64, forms::CMOVO_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVNO => cc_cmov(forms::CMOVNO_R64_R64, forms::CMOVNO_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVP => cc_cmov(forms::CMOVP_R64_R64, forms::CMOVP_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVNP => cc_cmov(forms::CMOVNP_R64_R64, forms::CMOVNP_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVS => cc_cmov(forms::CMOVS_R64_R64, forms::CMOVS_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVNS => cc_cmov(forms::CMOVNS_R64_R64, forms::CMOVNS_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVZ => cc_cmov(forms::CMOVZ_R64_R64, forms::CMOVZ_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVNZ => cc_cmov(forms::CMOVNZ_R64_R64, forms::CMOVNZ_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVB => cc_cmov(forms::CMOVB_R64_R64, forms::CMOVB_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVNB => cc_cmov(forms::CMOVAE_R64_R64, forms::CMOVAE_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVBE => cc_cmov(forms::CMOVBE_R64_R64, forms::CMOVBE_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVNBE => cc_cmov(forms::CMOVA_R64_R64, forms::CMOVA_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVL => cc_cmov(forms::CMOVL_R64_R64, forms::CMOVL_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVNL => cc_cmov(forms::CMOVGE_R64_R64, forms::CMOVGE_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVLE => cc_cmov(forms::CMOVLE_R64_R64, forms::CMOVLE_R32_R32, shapes),
+        xed::XED_ICLASS_CMOVNLE => cc_cmov(forms::CMOVG_R64_R64, forms::CMOVG_R32_R32, shapes),
+        xed::XED_ICLASS_SETO => cc_setcc(forms::SETO_R8, shapes),
+        xed::XED_ICLASS_SETNO => cc_setcc(forms::SETNO_R8, shapes),
+        xed::XED_ICLASS_SETP => cc_setcc(forms::SETP_R8, shapes),
+        xed::XED_ICLASS_SETNP => cc_setcc(forms::SETNP_R8, shapes),
+        xed::XED_ICLASS_SETS => cc_setcc(forms::SETS_R8, shapes),
+        xed::XED_ICLASS_SETNS => cc_setcc(forms::SETNS_R8, shapes),
+        xed::XED_ICLASS_SETZ => cc_setcc(forms::SETZ_R8, shapes),
+        xed::XED_ICLASS_SETNZ => cc_setcc(forms::SETNZ_R8, shapes),
+        xed::XED_ICLASS_SETB => cc_setcc(forms::SETB_R8, shapes),
+        xed::XED_ICLASS_SETNB => cc_setcc(forms::SETAE_R8, shapes),
+        xed::XED_ICLASS_SETBE => cc_setcc(forms::SETBE_R8, shapes),
+        xed::XED_ICLASS_SETNBE => cc_setcc(forms::SETA_R8, shapes),
+        xed::XED_ICLASS_SETL => cc_setcc(forms::SETL_R8, shapes),
+        xed::XED_ICLASS_SETNL => cc_setcc(forms::SETGE_R8, shapes),
+        xed::XED_ICLASS_SETLE => cc_setcc(forms::SETLE_R8, shapes),
+        xed::XED_ICLASS_SETNLE => cc_setcc(forms::SETG_R8, shapes),
         xed::XED_ICLASS_CMP => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CMP_R64_R64),
             [Shape::Reg64, Shape::Imm] => Some(forms::CMP_R64_IMM32),
             _ => None,
         },

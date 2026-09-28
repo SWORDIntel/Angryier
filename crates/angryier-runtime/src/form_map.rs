@@ -1260,6 +1260,11 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_FNINIT => Some(forms::FINIT),
         iclass::XED_ICLASS_FLD1 => Some(forms::FLD1),
         iclass::XED_ICLASS_FLDZ => Some(forms::FLDZ),
+        iclass::XED_ICLASS_FLDPI => Some(forms::FLDPI),
+        iclass::XED_ICLASS_FLDL2E => Some(forms::FLDL2E),
+        iclass::XED_ICLASS_FLDL2T => Some(forms::FLDL2T),
+        iclass::XED_ICLASS_FLDLG2 => Some(forms::FLDLG2),
+        iclass::XED_ICLASS_FLDLN2 => Some(forms::FLDLN2),
         iclass::XED_ICLASS_FLD => match shapes {
             [.., Shape::Mem32] => Some(forms::FLD_M32),
             [.., Shape::Mem64] => Some(forms::FLD_M64),
@@ -1270,11 +1275,10 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_FST => match shapes {
             [Shape::Mem32, ..] => Some(forms::FST_M32),
             [Shape::Mem64, ..] => Some(forms::FST_M64),
-            // `fst st(i)` has no corpus form: XED reports the `fst st(0)`
-            // alias as FNOP (unmapped below) and rejects the D9 D1+i
-            // encodings at decode time.
+            [Shape::Stack, ..] => Some(forms::FST_STI),
             _ => None,
         },
+        iclass::XED_ICLASS_FNOP => Some(forms::FNOP),
         // XED reports the D9 D8+i `fstp st(i)` encoding as FSTPNCE; both
         // iclasses route to the same corpus form.
         iclass::XED_ICLASS_FSTP | iclass::XED_ICLASS_FSTPNCE => match shapes {
@@ -1354,6 +1358,38 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         iclass::XED_ICLASS_FCOMIP => match shapes {
             [Shape::Stack, Shape::Stack] => Some(forms::FCOMIP_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCMOVB => match shapes {
+            [Shape::Stack, ..] => Some(forms::FCMOVB_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCMOVE => match shapes {
+            [Shape::Stack, ..] => Some(forms::FCMOVE_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCMOVBE => match shapes {
+            [Shape::Stack, ..] => Some(forms::FCMOVBE_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCMOVU => match shapes {
+            [Shape::Stack, ..] => Some(forms::FCMOVU_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCMOVNB => match shapes {
+            [Shape::Stack, ..] => Some(forms::FCMOVNB_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCMOVNE => match shapes {
+            [Shape::Stack, ..] => Some(forms::FCMOVNE_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCMOVNBE => match shapes {
+            [Shape::Stack, ..] => Some(forms::FCMOVNBE_ST0_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FCMOVNU => match shapes {
+            [Shape::Stack, ..] => Some(forms::FCMOVNU_ST0_STI),
             _ => None,
         },
         iclass::XED_ICLASS_MOVSX => match shapes {
@@ -1765,6 +1801,10 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_HLT => Some(forms::HLT),
         iclass::XED_ICLASS_UD2 => Some(forms::UD2),
         iclass::XED_ICLASS_RDTSC => Some(forms::RDTSC),
+        iclass::XED_ICLASS_RDTSCP => Some(forms::RDTSCP),
+        iclass::XED_ICLASS_XGETBV => Some(forms::XGETBV),
+        iclass::XED_ICLASS_WBINVD => Some(forms::WBINVD),
+        iclass::XED_ICLASS_INVD => Some(forms::INVD),
         iclass::XED_ICLASS_RDMSR => Some(forms::RDMSR),
         iclass::XED_ICLASS_WRMSR => Some(forms::WRMSR),
         iclass::XED_ICLASS_LFENCE | iclass::XED_ICLASS_SFENCE | iclass::XED_ICLASS_MFENCE => Some(forms::FENCE),
@@ -1850,12 +1890,30 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => Some(forms::FCOMP_STI),
         },
         iclass::XED_ICLASS_FCOMPP => Some(forms::FCOMPP),
-        // FNSTSW/FSTSW AX (`DF E0`): the status-word register dump. Only the
-        // AX destination is mapped; the m16 store form stays unmapped.
+        // FNSTSW/FSTSW: AX register dump (`DF E0`), or m16 store.
         iclass::XED_ICLASS_FNSTSW => match shapes {
             [Shape::Reg16] => Some(forms::FSTSW_AX),
+            [Shape::Mem16, ..] => Some(forms::FSTSW_M16),
             _ => None,
         },
+        iclass::XED_ICLASS_FLDCW => match shapes {
+            [Shape::Mem16, ..] => Some(forms::FLDCW_M16),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FNSTCW => match shapes {
+            [Shape::Mem16, ..] => Some(forms::FNSTCW_M16),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FNCLEX => Some(forms::FNCLEX),
+        iclass::XED_ICLASS_FTST => Some(forms::FTST),
+        iclass::XED_ICLASS_FXAM => Some(forms::FXAM),
+        iclass::XED_ICLASS_FDECSTP => Some(forms::FDECSTP),
+        iclass::XED_ICLASS_FINCSTP => Some(forms::FINCSTP),
+        iclass::XED_ICLASS_FFREE => match shapes {
+            [Shape::Stack, ..] => Some(forms::FFREE_STI),
+            _ => None,
+        },
+        iclass::XED_ICLASS_FRNDINT => Some(forms::FRNDINT),
         iclass::XED_ICLASS_FIADD => match shapes {
             [.., Shape::Mem16] => Some(forms::FIADD_M16),
             [.., Shape::Mem32] => Some(forms::FIADD_M32),
@@ -2109,6 +2167,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_FYL2X => Some(forms::FYL2X),
         iclass::XED_ICLASS_FYL2XP1 => Some(forms::FYL2XP1),
         iclass::XED_ICLASS_FSCALE => Some(forms::FSCALE),
+        iclass::XED_ICLASS_FSINCOS => Some(forms::FSINCOS),
         _ => None,
     }
 }
@@ -2246,16 +2305,37 @@ mod tests {
     }
 
     #[test]
-    fn unmapped_x87_reports_none() -> Result<(), Box<dyn std::error::Error>> {
+    fn maps_extended_x87_and_system_forms() -> Result<(), Box<dyn std::error::Error>> {
         // `9B` is FWAIT (mapped on its own); the FSTSW that follows decodes
         // as a separate instruction and maps to the AX dump form.
         assert_eq!(mapped(&[0x9B, 0xDF, 0xE0])?, Some(forms::FWAIT));
         assert_eq!(mapped(&[0xDF, 0xE0])?, Some(forms::FSTSW_AX));
-        // fst %st(1) has no corpus form.
-        assert_eq!(mapped(&[0xDD, 0xD1])?, None);
-        // fnop is XED's decoding of the `fst %st(0)` alias; outside the 39
-        // mapped forms it stays unmapped.
-        assert_eq!(mapped(&[0xD9, 0xD0])?, None);
+        // fst %st(1)
+        assert_eq!(mapped(&[0xDD, 0xD1])?, Some(forms::FST_STI));
+        // fnop (XED's decoding of the `fst %st(0)` alias)
+        assert_eq!(mapped(&[0xD9, 0xD0])?, Some(forms::FNOP));
+        // fldpi
+        assert_eq!(mapped(&[0xD9, 0xEB])?, Some(forms::FLDPI));
+        // fnclex
+        assert_eq!(mapped(&[0xDB, 0xE2])?, Some(forms::FNCLEX));
+        // ftst, fxam
+        assert_eq!(mapped(&[0xD9, 0xE4])?, Some(forms::FTST));
+        assert_eq!(mapped(&[0xD9, 0xE5])?, Some(forms::FXAM));
+        // fdecstp, fincstp
+        assert_eq!(mapped(&[0xD9, 0xF6])?, Some(forms::FDECSTP));
+        assert_eq!(mapped(&[0xD9, 0xF7])?, Some(forms::FINCSTP));
+        // ffree %st(1)
+        assert_eq!(mapped(&[0xDD, 0xC1])?, Some(forms::FFREE_STI));
+        // fcmovb %st(1), %st(0)
+        assert_eq!(mapped(&[0xDA, 0xC1])?, Some(forms::FCMOVB_ST0_STI));
+        // frndint, fsincos
+        assert_eq!(mapped(&[0xD9, 0xFC])?, Some(forms::FRNDINT));
+        assert_eq!(mapped(&[0xD9, 0xFB])?, Some(forms::FSINCOS));
+        // rdtscp, xgetbv, wbinvd, invd
+        assert_eq!(mapped(&[0x0F, 0x01, 0xF9])?, Some(forms::RDTSCP));
+        assert_eq!(mapped(&[0x0F, 0x01, 0xD0])?, Some(forms::XGETBV));
+        assert_eq!(mapped(&[0x0F, 0x09])?, Some(forms::WBINVD));
+        assert_eq!(mapped(&[0x0F, 0x08])?, Some(forms::INVD));
         Ok(())
     }
 
@@ -2309,10 +2389,10 @@ mod tests {
 
     #[test]
     fn maps_avx_blend_cvt_perm_forms() -> Result<(), Box<dyn std::error::Error>> {
-        // vcvtss2sd %xmm2, %xmm1, %xmm0
-        assert_eq!(mapped(&[0xC5, 0xF3, 0x5A, 0xC2])?, Some(forms::VCVTSS2SD_XMM_XMM_XMM));
-        // vcvtsd2ss %xmm2, %xmm1, %xmm0
-        assert_eq!(mapped(&[0xC5, 0xF7, 0x5A, 0xC2])?, Some(forms::VCVTSD2SS_XMM_XMM_XMM));
+        // vcvtss2sd %xmm2, %xmm2, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xEA, 0x5A, 0xC2])?, Some(forms::VCVTSS2SD_XMM_XMM_XMM));
+        // vcvtsd2ss %xmm2, %xmm2, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xEB, 0x5A, 0xC2])?, Some(forms::VCVTSD2SS_XMM_XMM_XMM));
         // vblendps $0x03, %ymm2, %ymm1, %ymm0
         assert_eq!(
             mapped(&[0xC4, 0xE3, 0x75, 0x0C, 0xC2, 0x03])?,

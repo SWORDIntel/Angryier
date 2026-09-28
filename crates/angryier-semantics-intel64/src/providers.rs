@@ -4761,6 +4761,119 @@ impl SemanticProvider for Fence {
 }
 
 // ---------------------------------------------------------------------------
+// RDTSCP, XGETBV, WBINVD, INVD
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+pub struct Rdtscp;
+
+impl SemanticProvider for Rdtscp {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x550)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::RDTSCP
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let tsc: u64 = 0x0000_0000_0100_0000;
+        let eax = tsc & 0xFFFF_FFFF;
+        let edx = tsc >> 32;
+        let eax_val = const_u64(out, eax)?;
+        let edx_val = const_u64(out, edx)?;
+        let ecx_val = const_u64(out, 0)?;
+        out.write_register(RegisterId(register_id::GPR_BASE), eax_val)?;
+        out.write_register(RegisterId(register_id::GPR_BASE + 2), edx_val)?;
+        out.write_register(RegisterId(register_id::GPR_BASE + 1), ecx_val)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x550, context))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Xgetbv;
+
+impl SemanticProvider for Xgetbv {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x551)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::XGETBV
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let eax_val = const_u64(out, 7)?;
+        let edx_val = const_u64(out, 0)?;
+        out.write_register(RegisterId(register_id::GPR_BASE), eax_val)?;
+        out.write_register(RegisterId(register_id::GPR_BASE + 2), edx_val)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x551, context))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Wbinvd;
+
+impl SemanticProvider for Wbinvd {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x552)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::WBINVD
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        fall_through(out, insn)?;
+        Ok(receipt(0x552, context))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Invd;
+
+impl SemanticProvider for Invd {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x553)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::INVD
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        fall_through(out, insn)?;
+        Ok(receipt(0x553, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // IN/OUT port I/O. No device model exists: IN reads return zero (the
 // "device absent" value — reads of absent ports return 0xFF on most chipsets
 // but 0 is the conservative direction for drivers checking feature bits),

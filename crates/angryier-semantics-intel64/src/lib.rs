@@ -1319,6 +1319,38 @@ pub mod forms {
     pub const FXCH: u32 = 0x0822;
     pub const FXCH_STI: u32 = 0x0823;
     pub const FSTSW_AX: u32 = 0x0824;
+    pub const FLDPI: u32 = 0x0825;
+    pub const FLDL2E: u32 = 0x0826;
+    pub const FLDL2T: u32 = 0x0827;
+    pub const FLDLG2: u32 = 0x0828;
+    pub const FLDLN2: u32 = 0x0829;
+    pub const FST_STI: u32 = 0x082A;
+    pub const FNOP: u32 = 0x082B;
+    pub const FSTSW_M16: u32 = 0x082C;
+    pub const FLDCW_M16: u32 = 0x082D;
+    pub const FNSTCW_M16: u32 = 0x082E;
+    pub const FNCLEX: u32 = 0x082F;
+    pub const FTST: u32 = 0x0830;
+    pub const FXAM: u32 = 0x0831;
+    pub const FDECSTP: u32 = 0x0832;
+    pub const FINCSTP: u32 = 0x0833;
+    pub const FFREE_STI: u32 = 0x0834;
+    pub const FRNDINT: u32 = 0x0835;
+    pub const FSINCOS: u32 = 0x0836;
+    pub const FCMOVB_ST0_STI: u32 = 0x0837;
+    pub const FCMOVE_ST0_STI: u32 = 0x0838;
+    pub const FCMOVBE_ST0_STI: u32 = 0x0839;
+    pub const FCMOVU_ST0_STI: u32 = 0x083A;
+    pub const FCMOVNB_ST0_STI: u32 = 0x083B;
+    pub const FCMOVNE_ST0_STI: u32 = 0x083C;
+    pub const FCMOVNBE_ST0_STI: u32 = 0x083D;
+    pub const FCMOVNU_ST0_STI: u32 = 0x083E;
+
+    // Intel 64 System & Control forms (0x083F..0x084F)
+    pub const RDTSCP: u32 = 0x083F;
+    pub const XGETBV: u32 = 0x0840;
+    pub const WBINVD: u32 = 0x0841;
+    pub const INVD: u32 = 0x0842;
 
     // x87 transcendental family (assigned form ID band: 0x0F40..0x0F7F)
     // Providers are SKIPPED: the IR/interpreter has no sin/cos/tan/atan/exp2/log2

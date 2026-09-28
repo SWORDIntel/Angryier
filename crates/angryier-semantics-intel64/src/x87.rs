@@ -45,6 +45,7 @@ use angryier_types::SemanticRuleId;
 
 const U80: SemanticType = SemanticType::Scalar(ScalarType::BitVec(80));
 const U64: SemanticType = SemanticType::Scalar(ScalarType::BitVec(64));
+const U32: SemanticType = SemanticType::Scalar(ScalarType::BitVec(32));
 const U16: SemanticType = SemanticType::Scalar(ScalarType::BitVec(16));
 const U1: SemanticType = SemanticType::Scalar(ScalarType::BitVec(1));
 const F32: SemanticType = SemanticType::Scalar(ScalarType::Float(FloatFormat::F32));
@@ -77,6 +78,7 @@ fn st_reg(index: u32) -> RegisterId {
 
 /// Status-word bit positions: C0/C1/C2/C3 and the TOP field.
 pub(crate) const SW_C0_BIT: u16 = 8;
+pub(crate) const SW_C1_BIT: u16 = 9;
 pub(crate) const SW_C2_BIT: u16 = 10;
 pub(crate) const SW_C3_BIT: u16 = 14;
 pub(crate) const SW_TOP_SHIFT: u16 = 11;
@@ -779,3 +781,590 @@ impl SemanticProvider for FstswAx {
         Ok(receipt(0x332, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Extended x87 Constants: FLDPI, FLDL2E, FLDL2T, FLDLG2, FLDLN2
+// ---------------------------------------------------------------------------
+
+x87_load_const!(Fldpi, forms::FLDPI, 0x333, 0x4009_21FB_5444_2D18);
+x87_load_const!(Fldl2e, forms::FLDL2E, 0x334, 0x3FF7_1547_652B_82FE);
+x87_load_const!(Fldl2t, forms::FLDL2T, 0x335, 0x400A_934F_0979_A371);
+x87_load_const!(Fldlg2, forms::FLDLG2, 0x336, 0x3FD3_4413_509F_79FF);
+x87_load_const!(Fldln2, forms::FLDLN2, 0x337, 0x3FE6_2E42_FEFA_39EF);
+
+// ---------------------------------------------------------------------------
+// FST st(i) and FNOP
+// ---------------------------------------------------------------------------
+
+/// FST st(i): stores ST(0) into ST(i) without popping.
+#[derive(Clone, Copy, Debug)]
+pub struct FstSti;
+
+impl SemanticProvider for FstSti {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x338)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FST_STI
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let top = read_st(out, 0)?;
+        let stored = unpack_st(out, top)?;
+        let destination = operand_st_index(insn, 0)?;
+        let packed = pack_st(out, stored)?;
+        write_st(out, destination, packed)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x338, context))
+    }
+}
+
+/// FNOP: No-operation (alias for FST st(0)).
+#[derive(Clone, Copy, Debug)]
+pub struct Fnop;
+
+impl SemanticProvider for Fnop {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x339)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FNOP
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        fall_through(out, insn)?;
+        Ok(receipt(0x339, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FSTSW m16, FLDCW m16, FNSTCW m16
+// ---------------------------------------------------------------------------
+
+/// FNSTSW/FSTSW m16: stores the 16-bit status word into memory.
+#[derive(Clone, Copy, Debug)]
+pub struct FstswM16;
+
+impl SemanticProvider for FstswM16 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x33A)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FSTSW_M16
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let status = out.read_register(register_id::X87_SW, U16)?;
+        out.write_operand(0, status)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x33A, context))
+    }
+}
+
+/// FLDCW m16: loads the 16-bit FPU control word from memory.
+#[derive(Clone, Copy, Debug)]
+pub struct FldcwM16;
+
+impl SemanticProvider for FldcwM16 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x33B)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FLDCW_M16
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let value = out.read_operand(0, U16)?;
+        out.write_register(register_id::X87_CW, value)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x33B, context))
+    }
+}
+
+/// FNSTCW/FSTCW m16: stores the 16-bit FPU control word into memory.
+#[derive(Clone, Copy, Debug)]
+pub struct FnstcwM16;
+
+impl SemanticProvider for FnstcwM16 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x33C)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FNSTCW_M16
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let cw = out.read_register(register_id::X87_CW, U16)?;
+        out.write_operand(0, cw)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x33C, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FNCLEX, FTST, FXAM, FDECSTP, FINCSTP, FFREE
+// ---------------------------------------------------------------------------
+
+/// FNCLEX/FCLEX: clears floating-point exception flags in X87_SW.
+#[derive(Clone, Copy, Debug)]
+pub struct Fnclex;
+
+impl SemanticProvider for Fnclex {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x33D)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FNCLEX
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let old = out.read_register(register_id::X87_SW, U16)?;
+        let mask = const_u16(out, !0x80FF)?;
+        let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[old, mask])?;
+        out.write_register(register_id::X87_SW, cleared)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x33D, context))
+    }
+}
+
+/// FTST: tests ST(0) against 0.0, updating condition codes C0/C2/C3 in X87_SW.
+#[derive(Clone, Copy, Debug)]
+pub struct Ftst;
+
+impl SemanticProvider for Ftst {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x33E)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FTST
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let top = read_st(out, 0)?;
+        let top_val = unpack_st(out, top)?;
+        let zero = const_f64(out, 0)?;
+        let flags = out.emit(SemanticOp::Float(FloatingOp::Compare), U64, &[top_val, zero])?;
+        write_fcom_condition_codes(out, flags, 0)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x33E, context))
+    }
+}
+
+/// FXAM: examines ST(0), setting condition codes C0/C1/C2/C3 in X87_SW.
+#[derive(Clone, Copy, Debug)]
+pub struct Fxam;
+
+impl SemanticProvider for Fxam {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x33F)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FXAM
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let raw = read_st(out, 0)?;
+        let sixty_four = const_u64(out, 64)?;
+        let zero_u64 = const_u64(out, 0)?;
+        let tag = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U16, &[raw, sixty_four])?;
+        let payload = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[raw, zero_u64])?;
+
+        let empty_tag = const_u16(out, EMPTY_TAG)?;
+        let is_empty = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[tag, empty_tag])?;
+
+        let sixty_three = const_u64(out, 63)?;
+        let sign_bit = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+            U64,
+            &[payload, sixty_three],
+        )?;
+        let one_u64 = const_u64(out, 1)?;
+        let sign = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[sign_bit, one_u64])?;
+        let sign_u16 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U16, &[sign, zero_u64])?;
+        let c1_shift = const_u16(out, SW_C1_BIT)?;
+        let c1 = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
+            U16,
+            &[sign_u16, c1_shift],
+        )?;
+
+        let fifty_two = const_u64(out, 52)?;
+        let exp_shifted = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+            U64,
+            &[payload, fifty_two],
+        )?;
+        let exp_mask = const_u64(out, 0x7FF)?;
+        let exp = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[exp_shifted, exp_mask])?;
+
+        let mant_mask = const_u64(out, 0x000F_FFFF_FFFF_FFFF)?;
+        let mant = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[payload, mant_mask])?;
+
+        let exp_all_ones = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[exp, exp_mask])?;
+        let exp_zero = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[exp, zero_u64])?;
+        let mant_zero = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[mant, zero_u64])?;
+        let mant_non_zero = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U1, &[mant_zero])?;
+
+        let is_nan = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::And),
+            U1,
+            &[exp_all_ones, mant_non_zero],
+        )?;
+        let is_inf = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U1, &[exp_all_ones, mant_zero])?;
+        let is_zero = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U1, &[exp_zero, mant_zero])?;
+        let is_denorm = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U1, &[exp_zero, mant_non_zero])?;
+
+        let c_empty = const_u16(out, (1 << SW_C3_BIT) | (1 << SW_C0_BIT))?;
+        let c_nan = const_u16(out, 1 << SW_C0_BIT)?;
+        let c_inf = const_u16(out, (1 << SW_C2_BIT) | (1 << SW_C0_BIT))?;
+        let c_zero = const_u16(out, 1 << SW_C3_BIT)?;
+        let c_denorm = const_u16(out, (1 << SW_C3_BIT) | (1 << SW_C2_BIT))?;
+        let c_norm = const_u16(out, 1 << SW_C2_BIT)?;
+
+        let cc = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::Select),
+            U16,
+            &[is_denorm, c_denorm, c_norm],
+        )?;
+        let cc = out.emit(SemanticOp::Primitive(PrimitiveOp::Select), U16, &[is_zero, c_zero, cc])?;
+        let cc = out.emit(SemanticOp::Primitive(PrimitiveOp::Select), U16, &[is_inf, c_inf, cc])?;
+        let cc = out.emit(SemanticOp::Primitive(PrimitiveOp::Select), U16, &[is_nan, c_nan, cc])?;
+        let cc = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::Select),
+            U16,
+            &[is_empty, c_empty, cc],
+        )?;
+        let full_codes = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U16, &[cc, c1])?;
+
+        let old = out.read_register(register_id::X87_SW, U16)?;
+        let clear_mask = const_u16(
+            out,
+            !((1 << SW_C0_BIT) | (1 << SW_C1_BIT) | (1 << SW_C2_BIT) | (1 << SW_C3_BIT)),
+        )?;
+        let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[old, clear_mask])?;
+        let merged = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U16, &[cleared, full_codes])?;
+        out.write_register(register_id::X87_SW, merged)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x33F, context))
+    }
+}
+
+/// FDECSTP: decrements TOP modulo 8 in X87_SW.
+#[derive(Clone, Copy, Debug)]
+pub struct Fdecstp;
+
+impl SemanticProvider for Fdecstp {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x340)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FDECSTP
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        sw_adjust_top(out, -1)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x340, context))
+    }
+}
+
+/// FINCSTP: increments TOP modulo 8 in X87_SW.
+#[derive(Clone, Copy, Debug)]
+pub struct Fincstp;
+
+impl SemanticProvider for Fincstp {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x341)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FINCSTP
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        sw_adjust_top(out, 1)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x341, context))
+    }
+}
+
+/// FFREE st(i): marks stack register st(i) empty.
+#[derive(Clone, Copy, Debug)]
+pub struct FfreeSti;
+
+impl SemanticProvider for FfreeSti {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x342)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FFREE_STI
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let index = operand_st_index(insn, 0)?;
+        let empty = empty_slot(out)?;
+        write_st(out, index, empty)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x342, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FRNDINT & FSINCOS
+// ---------------------------------------------------------------------------
+
+/// FRNDINT: rounds ST(0) to nearest integer.
+#[derive(Clone, Copy, Debug)]
+pub struct Frndint;
+
+impl SemanticProvider for Frndint {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x343)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FRNDINT
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let top = read_st(out, 0)?;
+        let val = unpack_st(out, top)?;
+        let cw = out.read_register(register_id::X87_CW, U16)?;
+        let ten = const_u16(out, 10)?;
+        let rc = out.emit(SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight), U16, &[cw, ten])?;
+        let three = const_u16(out, 0x3)?;
+        let mode = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[rc, three])?;
+        let mode_u32 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U32, &[mode])?;
+        let rounded = out.emit(SemanticOp::Float(FloatingOp::Round), F64, &[val, mode_u32])?;
+        let packed = pack_st(out, rounded)?;
+        write_st(out, 0, packed)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x343, context))
+    }
+}
+
+/// FSINCOS: computes sin and cos of ST(0), stores sin into ST(0) then pushes cos.
+#[derive(Clone, Copy, Debug)]
+pub struct Fsincos;
+
+impl SemanticProvider for Fsincos {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x344)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FSINCOS
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let top = read_st(out, 0)?;
+        let val = unpack_st(out, top)?;
+        let sin = out.emit(SemanticOp::Float(FloatingOp::Sin), F64, &[val])?;
+        let cos = out.emit(SemanticOp::Float(FloatingOp::Cos), F64, &[val])?;
+        let packed_sin = pack_st(out, sin)?;
+        write_st(out, 0, packed_sin)?;
+        push_st(out, cos)?;
+        let old = out.read_register(register_id::X87_SW, U16)?;
+        let clear_c2 = const_u16(out, !(1 << SW_C2_BIT))?;
+        let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[old, clear_c2])?;
+        out.write_register(register_id::X87_SW, cleared)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x344, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FCMOVcc: conditional move ST(0) <- ST(i) based on EFLAGS
+// ---------------------------------------------------------------------------
+
+fn read_flag_bit(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, SemanticError> {
+    let rflags = out.read_register(register_id::RFLAGS, U64)?;
+    let bit_offset = const_u64(out, u64::from(bit))?;
+    let shifted = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U64,
+        &[rflags, bit_offset],
+    )?;
+    let zero = const_u64(out, 0)?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U1, &[shifted, zero])
+}
+
+fn read_flag_not_bit(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, SemanticError> {
+    let bit_val = read_flag_bit(out, bit)?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U1, &[bit_val])
+}
+
+fn cond_be(out: &mut dyn SemanticBuilder) -> Result<ValueId, SemanticError> {
+    let cf = read_flag_bit(out, rflags::CF_BIT)?;
+    let zf = read_flag_bit(out, rflags::ZF_BIT)?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U1, &[cf, zf])
+}
+
+fn cond_nbe(out: &mut dyn SemanticBuilder) -> Result<ValueId, SemanticError> {
+    let be = cond_be(out)?;
+    out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U1, &[be])
+}
+
+macro_rules! x87_cmov {
+    ($name:ident, $form:expr, $rule:expr, $cond_fn:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let cond = $cond_fn(out)?;
+                let dest = out.read_operand(0, U80)?;
+                let src = out.read_operand(1, U80)?;
+                let selected = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Select),
+                    U80,
+                    &[cond, src, dest],
+                )?;
+                out.write_operand(0, selected)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+x87_cmov!(
+    FcmovbSt0Sti,
+    forms::FCMOVB_ST0_STI,
+    0x345,
+    |out: &mut dyn SemanticBuilder| read_flag_bit(out, rflags::CF_BIT)
+);
+x87_cmov!(
+    FcmoveSt0Sti,
+    forms::FCMOVE_ST0_STI,
+    0x346,
+    |out: &mut dyn SemanticBuilder| read_flag_bit(out, rflags::ZF_BIT)
+);
+x87_cmov!(FcmovbeSt0Sti, forms::FCMOVBE_ST0_STI, 0x347, cond_be);
+x87_cmov!(
+    FcmovuSt0Sti,
+    forms::FCMOVU_ST0_STI,
+    0x348,
+    |out: &mut dyn SemanticBuilder| read_flag_bit(out, rflags::PF_BIT)
+);
+x87_cmov!(
+    FcmovnbSt0Sti,
+    forms::FCMOVNB_ST0_STI,
+    0x349,
+    |out: &mut dyn SemanticBuilder| read_flag_not_bit(out, rflags::CF_BIT)
+);
+x87_cmov!(
+    FcmovneSt0Sti,
+    forms::FCMOVNE_ST0_STI,
+    0x34A,
+    |out: &mut dyn SemanticBuilder| read_flag_not_bit(out, rflags::ZF_BIT)
+);
+x87_cmov!(FcmovnbeSt0Sti, forms::FCMOVNBE_ST0_STI, 0x34B, cond_nbe);
+x87_cmov!(
+    FcmovnuSt0Sti,
+    forms::FCMOVNU_ST0_STI,
+    0x34C,
+    |out: &mut dyn SemanticBuilder| read_flag_not_bit(out, rflags::PF_BIT)
+);
