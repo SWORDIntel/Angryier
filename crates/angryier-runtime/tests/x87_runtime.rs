@@ -212,7 +212,7 @@ fn x87_program_divergence_matches_native() -> Result<(), Box<dyn std::error::Err
 fn unmapped_x87_forms_fail_explicitly() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
     for body in [
-        "_start:\n    fninit\n    fstsw %ax\n    hlt\n",
+        "_start:\n    fninit\n    fnop\n    hlt\n",
         "_start:\n    fninit\n    fld1\n    fst %st(1)\n    hlt\n",
     ] {
         let Some((elf, _binary)) = build_binary(body) else {

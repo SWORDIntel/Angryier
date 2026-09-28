@@ -147,6 +147,13 @@ pub enum FloatingOp {
     Compare,
     Convert,
     Round,
+    Sin,
+    Cos,
+    Tan,
+    Atan2,
+    Exp2,
+    Log2,
+    Scale,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

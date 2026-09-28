@@ -1258,6 +1258,20 @@ pub mod forms {
     pub const FSQRT: u32 = 0x0821;
     pub const FXCH: u32 = 0x0822;
     pub const FXCH_STI: u32 = 0x0823;
+    pub const FSTSW_AX: u32 = 0x0824;
+
+    // x87 transcendental family (assigned form ID band: 0x0F40..0x0F7F)
+    // Providers are SKIPPED: the IR/interpreter has no sin/cos/tan/atan/exp2/log2
+    // or scale primitive (FloatingOp::{Sin,Cos,Tan,Atan,Exp,Log,Scale} do not
+    // exist and the interpreter crate is owned by a sibling agent).
+    pub const FSIN: u32 = 0x0F40;
+    pub const FCOS: u32 = 0x0F41;
+    pub const FPTAN: u32 = 0x0F42;
+    pub const FPATAN: u32 = 0x0F43;
+    pub const F2XM1: u32 = 0x0F44;
+    pub const FYL2X: u32 = 0x0F45;
+    pub const FYL2XP1: u32 = 0x0F46;
+    pub const FSCALE: u32 = 0x0F47;
 
     // SSE4.1 / SSE4.2 completion batch (0x0C00..0x0CFF)
     pub const BLENDVPS_XMM_XMM: u32 = 0x0C00;
@@ -1439,6 +1453,8 @@ pub mod forms {
     pub const CMOVNO_R64_R64: u32 = 0x0EAD;
     pub const CMOVP_R64_R64: u32 = 0x0EAE;
     pub const CMOVNP_R64_R64: u32 = 0x0EAF;
+    pub const ADC_R32_IMM32: u32 = 0x0EB1;
+    pub const SBB_R32_IMM32: u32 = 0x0EB2;
 
     // SBB width completion and scalar D1 shifts/rotates (agent band).
     pub const SBB_R32_R32: u32 = 0x0E00;
@@ -1462,6 +1478,23 @@ pub mod forms {
     pub const MOV_CR_R64: u32 = 0x0F01;
     pub const MOV_R64_DR: u32 = 0x0F02;
     pub const MOV_DR_R64: u32 = 0x0F03;
+
+    // Final census-tail forms. Segment-register operands are absent from the
+    // normalized XED operand list, so direction is encoded in the form id.
+    pub const MOV_R16_SREG: u32 = 0x0F80;
+    pub const MOV_R64_SREG: u32 = 0x0F81;
+    pub const MOV_MEM16_SREG: u32 = 0x0F82;
+    pub const MOV_SREG_R16: u32 = 0x0F83;
+    pub const MOV_SREG_MEM16: u32 = 0x0F84;
+    pub const FLD_M80: u32 = 0x0F85;
+    pub const IRETD: u32 = 0x0F86;
+    pub const PUSH_R16: u32 = 0x0F87;
+    pub const XCHG_R8_R8: u32 = 0x0F88;
+    pub const ROR_R8_IMM8: u32 = 0x0F89;
+    pub const RCR_R8_IMM8: u32 = 0x0F8A;
+    pub const MOV_R32_SREG: u32 = 0x0F8B;
+    pub const ADC_R8_MEM8: u32 = 0x0F8C;
+    pub const SBB_R8_MEM8: u32 = 0x0F8D;
 }
 
 /// RFLAGS bit positions used by the corpus.

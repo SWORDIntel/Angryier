@@ -770,6 +770,51 @@ fn evaluate_primitive<R, M>(
             let input = read_float(resolved[0])?;
             return Ok(write_float(ty, input.sqrt()));
         }
+        IrPrimitive::FSin => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = read_float(resolved[0])?;
+            return Ok(write_float(ty, input.sin()));
+        }
+        IrPrimitive::FCos => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = read_float(resolved[0])?;
+            return Ok(write_float(ty, input.cos()));
+        }
+        IrPrimitive::FTan => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = read_float(resolved[0])?;
+            return Ok(write_float(ty, input.tan()));
+        }
+        IrPrimitive::FAtan2 => {
+            require_arity(operation, &resolved, 2)?;
+            require_types(&resolved, ty)?;
+            let y = read_float(resolved[0])?;
+            let x = read_float(resolved[1])?;
+            return Ok(write_float(ty, y.atan2(x)));
+        }
+        IrPrimitive::FExp2 => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = read_float(resolved[0])?;
+            return Ok(write_float(ty, input.exp2()));
+        }
+        IrPrimitive::FLog2 => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = read_float(resolved[0])?;
+            return Ok(write_float(ty, input.log2()));
+        }
+        IrPrimitive::FScale => {
+            require_arity(operation, &resolved, 2)?;
+            require_types(&resolved, ty)?;
+            let val = read_float(resolved[0])?;
+            let scale_factor = read_float(resolved[1])?;
+            let scale = scale_factor.trunc();
+            return Ok(write_float(ty, val * scale.exp2()));
+        }
         IrPrimitive::FConvert => {
             require_arity(operation, &resolved, 1)?;
             let input = read_float(resolved[0])?;

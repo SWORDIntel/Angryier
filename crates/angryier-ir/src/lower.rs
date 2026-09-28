@@ -741,6 +741,13 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             FloatingOp::Convert => IrPrimitive::FConvert,
             FloatingOp::Compare => IrPrimitive::FCompareFlags,
             FloatingOp::Round => IrPrimitive::FRound,
+            FloatingOp::Sin => IrPrimitive::FSin,
+            FloatingOp::Cos => IrPrimitive::FCos,
+            FloatingOp::Tan => IrPrimitive::FTan,
+            FloatingOp::Atan2 => IrPrimitive::FAtan2,
+            FloatingOp::Exp2 => IrPrimitive::FExp2,
+            FloatingOp::Log2 => IrPrimitive::FLog2,
+            FloatingOp::Scale => IrPrimitive::FScale,
         }),
         SemanticOp::Vector(op) => match op {
             VectorOp::LaneWise(scalar) => Ok(match scalar {

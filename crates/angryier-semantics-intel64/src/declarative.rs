@@ -13,8 +13,8 @@ use angryier_semantics_gen::{FlagPolicy, SemanticPattern, ShiftPattern};
 use angryier_types::SemanticRuleId;
 
 use crate::providers::{
-    ShiftKind, fall_through, write_add_flags, write_add_flags_preserve_cf, write_logical_flags, write_rotate_flags,
-    write_shift_flags, write_sub_flags, write_sub_flags_preserve_cf,
+    ShiftKind, fall_through, widen_to_u64, write_add_flags, write_add_flags_preserve_cf, write_logical_flags,
+    write_rotate_flags_width_count, write_shift_flags, write_sub_flags, write_sub_flags_preserve_cf,
 };
 use crate::rule_id;
 
@@ -147,7 +147,8 @@ fn emit_pattern(
             let result = out.emit(SemanticOp::Primitive(prim), ty, &[left, count_masked])?;
             match kind {
                 ShiftPattern::RotateLeft | ShiftPattern::RotateRight => {
-                    write_rotate_flags(out, result, shift_kind)?;
+                    let count64 = widen_to_u64(out, count_masked, *width_bits)?;
+                    write_rotate_flags_width_count(out, result, shift_kind, 64, Some(count64))?;
                 }
                 _ => write_shift_flags(out, left, count_masked, result, shift_kind, *width_bits)?,
             }

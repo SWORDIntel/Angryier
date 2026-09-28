@@ -170,18 +170,24 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
 
     match decoded.form_id {
         xed::XED_ICLASS_SHL => match shapes {
+            [Shape::Reg64, Shape::Imm] => Some(forms::SHL_R64_IMM8),
+            [Shape::Reg64] if has_cl => Some(forms::SHL_R64_CL),
             [Shape::Reg32, Shape::Imm] => Some(forms::SHL_R32_IMM8),
             [Shape::Reg32] if has_cl => Some(forms::SHL_R32_CL),
             [Shape::Reg32] => Some(forms::SHL_R32_IMM8),
             _ => None,
         },
         xed::XED_ICLASS_SHR => match shapes {
+            [Shape::Reg64, Shape::Imm] => Some(forms::SHR_R64_IMM8),
+            [Shape::Reg64] if has_cl => Some(forms::SHR_R64_CL),
             [Shape::Reg32, Shape::Imm] => Some(forms::SHR_R32_IMM8),
             [Shape::Reg32] if has_cl => Some(forms::SHR_R32_CL),
             [Shape::Reg32] => Some(forms::SHR_R32_IMM8),
             _ => None,
         },
         xed::XED_ICLASS_SAR => match shapes {
+            [Shape::Reg64, Shape::Imm] => Some(forms::SAR_R64_IMM8),
+            [Shape::Reg64] if has_cl => Some(forms::SAR_R64_CL),
             [Shape::Reg32, Shape::Imm] => Some(forms::SAR_R32_IMM8),
             [Shape::Reg32] if has_cl => Some(forms::SAR_R32_CL),
             [Shape::Reg32] => Some(forms::SAR_R32_IMM8),
@@ -201,6 +207,17 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
             [Shape::Reg32] if has_cl => Some(forms::ROR_R32_CL),
             _ => None,
         },
+        xed::XED_ICLASS_RCL => match shapes {
+            [Shape::Reg64, Shape::Imm] => Some(forms::RCL_R64_IMM8),
+            [Shape::Reg64] if has_cl => Some(forms::RCL_R64_CL),
+            _ => None,
+        },
+        xed::XED_ICLASS_RCR => match shapes {
+            [Shape::Reg64, Shape::Imm] => Some(forms::RCR_R64_IMM8),
+            [Shape::Reg64] if has_cl => Some(forms::RCR_R64_CL),
+            _ => None,
+        },
+        xed::XED_ICLASS_STC => Some(forms::STC),
         // Plumbing forms the harness itself needs.
         xed::XED_ICLASS_MOV => match shapes {
             [Shape::Reg64, Shape::Imm] => Some(forms::MOV_R64_IMM64),
@@ -412,7 +429,7 @@ fn differential_case(name: &str, body: &str, flag_mask: u64) -> Result<bool, Box
 
 fn flag_mask_for_shift(masked_count: u64) -> u64 {
     match masked_count {
-        0 => 0,
+        0 => CF | PF | ZF | SF | OF,
         1 => CF | PF | ZF | SF | OF,
         _ => CF | PF | ZF | SF,
     }
@@ -420,8 +437,15 @@ fn flag_mask_for_shift(masked_count: u64) -> u64 {
 
 fn flag_mask_for_rotate(masked_count: u64) -> u64 {
     match masked_count {
-        0 => 0,
+        0 => CF | OF,
         1 => CF | OF,
+        _ => CF,
+    }
+}
+
+fn flag_mask_for_rcl_rcr(masked_count: u64) -> u64 {
+    match masked_count {
+        0 | 1 => CF | OF,
         _ => CF,
     }
 }
@@ -435,6 +459,8 @@ const COUNTS_R32: [u64; 9] = [0, 1, 31, 32, 33, 63, 64, 127, 255];
 
 const VALUES64: [u64; 4] = [0, 0xdead_beef_cafe_f00d, 0x8000_0000_0000_0001, 0xffff_ffff_ffff_ffff];
 const COUNTS64_CL: [u64; 6] = [0, 1, 63, 64, 65, 255];
+const COUNTS_RCL_IMM: [u64; 5] = [0, 1, 2, 63, 64];
+const COUNTS_RCL_CL: [u64; 6] = [0, 1, 2, 63, 64, 255];
 
 #[test]
 fn shift_and_rotate_semantics_match_hardware() -> Result<(), BoxError> {
@@ -500,13 +526,75 @@ fn shift_and_rotate_semantics_match_hardware() -> Result<(), BoxError> {
         }
     }
 
+    // 4. r64 shifts with CL counts [0, 1, 63, 64, 65, 255] checking CF, PF, ZF, SF, and OF
+    for mnemonic in ["shl", "shr", "sar"] {
+        for &cl in &COUNTS64_CL {
+            let masked = cl & 0x3F;
+            let mask = flag_mask_for_shift(masked);
+            for &value in &VALUES64 {
+                let cl_seed = 0xaabb_ccdd_ffff_ff00u64 | (cl & 0xff);
+                let body_cl = format!(
+                    "    movabs ${cl_seed:#x}, %rcx\n    movabs ${value:#x}, %rax\n    {mnemonic}q %cl, %rax\n"
+                );
+                case(format!("{mnemonic}q_cl{cl}_{value:#x}"), body_cl, mask)?;
+            }
+        }
+    }
+
+    // 5. r64 RCL/RCR imm8 and CL sweeps with incoming CF varied (alternating STC)
+    let mut stc_toggle = false;
+    for mnemonic in ["rcl", "rcr"] {
+        // imm8 counts {0, 1, 2, 63, 64}
+        for &count in &COUNTS_RCL_IMM {
+            let masked = count & 0x3F;
+            let mask = flag_mask_for_rcl_rcr(masked);
+            for &value in &VALUES64 {
+                let stc = if stc_toggle { "    stc\n" } else { "" };
+                stc_toggle = !stc_toggle;
+                let body = format!("{stc}    movabs ${value:#x}, %rax\n    {mnemonic}q ${count}, %rax\n");
+                case(format!("{mnemonic}q_imm{count}_{value:#x}"), body, mask)?;
+            }
+        }
+        // CL counts {0, 1, 2, 63, 64, 255}
+        for &cl in &COUNTS_RCL_CL {
+            let masked = cl & 0x3F;
+            let mask = flag_mask_for_rcl_rcr(masked);
+            for &value in &VALUES64 {
+                let stc = if stc_toggle { "    stc\n" } else { "" };
+                stc_toggle = !stc_toggle;
+                let cl_seed = 0xaabb_ccdd_ffff_ff00u64 | (cl & 0xff);
+                let body = format!(
+                    "{stc}    movabs ${cl_seed:#x}, %rcx\n    movabs ${value:#x}, %rax\n    {mnemonic}q %cl, %rax\n"
+                );
+                case(format!("{mnemonic}q_cl{cl}_{value:#x}"), body, mask)?;
+            }
+        }
+    }
+
+    // 6. Dedicated zero-count flag preservation: stc then count 0 (imm8 $0 and CL=0)
+    for mnemonic in ["shl", "shr", "sar", "rol", "ror", "rcl", "rcr"] {
+        let mask = CF | PF | ZF | SF | OF;
+        let value = 0xdead_beef_cafe_f00du64;
+
+        // imm8 $0
+        let body_imm = format!("    stc\n    movabs ${value:#x}, %rax\n    {mnemonic}q $0, %rax\n");
+        case(format!("{mnemonic}q_imm0_preserve_cf"), body_imm, mask)?;
+
+        // CL=0 with garbage upper bits
+        let cl_seed = 0xaabb_ccdd_ffff_ff00u64;
+        let body_cl = format!(
+            "    movabs ${cl_seed:#x}, %rcx\n    stc\n    movabs ${value:#x}, %rax\n    {mnemonic}q %cl, %rax\n"
+        );
+        case(format!("{mnemonic}q_cl0_preserve_cf"), body_cl, mask)?;
+    }
+
     if skipped && executed == 0 {
         eprintln!("skipping shift differential: binutils unavailable");
         return Ok(());
     }
     eprintln!("shift differential oracle: {executed} cases matched hardware byte-for-byte");
-    if executed < 300 {
-        return Err(format!("expected >= 300 shift differential cases, ran {executed}").into());
+    if executed < 450 {
+        return Err(format!("expected >= 450 shift differential cases, ran {executed}").into());
     }
     Ok(())
 }

@@ -1015,7 +1015,7 @@ impl<D: Decoder> Runtime<D> {
                 let res = a.wrapping_sub(b) & mask;
 
                 let cf = a < b;
-                let pf = (res as u8).count_ones() % 2 == 0;
+                let pf = (res as u8).count_ones().is_multiple_of(2);
                 let af = ((a ^ b ^ res) & 0x10) != 0;
                 let zf = res == 0;
                 let sf = (res & sign_bit) != 0;
@@ -2980,8 +2980,8 @@ impl<D: Decoder> Runtime<D> {
 
     /// `OUT port, r8/16/32`: writes to port 0xCF8 latch the PCI
     /// configuration-address register (all other port writes are dropped —
-    /// no device model). The latch is consulted by config reads at
-    /// 0xCFC-0xCFF.
+    /// no device model). The latch is readable at 0xCF8 and consulted by
+    /// config reads at 0xCFC-0xCFF.
     fn execute_port_out(
         &self,
         process: &mut Process,
@@ -3012,10 +3012,11 @@ impl<D: Decoder> Runtime<D> {
         })
     }
 
-    /// `IN r8/16/32, port`: ports 0xCFC-0xCFF read the PCI configuration
-    /// space at the latched 0xCF8 address (byte-offset addressing: a read
-    /// at 0xCFC+`k` returns the config dword shifted by 8*k); every other
-    /// port reads zero ("device absent"). The config space model exposes a
+    /// `IN r8/16/32, port`: port 0xCF8 reads back the PCI configuration-
+    /// address latch, while ports 0xCFC-0xCFF read configuration space at
+    /// that address (byte-offset addressing: a read at 0xCFC+`k` returns the
+    /// config dword shifted by 8*k); every other port reads zero ("device
+    /// absent"). The config space model exposes a
     /// minimal AMD FCH: the host bridge (bus 0, device 0, function 0) and
     /// the SMBus/GPIO controllers at their standard bus-0 slots.
     fn execute_port_in(
@@ -3032,6 +3033,7 @@ impl<D: Decoder> Runtime<D> {
             .get(1)
             .and_then(|o| self.port_operand_value(process, o));
         let value = match port {
+            Some(0xCF8) => u64::from(process.pci_config_address),
             Some(p @ 0xCFC..=0xCFF) => {
                 let addr = process.pci_config_address;
                 let bus = ((addr >> 16) & 0xFF) as u8;
@@ -3198,17 +3200,17 @@ impl<D: Decoder> Runtime<D> {
         // [rsp+0x38]; slot 0 is the return address, also useful.
         {
             let rsp = sim_state.get_reg(4);
-            if rsp != 0 {
-                if let Ok(bytes) = process.state.memory.read(rsp, 0x40) {
-                    let concrete: Vec<u8> = bytes
-                        .iter()
-                        .map(|b| match b {
-                            ByteValue::Concrete(v) => *v,
-                            ByteValue::Symbolic(_) => 0,
-                        })
-                        .collect();
-                    sim_state.write_memory(rsp, concrete);
-                }
+            if rsp != 0
+                && let Ok(bytes) = process.state.memory.read(rsp, 0x40)
+            {
+                let concrete: Vec<u8> = bytes
+                    .iter()
+                    .map(|b| match b {
+                        ByteValue::Concrete(v) => *v,
+                        ByteValue::Symbolic(_) => 0,
+                    })
+                    .collect();
+                sim_state.write_memory(rsp, concrete);
             }
         }
 
@@ -4564,7 +4566,7 @@ mod tests {
         assert_eq!(pci_config_read(0, 0, 0, 0x10), 0); // BAR reads zero
     }
 
-    /// IN/OUT port dispatch: 0xCF8 latch, 0xCFC config reads with
+    /// IN/OUT port dispatch: readable 0xCF8 latch, 0xCFC config reads with
     /// byte-offset addressing, other ports read zero.
     #[test]
     fn port_io_pci_latch() -> Result<(), RuntimeError> {
@@ -4637,6 +4639,11 @@ mod tests {
         process.write_register(register_id::GPR_BASE + 2, 0xCFC)?; // DX
         let _ = runtime.execute_port_in(&mut process, 0x1001, 1, &in_decoded)?;
         assert_eq!(process.read_register(rax)?, 0x1450_1022);
+        // CONFIG_ADDRESS is a read/write latch. Drivers use this readback to
+        // confirm that configuration mechanism #1 accepted the address.
+        process.write_register(register_id::GPR_BASE + 2, 0xCF8)?;
+        let _ = runtime.execute_port_in(&mut process, 0x1001, 1, &in_decoded)?;
+        assert_eq!(process.read_register(rax)?, 0x8000_0000);
         // Byte-offset read: 0xCFE returns the high word (class low half).
         process.write_register(register_id::GPR_BASE + 2, 0xCFE)?;
         let _ = runtime.execute_port_in(&mut process, 0x1001, 1, &in_decoded)?;
@@ -6342,7 +6349,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 // symbolic call leaked the loader's exit sentinel and the
                 // callee "returned" into termination.
                 let ret_addr = pc.wrapping_add(u64::from(decoded.length));
-                if let Some(rsp) = state.process.read_register(register_id::GPR_BASE + 4).ok() {
+                if let Ok(rsp) = state.process.read_register(register_id::GPR_BASE + 4) {
                     let frame: Vec<ByteValue> =
                         ret_addr.to_le_bytes().iter().map(|b| ByteValue::Concrete(*b)).collect();
                     state.process.state.memory = state

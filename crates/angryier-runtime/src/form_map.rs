@@ -129,6 +129,10 @@ enum Shape {
     Mem32,
     /// 64-bit memory access.
     Mem64,
+    /// 80-bit x87 extended-precision memory access.
+    Mem80,
+    #[allow(dead_code)]
+    FarPtr,
     /// 128-bit memory access.
     Mem128,
     /// Address-generation operand (`lea`); sized variants are not used since
@@ -168,6 +172,7 @@ fn shape_of(operand: &Operand) -> Shape {
             16 => Shape::Mem16,
             32 => Shape::Mem32,
             64 => Shape::Mem64,
+            80 => Shape::Mem80,
             128 => Shape::Mem128,
             _ => Shape::Other,
         },
@@ -244,6 +249,54 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem8, Shape::Imm] => Some(forms::MOV_MEM8_IMM8),
             [Shape::Mem16, Shape::Imm] => Some(forms::MOV_MEM16_IMM16),
             [Shape::Mem32, Shape::Imm] => Some(forms::MOV_MEM32_IMM32),
+            [Shape::Reg16]
+                if matches!(
+                    decoded.operands.first().map(|operand| operand.access),
+                    Some(angryier_arch::AccessKind::Write)
+                ) =>
+            {
+                Some(forms::MOV_R16_SREG)
+            }
+            [Shape::Reg32]
+                if matches!(
+                    decoded.operands.first().map(|operand| operand.access),
+                    Some(angryier_arch::AccessKind::Write)
+                ) =>
+            {
+                Some(forms::MOV_R32_SREG)
+            }
+            [Shape::Reg64]
+                if matches!(
+                    decoded.operands.first().map(|operand| operand.access),
+                    Some(angryier_arch::AccessKind::Write)
+                ) =>
+            {
+                Some(forms::MOV_R64_SREG)
+            }
+            [Shape::Mem16]
+                if matches!(
+                    decoded.operands.first().map(|operand| operand.access),
+                    Some(angryier_arch::AccessKind::Write)
+                ) =>
+            {
+                Some(forms::MOV_MEM16_SREG)
+            }
+            [Shape::Reg16]
+                if matches!(
+                    decoded.operands.first().map(|operand| operand.access),
+                    Some(angryier_arch::AccessKind::Read)
+                ) =>
+            {
+                Some(forms::MOV_SREG_R16)
+            }
+            [Shape::Mem16]
+                if matches!(
+                    decoded.operands.first().map(|operand| operand.access),
+                    Some(angryier_arch::AccessKind::Read)
+                ) =>
+            {
+                Some(forms::MOV_SREG_MEM16)
+            }
             _ => None,
         },
         iclass::XED_ICLASS_ADD | iclass::XED_ICLASS_ADD_LOCK => match shapes {
@@ -501,6 +554,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         iclass::XED_ICLASS_ROR => match shapes {
             [Shape::Mem8, Shape::Imm] => Some(forms::ROR_MEM8_IMM8),
+            [Shape::Reg8, Shape::Imm] => Some(forms::ROR_R8_IMM8),
             [Shape::Mem8] if has_cl => Some(forms::ROR_MEM8_CL),
             [Shape::Reg8] if has_cl => Some(forms::ROR_R8_CL),
             [Shape::Mem16, Shape::Imm] => Some(forms::ROR_MEM16_IMM8),
@@ -537,6 +591,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         },
         iclass::XED_ICLASS_RCR => match shapes {
             [Shape::Mem8, Shape::Imm] => Some(forms::RCR_MEM8_IMM8),
+            [Shape::Reg8, Shape::Imm] => Some(forms::RCR_R8_IMM8),
             [Shape::Mem8] if has_cl => Some(forms::RCR_MEM8_CL),
             [Shape::Reg8] if has_cl => Some(forms::RCR_R8_CL),
             [Shape::Mem16, Shape::Imm] => Some(forms::RCR_MEM16_IMM8),
@@ -655,6 +710,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_PUSH => match shapes {
             [Shape::Reg64] => Some(forms::PUSH_R64),
             [Shape::Reg32] => Some(forms::PUSH_R32),
+            [Shape::Reg16] => Some(forms::PUSH_R16),
             [Shape::Imm] => Some(forms::PUSH_IMM32),
             [Shape::Mem64] => Some(forms::PUSH_MEM64),
             [Shape::Mem16] => Some(forms::PUSH_MEM16),
@@ -663,6 +719,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_POP => match shapes {
             [Shape::Reg64] => Some(forms::POP_R64),
             [Shape::Reg32] => Some(forms::POP_R32),
+            [Shape::Mem64] => Some(forms::POP_MEM64),
             _ => None,
         },
         iclass::XED_ICLASS_LEA => match shapes {
@@ -673,6 +730,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_XCHG => match shapes {
             [Shape::Reg64, Shape::Reg64] => Some(forms::XCHG_R64_R64),
             [Shape::Reg32, Shape::Reg32] => Some(forms::XCHG_R32_R32),
+            [Shape::Reg8, Shape::Reg8] => Some(forms::XCHG_R8_R8),
             [Shape::Mem32, Shape::Reg32] => Some(forms::XCHG_MEM32_R32),
             [Shape::Mem64, Shape::Reg64] => Some(forms::XCHG_MEM64_R64),
             [Shape::Mem8, Shape::Reg8] => Some(forms::XCHG_MEM8_R8),
@@ -1070,6 +1128,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_FLD => match shapes {
             [.., Shape::Mem32] => Some(forms::FLD_M32),
             [.., Shape::Mem64] => Some(forms::FLD_M64),
+            [.., Shape::Mem80] => Some(forms::FLD_M80),
             [Shape::Stack, Shape::Stack] => Some(forms::FLD_STI),
             _ => None,
         },
@@ -1175,9 +1234,11 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_ADC => match shapes {
+            [Shape::Reg32, Shape::Imm] => Some(forms::ADC_R32_IMM32),
             [Shape::Reg8, Shape::Imm] => Some(forms::ADC_R8_IMM8),
             [Shape::Mem8, Shape::Imm] => Some(forms::ADC_MEM8_IMM8),
             [Shape::Reg8, Shape::Reg8] => Some(forms::ADC_R8_R8),
+            [Shape::Reg8, Shape::Mem8] => Some(forms::ADC_R8_MEM8),
             [Shape::Mem8, Shape::Reg8] => Some(forms::ADC_MEM8_R8),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADC_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADC_MEM16_IMM8),
@@ -1190,9 +1251,11 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_SBB => match shapes {
+            [Shape::Reg32, Shape::Imm] => Some(forms::SBB_R32_IMM32),
             [Shape::Reg8, Shape::Imm] => Some(forms::SBB_R8_IMM8),
             [Shape::Mem8, Shape::Imm] => Some(forms::SBB_MEM8_IMM8),
             [Shape::Reg8, Shape::Reg8] => Some(forms::SBB_R8_R8),
+            [Shape::Reg8, Shape::Mem8] => Some(forms::SBB_R8_MEM8),
             [Shape::Mem8, Shape::Reg8] => Some(forms::SBB_MEM8_R8),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SBB_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SBB_MEM16_IMM8),
@@ -1561,58 +1624,6 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem8, Shape::Reg8] => Some(forms::CMPXCHG_MEM8_R8),
             _ => None,
         },
-        // Locked read-modify-write ops are semantically identical to their
-        // unlocked forms in this single-threaded engine.
-        iclass::XED_ICLASS_OR_LOCK => match shapes {
-            [Shape::Mem32, Shape::Reg32] => Some(forms::OR_MEM32_R32),
-            [Shape::Mem64, Shape::Reg64] => Some(forms::OR_MEM64_R64),
-            [Shape::Mem8, Shape::Reg8] => Some(forms::OR_MEM8_R8),
-            [Shape::Mem32, Shape::Imm] => Some(forms::OR_MEM32_IMM32),
-            [Shape::Mem64, Shape::Imm] => Some(forms::OR_MEM64_IMM32),
-            [Shape::Mem8, Shape::Imm] => Some(forms::OR_MEM8_IMM8),
-            [Shape::Mem16, Shape::Imm] => Some(forms::OR_MEM16_IMM16),
-            _ => None,
-        },
-        iclass::XED_ICLASS_AND_LOCK => match shapes {
-            [Shape::Mem32, Shape::Reg32] => Some(forms::AND_MEM32_R32),
-            [Shape::Mem64, Shape::Reg64] => Some(forms::AND_MEM64_R64),
-            [Shape::Mem8, Shape::Reg8] => Some(forms::AND_MEM8_R8),
-            [Shape::Mem32, Shape::Imm] => Some(forms::AND_MEM32_IMM32),
-            [Shape::Mem64, Shape::Imm] => Some(forms::AND_MEM64_IMM32),
-            [Shape::Mem8, Shape::Imm] => Some(forms::AND_MEM8_IMM8),
-            [Shape::Mem16, Shape::Imm] => Some(forms::AND_MEM16_IMM16),
-            _ => None,
-        },
-        iclass::XED_ICLASS_XOR_LOCK => match shapes {
-            [Shape::Mem32, Shape::Reg32] => Some(forms::XOR_MEM32_R32),
-            [Shape::Mem64, Shape::Reg64] => Some(forms::XOR_MEM64_R64),
-            [Shape::Mem8, Shape::Reg8] => Some(forms::XOR_MEM8_R8),
-            [Shape::Mem32, Shape::Imm] => Some(forms::XOR_MEM32_IMM32),
-            [Shape::Mem64, Shape::Imm] => Some(forms::XOR_MEM64_IMM32),
-            [Shape::Mem8, Shape::Imm] => Some(forms::XOR_MEM8_IMM8),
-            [Shape::Mem16, Shape::Imm] => Some(forms::XOR_MEM16_IMM16),
-            _ => None,
-        },
-        iclass::XED_ICLASS_ADD_LOCK => match shapes {
-            [Shape::Mem32, Shape::Reg32] => Some(forms::ADD_MEM32_R32),
-            [Shape::Mem64, Shape::Reg64] => Some(forms::ADD_MEM64_R64),
-            [Shape::Mem8, Shape::Reg8] => Some(forms::ADD_MEM8_R8),
-            [Shape::Mem32, Shape::Imm] => Some(forms::ADD_MEM32_IMM32),
-            [Shape::Mem64, Shape::Imm] => Some(forms::ADD_MEM64_IMM32),
-            [Shape::Mem8, Shape::Imm] => Some(forms::ADD_MEM8_IMM8),
-            [Shape::Mem16, Shape::Imm] => Some(forms::ADD_MEM16_IMM16),
-            _ => None,
-        },
-        iclass::XED_ICLASS_SUB_LOCK => match shapes {
-            [Shape::Mem32, Shape::Reg32] => Some(forms::SUB_MEM32_R32),
-            [Shape::Mem64, Shape::Reg64] => Some(forms::SUB_MEM64_R64),
-            [Shape::Mem8, Shape::Reg8] => Some(forms::SUB_MEM8_R8),
-            [Shape::Mem32, Shape::Imm] => Some(forms::SUB_MEM32_IMM32),
-            [Shape::Mem64, Shape::Imm] => Some(forms::SUB_MEM64_IMM32),
-            [Shape::Mem8, Shape::Imm] => Some(forms::SUB_MEM8_IMM8),
-            [Shape::Mem16, Shape::Imm] => Some(forms::SUB_MEM16_IMM16),
-            _ => None,
-        },
         iclass::XED_ICLASS_SYSCALL => Some(crate::SYSCALL_FORM_ID),
         iclass::XED_ICLASS_CPUID => Some(crate::CPUID_FORM_ID),
         iclass::XED_ICLASS_NOP => Some(forms::NOP),
@@ -1704,6 +1715,12 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => Some(forms::FCOMP_STI),
         },
         iclass::XED_ICLASS_FCOMPP => Some(forms::FCOMPP),
+        // FNSTSW/FSTSW AX (`DF E0`): the status-word register dump. Only the
+        // AX destination is mapped; the m16 store form stays unmapped.
+        iclass::XED_ICLASS_FNSTSW => match shapes {
+            [Shape::Reg16] => Some(forms::FSTSW_AX),
+            _ => None,
+        },
         iclass::XED_ICLASS_FIADD => match shapes {
             [.., Shape::Mem16] => Some(forms::FIADD_M16),
             [.., Shape::Mem32] => Some(forms::FIADD_M32),
@@ -1930,7 +1947,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_JMP_FAR => match shapes {
-            [Shape::Mem] | [Shape::Mem64] | [Shape::Mem32] | [Shape::Mem16] => Some(forms::JMP_FAR_MEM),
+            [Shape::Mem] | [Shape::Mem64] | [Shape::Mem32] | [Shape::Mem16] | [Shape::Mem80] | [Shape::FarPtr] => {
+                Some(forms::JMP_FAR_MEM)
+            }
             _ => None,
         },
         iclass::XED_ICLASS_MOV_CR => match decoded.operands.first().map(|operand| operand.access) {
@@ -1943,6 +1962,18 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             Some(angryier_arch::AccessKind::Read) => Some(forms::MOV_DR_R64),
             _ => None,
         },
+        iclass::XED_ICLASS_IRETD => Some(forms::IRETD),
+        // x87 transcendental family: form IDs reserved; providers are absent
+        // (missing FloatingOp primitives — see forms::FSIN/FCOS/... in
+        // angryier-semantics-intel64/src/lib.rs).
+        iclass::XED_ICLASS_FSIN => Some(forms::FSIN),
+        iclass::XED_ICLASS_FCOS => Some(forms::FCOS),
+        iclass::XED_ICLASS_FPTAN => Some(forms::FPTAN),
+        iclass::XED_ICLASS_FPATAN => Some(forms::FPATAN),
+        iclass::XED_ICLASS_F2XM1 => Some(forms::F2XM1),
+        iclass::XED_ICLASS_FYL2X => Some(forms::FYL2X),
+        iclass::XED_ICLASS_FYL2XP1 => Some(forms::FYL2XP1),
+        iclass::XED_ICLASS_FSCALE => Some(forms::FSCALE),
         _ => None,
     }
 }
@@ -2081,10 +2112,10 @@ mod tests {
 
     #[test]
     fn unmapped_x87_reports_none() -> Result<(), Box<dyn std::error::Error>> {
-        // `9B` is FWAIT (now mapped); the following FSTSW still needs a
-        // status-word register the engine does not model.
+        // `9B` is FWAIT (mapped on its own); the FSTSW that follows decodes
+        // as a separate instruction and maps to the AX dump form.
         assert_eq!(mapped(&[0x9B, 0xDF, 0xE0])?, Some(forms::FWAIT));
-        assert_eq!(mapped(&[0xDF, 0xE0])?, None);
+        assert_eq!(mapped(&[0xDF, 0xE0])?, Some(forms::FSTSW_AX));
         // fst %st(1) has no corpus form.
         assert_eq!(mapped(&[0xDD, 0xD1])?, None);
         // fnop is XED's decoding of the `fst %st(0)` alias; outside the 39
@@ -2106,6 +2137,21 @@ mod tests {
         assert_eq!(mapped(&[0x66, 0x81, 0xF2, 0x34, 0x12])?, Some(forms::XOR_R16_IMM16));
         // test $imm16, %dx was already mapped.
         assert_eq!(mapped(&[0x66, 0xF7, 0xC2, 0x34, 0x12])?, Some(forms::TEST_R16_IMM16));
+        Ok(())
+    }
+
+    #[test]
+    fn maps_x87_transcendental_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // fsin (D9 FE), fcos (D9 FF), fptan (D9 F2), fpatan (D9 F3)
+        assert_eq!(mapped(&[0xD9, 0xFE])?, Some(forms::FSIN));
+        assert_eq!(mapped(&[0xD9, 0xFF])?, Some(forms::FCOS));
+        assert_eq!(mapped(&[0xD9, 0xF2])?, Some(forms::FPTAN));
+        assert_eq!(mapped(&[0xD9, 0xF3])?, Some(forms::FPATAN));
+        // f2xm1 (D9 F0), fyl2x (D9 F1), fyl2xp1 (D9 F9), fscale (D9 FD)
+        assert_eq!(mapped(&[0xD9, 0xF0])?, Some(forms::F2XM1));
+        assert_eq!(mapped(&[0xD9, 0xF1])?, Some(forms::FYL2X));
+        assert_eq!(mapped(&[0xD9, 0xF9])?, Some(forms::FYL2XP1));
+        assert_eq!(mapped(&[0xD9, 0xFD])?, Some(forms::FSCALE));
         Ok(())
     }
 }

@@ -589,6 +589,13 @@ fn float_tag(op: FloatingOp) -> u8 {
         FloatingOp::Compare => 5,
         FloatingOp::Convert => 6,
         FloatingOp::Round => 7,
+        FloatingOp::Sin => 8,
+        FloatingOp::Cos => 9,
+        FloatingOp::Tan => 10,
+        FloatingOp::Atan2 => 11,
+        FloatingOp::Exp2 => 12,
+        FloatingOp::Log2 => 13,
+        FloatingOp::Scale => 14,
     }
 }
 

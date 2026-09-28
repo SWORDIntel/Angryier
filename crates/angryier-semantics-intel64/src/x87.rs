@@ -17,8 +17,15 @@
 //! (`0xFFF8_0000_0000_0000`), matching hardware with masked exceptions (the
 //! masked state `fninit` establishes). Pushing onto a full stack likewise
 //! loads the indefinite, matching masked hardware stack-overflow behavior.
-//! `FSTSW`/`FSTCW` and FPU state dumps read the status word and are not
-//! modeled here.
+//!
+//! The FPU status word lives in its own 16-bit register (`register_id::X87_SW`)
+//! holding TOP (bits 11..=13) and the condition codes C0/C1/C2/C3
+//! (bits 8/9/10/14); exception and summary flags stay 0 in the masked model.
+//! Although the data plane keeps logical ST(i) in physical slot i (so TOP is
+//! architecturally "always 0" from the slot side), the status word mirrors the
+//! hardware TOP arithmetic — decrement on push, increment on pop — so
+//! `FSTSW AX` reports the same TOP a real CPU would after the same
+//! push/pop sequence. `FSTCW` and full FPU state dumps remain unmodeled.
 //!
 //! Arithmetic runs on the f64 payload, following the SSE scalar-float
 //! precedent: the concrete interpreter has no f80 arithmetic, and every
@@ -62,6 +69,136 @@ fn const_f64(out: &mut dyn SemanticBuilder, bits: u64) -> Result<ValueId, Semant
 
 fn st_reg(index: u32) -> RegisterId {
     RegisterId(X87_BASE + index)
+}
+
+// ---------------------------------------------------------------------------
+// FPU status word (X87_SW): TOP tracking and FCOM condition codes
+// ---------------------------------------------------------------------------
+
+/// Status-word bit positions: C0/C1/C2/C3 and the TOP field.
+pub(crate) const SW_C0_BIT: u16 = 8;
+pub(crate) const SW_C2_BIT: u16 = 10;
+pub(crate) const SW_C3_BIT: u16 = 14;
+pub(crate) const SW_TOP_SHIFT: u16 = 11;
+
+/// Mirrors hardware TOP arithmetic on push (`delta = -1`) and pop
+/// (`delta = +1`): TOP wraps modulo 8 through bits 11..=13 of the status
+/// word. The data plane keeps ST(i) in physical slot i; only the reported
+/// TOP follows the hardware rotation.
+pub(crate) fn sw_adjust_top(out: &mut dyn SemanticBuilder, delta: i32) -> Result<(), SemanticError> {
+    let old = out.read_register(register_id::X87_SW, U16)?;
+    let top_shift = const_u16(out, SW_TOP_SHIFT)?;
+    let top = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U16,
+        &[old, top_shift],
+    )?;
+    let seven = const_u16(out, 7)?;
+    let top = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[top, seven])?;
+    // delta arrives as a 4-bit two's-complement constant; addition wraps mod 16
+    // and the AND re-masks to the 3-bit TOP field, giving mod-8 wraparound.
+    let delta_const = const_u16(out, (delta as u16) & 0xF)?;
+    let adjusted = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U16, &[top, delta_const])?;
+    let adjusted = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[adjusted, seven])?;
+    let shifted = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
+        U16,
+        &[adjusted, top_shift],
+    )?;
+    let top_clear = const_u16(out, !(7 << SW_TOP_SHIFT))?;
+    let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[old, top_clear])?;
+    let merged = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U16, &[cleared, shifted])?;
+    out.write_register(register_id::X87_SW, merged)?;
+    Ok(())
+}
+
+/// Resets the status word to the `fninit` state (TOP=0, no condition codes,
+/// no exception flags).
+pub(crate) fn sw_clear(out: &mut dyn SemanticBuilder) -> Result<(), SemanticError> {
+    let zero = const_u16(out, 0)?;
+    out.write_register(register_id::X87_SW, zero)?;
+    Ok(())
+}
+
+/// Merges an FCOM-style comparison into the status-word condition codes.
+/// `packed` is the `FloatingOp::Compare` result with ZF/CF/PF at their
+/// RFLAGS positions (as consumed by `write_zf_cf_pf_packed`); the x87 status
+/// word instead wants C0=CF (bit 8), C2=PF (bit 10), C3=ZF (bit 14).
+pub(crate) fn write_fcom_condition_codes(
+    out: &mut dyn SemanticBuilder,
+    packed: ValueId,
+    pop_delta: i32,
+) -> Result<(), SemanticError> {
+    let one = const_u64(out, 1)?;
+    let zero = const_u64(out, 0)?;
+    let cf_bit = const_u64(out, u64::from(rflags::CF_BIT))?;
+    let pf_bit = const_u64(out, u64::from(rflags::PF_BIT))?;
+    let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
+    let cf_raw = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U64,
+        &[packed, cf_bit],
+    )?;
+    let c0 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[cf_raw, one])?;
+    let pf_raw = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U64,
+        &[packed, pf_bit],
+    )?;
+    let c2 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[pf_raw, one])?;
+    let zf_raw = out.emit(
+        SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+        U64,
+        &[packed, zf_bit],
+    )?;
+    let c3 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[zf_raw, one])?;
+
+    // Repack the three one-bit codes into their status-word positions.
+    let c0_pos = const_u64(out, 1 << SW_C0_BIT)?;
+    let c2_pos = const_u64(out, 1 << SW_C2_BIT)?;
+    let c3_pos = const_u64(out, 1 << SW_C3_BIT)?;
+    let c0_merged = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[c0, c0_pos])?;
+    let c2_merged = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[c2, c2_pos])?;
+    let c3_merged = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[c3, c3_pos])?;
+    let low = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[c0_merged, c2_merged])?;
+    let codes = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U64, &[low, c3_merged])?;
+    let codes = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U16, &[codes, zero])?;
+
+    let old = out.read_register(register_id::X87_SW, U16)?;
+    if pop_delta != 0 {
+        // Adjust TOP and set condition codes in a single write so that neither
+        // clobbers the other.
+        let top_shift = const_u16(out, SW_TOP_SHIFT)?;
+        let top = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+            U16,
+            &[old, top_shift],
+        )?;
+        let seven = const_u16(out, 7)?;
+        let top = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[top, seven])?;
+        let delta_const = const_u16(out, (pop_delta as u16) & 0xF)?;
+        let adjusted = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U16, &[top, delta_const])?;
+        let adjusted = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[adjusted, seven])?;
+        let shifted = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::ShiftLeft),
+            U16,
+            &[adjusted, top_shift],
+        )?;
+        let clear = const_u16(
+            out,
+            !((1 << SW_C0_BIT) | (1 << SW_C2_BIT) | (1 << SW_C3_BIT) | (7 << SW_TOP_SHIFT)),
+        )?;
+        let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[old, clear])?;
+        let with_codes = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U16, &[cleared, codes])?;
+        let merged = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U16, &[with_codes, shifted])?;
+        out.write_register(register_id::X87_SW, merged)?;
+    } else {
+        let clear = const_u16(out, !((1 << SW_C0_BIT) | (1 << SW_C2_BIT) | (1 << SW_C3_BIT)))?;
+        let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[old, clear])?;
+        let merged = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U16, &[cleared, codes])?;
+        out.write_register(register_id::X87_SW, merged)?;
+    }
+    Ok(())
 }
 
 fn fall_through(out: &mut dyn SemanticBuilder, insn: &dyn DecodedInstructionView) -> Result<(), SemanticError> {
@@ -145,6 +282,7 @@ fn push_st(out: &mut dyn SemanticBuilder, value: ValueId) -> Result<(), Semantic
         write_st(out, u32::from(index + 1), sources[usize::from(index)])?;
     }
     write_st(out, 0, packed)?;
+    sw_adjust_top(out, -1)?;
     Ok(())
 }
 
@@ -161,6 +299,7 @@ fn pop_st(out: &mut dyn SemanticBuilder) -> Result<(), SemanticError> {
         write_st(out, u32::from(index), sources[usize::from(index)])?;
     }
     write_st(out, u32::from(X87_COUNT) - 1, empty)?;
+    sw_adjust_top(out, 1)?;
     Ok(())
 }
 
@@ -212,6 +351,7 @@ impl SemanticProvider for Finit {
         for index in 0..X87_COUNT {
             write_st(out, u32::from(index), empty)?;
         }
+        sw_clear(out)?;
         fall_through(out, insn)?;
         Ok(receipt(0x30B, context))
     }
@@ -573,3 +713,69 @@ x87_comi!(FucomiSt0Sti, forms::FUCOMI_ST0_STI, 0x32E, false);
 x87_comi!(FucomipSt0Sti, forms::FUCOMIP_ST0_STI, 0x32F, true);
 x87_comi!(FcomiSt0Sti, forms::FCOMI_ST0_STI, 0x330, false);
 x87_comi!(FcomipSt0Sti, forms::FCOMIP_ST0_STI, 0x331, true);
+
+/// FLD m80. The current x87 data model stores an f64 payload plus a 16-bit
+/// validity tag rather than an IEEE 754 extended-precision value. Preserve
+/// the low 64 memory bits as the payload and discard the high exponent/sign
+/// word for now; replacing this lossy bridge is explicit x87-model debt.
+#[derive(Clone, Copy, Debug)]
+pub struct FldM80;
+
+impl SemanticProvider for FldM80 {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x1305)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FLD_M80
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let source = out.read_operand(1, U80)?;
+        let zero = const_u64(out, 0)?;
+        let payload = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64, &[source, zero])?;
+        push_st(out, payload)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x1305, context))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FSTSW AX: store the FPU status word into AX
+// ---------------------------------------------------------------------------
+
+/// FNSTSW/FSTSW AX (`DF E0`): copies the 16-bit status word — TOP plus the
+/// C0/C2/C3 condition codes left by FCOM-family compares — into AX. The AX
+/// write preserves the upper 48 bits of RAX. Exception/summary flags read as
+/// 0 in the masked-exceptions model; FSTSW m16 is not mapped yet.
+#[derive(Clone, Copy, Debug)]
+pub struct FstswAx;
+
+impl SemanticProvider for FstswAx {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(0x332)
+    }
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+    fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+        insn.form_id() == forms::FSTSW_AX
+    }
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        let status = out.read_register(register_id::X87_SW, U16)?;
+        out.write_operand(0, status)?;
+        fall_through(out, insn)?;
+        Ok(receipt(0x332, context))
+    }
+}

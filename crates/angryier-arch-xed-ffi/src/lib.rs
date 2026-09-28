@@ -33,6 +33,7 @@ pub use backend::NativeXedBackend;
 /// [`XedDecoder`] are raw XED instruction classes; translating them into
 /// engine-owned semantic form ids is the integration layer's responsibility.
 pub mod iclass {
+    pub use xed_sys::XED_ICLASS_IRETD;
     pub use xed_sys::{
         XED_ICLASS_ADC, XED_ICLASS_ADD, XED_ICLASS_ADD_LOCK, XED_ICLASS_ADDSD, XED_ICLASS_ADDSS, XED_ICLASS_AND,
         XED_ICLASS_AND_LOCK, XED_ICLASS_BLENDVPD, XED_ICLASS_BLENDVPS, XED_ICLASS_BSF, XED_ICLASS_BSR,
@@ -240,6 +241,7 @@ impl Decoder for XedDecoder {
     fn decode(&self, address: Address, bytes: &[u8]) -> Result<DecodedInstruction, Self::Error> {
         let mut decoded = self.inner.decode(address, bytes)?;
         append_system_register_operand(&mut decoded, bytes);
+        normalize_push16_stack_operand(&mut decoded);
         Ok(decoded)
     }
 }
@@ -275,6 +277,29 @@ fn append_system_register_operand(decoded: &mut DecodedInstruction, bytes: &[u8]
             signed: false,
         }),
     });
+}
+
+/// XED describes every suppressed PUSH stack slot relative to the old RSP
+/// with an eight-byte displacement, even for the operand-size-overridden
+/// 16-bit encoding. Normalize that address to the architectural two-byte
+/// decrement so semantic operand writes land at the post-push RSP.
+fn normalize_push16_stack_operand(decoded: &mut DecodedInstruction) {
+    if decoded.form_id != xed_sys::XED_ICLASS_PUSH
+        || !decoded
+            .operands
+            .iter()
+            .any(|operand| operand.visibility == angryier_arch::OperandVisibility::Explicit && operand.width_bits == 16)
+    {
+        return;
+    }
+    for operand in &mut decoded.operands {
+        if operand.visibility == angryier_arch::OperandVisibility::Suppressed
+            && operand.width_bits == 16
+            && let angryier_arch::OperandKind::Memory(memory) = &mut operand.kind
+        {
+            memory.displacement = -2;
+        }
+    }
 }
 
 #[cfg(test)]
