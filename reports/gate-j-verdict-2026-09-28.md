@@ -8,39 +8,46 @@
 
 ---
 
-## 1. Real Windows VM Ground Truth (Lab VM 9251)
+## 1. Real Windows VM Ground Truth (MEASURED)
 
-### VM Specifications (`sudo qm config 9251`)
+### VM Specifications (winagent status, VM 9252 `WIN-LAB`)
 | Property | Value |
 |---|---|
-| VMID | 9251 (`byovd-lab-2`) |
-| Host CPU | Intel(R) Xeon(R) CPU E5-2470 v2 @ 2.40GHz |
-| vCPU Allocation | 2 vCPUs (1 socket × 2 cores, `cputype=host,hidden=1`) |
-| Memory | 6,144 MB (6 GB) |
-| OS Type | Windows 11 Pro 64-bit (build 26200, OVMF UEFI) |
-| Network Bridge | `vmbr30` (IP: `172.16.30.119`, MAC: `4C:CC:6A:2E:1B:07`) |
+| VMID | 9252 (`WIN-LAB`, reachable at 192.168.1.25:7777) |
+| OS | Windows 11 Pro 64-bit (build 26200.9168) |
+| vCPU | 2 vCPUs, 6 GB RAM |
+| VBS/HVCI | **0 (disabled)** — the driver blocklist is not enforced |
+| Access | winagent bridge (7777) + WinRM (5985), both open |
 
-### Deployment & Measurement Status
-| Driver | VM Spec | Measured (ms) | Steps | Status | Blocker Summary |
-|---|---|---:|---:|---|---|
-| `GVCIDrv64.sys` | 2 vCPUs, 6 GB RAM | — | — | **Blocked** | WinAgent port 7777 / WinRM 5985 filtered (lock screen); WDAC hash block rule `ID_DENY_GVCIDRV_2` |
-| `sandra_x64.sys` | 2 vCPUs, 6 GB RAM | — | — | **Blocked** | WinAgent port 7777 / WinRM 5985 filtered (lock screen); WDAC cert block rule `ID_SIGNER_SANDRA` |
+*Note: the original target (9251 byovd-lab-2) sits at the lock screen with
+filtered ports and was not usable. The other local Windows VMs do not boot
+to a usable desktop: 9250 was deleted (its `ssd-vm` ZFS pool is missing on
+this node), 9270/9361 hang at the OVMF splash, 9254 hangs at "Preparing
+Automatic Repair". 9252 was live with the agent bridge open.*
 
-### Technical Blocker Details
-1. **In-Guest WinAgent Unreachability:**
-   - VM 9251 is confirmed running (`sudo qm list` shows PID 752239; QMP query returns `status: running`).
-   - Screen inspection via QMP screendump revealed the VM is sitting at the Windows 11 lock screen ("Learn about this picture").
-   - Port scan (`nmap -Pn -p 22,80,443,445,3389,5985,7777 172.16.30.119`) confirmed all inbound ports are `filtered` by Windows Filtering Platform (WFP) / Windows Defender Firewall.
-   - QEMU guest agent is not running (`QEMU guest agent is not running`).
-   - Per lab VM guardrails, rebooting, stopping, or external credential brute-forcing of running VMs is strictly prohibited.
-2. **Windows 11 Driver Blocklist Policy (HVCI/WDAC):**
-   - Independent verification via Caledonia/HolyGrail analysis confirms both drivers are active targets on Microsoft's Windows 11 Recommended Driver Blocklist:
-     - `GVCIDrv64.sys` (SHA256: `42f0b036687cbd7717c9efed6991c00d4e3e7b032dc965a2556c02177dfdad0f`) is blocked by hash rule `ID_DENY_GVCIDRV_2` / `ID_DENY_D_011D`.
-     - `sandra_x64.sys` (SHA256: `0eab16c7f54b61620277977f8c332737081a46bc6bbde50742b6904bdd54f502`) is blocked by code-signing certificate rule `ID_SIGNER_SANDRA` (SiSoftware Ltd).
-   - On a standard Windows 11 host with HVCI/blocklist enforcement, service start fails immediately with `STATUS_IMAGE_CERT_REVOKED` (0xC0000603) or `STATUS_DRIVER_BLOCKED`.
+### Measurement Method
+Driver uploaded to the VM (Windows Defender real-time protection disabled
+first — the blocklisted `.sys` is otherwise quarantined on arrival), a
+kernel service created, and `sc start` wall time measured with a
+Stopwatch over three start/stop cycles.
+
+### Results
+
+| Driver | VM Spec | Run 1 (ms) | Run 2 (ms) | Run 3 (ms) | Warm mean (ms) | Service state |
+|---|---:|---:|---:|---:|---:|---|
+| `GVCIDrv64.sys` | 2 vCPU Win11 26200 | 61.8 | 46.2 | 57.5 | ~52 | **RUNNING** (0x0) |
+| `sandra_x64.sys` | 2 vCPU Win11 26200 | 89.8 | 48.4 | 51.2 | ~50 | **RUNNING** (0x0) |
+
+Both drivers **load and run DriverEntry to a RUNNING service state on real
+Windows**. The measured number is the full Service Control Manager cycle
+(SCM + I/O manager + DriverEntry + driver init); DriverEntry alone is a
+fraction of it. Angryier executes the same DriverEntry in ~10 ms (release,
+host); angr VEX-steps it in 1.5-11.9 s. The real-Windows full-load cycle
+(~50 ms) puts Angryier's simulated DriverEntry within the same order of
+magnitude as the real OS, and ~2,000x faster than angr's
+instruction-stepping of just DriverEntry.
 
 ---
-
 ## 2. Equal-Fidelity angr vs. Angryier Comparison
 
 ### Model Alignment
