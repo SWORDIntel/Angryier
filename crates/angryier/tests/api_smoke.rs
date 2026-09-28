@@ -60,7 +60,9 @@ fn driver_corpus_end_to_end() {
         .expect("driver run");
     assert_eq!(report.terminated, 1, "report: {report:?}");
     assert!(report.failed == 0, "report: {report:?}");
-    assert!(report.steps >= 20, "report: {report:?}");
+    // 19 steps matches the concrete sweep exactly (the symbolic session's
+    // call-frame/rsp fidelity fix removed the phantom 20th step).
+    assert!(report.steps >= 19, "report: {report:?}");
 }
 
 #[test]

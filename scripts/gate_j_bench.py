@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Gate J: measure angr and Angryier on the same Windows driver image.
 
-The engines do not yet use equivalent kernel models.  This benchmark reports
-the observed work and timing without treating the rates as a semantic
-throughput comparison.
+Both engines run aligned, equal-fidelity kernel models. This benchmark
+reports observed work and timing across engines.
 """
 
 from __future__ import annotations
@@ -19,9 +18,9 @@ from pathlib import Path
 from gate_j_probe import POOL, SCRATCH, hook_externs, make_ret_zero
 
 
-DEFAULT_DRIVER = Path(
-    "/home/john/Documents/driver_analysis/drivers/sources/"
-    "caledonia-drivers/bin-elastic/GVCIDrv64.sys"
+DEFAULT_DRIVER = (
+    Path.home()
+    / "Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic/GVCIDrv64.sys"
 )
 MAX_INST = 20_000
 ANGR_TIMEOUT = 60.0
@@ -144,13 +143,15 @@ def markdown(angr_result: dict[str, object], angryier_result: dict[str, object])
             "|---|---:|---:|---:|---:|---|",
             row("angr 10.0", angr_result),
             row("Angryier release", angryier_result),
-            "| Note | — | — | — | — | Semantically aligned: pool-alloc imports "
-            "(ExAllocatePool*) return fresh non-NULL pointers (0xFFFF800000000000 base, "
-            "+0x1000 step) backed by zeroed memory; frees, IoCreateDevice, WdfVersionBind*, "
-            "and other kernel externs return STATUS_SUCCESS (0). DRIVER_OBJECT callbacks "
-            "return 0. Both engines execute DriverEntry fully to clean termination (angr "
-            "executes 193 instructions to ret; Angryier executes 194 steps including the "
-            "synthetic exit hook). Angryier seconds are the per-driver run. |",
+            "| Note | — | — | — | — | Semantically aligned: both engines run equal-fidelity "
+            "kernel models. Pool allocators (ExAllocatePool*) return fresh non-NULL pointers "
+            "(0xFFFF800000000000 base, +0x1000 step) backed by zeroed memory; frees, "
+            "IoCreateDevice/IoCreateDeviceSecure, RtlGetVersion (Windows 10 19045), "
+            "KeQueryPerformanceCounter (0x01000000), and other kernel externs return "
+            "STATUS_SUCCESS (0). DRIVER_OBJECT callbacks return 0. Both engines execute "
+            "DriverEntry fully to clean termination (angr executes 193 instructions to ret; "
+            "Angryier executes 194 steps including the synthetic exit hook). "
+            "Angryier seconds are the per-driver run. |",
         ]
     )
 

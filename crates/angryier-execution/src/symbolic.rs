@@ -756,6 +756,57 @@ fn fold_node(
                 }
             }
         }
+        ExprOp::Mul => Ok(child!(node.operands.first())?.wrapping_mul(child!(node.operands.get(1))?)),
+        ExprOp::UDiv => {
+            let rhs = child!(node.operands.get(1))?;
+            if rhs == 0 {
+                return Err(FoldFail::Absolute);
+            }
+            Ok(child!(node.operands.first())? / rhs)
+        }
+        ExprOp::SDiv => {
+            let rhs = child!(node.operands.get(1))? as i64;
+            if rhs == 0 {
+                return Err(FoldFail::Absolute);
+            }
+            let lhs = child!(node.operands.first())? as i64;
+            Ok(lhs.wrapping_div(rhs) as u64)
+        }
+        ExprOp::AShr => {
+            let lhs = child!(node.operands.first())? as i64;
+            let shift = (child!(node.operands.get(1))? & 63) as u32;
+            Ok((lhs >> shift) as u64)
+        }
+        ExprOp::Ult => Ok(u64::from(
+            child!(node.operands.first())? < child!(node.operands.get(1))?,
+        )),
+        ExprOp::Ule => Ok(u64::from(
+            child!(node.operands.first())? <= child!(node.operands.get(1))?,
+        )),
+        ExprOp::Slt | ExprOp::Sle => {
+            let op0 = *node.operands.first().ok_or(FoldFail::Absolute)?;
+            let width = arena
+                .sort_of(op0)
+                .and_then(|sort| match sort {
+                    ExprSort::BitVec(w) => Some(u32::from(w)),
+                    _ => None,
+                })
+                .unwrap_or(64);
+            let sign_extend = |val: u64| -> i64 {
+                if width > 0 && width < 64 && (val & (1u64 << (width - 1))) != 0 {
+                    (val | (!0u64 << width)) as i64
+                } else {
+                    val as i64
+                }
+            };
+            let lhs = sign_extend(child!(node.operands.first())?);
+            let rhs = sign_extend(child!(node.operands.get(1))?);
+            if op == ExprOp::Slt {
+                Ok(u64::from(lhs < rhs))
+            } else {
+                Ok(u64::from(lhs <= rhs))
+            }
+        }
         // Operators outside the foldable subset never fold regardless of
         // budget: an absolute verdict, memoizable.
         _ => Err(FoldFail::Absolute),
@@ -765,7 +816,7 @@ fn fold_node(
 /// Like [`constant_value`], but `resolve_expr(symbol_id)` can bind Symbol
 /// leaves to concrete values — the session passes each symbol's concrete
 /// register value so `rsp-symbolic` addresses still resolve.
-fn constant_value_resolved(
+pub fn constant_value_resolved(
     arena: &SymbolicArena,
     expression: ExprId,
     resolve_expr: &dyn Fn(ExprId) -> Option<u64>,
@@ -2341,7 +2392,19 @@ impl SymbolicSessionMemory {
                 imm.extend_from_slice(&8u16.to_le_bytes());
                 intern(arena, ExprSort::BitVec(8), ExprOp::Extract, vec![expression], imm)?
             };
-            bytes.push(angryier_memory::ByteValue::Symbolic(byte));
+            let concrete_val = if let Some(node) = arena.get(byte)
+                && node.op == ExprOp::Constant
+                && let Some(&b) = node.immediate.first()
+            {
+                Some(b)
+            } else {
+                constant_value(arena, byte).ok().map(|v| v as u8)
+            };
+            if let Some(b) = concrete_val {
+                bytes.push(angryier_memory::ByteValue::Concrete(b));
+            } else {
+                bytes.push(angryier_memory::ByteValue::Symbolic(byte));
+            }
         }
         self.memory = self
             .memory

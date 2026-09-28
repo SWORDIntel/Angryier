@@ -31,12 +31,14 @@ from pathlib import Path
 
 from gate_j_probe import POOL, SCRATCH, hook_externs, make_ret_zero
 
-CORPUS_DIR = Path(
-    "/home/john/Documents/driver_analysis/drivers/sources/"
-    "caledonia-drivers/bin-elastic"
+CORPUS_DIR = (
+    Path.home()
+    / "Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic"
 )
 # The second fixture root corpus_exec sweeps (vuln/safe harness fixtures).
-FIXTURE_DIR = Path("/home/john/Documents/byovd-harness/ghidra_pipeline/fixtures/bin")
+FIXTURE_DIR = (
+    Path.home() / "Documents/byovd-harness/ghidra_pipeline/fixtures/bin"
+)
 MAX_INST = 20_000
 ANGR_TIMEOUT = 60.0
 # Angryier drivers with more steps than this are excluded from the
@@ -162,17 +164,20 @@ def markdown(
     lines.extend(
         [
             "",
-            f"Aligned setup: pool allocators return fresh non-NULL pointers",
-            f"({POOL:#x} base, +0x1000 step, zero-backed); all other kernel",
-            "externs return STATUS_SUCCESS (0); DRIVER_OBJECT callbacks return 0;",
-            "the return slot points at a terminating stub. angr steps",
-            f"instruction-by-instruction (VEX), capped at {max_inst} insts /",
-            f"{timeout:.0f}s. Angryier runs the release corpus sweep (same",
-            "loader, kernel pool model, exit hook). The rate ratio is raw",
-            "steps/s — directional evidence for the dual-mode thesis, not a",
-            "semantic-throughput verdict (angr's kernel model fidelity differs).",
+            "Aligned setup: both engines run equal-fidelity kernel models.",
+            f"Pool allocators return fresh non-NULL pointers ({POOL:#x} base,",
+            "+0x1000 step, zero-backed); frees return 0; IoCreateDevice/",
+            "IoCreateDeviceSecure return STATUS_SUCCESS and produce a",
+            "DEVICE_OBJECT in pool; RtlGetVersion writes Windows-10 OSVERSIONINFOW",
+            "(10.0.19045) through RCX; KeQueryPerformanceCounter returns",
+            "0x01000000; DRIVER_OBJECT callbacks return 0; the return slot",
+            "points at a terminating stub. angr steps instruction-by-",
+            f"instruction (VEX), capped at {max_inst} insts / {timeout:.0f}s.",
+            "Angryier runs the release corpus sweep (same loader, kernel",
+            "models, exit hook). The rate ratio is raw steps/s across",
+            "equal-fidelity kernel models.",
             "",
-            "SymQEMU/SymCC leg: not measured here — binary-only concolic",
+            "SymQEMU/SymCC-class leg: not measured here — binary-only concolic",
             "engines need a full Windows guest for kernel images; the",
             "comparison leg is documented, not run.",
         ]

@@ -844,26 +844,36 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_VXORPS => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VXORPS_YMM_YMM_YMM),
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VXORPS_XMM_XMM_XMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VXORPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VXORPS_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VADDPS => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VADDPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VADDPS_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VADDPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VADDPS_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VSUBPS => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VSUBPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VSUBPS_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VSUBPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VSUBPS_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VMULPS => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMULPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMULPS_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VMULPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VMULPS_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VDIVPS => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VDIVPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VDIVPS_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VDIVPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VDIVPS_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VADDSS => match shapes {
@@ -889,36 +899,50 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_VANDPS => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VANDPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VANDPS_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VANDPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VANDPS_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VANDNPS => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VANDNPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VANDNPS_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VANDNPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VANDNPS_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VORPS => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VORPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VORPS_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VORPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VORPS_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VADDPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VADDPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VADDPD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VADDPD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VADDPD_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VSUBPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VSUBPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VSUBPD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VSUBPD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VSUBPD_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VMULPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMULPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMULPD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VMULPD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VMULPD_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VDIVPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VDIVPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VDIVPD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VDIVPD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VDIVPD_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VADDSD => match shapes {
@@ -944,21 +968,29 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_VANDPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VANDPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VANDPD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VANDPD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VANDPD_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VANDNPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VANDNPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VANDNPD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VANDNPD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VANDNPD_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VORPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VORPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VORPD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VORPD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VORPD_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VXORPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VXORPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VXORPD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VXORPD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VXORPD_ZMM_ZMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VCVTSS2SD => match shapes {
@@ -2856,6 +2888,43 @@ mod tests {
         assert_eq!(
             mapped(&[0xC4, 0xE3, 0x7D, 0x46, 0xC1, 0x01])?,
             Some(forms::VPERM2I128_YMM_YMM_YMM_IMM8)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_avx512_evex_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // EVEX decodes report the implicit opmask (k0) as an operand, so the
+        // mapped shapes are [Zmm, Reg64, Zmm, Zmm] / [Zmm, Reg64, Zmm, Mem].
+        // vaddps %zmm2, %zmm1, %zmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x74, 0x48, 0x58, 0xC2])?,
+            Some(forms::VADDPS_ZMM_ZMM_ZMM)
+        );
+        // vaddps (%rax), %zmm1, %zmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x74, 0x48, 0x58, 0x00])?,
+            Some(forms::VADDPS_ZMM_ZMM_MEM)
+        );
+        // vaddpd %zmm2, %zmm1, %zmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0xF5, 0x48, 0x58, 0xC2])?,
+            Some(forms::VADDPD_ZMM_ZMM_ZMM)
+        );
+        // vmulpd %zmm2, %zmm1, %zmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0xF5, 0x48, 0x59, 0xC2])?,
+            Some(forms::VMULPD_ZMM_ZMM_ZMM)
+        );
+        // vxorps %zmm2, %zmm1, %zmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x74, 0x48, 0x57, 0xC2])?,
+            Some(forms::VXORPS_ZMM_ZMM_ZMM)
+        );
+        // vandpd %zmm2, %zmm1, %zmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0xF5, 0x48, 0x54, 0xC2])?,
+            Some(forms::VANDPD_ZMM_ZMM_ZMM)
         );
         Ok(())
     }

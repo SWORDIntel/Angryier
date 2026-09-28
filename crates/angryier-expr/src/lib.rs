@@ -403,6 +403,186 @@ impl ShardedExprArena {
                     records[1].node.clone()
                 }
             }
+            ExprOp::ZExt => {
+                let ExprSort::BitVec(bits) = node.sort else {
+                    return Ok(node);
+                };
+                if bits > 128 {
+                    return Ok(node);
+                }
+                let value = match records[0].node.sort {
+                    ExprSort::Bool => u128::from(records[0].node.immediate.first().copied().unwrap_or(0)),
+                    ExprSort::BitVec(_) => constant_u128(&records[0].node.immediate),
+                    _ => return Ok(node),
+                } & bit_mask(bits);
+                ExprNode {
+                    sort: node.sort,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: value.to_le_bytes()[..usize::from(bits).div_ceil(8)].to_vec(),
+                }
+            }
+            ExprOp::SExt => {
+                let ExprSort::BitVec(bits) = node.sort else {
+                    return Ok(node);
+                };
+                if bits > 128 {
+                    return Ok(node);
+                }
+                let (value, in_bits) = match records[0].node.sort {
+                    ExprSort::Bool => (
+                        u128::from(records[0].node.immediate.first().copied().unwrap_or(0)),
+                        1u16,
+                    ),
+                    ExprSort::BitVec(w) => (constant_u128(&records[0].node.immediate), w),
+                    _ => return Ok(node),
+                };
+                let extended = if in_bits > 0 && in_bits < 128 && (value & (1u128 << (in_bits - 1))) != 0 {
+                    (value | (!bit_mask(in_bits))) & bit_mask(bits)
+                } else {
+                    value & bit_mask(bits)
+                };
+                ExprNode {
+                    sort: node.sort,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: extended.to_le_bytes()[..usize::from(bits).div_ceil(8)].to_vec(),
+                }
+            }
+            ExprOp::Extract => {
+                let ExprSort::BitVec(bits) = node.sort else {
+                    return Ok(node);
+                };
+                if bits > 128 {
+                    return Ok(node);
+                }
+                let Ok(immediate) = <[u8; 4]>::try_from(node.immediate.as_slice()) else {
+                    return Ok(node);
+                };
+                let offset = u16::from_le_bytes([immediate[0], immediate[1]]);
+                let width = u16::from_le_bytes([immediate[2], immediate[3]]);
+                if width != bits {
+                    return Ok(node);
+                }
+                let value = constant_u128(&records[0].node.immediate);
+                let extracted = if offset >= 128 {
+                    0
+                } else {
+                    (value >> offset) & bit_mask(bits)
+                };
+                ExprNode {
+                    sort: node.sort,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: extracted.to_le_bytes()[..usize::from(bits).div_ceil(8)].to_vec(),
+                }
+            }
+            ExprOp::Concat => {
+                let ExprSort::BitVec(output_bits) = node.sort else {
+                    return Ok(node);
+                };
+                if output_bits > 128 {
+                    return Ok(node);
+                }
+                let ExprSort::BitVec(right_bits) = records[1].node.sort else {
+                    return Ok(node);
+                };
+                let hi = constant_u128(&records[0].node.immediate);
+                let lo = constant_u128(&records[1].node.immediate);
+                let value = if right_bits >= 128 {
+                    lo & bit_mask(output_bits)
+                } else {
+                    ((hi << right_bits) | lo) & bit_mask(output_bits)
+                };
+                ExprNode {
+                    sort: node.sort,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: value.to_le_bytes()[..usize::from(output_bits).div_ceil(8)].to_vec(),
+                }
+            }
+            ExprOp::Shl | ExprOp::LShr | ExprOp::AShr => {
+                let ExprSort::BitVec(bits) = node.sort else {
+                    return Ok(node);
+                };
+                if bits > 128 {
+                    return Ok(node);
+                }
+                let left = constant_u128(&records[0].node.immediate);
+                let shift = constant_u128(&records[1].node.immediate);
+                let value = match node.op {
+                    ExprOp::Shl => {
+                        if shift >= u128::from(bits) {
+                            0
+                        } else {
+                            (left << shift) & bit_mask(bits)
+                        }
+                    }
+                    ExprOp::LShr => {
+                        if shift >= u128::from(bits) {
+                            0
+                        } else {
+                            (left >> shift) & bit_mask(bits)
+                        }
+                    }
+                    ExprOp::AShr => {
+                        let signed = if bits > 0 && bits < 128 && (left & (1u128 << (bits - 1))) != 0 {
+                            (left | (!bit_mask(bits))) as i128
+                        } else {
+                            left as i128
+                        };
+                        let shifted = if shift >= u128::from(bits) {
+                            if signed < 0 { !0i128 } else { 0i128 }
+                        } else {
+                            signed >> shift
+                        };
+                        (shifted as u128) & bit_mask(bits)
+                    }
+                    _ => unreachable!(),
+                };
+                ExprNode {
+                    sort: node.sort,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: value.to_le_bytes()[..usize::from(bits).div_ceil(8)].to_vec(),
+                }
+            }
+            ExprOp::UDiv | ExprOp::SDiv => {
+                let ExprSort::BitVec(bits) = node.sort else {
+                    return Ok(node);
+                };
+                if bits > 128 {
+                    return Ok(node);
+                }
+                let left = constant_u128(&records[0].node.immediate);
+                let right = constant_u128(&records[1].node.immediate);
+                if right == 0 {
+                    return Ok(node);
+                }
+                let value = match node.op {
+                    ExprOp::UDiv => (left / right) & bit_mask(bits),
+                    ExprOp::SDiv => {
+                        let to_signed = |v: u128| -> i128 {
+                            if bits > 0 && bits < 128 && (v & (1u128 << (bits - 1))) != 0 {
+                                (v | (!bit_mask(bits))) as i128
+                            } else {
+                                v as i128
+                            }
+                        };
+                        let sleft = to_signed(left);
+                        let sright = to_signed(right);
+                        let sres = sleft.checked_div(sright).unwrap_or(0);
+                        (sres as u128) & bit_mask(bits)
+                    }
+                    _ => unreachable!(),
+                };
+                ExprNode {
+                    sort: node.sort,
+                    op: ExprOp::Constant,
+                    operands: Vec::new(),
+                    immediate: value.to_le_bytes()[..usize::from(bits).div_ceil(8)].to_vec(),
+                }
+            }
             _ => return Ok(node),
         };
         Ok(folded)
@@ -749,7 +929,8 @@ fn op_tag(op: ExprOp) -> u8 {
 
 fn constant_u128(bytes: &[u8]) -> u128 {
     let mut widened = [0_u8; 16];
-    widened[..bytes.len()].copy_from_slice(bytes);
+    let len = bytes.len().min(16);
+    widened[..len].copy_from_slice(&bytes[..len]);
     u128::from_le_bytes(widened)
 }
 

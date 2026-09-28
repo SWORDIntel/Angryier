@@ -9,6 +9,12 @@
 //!
 //! See `docs/status/implementation-plan.md` Phase 4 for the exit gate.
 
+// The AVX-512 module is compiled both in-crate and (via `#[path]`) into its
+// standalone test crate; a stable self-name keeps `angryier_semantics_intel64::`
+// paths valid in every context.
+extern crate self as angryier_semantics_intel64;
+
+mod avx512;
 mod bmi;
 mod providers;
 mod providers_ext;
@@ -16,6 +22,7 @@ mod registry;
 mod x87;
 
 pub mod declarative;
+pub use avx512::*;
 pub use bmi::*;
 pub use declarative::{DeclarativeProvider, GENERATED_RULE_BASE, generated_providers};
 pub use providers::*;
@@ -1132,6 +1139,42 @@ pub mod forms {
     pub const VPCMPGTW_YMM_YMM_MEM256: u32 = 0x08E8;
     pub const VPCMPGTD_YMM_YMM_MEM256: u32 = 0x08E9;
     pub const VPCMPGTQ_YMM_YMM_MEM256: u32 = 0x08EA;
+
+    // AVX-512 EVEX packed single/double arithmetic + logic (ZMM, 0x0900..0x091F).
+    // EVEX decodes report the implicit opmask (k0) as an operand, so the
+    // form-map shapes are [Zmm, Reg64, Zmm, {Zmm, Mem}].
+    pub const VADDPS_ZMM_ZMM_ZMM: u32 = 0x0900;
+    pub const VADDPS_ZMM_ZMM_MEM: u32 = 0x0901;
+    pub const VSUBPS_ZMM_ZMM_ZMM: u32 = 0x0902;
+    pub const VSUBPS_ZMM_ZMM_MEM: u32 = 0x0903;
+    pub const VMULPS_ZMM_ZMM_ZMM: u32 = 0x0904;
+    pub const VMULPS_ZMM_ZMM_MEM: u32 = 0x0905;
+    pub const VDIVPS_ZMM_ZMM_ZMM: u32 = 0x0906;
+    pub const VDIVPS_ZMM_ZMM_MEM: u32 = 0x0907;
+    pub const VADDPD_ZMM_ZMM_ZMM: u32 = 0x0908;
+    pub const VADDPD_ZMM_ZMM_MEM: u32 = 0x0909;
+    pub const VSUBPD_ZMM_ZMM_ZMM: u32 = 0x090A;
+    pub const VSUBPD_ZMM_ZMM_MEM: u32 = 0x090B;
+    pub const VMULPD_ZMM_ZMM_ZMM: u32 = 0x090C;
+    pub const VMULPD_ZMM_ZMM_MEM: u32 = 0x090D;
+    pub const VDIVPD_ZMM_ZMM_ZMM: u32 = 0x090E;
+    pub const VDIVPD_ZMM_ZMM_MEM: u32 = 0x090F;
+    pub const VANDPS_ZMM_ZMM_ZMM: u32 = 0x0910;
+    pub const VANDPS_ZMM_ZMM_MEM: u32 = 0x0911;
+    pub const VANDNPS_ZMM_ZMM_ZMM: u32 = 0x0912;
+    pub const VANDNPS_ZMM_ZMM_MEM: u32 = 0x0913;
+    pub const VORPS_ZMM_ZMM_ZMM: u32 = 0x0914;
+    pub const VORPS_ZMM_ZMM_MEM: u32 = 0x0915;
+    pub const VXORPS_ZMM_ZMM_ZMM: u32 = 0x0916;
+    pub const VXORPS_ZMM_ZMM_MEM: u32 = 0x0917;
+    pub const VANDPD_ZMM_ZMM_ZMM: u32 = 0x0918;
+    pub const VANDPD_ZMM_ZMM_MEM: u32 = 0x0919;
+    pub const VANDNPD_ZMM_ZMM_ZMM: u32 = 0x091A;
+    pub const VANDNPD_ZMM_ZMM_MEM: u32 = 0x091B;
+    pub const VORPD_ZMM_ZMM_ZMM: u32 = 0x091C;
+    pub const VORPD_ZMM_ZMM_MEM: u32 = 0x091D;
+    pub const VXORPD_ZMM_ZMM_ZMM: u32 = 0x091E;
+    pub const VXORPD_ZMM_ZMM_MEM: u32 = 0x091F;
 
     // 16-bit integer arithmetic, IMUL, and MOVSXD expansion.
     pub const ADD_R16_IMM16: u32 = 0x0420;

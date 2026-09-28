@@ -5865,12 +5865,38 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             } else {
                 self.runtime.step(&mut state.process)?
             };
-            return Ok(match outcome {
-                StepOutcome::Terminated { .. } => SymbolicStepOutcome::Terminated,
-                _ => SymbolicStepOutcome::Stepped {
-                    next_pc: state.process.pc().unwrap_or(0),
+            state.memory = angryier_execution::SymbolicSessionMemory::new(state.process.state.memory.clone());
+            for i in 0..16u32 {
+                if let Ok(value) = state.process.read_register(register_id::GPR_BASE + i) {
+                    state.concrete_registers.insert(register_id::GPR_BASE + i, value);
+                    let bytes = value.to_le_bytes().to_vec();
+                    if let Ok(expr) = self.arena.intern(angryier_expr::ExprNode {
+                        sort: angryier_expr::ExprSort::BitVec(64),
+                        op: angryier_expr::ExprOp::Constant,
+                        operands: Vec::new(),
+                        immediate: bytes,
+                    }) {
+                        state
+                            .registers
+                            .insert(register_id::GPR_BASE + i, (expr, angryier_ir::IrType::Bits(64)));
+                    }
+                }
+            }
+            if let Ok(value) = state.process.read_register(register_id::RIP.0) {
+                state.concrete_registers.insert(register_id::RIP.0, value);
+            }
+            if let Ok(value) = state.process.read_register(register_id::RFLAGS.0) {
+                state.concrete_registers.insert(register_id::RFLAGS.0, value);
+            }
+            return Ok(
+                if state.process.terminated || matches!(outcome, StepOutcome::Terminated { .. }) {
+                    SymbolicStepOutcome::Terminated
+                } else {
+                    SymbolicStepOutcome::Stepped {
+                        next_pc: state.process.pc().unwrap_or(0),
+                    }
                 },
-            });
+            );
         }
 
         // Decode at pc from the state's concrete memory, bounded to the
@@ -6229,6 +6255,24 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             state.registers = post.registers;
             state.expr_concrete = post.expr_concrete;
             state.symbols = evaluator.symbols().to_vec();
+            for (&reg, &(expr, _)) in &state.registers {
+                let val = self
+                    .arena
+                    .get(expr)
+                    .filter(|n| n.op == angryier_expr::ExprOp::Constant)
+                    .map(|n| {
+                        let mut buf = [0u8; 8];
+                        let len = n.immediate.len().min(8);
+                        buf[..len].copy_from_slice(&n.immediate[..len]);
+                        u64::from_le_bytes(buf)
+                    })
+                    .or_else(|| angryier_execution::constant_value(self.arena, expr).ok())
+                    .or_else(|| state.expr_concrete.get(&expr).copied());
+                if let Some(val) = val {
+                    state.concrete_registers.insert(reg, val);
+                    let _ = state.process.write_register(reg, val);
+                }
+            }
         }
 
         // Function summarization for resolved indirect calls — the
@@ -6268,9 +6312,37 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 })
                 .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
 
+            let const_val = self
+                .arena
+                .get(condition)
+                .filter(|n| n.op == angryier_expr::ExprOp::Constant)
+                .and_then(|n| n.immediate.first().copied().map(u64::from))
+                .or_else(|| {
+                    self.arena
+                        .get(branch.condition)
+                        .filter(|n| n.op == angryier_expr::ExprOp::Constant)
+                        .and_then(|n| n.immediate.first().copied().map(u64::from))
+                })
+                .or_else(|| self.states[index].expr_concrete.get(&condition).copied())
+                .or_else(|| self.states[index].expr_concrete.get(&branch.condition).copied())
+                .or_else(|| {
+                    angryier_execution::symbolic::constant_value_resolved(self.arena, condition, &|expr| {
+                        self.states[index].expr_concrete.get(&expr).copied()
+                    })
+                    .ok()
+                })
+                .or_else(|| {
+                    angryier_execution::symbolic::constant_value_resolved(self.arena, branch.condition, &|expr| {
+                        self.states[index].expr_concrete.get(&expr).copied()
+                    })
+                    .ok()
+                });
+
             // Feasibility gates: taken under `condition`, not_taken under
             // `!condition` — each checked against the state's constraints.
-            let (taken_feasible, other_feasible) = if let Some((backend, timeout)) = solver {
+            let (taken_feasible, other_feasible) = if let Some(cv) = const_val {
+                (cv != 0, cv == 0)
+            } else if let Some((backend, timeout)) = solver {
                 let taken = self.direction_feasible(index, condition, backend, timeout)?;
                 let other = self.direction_feasible(index, not_cond, backend, timeout)?;
                 (taken, other)
@@ -6342,44 +6414,33 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         let terminator = ir_block.instructions.last().map(|insn| &insn.op);
         match terminator {
             Some(angryier_ir::IrOp::Jump { target }) => {
-                let _ = state.process.write_pc(*target);
-                Ok(SymbolicStepOutcome::Stepped { next_pc: *target })
-            }
-            Some(angryier_ir::IrOp::Call { target }) => {
-                // Push the return frame: a symbolic-mode call must behave
-                // like a call — the callee's `ret` (and a SimProcedure's
-                // pop) reads the pushed address. Without this, every
-                // symbolic call leaked the loader's exit sentinel and the
-                // callee "returned" into termination.
-                let ret_addr = pc.wrapping_add(u64::from(decoded.length));
-                if let Ok(rsp) = state.process.read_register(register_id::GPR_BASE + 4) {
-                    let frame: Vec<ByteValue> =
-                        ret_addr.to_le_bytes().iter().map(|b| ByteValue::Concrete(*b)).collect();
-                    state.process.state.memory = state
-                        .process
-                        .state
-                        .memory
-                        .write(rsp.wrapping_sub(8), &frame)
-                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
-                    let _ = state
-                        .process
-                        .write_register(register_id::GPR_BASE + 4, rsp.wrapping_sub(8));
+                // Direct calls lower to Jump (the call providers emit
+                // `out.jump`), so the frame the IR pushed into the symbolic
+                // store must be mirrored into process memory here — a later
+                // SimProcedure dispatch rebuilds the symbolic store from
+                // process memory, and without the mirror the caller's frame
+                // is lost and its `ret` pops zero (or a stale slot).
+                if decoded.form_id == angryier_semantics_intel64::forms::CALL_REL32 {
+                    Self::mirror_call_frame(state, self.arena, pc.wrapping_add(u64::from(decoded.length)))?;
                 }
                 let _ = state.process.write_pc(*target);
                 Ok(SymbolicStepOutcome::Stepped { next_pc: *target })
             }
+            Some(angryier_ir::IrOp::Call { target }) => {
+                // The lowered IR already pushes the return frame (the call
+                // provider emits the suppressed stack-slot store plus the
+                // rsp write, both folded to constants and synced to the
+                // process register file above). All that remains here is to
+                // mirror the frame into the PROCESS memory — the evaluator's
+                // store only touched the symbolic store, and a callee that
+                // dispatches a SimProcedure pops [rsp] from process memory.
+                // No second push: double-adjusting rsp drifts the tracked
+                // stack by 8 per call (real drivers diverge exactly so).
+                Self::mirror_call_frame(state, self.arena, pc.wrapping_add(u64::from(decoded.length)))?;
+                let _ = state.process.write_pc(*target);
+                Ok(SymbolicStepOutcome::Stepped { next_pc: *target })
+            }
             Some(angryier_ir::IrOp::JumpIndirect { .. }) => {
-                // Indirect jump/call: the evaluator resolved the target
-                // expression (e.g. `call rax` — rax, not [rsp]; `ret` — the
-                // popped [rsp]). Jump when it folds to a constant; a
-                // symbolic target is an under-constrained exit (honest
-                // termination), never the return-address misread this arm
-                // used to do. The fold accepts both a bare Constant and a
-                // composed-but-concrete expression — the `ret` path's target
-                // is a Concat of per-byte frame reads, which the session
-                // byte store materializes as constant extracts, so folding
-                // (not just the Constant shape test) is what makes an
-                // internal call return.
                 if let Some(target_expr) = summary.jump_target {
                     let direct = self
                         .arena
@@ -6393,27 +6454,22 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         });
                     let target = direct.or_else(|| angryier_execution::constant_value(self.arena, target_expr).ok());
                     if let Some(target) = target {
-                        // CALL-biased stack semantics: the IR conflates
-                        // `call reg` and `jmp reg` into one op, and the
-                        // driver campaign's indirect calls (IAT thunks) need
-                        // the return frame pushed so the callee's ret (and a
-                        // SimProcedure's pop) lands back here. Debt-recorded:
-                        // a true `jmp reg` (jump table) pushes a spurious
-                        // frame — rare on these paths, revisit with a
-                        // distinct CallIndirect op.
-                        let ret_addr = pc.wrapping_add(u64::from(decoded.length));
-                        if let Ok(rsp) = state.process.read_register(register_id::GPR_BASE + 4) {
-                            let frame: Vec<ByteValue> =
-                                ret_addr.to_le_bytes().iter().map(|b| ByteValue::Concrete(*b)).collect();
-                            state.process.state.memory = state
-                                .process
-                                .state
-                                .memory
-                                .write(rsp.wrapping_sub(8), &frame)
-                                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
-                            let _ = state
-                                .process
-                                .write_register(register_id::GPR_BASE + 4, rsp.wrapping_sub(8));
+                        if matches!(
+                            decoded.form_id,
+                            angryier_semantics_intel64::forms::CALL_INDIRECT_R64
+                                | angryier_semantics_intel64::forms::CALL_INDIRECT_MEM64
+                        ) {
+                            // Same mirror-only rule as the direct-call arm:
+                            // the IR already pushed the frame (store + rsp
+                            // write) into the symbolic store; make it visible
+                            // to a SimProcedure pop without a second rsp
+                            // adjustment.
+                            Self::mirror_call_frame(state, self.arena, pc.wrapping_add(u64::from(decoded.length)))?;
+                        } else if let Some((rsp_expr, _)) = state.registers.get(&(register_id::GPR_BASE + 4))
+                            && let Ok(new_rsp) = angryier_execution::constant_value(self.arena, *rsp_expr)
+                        {
+                            let _ = state.process.write_register(register_id::GPR_BASE + 4, new_rsp);
+                            state.concrete_registers.insert(register_id::GPR_BASE + 4, new_rsp);
                         }
                         let _ = state.process.write_pc(target);
                         return Ok(SymbolicStepOutcome::Stepped { next_pc: target });
@@ -6445,6 +6501,25 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     && let Some(b) = node.immediate.get(..8)
                 {
                     let target = u64::from_le_bytes(b.try_into().unwrap_or([0; 8]));
+                    // Pop the frame: rsp += 8 in the process register file,
+                    // the concrete-register cache, and the symbolic binding —
+                    // without this the next callee's stack writes land at the
+                    // wrong slots and the tracked rsp drifts (real drivers
+                    // diverge once a callee's epilogue `ret` reads a stale
+                    // slot, as GVCIDrv64 did at step 170).
+                    let new_rsp = rsp.wrapping_add(8);
+                    let _ = state.process.write_register(register_id::GPR_BASE + 4, new_rsp);
+                    state.concrete_registers.insert(register_id::GPR_BASE + 4, new_rsp);
+                    if let Ok(rsp_expr) = self.arena.intern(angryier_expr::ExprNode {
+                        sort: angryier_expr::ExprSort::BitVec(64),
+                        op: angryier_expr::ExprOp::Constant,
+                        operands: Vec::new(),
+                        immediate: new_rsp.to_le_bytes().to_vec(),
+                    }) {
+                        state
+                            .registers
+                            .insert(register_id::GPR_BASE + 4, (rsp_expr, angryier_ir::IrType::Bits(64)));
+                    }
                     let _ = state.process.write_pc(target);
                     return Ok(SymbolicStepOutcome::Stepped { next_pc: target });
                 }
@@ -6457,6 +6532,30 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 Ok(SymbolicStepOutcome::Stepped { next_pc })
             }
         }
+    }
+
+    /// Mirrors the call frame (already pushed into the symbolic store by the
+    /// lowered IR) into the PROCESS memory at the IR-synced rsp, so a callee
+    /// that dispatches a SimProcedure pops the real return address. Does NOT
+    /// adjust rsp — the IR's store + rsp write already did that, and a
+    /// second adjustment would drift the tracked stack by 8 per call.
+    fn mirror_call_frame(
+        state: &mut SymbolicState,
+        _arena: &SymbolicArena,
+        ret_addr: Address,
+    ) -> Result<(), RuntimeError> {
+        let rsp = state
+            .process
+            .read_register(register_id::GPR_BASE + 4)
+            .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+        let frame: Vec<ByteValue> = ret_addr.to_le_bytes().iter().map(|b| ByteValue::Concrete(*b)).collect();
+        state.process.state.memory = state
+            .process
+            .state
+            .memory
+            .write(rsp, &frame)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        Ok(())
     }
 
     /// Queries `backend` whether `direction` is satisfiable under the

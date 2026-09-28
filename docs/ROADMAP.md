@@ -289,17 +289,17 @@ suites require system Z3/XED):
   collapsing it silently skipped the kernel model on every `call [IAT]`
   in the symbolic session (regression-tested in
   `tests/symbolic_kernel_models.rs`).
-- Full-symbolic fidelity on real drivers is not yet concrete-faithful:
-  stepping without a solver backend forks constant branch conditions as
-  if symbolic (phantom paths), and some stack-derived register bindings
-  (Concat/Add expressions) resist arena folding, so solver-gated runs can
-  take directions concrete would not and surface honest
-  UnresolvedAddress/Unmapped errors on deep DriverEntry paths (GVCIDrv64
-  diverges at step ~49; the import-variant vuln fixtures at step ~163).
-  Concolic EXPLORE fidelity on real drivers IS validated (concrete-
-  matching, zero debt, `tests/concolic_driver.rs`); the PROVE leg needs
-  evaluator-side condition folding before dual-mode claims extend to real
-  binaries at depth.
+- **Full-symbolic fidelity on real drivers — CLOSED 2026-09-28 (round 2).**
+  The PROVE leg now matches concrete step-for-step on GVCIDrv64 (194
+  steps, pc-identical trace) with and without the solver backend
+  (`tests/symbolic_driver_fidelity.rs`). Fixes: constant branch conditions
+  fold instead of forking phantom paths without a solver; the arena folds
+  concrete-only Mul/UDiv/SDiv/AShr/Ult/Ule/Slt/Sle; the call frames the
+  lowered IR pushes are mirrored into process memory (SimProcedure
+  dispatches rebuild the symbolic store from process memory, so an
+  un-mirrored frame was lost and `ret` popped zero/stale slots); the
+  runtime call arms no longer double-push rsp; `ret` restores rsp.
+  Remaining known bounds: EVEX scalar/opmask dispatch, masking.
 - Performance work is still measured on synthetic microbenchmarks plus a
   small set of real fixtures, not broad real execution traces.
 
@@ -604,6 +604,11 @@ cases)**; r32 rotate flag modeling (CF) — CLOSED with the same round; **x87 tr
 expand families in order — AVX2 → AVX-512 →
 VNNI/AVX10 → AMX → CET/APX (AES/SHA interleaved); CI regeneration/diff
 gate; documented undefined-flag behavior (AF/PF/OF-on-shift-by-zero).
+**AVX-512 first slice landed 2026-09-28** (`src/avx512.rs`, 60 providers:
+EVEX ZMM packed arithmetic + logic wired into the runtime form map —
+32 forms decode→map→execute end-to-end, `maps_avx512_evex_forms`;
+EVEX scalar + opmask (KANDW/KORW/...) register but need an
+encoding-aware form-map tier + XED iclass exports to fire).
 
 ### Phase 8 (solver reuse, slicing, preemption)
 **Status: slicing, exact reuse, UNSAT cores, incremental contexts, interrupt
@@ -879,6 +884,7 @@ GUI, other ISAs, CUDA/OpenCL planning.
   fidelity differs; no SymQEMU/SymCC leg — binary-only concolic engines
   need a full Windows guest for kernel images), but the workload class is
   now named and measured on four aligned images rather than one.
+  **2026-09-28 evening update — equal-fidelity models aligned (`reports/gate-j-verdict-2026-09-28.md`):** angr probe upgraded with matching SimProcedures for `RtlGetVersion` (Win10 19045), `IoCreateDevice`/`IoCreateDeviceSecure` (pool device object + extension), `KeQueryPerformanceCounter`, `ExAllocatePool*`/`ExFreePool*`, and Unicode/thread/key APIs. Both engines continue terminating cleanly with matching step counts (±1); Angryier achieves **210× to 432×** raw execution throughput (13.5k–24.7k steps/s vs. angr's 31–92 steps/s). Real VM (9251) and SymQEMU legs verified blocked (Windows 11 WDAC driver blocklist + guest lock-screen firewall; SymQEMU is user-mode ELF only).
 
 ---
 

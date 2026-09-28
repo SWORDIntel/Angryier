@@ -23,7 +23,7 @@ pub struct Intel64CorpusRegistry {
 
 impl Intel64CorpusRegistry {
     pub fn new(semantic_version: SemanticVersion) -> Self {
-        let providers: Vec<Arc<dyn angryier_semantics::SemanticProvider>> = vec![
+        let mut providers: Vec<Arc<dyn angryier_semantics::SemanticProvider>> = vec![
             Arc::new(MovR64R64),
             Arc::new(AddR64R64),
             Arc::new(SubR64R64),
@@ -1356,9 +1356,15 @@ impl Intel64CorpusRegistry {
             Arc::new(ShrxR64R64R64),
             Arc::new(ShrxR64M64R64),
         ];
+        // AVX-512 EVEX ZMM arithmetic/logic + opmask providers (2026-09-28).
+        // The packed ZMM forms are wired into the runtime form map; the EVEX
+        // scalar and opmask providers register here but only match once an
+        // encoding-aware form-map tier lands (see form_map.rs ZMM arms).
+        providers.extend(crate::avx512::providers());
 
         // Build form index from known form IDs. Each provider corresponds to
-        // exactly one form. The ALL_FORMS array is hardcoded with unique entries.
+        // exactly one form. The ALL_FORMS array is hardcoded with unique entries
+        // (including the AVX-512 module's forms — see its tail comment).
         let mut form_index = BTreeMap::new();
         for (index, &form) in ALL_FORMS.iter().enumerate() {
             form_index.insert(form, index);
@@ -1445,7 +1451,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1320] = [
+const ALL_FORMS: [u32; 1380] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2776,6 +2782,69 @@ const ALL_FORMS: [u32; 1320] = [
     crate::forms::SHRX_R32_MEM32_R32,
     crate::forms::SHRX_R64_R64_R64,
     crate::forms::SHRX_R64_MEM64_R64,
+    // AVX-512 EVEX module (2026-09-28): the 32 packed ZMM forms are wired
+    // into the runtime form map; the EVEX scalar and opmask forms keep the
+    // module-local ids until an encoding-aware form-map tier lands.
+    crate::forms::VADDPS_ZMM_ZMM_ZMM,
+    crate::forms::VADDPS_ZMM_ZMM_MEM,
+    crate::forms::VSUBPS_ZMM_ZMM_ZMM,
+    crate::forms::VSUBPS_ZMM_ZMM_MEM,
+    crate::forms::VMULPS_ZMM_ZMM_ZMM,
+    crate::forms::VMULPS_ZMM_ZMM_MEM,
+    crate::forms::VDIVPS_ZMM_ZMM_ZMM,
+    crate::forms::VDIVPS_ZMM_ZMM_MEM,
+    crate::forms::VADDPD_ZMM_ZMM_ZMM,
+    crate::forms::VADDPD_ZMM_ZMM_MEM,
+    crate::forms::VSUBPD_ZMM_ZMM_ZMM,
+    crate::forms::VSUBPD_ZMM_ZMM_MEM,
+    crate::forms::VMULPD_ZMM_ZMM_ZMM,
+    crate::forms::VMULPD_ZMM_ZMM_MEM,
+    crate::forms::VDIVPD_ZMM_ZMM_ZMM,
+    crate::forms::VDIVPD_ZMM_ZMM_MEM,
+    crate::avx512::forms::VADDSS_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VADDSS_EVEX_XMM_XMM_MEM32,
+    crate::avx512::forms::VSUBSS_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VSUBSS_EVEX_XMM_XMM_MEM32,
+    crate::avx512::forms::VMULSS_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VMULSS_EVEX_XMM_XMM_MEM32,
+    crate::avx512::forms::VDIVSS_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VDIVSS_EVEX_XMM_XMM_MEM32,
+    crate::avx512::forms::VADDSD_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VADDSD_EVEX_XMM_XMM_MEM64,
+    crate::avx512::forms::VSUBSD_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VSUBSD_EVEX_XMM_XMM_MEM64,
+    crate::avx512::forms::VMULSD_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VMULSD_EVEX_XMM_XMM_MEM64,
+    crate::avx512::forms::VDIVSD_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VDIVSD_EVEX_XMM_XMM_MEM64,
+    crate::forms::VANDPS_ZMM_ZMM_ZMM,
+    crate::forms::VANDPS_ZMM_ZMM_MEM,
+    crate::forms::VANDNPS_ZMM_ZMM_ZMM,
+    crate::forms::VANDNPS_ZMM_ZMM_MEM,
+    crate::forms::VORPS_ZMM_ZMM_ZMM,
+    crate::forms::VORPS_ZMM_ZMM_MEM,
+    crate::forms::VXORPS_ZMM_ZMM_ZMM,
+    crate::forms::VXORPS_ZMM_ZMM_MEM,
+    crate::forms::VANDPD_ZMM_ZMM_ZMM,
+    crate::forms::VANDPD_ZMM_ZMM_MEM,
+    crate::forms::VANDNPD_ZMM_ZMM_ZMM,
+    crate::forms::VANDNPD_ZMM_ZMM_MEM,
+    crate::forms::VORPD_ZMM_ZMM_ZMM,
+    crate::forms::VORPD_ZMM_ZMM_MEM,
+    crate::forms::VXORPD_ZMM_ZMM_ZMM,
+    crate::forms::VXORPD_ZMM_ZMM_MEM,
+    crate::avx512::forms::KANDW_K_K_K,
+    crate::avx512::forms::KANDNW_K_K_K,
+    crate::avx512::forms::KORW_K_K_K,
+    crate::avx512::forms::KXORW_K_K_K,
+    crate::avx512::forms::KNOTW_K_K,
+    crate::avx512::forms::KXNORW_K_K_K,
+    crate::avx512::forms::KANDQ_K_K_K,
+    crate::avx512::forms::KANDNQ_K_K_K,
+    crate::avx512::forms::KORQ_K_K_K,
+    crate::avx512::forms::KXORQ_K_K_K,
+    crate::avx512::forms::KNOTQ_K_K,
+    crate::avx512::forms::KXNORQ_K_K_K,
 ];
 
 #[cfg(test)]
