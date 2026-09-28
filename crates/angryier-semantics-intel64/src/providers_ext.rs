@@ -7836,6 +7836,10 @@ const I64X4: SemanticType = SemanticType::Vector {
     lanes: 4,
     lane: ScalarType::BitVec(64),
 };
+const F64X4: SemanticType = SemanticType::Vector {
+    lanes: 4,
+    lane: ScalarType::Float(FloatFormat::F64),
+};
 
 /// `vmov* ymm, m256/ymm` — 256-bit load or register move.
 macro_rules! mov_ymm {
@@ -8240,6 +8244,184 @@ macro_rules! andn_ps_ymm {
 
 andn_ps_ymm!(VandnpsYmmYmmYmm, forms::VANDNPS_YMM_YMM_YMM, 0x612);
 andn_ps_ymm!(VandnpsYmmYmmMem, forms::VANDNPS_YMM_YMM_MEM, 0x613);
+
+/// VEX.256 packed double-precision arithmetic.
+macro_rules! packed_double_ymm {
+    ($name:ident, $form:expr, $op:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let left = out.read_operand(1, F64X4)?;
+                let right = out.read_operand(2, F64X4)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let left_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64X2, &[left, zero])?;
+                let left_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    F64X2,
+                    &[left, high_offset],
+                )?;
+                let right_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64X2, &[right, zero])?;
+                let right_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    F64X2,
+                    &[right, high_offset],
+                )?;
+                let low = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat($op)),
+                    F64X2,
+                    &[left_low, right_low],
+                )?;
+                let high = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat($op)),
+                    F64X2,
+                    &[left_high, right_high],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), F64X4, &[low, high])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_double_ymm!(VaddpdYmmYmmYmm, forms::VADDPD_YMM_YMM_YMM, FloatingOp::Add, 0x1410);
+packed_double_ymm!(VaddpdYmmYmmMem, forms::VADDPD_YMM_YMM_MEM, FloatingOp::Add, 0x1411);
+packed_double_ymm!(VsubpdYmmYmmYmm, forms::VSUBPD_YMM_YMM_YMM, FloatingOp::Sub, 0x1412);
+packed_double_ymm!(VsubpdYmmYmmMem, forms::VSUBPD_YMM_YMM_MEM, FloatingOp::Sub, 0x1413);
+packed_double_ymm!(VmulpdYmmYmmYmm, forms::VMULPD_YMM_YMM_YMM, FloatingOp::Mul, 0x1414);
+packed_double_ymm!(VmulpdYmmYmmMem, forms::VMULPD_YMM_YMM_MEM, FloatingOp::Mul, 0x1415);
+packed_double_ymm!(VdivpdYmmYmmYmm, forms::VDIVPD_YMM_YMM_YMM, FloatingOp::Div, 0x1416);
+packed_double_ymm!(VdivpdYmmYmmMem, forms::VDIVPD_YMM_YMM_MEM, FloatingOp::Div, 0x1417);
+
+macro_rules! scalar_double_xmm {
+    ($name:ident, $form:expr, $op:expr, $memory:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, F64X2)?;
+                let zero = const_u64(out, 0)?;
+                let sixty_four = const_u64(out, 64)?;
+                let left = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64, &[src1, zero])?;
+                let right = if $memory {
+                    out.read_operand(2, F64)?
+                } else {
+                    let src2 = out.read_operand(2, F64X2)?;
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64, &[src2, zero])?
+                };
+                let low = out.emit(SemanticOp::Float($op), F64, &[left, right])?;
+                let upper = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src1, sixty_four],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), F64X2, &[low, upper])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+scalar_double_xmm!(
+    VaddsdXmmXmmXmm,
+    forms::VADDSD_XMM_XMM_XMM,
+    FloatingOp::Add,
+    false,
+    0x1418
+);
+scalar_double_xmm!(
+    VaddsdXmmXmmMem64,
+    forms::VADDSD_XMM_XMM_MEM64,
+    FloatingOp::Add,
+    true,
+    0x1419
+);
+scalar_double_xmm!(
+    VsubsdXmmXmmXmm,
+    forms::VSUBSD_XMM_XMM_XMM,
+    FloatingOp::Sub,
+    false,
+    0x141A
+);
+scalar_double_xmm!(
+    VsubsdXmmXmmMem64,
+    forms::VSUBSD_XMM_XMM_MEM64,
+    FloatingOp::Sub,
+    true,
+    0x141B
+);
+scalar_double_xmm!(
+    VmulsdXmmXmmXmm,
+    forms::VMULSD_XMM_XMM_XMM,
+    FloatingOp::Mul,
+    false,
+    0x141C
+);
+scalar_double_xmm!(
+    VmulsdXmmXmmMem64,
+    forms::VMULSD_XMM_XMM_MEM64,
+    FloatingOp::Mul,
+    true,
+    0x141D
+);
+scalar_double_xmm!(
+    VdivsdXmmXmmXmm,
+    forms::VDIVSD_XMM_XMM_XMM,
+    FloatingOp::Div,
+    false,
+    0x141E
+);
+scalar_double_xmm!(
+    VdivsdXmmXmmMem64,
+    forms::VDIVSD_XMM_XMM_MEM64,
+    FloatingOp::Div,
+    true,
+    0x141F
+);
+
+logic_ps_ymm!(VandpdYmmYmmYmm, forms::VANDPD_YMM_YMM_YMM, And, 0x1420);
+logic_ps_ymm!(VandpdYmmYmmMem, forms::VANDPD_YMM_YMM_MEM, And, 0x1421);
+andn_ps_ymm!(VandnpdYmmYmmYmm, forms::VANDNPD_YMM_YMM_YMM, 0x1422);
+andn_ps_ymm!(VandnpdYmmYmmMem, forms::VANDNPD_YMM_YMM_MEM, 0x1423);
+logic_ps_ymm!(VorpdYmmYmmYmm, forms::VORPD_YMM_YMM_YMM, Or, 0x1424);
+logic_ps_ymm!(VorpdYmmYmmMem, forms::VORPD_YMM_YMM_MEM, Or, 0x1425);
+logic_ps_ymm!(VxorpdYmmYmmYmm, forms::VXORPD_YMM_YMM_YMM, Xor, 0x1426);
+logic_ps_ymm!(VxorpdYmmYmmMem, forms::VXORPD_YMM_YMM_MEM, Xor, 0x1427);
 
 /// `vpcmpeqb ymm, ymm, ymm` — per-byte equality mask (0xFF where equal).
 #[derive(Clone, Copy, Debug)]

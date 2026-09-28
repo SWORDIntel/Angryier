@@ -1123,6 +1123,30 @@ impl Intel64CorpusRegistry {
             Arc::new(Fyl2x),
             Arc::new(Fyl2xp1),
             Arc::new(Fscale),
+            Arc::new(VaddpdYmmYmmYmm),
+            Arc::new(VaddpdYmmYmmMem),
+            Arc::new(VsubpdYmmYmmYmm),
+            Arc::new(VsubpdYmmYmmMem),
+            Arc::new(VmulpdYmmYmmYmm),
+            Arc::new(VmulpdYmmYmmMem),
+            Arc::new(VdivpdYmmYmmYmm),
+            Arc::new(VdivpdYmmYmmMem),
+            Arc::new(VaddsdXmmXmmXmm),
+            Arc::new(VaddsdXmmXmmMem64),
+            Arc::new(VsubsdXmmXmmXmm),
+            Arc::new(VsubsdXmmXmmMem64),
+            Arc::new(VmulsdXmmXmmXmm),
+            Arc::new(VmulsdXmmXmmMem64),
+            Arc::new(VdivsdXmmXmmXmm),
+            Arc::new(VdivsdXmmXmmMem64),
+            Arc::new(VandpdYmmYmmYmm),
+            Arc::new(VandpdYmmYmmMem),
+            Arc::new(VandnpdYmmYmmYmm),
+            Arc::new(VandnpdYmmYmmMem),
+            Arc::new(VorpdYmmYmmYmm),
+            Arc::new(VorpdYmmYmmMem),
+            Arc::new(VxorpdYmmYmmYmm),
+            Arc::new(VxorpdYmmYmmMem),
         ];
 
         // Build form index from known form IDs. Each provider corresponds to
@@ -1213,7 +1237,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1093] = [
+const ALL_FORMS: [u32; 1117] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2312,6 +2336,30 @@ const ALL_FORMS: [u32; 1093] = [
     crate::forms::FYL2X,
     crate::forms::FYL2XP1,
     crate::forms::FSCALE,
+    crate::forms::VADDPD_YMM_YMM_YMM,
+    crate::forms::VADDPD_YMM_YMM_MEM,
+    crate::forms::VSUBPD_YMM_YMM_YMM,
+    crate::forms::VSUBPD_YMM_YMM_MEM,
+    crate::forms::VMULPD_YMM_YMM_YMM,
+    crate::forms::VMULPD_YMM_YMM_MEM,
+    crate::forms::VDIVPD_YMM_YMM_YMM,
+    crate::forms::VDIVPD_YMM_YMM_MEM,
+    crate::forms::VADDSD_XMM_XMM_XMM,
+    crate::forms::VADDSD_XMM_XMM_MEM64,
+    crate::forms::VSUBSD_XMM_XMM_XMM,
+    crate::forms::VSUBSD_XMM_XMM_MEM64,
+    crate::forms::VMULSD_XMM_XMM_XMM,
+    crate::forms::VMULSD_XMM_XMM_MEM64,
+    crate::forms::VDIVSD_XMM_XMM_XMM,
+    crate::forms::VDIVSD_XMM_XMM_MEM64,
+    crate::forms::VANDPD_YMM_YMM_YMM,
+    crate::forms::VANDPD_YMM_YMM_MEM,
+    crate::forms::VANDNPD_YMM_YMM_YMM,
+    crate::forms::VANDNPD_YMM_YMM_MEM,
+    crate::forms::VORPD_YMM_YMM_YMM,
+    crate::forms::VORPD_YMM_YMM_MEM,
+    crate::forms::VXORPD_YMM_YMM_YMM,
+    crate::forms::VXORPD_YMM_YMM_MEM,
 ];
 
 #[cfg(test)]

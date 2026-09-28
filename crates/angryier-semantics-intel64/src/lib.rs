@@ -951,6 +951,32 @@ pub mod forms {
     pub const VORPS_YMM_YMM_YMM: u32 = 0x0414;
     pub const VORPS_YMM_YMM_MEM: u32 = 0x0415;
 
+    // AVX packed-double arithmetic, scalar-double arithmetic, and packed logic.
+    pub const VADDPD_YMM_YMM_YMM: u32 = 0x0F48;
+    pub const VADDPD_YMM_YMM_MEM: u32 = 0x0F49;
+    pub const VSUBPD_YMM_YMM_YMM: u32 = 0x0F4A;
+    pub const VSUBPD_YMM_YMM_MEM: u32 = 0x0F4B;
+    pub const VMULPD_YMM_YMM_YMM: u32 = 0x0F4C;
+    pub const VMULPD_YMM_YMM_MEM: u32 = 0x0F4D;
+    pub const VDIVPD_YMM_YMM_YMM: u32 = 0x0F4E;
+    pub const VDIVPD_YMM_YMM_MEM: u32 = 0x0F4F;
+    pub const VADDSD_XMM_XMM_XMM: u32 = 0x0F50;
+    pub const VADDSD_XMM_XMM_MEM64: u32 = 0x0F51;
+    pub const VSUBSD_XMM_XMM_XMM: u32 = 0x0F52;
+    pub const VSUBSD_XMM_XMM_MEM64: u32 = 0x0F53;
+    pub const VMULSD_XMM_XMM_XMM: u32 = 0x0F54;
+    pub const VMULSD_XMM_XMM_MEM64: u32 = 0x0F55;
+    pub const VDIVSD_XMM_XMM_XMM: u32 = 0x0F56;
+    pub const VDIVSD_XMM_XMM_MEM64: u32 = 0x0F57;
+    pub const VANDPD_YMM_YMM_YMM: u32 = 0x0F58;
+    pub const VANDPD_YMM_YMM_MEM: u32 = 0x0F59;
+    pub const VANDNPD_YMM_YMM_YMM: u32 = 0x0F5A;
+    pub const VANDNPD_YMM_YMM_MEM: u32 = 0x0F5B;
+    pub const VORPD_YMM_YMM_YMM: u32 = 0x0F5C;
+    pub const VORPD_YMM_YMM_MEM: u32 = 0x0F5D;
+    pub const VXORPD_YMM_YMM_YMM: u32 = 0x0F5E;
+    pub const VXORPD_YMM_YMM_MEM: u32 = 0x0F5F;
+
     // 16-bit integer arithmetic, IMUL, and MOVSXD expansion.
     pub const ADD_R16_IMM16: u32 = 0x0420;
     pub const ADD_R16_IMM8: u32 = 0x0421;

@@ -159,6 +159,18 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
         xed::XED_ICLASS_VSUBSS => scalar_form(&shapes, forms::VSUBSS_XMM_XMM_XMM, forms::VSUBSS_XMM_XMM_MEM32),
         xed::XED_ICLASS_VMULSS => scalar_form(&shapes, forms::VMULSS_XMM_XMM_XMM, forms::VMULSS_XMM_XMM_MEM32),
         xed::XED_ICLASS_VDIVSS => scalar_form(&shapes, forms::VDIVSS_XMM_XMM_XMM, forms::VDIVSS_XMM_XMM_MEM32),
+        xed::XED_ICLASS_VADDPD => packed_form(&shapes, forms::VADDPD_YMM_YMM_YMM, forms::VADDPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VSUBPD => packed_form(&shapes, forms::VSUBPD_YMM_YMM_YMM, forms::VSUBPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VMULPD => packed_form(&shapes, forms::VMULPD_YMM_YMM_YMM, forms::VMULPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VDIVPD => packed_form(&shapes, forms::VDIVPD_YMM_YMM_YMM, forms::VDIVPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VADDSD => scalar_double_form(&shapes, forms::VADDSD_XMM_XMM_XMM, forms::VADDSD_XMM_XMM_MEM64),
+        xed::XED_ICLASS_VSUBSD => scalar_double_form(&shapes, forms::VSUBSD_XMM_XMM_XMM, forms::VSUBSD_XMM_XMM_MEM64),
+        xed::XED_ICLASS_VMULSD => scalar_double_form(&shapes, forms::VMULSD_XMM_XMM_XMM, forms::VMULSD_XMM_XMM_MEM64),
+        xed::XED_ICLASS_VDIVSD => scalar_double_form(&shapes, forms::VDIVSD_XMM_XMM_XMM, forms::VDIVSD_XMM_XMM_MEM64),
+        xed::XED_ICLASS_VANDPD => packed_form(&shapes, forms::VANDPD_YMM_YMM_YMM, forms::VANDPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VANDNPD => packed_form(&shapes, forms::VANDNPD_YMM_YMM_YMM, forms::VANDNPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VORPD => packed_form(&shapes, forms::VORPD_YMM_YMM_YMM, forms::VORPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VXORPD => packed_form(&shapes, forms::VXORPD_YMM_YMM_YMM, forms::VXORPD_YMM_YMM_MEM),
         _ => None,
     }
 }
@@ -175,6 +187,14 @@ fn scalar_form(shapes: &[Shape], register: u32, memory: u32) -> Option<u32> {
     match shapes {
         [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(register),
         [Shape::Xmm, Shape::Xmm, Shape::Mem32] => Some(memory),
+        _ => None,
+    }
+}
+
+fn scalar_double_form(shapes: &[Shape], register: u32, memory: u32) -> Option<u32> {
+    match shapes {
+        [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(register),
+        [Shape::Xmm, Shape::Xmm, Shape::Mem64] => Some(memory),
         _ => None,
     }
 }
@@ -449,5 +469,144 @@ fn avx_divide_by_zero_matches_hardware() -> Result<(), BoxError> {
         return Err(format!("expected +Inf lane 0x7f800000, got {lane:#x}").into());
     }
     eprintln!("AVX divide-by-zero: 1 native case matched (+Inf lanes)");
+    Ok(())
+}
+
+const DOUBLE_PATTERNS: [([u32; 8], [u32; 8]); 2] = [
+    (
+        // Pattern 0: left = [1.0, 2.0, 3.0, 4.0], right = [5.0, 6.0, 7.0, 8.0]
+        [
+            0x0000_0000,
+            0x3ff0_0000, // 1.0
+            0x0000_0000,
+            0x4000_0000, // 2.0
+            0x0000_0000,
+            0x4008_0000, // 3.0
+            0x0000_0000,
+            0x4010_0000, // 4.0
+        ],
+        [
+            0x0000_0000,
+            0x4014_0000, // 5.0
+            0x0000_0000,
+            0x4018_0000, // 6.0
+            0x0000_0000,
+            0x401c_0000, // 7.0
+            0x0000_0000,
+            0x4020_0000, // 8.0
+        ],
+    ),
+    (
+        // Pattern 1: mixed positive, negative, fractional
+        [
+            0x0000_0000,
+            0x4059_2000, // 100.5
+            0x0000_0000,
+            0xc034_4000, // -20.25
+            0x0000_0000,
+            0x0000_0000, // 0.0
+            0x0000_0000,
+            0xbff0_0000, // -1.0
+        ],
+        [
+            0x0000_0000,
+            0x4004_0000, // 2.5
+            0x0000_0000,
+            0x4010_0000, // 4.0
+            0x0000_0000,
+            0xc014_0000, // -5.0
+            0x0000_0000,
+            0x4000_0000, // 2.0
+        ],
+    ),
+];
+
+#[test]
+fn avx_double_family_differential() -> Result<(), BoxError> {
+    let forms = [
+        ("vaddpd_reg", "vaddpd %ymm2, %ymm1, %ymm0"),
+        ("vaddpd_mem", "vaddpd 0x500020, %ymm1, %ymm0"),
+        ("vsubpd_reg", "vsubpd %ymm2, %ymm1, %ymm0"),
+        ("vsubpd_mem", "vsubpd 0x500020, %ymm1, %ymm0"),
+        ("vmulpd_reg", "vmulpd %ymm2, %ymm1, %ymm0"),
+        ("vmulpd_mem", "vmulpd 0x500020, %ymm1, %ymm0"),
+        ("vdivpd_reg", "vdivpd %ymm2, %ymm1, %ymm0"),
+        ("vdivpd_mem", "vdivpd 0x500020, %ymm1, %ymm0"),
+        ("vaddsd_reg", "vaddsd %xmm2, %xmm1, %xmm0"),
+        ("vaddsd_mem", "vaddsd 0x500020, %xmm1, %xmm0"),
+        ("vsubsd_reg", "vsubsd %xmm2, %xmm1, %xmm0"),
+        ("vsubsd_mem", "vsubsd 0x500020, %xmm1, %xmm0"),
+        ("vmulsd_reg", "vmulsd %xmm2, %xmm1, %xmm0"),
+        ("vmulsd_mem", "vmulsd 0x500020, %xmm1, %xmm0"),
+        ("vdivsd_reg", "vdivsd %xmm2, %xmm1, %xmm0"),
+        ("vdivsd_mem", "vdivsd 0x500020, %xmm1, %xmm0"),
+        ("vandpd_reg", "vandpd %ymm2, %ymm1, %ymm0"),
+        ("vandpd_mem", "vandpd 0x500020, %ymm1, %ymm0"),
+        ("vandnpd_reg", "vandnpd %ymm2, %ymm1, %ymm0"),
+        ("vandnpd_mem", "vandnpd 0x500020, %ymm1, %ymm0"),
+        ("vorpd_reg", "vorpd %ymm2, %ymm1, %ymm0"),
+        ("vorpd_mem", "vorpd 0x500020, %ymm1, %ymm0"),
+        ("vxorpd_reg", "vxorpd %ymm2, %ymm1, %ymm0"),
+        ("vxorpd_mem", "vxorpd 0x500020, %ymm1, %ymm0"),
+    ];
+    let mut count = 0usize;
+    for (pattern, (left, right)) in DOUBLE_PATTERNS.into_iter().enumerate() {
+        for (name, instruction) in forms {
+            if differential_case(&format!("{name}_{pattern}"), instruction, left, right)? {
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        eprintln!("SKIP: binutils unavailable");
+    } else {
+        eprintln!("AVX double differential: {count} native cases passed");
+    }
+    if count != 0 && count != 48 {
+        return Err(format!("expected 48 native cases, ran {count}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn avx_double_divide_by_zero_matches_hardware() -> Result<(), BoxError> {
+    let Some(dir) = temp_dir("vdivpd_zero_probe") else {
+        eprintln!("SKIP: binutils unavailable");
+        return Ok(());
+    };
+    let source = dir.join("case.s");
+    let object = dir.join("case.o");
+    let binary = dir.join("case");
+    let left = [
+        0x0000_0000,
+        0x3ff0_0000,
+        0x0000_0000,
+        0x3ff0_0000,
+        0x0000_0000,
+        0x3ff0_0000,
+        0x0000_0000,
+        0x3ff0_0000,
+    ];
+    let right = [0; 8];
+    std::fs::write(&source, harness_source("vdivpd %ymm2, %ymm1, %ymm0", left, right))?;
+    if assemble(&source, &object).is_none() || link(&binary, &object).is_none() {
+        eprintln!("SKIP: binutils unavailable");
+        return Ok(());
+    }
+    let native = Command::new(&binary).output()?.stdout;
+    if native.len() != 32 {
+        return Err(format!("vdivpd divide-by-zero native probe wrote {} bytes", native.len()).into());
+    }
+    let code = extract_text(&dir, &binary).ok_or("objcopy failed")?;
+    let engine = run_engine(&code, &Intel64CorpusRegistry::new(SEMANTIC_VERSION))
+        .map_err(|e| format!("engine failed to execute vdivpd-by-zero: {e}"))?;
+    if native != engine {
+        return Err(format!("vdivpd-by-zero mismatch: native={native:02x?} engine={engine:02x?}").into());
+    }
+    let lane = u64::from_le_bytes(native[..8].try_into()?);
+    if lane != 0x7ff0_0000_0000_0000 {
+        return Err(format!("expected +Inf lane 0x7ff0000000000000, got {lane:#x}").into());
+    }
+    eprintln!("AVX double divide-by-zero: 1 native case matched (+Inf lanes)");
     Ok(())
 }
