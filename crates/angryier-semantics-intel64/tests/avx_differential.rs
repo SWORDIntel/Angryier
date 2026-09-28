@@ -210,6 +210,20 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERMILPD_YMM_MEM_IMM8),
             _ => None,
         },
+        xed::XED_ICLASS_VSHUFPS => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VSHUFPS_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VSHUFPS_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        xed::XED_ICLASS_VSHUFPD => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VSHUFPD_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VSHUFPD_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        xed::XED_ICLASS_VUNPCKLPS => packed_form(&shapes, forms::VUNPCKLPS_YMM_YMM_YMM, forms::VUNPCKLPS_YMM_YMM_MEM),
+        xed::XED_ICLASS_VUNPCKHPS => packed_form(&shapes, forms::VUNPCKHPS_YMM_YMM_YMM, forms::VUNPCKHPS_YMM_YMM_MEM),
+        xed::XED_ICLASS_VUNPCKLPD => packed_form(&shapes, forms::VUNPCKLPD_YMM_YMM_YMM, forms::VUNPCKLPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VUNPCKHPD => packed_form(&shapes, forms::VUNPCKHPD_YMM_YMM_YMM, forms::VUNPCKHPD_YMM_YMM_MEM),
         _ => None,
     }
 }
@@ -687,6 +701,41 @@ fn avx_blend_cvt_perm_differential() -> Result<(), BoxError> {
     }
     if count != 0 && count != 36 {
         return Err(format!("expected 36 native cases, ran {count}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn avx_shuf_unpck_differential() -> Result<(), BoxError> {
+    let forms = [
+        ("vshufps_reg", "vshufps $0x4e, %ymm2, %ymm1, %ymm0"),
+        ("vshufps_mem", "vshufps $0x4e, 0x500020, %ymm1, %ymm0"),
+        ("vshufpd_reg", "vshufpd $0x05, %ymm2, %ymm1, %ymm0"),
+        ("vshufpd_mem", "vshufpd $0x05, 0x500020, %ymm1, %ymm0"),
+        ("vunpcklps_reg", "vunpcklps %ymm2, %ymm1, %ymm0"),
+        ("vunpcklps_mem", "vunpcklps 0x500020, %ymm1, %ymm0"),
+        ("vunpckhps_reg", "vunpckhps %ymm2, %ymm1, %ymm0"),
+        ("vunpckhps_mem", "vunpckhps 0x500020, %ymm1, %ymm0"),
+        ("vunpcklpd_reg", "vunpcklpd %ymm2, %ymm1, %ymm0"),
+        ("vunpcklpd_mem", "vunpcklpd 0x500020, %ymm1, %ymm0"),
+        ("vunpckhpd_reg", "vunpckhpd %ymm2, %ymm1, %ymm0"),
+        ("vunpckhpd_mem", "vunpckhpd 0x500020, %ymm1, %ymm0"),
+    ];
+    let mut count = 0usize;
+    for (pattern, (left, right)) in PATTERNS.into_iter().enumerate() {
+        for (name, instruction) in forms {
+            if differential_case(&format!("{name}_{pattern}"), instruction, left, right)? {
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        eprintln!("SKIP: binutils unavailable");
+    } else {
+        eprintln!("AVX shuf/unpck differential: {count} native cases passed");
+    }
+    if count != 0 && count != 24 {
+        return Err(format!("expected 24 native cases, ran {count}").into());
     }
     Ok(())
 }

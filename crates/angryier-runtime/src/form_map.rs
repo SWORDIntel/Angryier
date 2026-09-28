@@ -1006,6 +1006,36 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERMILPD_YMM_MEM_IMM8),
             _ => None,
         },
+        iclass::XED_ICLASS_VSHUFPS => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VSHUFPS_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VSHUFPS_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VSHUFPD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VSHUFPD_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VSHUFPD_YMM_YMM_MEM_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VUNPCKLPS => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VUNPCKLPS_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VUNPCKLPS_YMM_YMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VUNPCKHPS => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VUNPCKHPS_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VUNPCKHPS_YMM_YMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VUNPCKLPD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VUNPCKLPD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VUNPCKLPD_YMM_YMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VUNPCKHPD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VUNPCKHPD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VUNPCKHPD_YMM_YMM_MEM),
+            _ => None,
+        },
         iclass::XED_ICLASS_VPCMPEQB => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPEQB_YMM_YMM_YMM),
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VPCMPEQB_XMM_XMM_XMM),
@@ -2308,6 +2338,29 @@ mod tests {
             mapped(&[0xC4, 0xE3, 0x7D, 0x05, 0xC1, 0x05])?,
             Some(forms::VPERMILPD_YMM_YMM_IMM8)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_avx_shuf_unpck_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // vshufps $0x1b, %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC5, 0xF4, 0xC6, 0xC2, 0x1B])?,
+            Some(forms::VSHUFPS_YMM_YMM_YMM_IMM8)
+        );
+        // vshufpd $0x03, %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC5, 0xF5, 0xC6, 0xC2, 0x03])?,
+            Some(forms::VSHUFPD_YMM_YMM_YMM_IMM8)
+        );
+        // vunpcklps %ymm2, %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF4, 0x14, 0xC2])?, Some(forms::VUNPCKLPS_YMM_YMM_YMM));
+        // vunpckhps %ymm2, %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF4, 0x15, 0xC2])?, Some(forms::VUNPCKHPS_YMM_YMM_YMM));
+        // vunpcklpd %ymm2, %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF5, 0x14, 0xC2])?, Some(forms::VUNPCKLPD_YMM_YMM_YMM));
+        // vunpckhpd %ymm2, %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF5, 0x15, 0xC2])?, Some(forms::VUNPCKHPD_YMM_YMM_YMM));
         Ok(())
     }
 }

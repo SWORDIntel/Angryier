@@ -9128,6 +9128,325 @@ macro_rules! vpermil_pd {
 vpermil_pd!(VpermilpdYmmYmmImm8, forms::VPERMILPD_YMM_YMM_IMM8, 0x1438);
 vpermil_pd!(VpermilpdYmmMemImm8, forms::VPERMILPD_YMM_MEM_IMM8, 0x1439);
 
+/// VSHUFPS ymm1, ymm2, ymm3/m256, imm8: shuffle single-precision floats within 128-bit halves.
+macro_rules! vshuf_ps {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, U256)?;
+                let src2 = out.read_operand(2, U256)?;
+                let imm = insn
+                    .operand(3)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0) as u8;
+
+                let c0 = const_u64(out, 0)?;
+                let c32 = const_u64(out, 32)?;
+                let c64 = const_u64(out, 64)?;
+                let c96 = const_u64(out, 96)?;
+                let c128 = const_u64(out, 128)?;
+                let c160 = const_u64(out, 160)?;
+                let c192 = const_u64(out, 192)?;
+                let c224 = const_u64(out, 224)?;
+
+                let s1_d0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src1, c0])?;
+                let s1_d1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src1, c32])?;
+                let s1_d2 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src1, c64])?;
+                let s1_d3 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src1, c96])?;
+                let s1_d4 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src1, c128])?;
+                let s1_d5 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src1, c160])?;
+                let s1_d6 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src1, c192])?;
+                let s1_d7 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src1, c224])?;
+
+                let s2_d0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src2, c0])?;
+                let s2_d1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src2, c32])?;
+                let s2_d2 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src2, c64])?;
+                let s2_d3 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src2, c96])?;
+                let s2_d4 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src2, c128])?;
+                let s2_d5 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src2, c160])?;
+                let s2_d6 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src2, c192])?;
+                let s2_d7 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U32, &[src2, c224])?;
+
+                let sel1_lo = |sel: u8| match sel & 3 {
+                    0 => s1_d0,
+                    1 => s1_d1,
+                    2 => s1_d2,
+                    _ => s1_d3,
+                };
+                let sel2_lo = |sel: u8| match sel & 3 {
+                    0 => s2_d0,
+                    1 => s2_d1,
+                    2 => s2_d2,
+                    _ => s2_d3,
+                };
+                let sel1_hi = |sel: u8| match sel & 3 {
+                    0 => s1_d4,
+                    1 => s1_d5,
+                    2 => s1_d6,
+                    _ => s1_d7,
+                };
+                let sel2_hi = |sel: u8| match sel & 3 {
+                    0 => s2_d4,
+                    1 => s2_d5,
+                    2 => s2_d6,
+                    _ => s2_d7,
+                };
+
+                let lo_0 = sel1_lo(imm);
+                let lo_1 = sel1_lo(imm >> 2);
+                let lo_2 = sel2_lo(imm >> 4);
+                let lo_3 = sel2_lo(imm >> 6);
+
+                let hi_0 = sel1_hi(imm);
+                let hi_1 = sel1_hi(imm >> 2);
+                let hi_2 = sel2_hi(imm >> 4);
+                let hi_3 = sel2_hi(imm >> 6);
+
+                let lo_q0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U64, &[lo_0, lo_1])?;
+                let lo_q1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U64, &[lo_2, lo_3])?;
+                let hi_q0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U64, &[hi_0, hi_1])?;
+                let hi_q1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U64, &[hi_2, hi_3])?;
+
+                let lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U128, &[lo_q0, lo_q1])?;
+                let hi = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U128, &[hi_q0, hi_q1])?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[lo, hi])?;
+
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vshuf_ps!(VshufpsYmmYmmYmmImm8, forms::VSHUFPS_YMM_YMM_YMM_IMM8, 0x143A);
+vshuf_ps!(VshufpsYmmYmmMemImm8, forms::VSHUFPS_YMM_YMM_MEM_IMM8, 0x143B);
+
+/// VSHUFPD ymm1, ymm2, ymm3/m256, imm8: shuffle double-precision floats within 128-bit halves.
+macro_rules! vshuf_pd {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, U256)?;
+                let src2 = out.read_operand(2, U256)?;
+                let imm = insn
+                    .operand(3)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0) as u8;
+
+                let zero = const_u64(out, 0)?;
+                let sixty_four = const_u64(out, 64)?;
+                let one_twenty_eight = const_u64(out, 128)?;
+                let one_ninety_two = const_u64(out, 192)?;
+
+                let s1_q0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src1, zero])?;
+                let s1_q1 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src1, sixty_four],
+                )?;
+                let s1_q2 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src1, one_twenty_eight],
+                )?;
+                let s1_q3 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src1, one_ninety_two],
+                )?;
+
+                let s2_q0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src2, zero])?;
+                let s2_q1 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src2, sixty_four],
+                )?;
+                let s2_q2 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src2, one_twenty_eight],
+                )?;
+                let s2_q3 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    U64,
+                    &[src2, one_ninety_two],
+                )?;
+
+                let out_q0 = if (imm & 1) == 0 { s1_q0 } else { s1_q1 };
+                let out_q1 = if (imm & 2) == 0 { s2_q0 } else { s2_q1 };
+                let out_q2 = if (imm & 4) == 0 { s1_q2 } else { s1_q3 };
+                let out_q3 = if (imm & 8) == 0 { s2_q2 } else { s2_q3 };
+
+                let low = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    U128,
+                    &[out_q0, out_q1],
+                )?;
+                let high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    U128,
+                    &[out_q2, out_q3],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[low, high])?;
+
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vshuf_pd!(VshufpdYmmYmmYmmImm8, forms::VSHUFPD_YMM_YMM_YMM_IMM8, 0x143C);
+vshuf_pd!(VshufpdYmmYmmMemImm8, forms::VSHUFPD_YMM_YMM_MEM_IMM8, 0x143D);
+
+/// VEX.256 packed unpack (interleave) operations within 128-bit halves.
+macro_rules! vunpck_ymm {
+    ($name:ident, $form:expr, $op:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let left = out.read_operand(1, U256)?;
+                let right = out.read_operand(2, U256)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let left_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[left, zero])?;
+                let left_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $ty,
+                    &[left, high_offset],
+                )?;
+                let right_low = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[right, zero])?;
+                let right_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $ty,
+                    &[right, high_offset],
+                )?;
+                let low = out.emit(SemanticOp::Vector($op), $ty, &[left_low, right_low])?;
+                let high = out.emit(SemanticOp::Vector($op), $ty, &[left_high, right_high])?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[low, high])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vunpck_ymm!(
+    VunpcklpsYmmYmmYmm,
+    forms::VUNPCKLPS_YMM_YMM_YMM,
+    VectorOp::Unpack,
+    I32X4,
+    0x143E
+);
+vunpck_ymm!(
+    VunpcklpsYmmYmmMem,
+    forms::VUNPCKLPS_YMM_YMM_MEM,
+    VectorOp::Unpack,
+    I32X4,
+    0x143F
+);
+vunpck_ymm!(
+    VunpckhpsYmmYmmYmm,
+    forms::VUNPCKHPS_YMM_YMM_YMM,
+    VectorOp::UnpackHigh,
+    I32X4,
+    0x1440
+);
+vunpck_ymm!(
+    VunpckhpsYmmYmmMem,
+    forms::VUNPCKHPS_YMM_YMM_MEM,
+    VectorOp::UnpackHigh,
+    I32X4,
+    0x1441
+);
+vunpck_ymm!(
+    VunpcklpdYmmYmmYmm,
+    forms::VUNPCKLPD_YMM_YMM_YMM,
+    VectorOp::Unpack,
+    I64X2,
+    0x1442
+);
+vunpck_ymm!(
+    VunpcklpdYmmYmmMem,
+    forms::VUNPCKLPD_YMM_YMM_MEM,
+    VectorOp::Unpack,
+    I64X2,
+    0x1443
+);
+vunpck_ymm!(
+    VunpckhpdYmmYmmYmm,
+    forms::VUNPCKHPD_YMM_YMM_YMM,
+    VectorOp::UnpackHigh,
+    I64X2,
+    0x1444
+);
+vunpck_ymm!(
+    VunpckhpdYmmYmmMem,
+    forms::VUNPCKHPD_YMM_YMM_MEM,
+    VectorOp::UnpackHigh,
+    I64X2,
+    0x1445
+);
+
 /// `vpcmpeqb ymm, ymm, ymm` — per-byte equality mask (0xFF where equal).
 #[derive(Clone, Copy, Debug)]
 pub struct VpcmpeqbYmmYmmYmm;

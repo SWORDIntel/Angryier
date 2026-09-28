@@ -1165,6 +1165,18 @@ impl Intel64CorpusRegistry {
             Arc::new(VpermilpsYmmMemImm8),
             Arc::new(VpermilpdYmmYmmImm8),
             Arc::new(VpermilpdYmmMemImm8),
+            Arc::new(VshufpsYmmYmmYmmImm8),
+            Arc::new(VshufpsYmmYmmMemImm8),
+            Arc::new(VshufpdYmmYmmYmmImm8),
+            Arc::new(VshufpdYmmYmmMemImm8),
+            Arc::new(VunpcklpsYmmYmmYmm),
+            Arc::new(VunpcklpsYmmYmmMem),
+            Arc::new(VunpckhpsYmmYmmYmm),
+            Arc::new(VunpckhpsYmmYmmMem),
+            Arc::new(VunpcklpdYmmYmmYmm),
+            Arc::new(VunpcklpdYmmYmmMem),
+            Arc::new(VunpckhpdYmmYmmYmm),
+            Arc::new(VunpckhpdYmmYmmMem),
         ];
 
         // Build form index from known form IDs. Each provider corresponds to
@@ -1255,7 +1267,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1135] = [
+const ALL_FORMS: [u32; 1147] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2396,6 +2408,18 @@ const ALL_FORMS: [u32; 1135] = [
     crate::forms::VPERMILPS_YMM_MEM_IMM8,
     crate::forms::VPERMILPD_YMM_YMM_IMM8,
     crate::forms::VPERMILPD_YMM_MEM_IMM8,
+    crate::forms::VSHUFPS_YMM_YMM_YMM_IMM8,
+    crate::forms::VSHUFPS_YMM_YMM_MEM_IMM8,
+    crate::forms::VSHUFPD_YMM_YMM_YMM_IMM8,
+    crate::forms::VSHUFPD_YMM_YMM_MEM_IMM8,
+    crate::forms::VUNPCKLPS_YMM_YMM_YMM,
+    crate::forms::VUNPCKLPS_YMM_YMM_MEM,
+    crate::forms::VUNPCKHPS_YMM_YMM_YMM,
+    crate::forms::VUNPCKHPS_YMM_YMM_MEM,
+    crate::forms::VUNPCKLPD_YMM_YMM_YMM,
+    crate::forms::VUNPCKLPD_YMM_YMM_MEM,
+    crate::forms::VUNPCKHPD_YMM_YMM_YMM,
+    crate::forms::VUNPCKHPD_YMM_YMM_MEM,
 ];
 
 #[cfg(test)]

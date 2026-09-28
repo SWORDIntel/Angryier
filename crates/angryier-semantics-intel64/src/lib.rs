@@ -997,6 +997,20 @@ pub mod forms {
     pub const VPERMILPD_YMM_YMM_IMM8: u32 = 0x0F70;
     pub const VPERMILPD_YMM_MEM_IMM8: u32 = 0x0F71;
 
+    // AVX shuffle and unpack forms (0x0F72..0x0F7D).
+    pub const VSHUFPS_YMM_YMM_YMM_IMM8: u32 = 0x0F72;
+    pub const VSHUFPS_YMM_YMM_MEM_IMM8: u32 = 0x0F73;
+    pub const VSHUFPD_YMM_YMM_YMM_IMM8: u32 = 0x0F74;
+    pub const VSHUFPD_YMM_YMM_MEM_IMM8: u32 = 0x0F75;
+    pub const VUNPCKLPS_YMM_YMM_YMM: u32 = 0x0F76;
+    pub const VUNPCKLPS_YMM_YMM_MEM: u32 = 0x0F77;
+    pub const VUNPCKHPS_YMM_YMM_YMM: u32 = 0x0F78;
+    pub const VUNPCKHPS_YMM_YMM_MEM: u32 = 0x0F79;
+    pub const VUNPCKLPD_YMM_YMM_YMM: u32 = 0x0F7A;
+    pub const VUNPCKLPD_YMM_YMM_MEM: u32 = 0x0F7B;
+    pub const VUNPCKHPD_YMM_YMM_YMM: u32 = 0x0F7C;
+    pub const VUNPCKHPD_YMM_YMM_MEM: u32 = 0x0F7D;
+
     // 16-bit integer arithmetic, IMUL, and MOVSXD expansion.
     pub const ADD_R16_IMM16: u32 = 0x0420;
     pub const ADD_R16_IMM8: u32 = 0x0421;
