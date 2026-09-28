@@ -637,6 +637,7 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
                 argv,
                 steps,
                 dynamic,
+                driver: false,
             }
         }
 

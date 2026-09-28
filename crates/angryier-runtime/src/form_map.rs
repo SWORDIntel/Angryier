@@ -1006,6 +1006,31 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERMILPD_YMM_MEM_IMM8),
             _ => None,
         },
+        iclass::XED_ICLASS_VPERM2I128 => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPERM2I128_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERM2I128_YMM_YMM_MEM256_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPERMD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPERMD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPERMD_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPERMPS => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPERMPS_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPERMPS_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPERMQ => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPERMQ_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERMQ_YMM_MEM256_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPERMPD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPERMPD_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPERMPD_YMM_MEM256_IMM8),
+            _ => None,
+        },
         iclass::XED_ICLASS_VSHUFPS => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VSHUFPS_YMM_YMM_YMM_IMM8),
             [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VSHUFPS_YMM_YMM_MEM_IMM8),
@@ -1036,9 +1061,234 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VUNPCKHPD_YMM_YMM_MEM),
             _ => None,
         },
+        iclass::XED_ICLASS_VMINPS => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMINPS_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMINPS_YMM_YMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VMAXPS => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMAXPS_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMAXPS_YMM_YMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VMINPD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMINPD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMINPD_YMM_YMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VMAXPD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMAXPD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMAXPD_YMM_YMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VMINSS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VMINSS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem32] => Some(forms::VMINSS_XMM_XMM_MEM32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VMAXSS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VMAXSS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem32] => Some(forms::VMAXSS_XMM_XMM_MEM32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VMINSD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VMINSD_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem64] => Some(forms::VMINSD_XMM_XMM_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VMAXSD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VMAXSD_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem64] => Some(forms::VMAXSD_XMM_XMM_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VSQRTPS => match shapes {
+            [Shape::Ymm, Shape::Ymm] => Some(forms::VSQRTPS_YMM_YMM),
+            [Shape::Ymm, Shape::Mem] => Some(forms::VSQRTPS_YMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VSQRTPD => match shapes {
+            [Shape::Ymm, Shape::Ymm] => Some(forms::VSQRTPD_YMM_YMM),
+            [Shape::Ymm, Shape::Mem] => Some(forms::VSQRTPD_YMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VSQRTSS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VSQRTSS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem32] => Some(forms::VSQRTSS_XMM_XMM_MEM32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VSQRTSD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VSQRTSD_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem64] => Some(forms::VSQRTSD_XMM_XMM_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSLLVD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VPSLLVD_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128 | Shape::Mem] => Some(forms::VPSLLVD_XMM_XMM_MEM128),
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSLLVD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSLLVD_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSLLVQ => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VPSLLVQ_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128 | Shape::Mem] => Some(forms::VPSLLVQ_XMM_XMM_MEM128),
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSLLVQ_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSLLVQ_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSRAVD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VPSRAVD_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128 | Shape::Mem] => Some(forms::VPSRAVD_XMM_XMM_MEM128),
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSRAVD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSRAVD_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSRLVD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VPSRLVD_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128 | Shape::Mem] => Some(forms::VPSRLVD_XMM_XMM_MEM128),
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSRLVD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSRLVD_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSRLVQ => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VPSRLVQ_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128 | Shape::Mem] => Some(forms::VPSRLVQ_XMM_XMM_MEM128),
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSRLVQ_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSRLVQ_YMM_YMM_MEM256),
+            _ => None,
+        },
         iclass::XED_ICLASS_VPCMPEQB => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPEQB_YMM_YMM_YMM),
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VPCMPEQB_XMM_XMM_XMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPCMPEQW => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPEQW_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPCMPEQW_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPCMPEQD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPEQD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPCMPEQD_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPCMPEQQ => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPEQQ_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPCMPEQQ_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPCMPGTB => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPGTB_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPCMPGTB_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPCMPGTW => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPGTW_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPCMPGTW_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPCMPGTD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPGTD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPCMPGTD_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPCMPGTQ => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPCMPGTQ_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPCMPGTQ_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPADDUSB => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPADDUSB_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPADDUSB_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPADDUSW => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPADDUSW_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPADDUSW_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSUBUSB => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSUBUSB_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSUBUSB_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSUBUSW => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSUBUSW_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSUBUSW_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPAVGB => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPAVGB_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPAVGB_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPAVGW => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPAVGW_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPAVGW_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPMULLD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPMULLD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPMULLD_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPMULHUW => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPMULHUW_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPMULHUW_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPABSB => match shapes {
+            [Shape::Ymm, Shape::Ymm] => Some(forms::VPABSB_YMM_YMM),
+            [Shape::Ymm, Shape::Mem] => Some(forms::VPABSB_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPABSW => match shapes {
+            [Shape::Ymm, Shape::Ymm] => Some(forms::VPABSW_YMM_YMM),
+            [Shape::Ymm, Shape::Mem] => Some(forms::VPABSW_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPABSD => match shapes {
+            [Shape::Ymm, Shape::Ymm] => Some(forms::VPABSD_YMM_YMM),
+            [Shape::Ymm, Shape::Mem] => Some(forms::VPABSD_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSIGNB => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSIGNB_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSIGNB_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSIGNW => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSIGNW_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSIGNW_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPSIGND => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPSIGND_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPSIGND_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPACKSSWB => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPACKSSWB_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPACKSSWB_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPACKSSDW => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPACKSSDW_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPACKSSDW_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPACKUSWB => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPACKUSWB_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPACKUSWB_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPACKUSDW => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VPACKUSDW_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPACKUSDW_YMM_YMM_MEM256),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPBLENDD => match shapes {
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPBLENDD_YMM_YMM_YMM_IMM8),
+            [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPBLENDD_YMM_YMM_MEM256_IMM8),
             _ => None,
         },
         iclass::XED_ICLASS_VPMOVMSKB => match shapes {
@@ -1513,6 +1763,83 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_BSWAP => match shapes {
             [Shape::Reg64] => Some(forms::BSWAP_R64),
             [Shape::Reg32] => Some(forms::BSWAP_R32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_ANDN => match shapes {
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::ANDN_R32_R32_R32),
+            [Shape::Reg32, Shape::Reg32, Shape::Mem32] => Some(forms::ANDN_R32_R32_MEM32),
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::ANDN_R64_R64_R64),
+            [Shape::Reg64, Shape::Reg64, Shape::Mem64] => Some(forms::ANDN_R64_R64_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_BEXTR => match shapes {
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::BEXTR_R32_R32_R32),
+            [Shape::Reg32, Shape::Mem32, Shape::Reg32] => Some(forms::BEXTR_R32_MEM32_R32),
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::BEXTR_R64_R64_R64),
+            [Shape::Reg64, Shape::Mem64, Shape::Reg64] => Some(forms::BEXTR_R64_MEM64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_BLSI => match shapes {
+            [Shape::Reg32, Shape::Reg32] => Some(forms::BLSI_R32_R32),
+            [Shape::Reg32, Shape::Mem32] => Some(forms::BLSI_R32_MEM32),
+            [Shape::Reg64, Shape::Reg64] => Some(forms::BLSI_R64_R64),
+            [Shape::Reg64, Shape::Mem64] => Some(forms::BLSI_R64_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_BLSMSK => match shapes {
+            [Shape::Reg32, Shape::Reg32] => Some(forms::BLSMSK_R32_R32),
+            [Shape::Reg32, Shape::Mem32] => Some(forms::BLSMSK_R32_MEM32),
+            [Shape::Reg64, Shape::Reg64] => Some(forms::BLSMSK_R64_R64),
+            [Shape::Reg64, Shape::Mem64] => Some(forms::BLSMSK_R64_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_BLSR => match shapes {
+            [Shape::Reg32, Shape::Reg32] => Some(forms::BLSR_R32_R32),
+            [Shape::Reg32, Shape::Mem32] => Some(forms::BLSR_R32_MEM32),
+            [Shape::Reg64, Shape::Reg64] => Some(forms::BLSR_R64_R64),
+            [Shape::Reg64, Shape::Mem64] => Some(forms::BLSR_R64_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_BZHI => match shapes {
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::BZHI_R32_R32_R32),
+            [Shape::Reg32, Shape::Mem32, Shape::Reg32] => Some(forms::BZHI_R32_MEM32_R32),
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::BZHI_R64_R64_R64),
+            [Shape::Reg64, Shape::Mem64, Shape::Reg64] => Some(forms::BZHI_R64_MEM64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_MULX => match shapes {
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::MULX_R32_R32_R32),
+            [Shape::Reg32, Shape::Reg32, Shape::Mem32] => Some(forms::MULX_R32_R32_MEM32),
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::MULX_R64_R64_R64),
+            [Shape::Reg64, Shape::Reg64, Shape::Mem64] => Some(forms::MULX_R64_R64_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_RORX => match shapes {
+            [Shape::Reg32, Shape::Reg32, Shape::Imm] => Some(forms::RORX_R32_R32_IMM8),
+            [Shape::Reg32, Shape::Mem32, Shape::Imm] => Some(forms::RORX_R32_MEM32_IMM8),
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::RORX_R64_R64_IMM8),
+            [Shape::Reg64, Shape::Mem64, Shape::Imm] => Some(forms::RORX_R64_MEM64_IMM8),
+            _ => None,
+        },
+        iclass::XED_ICLASS_SARX => match shapes {
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::SARX_R32_R32_R32),
+            [Shape::Reg32, Shape::Mem32, Shape::Reg32] => Some(forms::SARX_R32_MEM32_R32),
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::SARX_R64_R64_R64),
+            [Shape::Reg64, Shape::Mem64, Shape::Reg64] => Some(forms::SARX_R64_MEM64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_SHLX => match shapes {
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::SHLX_R32_R32_R32),
+            [Shape::Reg32, Shape::Mem32, Shape::Reg32] => Some(forms::SHLX_R32_MEM32_R32),
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::SHLX_R64_R64_R64),
+            [Shape::Reg64, Shape::Mem64, Shape::Reg64] => Some(forms::SHLX_R64_MEM64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_SHRX => match shapes {
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::SHRX_R32_R32_R32),
+            [Shape::Reg32, Shape::Mem32, Shape::Reg32] => Some(forms::SHRX_R32_MEM32_R32),
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::SHRX_R64_R64_R64),
+            [Shape::Reg64, Shape::Mem64, Shape::Reg64] => Some(forms::SHRX_R64_MEM64_R64),
             _ => None,
         },
         iclass::XED_ICLASS_CLC => Some(forms::CLC),
@@ -2441,6 +2768,116 @@ mod tests {
         assert_eq!(mapped(&[0xC5, 0xF5, 0x14, 0xC2])?, Some(forms::VUNPCKLPD_YMM_YMM_YMM));
         // vunpckhpd %ymm2, %ymm1, %ymm0
         assert_eq!(mapped(&[0xC5, 0xF5, 0x15, 0xC2])?, Some(forms::VUNPCKHPD_YMM_YMM_YMM));
+        Ok(())
+    }
+
+    #[test]
+    fn maps_avx_minmax_sqrt_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // vminps %ymm2, %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF4, 0x5D, 0xC2])?, Some(forms::VMINPS_YMM_YMM_YMM));
+        // vmaxps %ymm2, %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF4, 0x5F, 0xC2])?, Some(forms::VMAXPS_YMM_YMM_YMM));
+        // vminpd %ymm2, %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF5, 0x5D, 0xC2])?, Some(forms::VMINPD_YMM_YMM_YMM));
+        // vmaxpd %ymm2, %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF5, 0x5F, 0xC2])?, Some(forms::VMAXPD_YMM_YMM_YMM));
+        // vminss %xmm2, %xmm1, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xF2, 0x5D, 0xC2])?, Some(forms::VMINSS_XMM_XMM_XMM));
+        // vmaxss %xmm2, %xmm1, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xF2, 0x5F, 0xC2])?, Some(forms::VMAXSS_XMM_XMM_XMM));
+        // vminsd %xmm2, %xmm1, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xF3, 0x5D, 0xC2])?, Some(forms::VMINSD_XMM_XMM_XMM));
+        // vmaxsd %xmm2, %xmm1, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xF3, 0x5F, 0xC2])?, Some(forms::VMAXSD_XMM_XMM_XMM));
+        // vsqrtps %ymm2, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xFC, 0x51, 0xC2])?, Some(forms::VSQRTPS_YMM_YMM));
+        // vsqrtpd %ymm2, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xFD, 0x51, 0xC2])?, Some(forms::VSQRTPD_YMM_YMM));
+        // vsqrtss %xmm2, %xmm1, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xF2, 0x51, 0xC2])?, Some(forms::VSQRTSS_XMM_XMM_XMM));
+        // vsqrtsd %xmm2, %xmm1, %xmm0
+        assert_eq!(mapped(&[0xC5, 0xF3, 0x51, 0xC2])?, Some(forms::VSQRTSD_XMM_XMM_XMM));
+        Ok(())
+    }
+
+    #[test]
+    fn maps_avx2_varshift_perm_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // vpsllvd %ymm1, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x7D, 0x47, 0xC1])?,
+            Some(forms::VPSLLVD_YMM_YMM_YMM)
+        );
+        // vpsllvq %ymm1, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0xFD, 0x47, 0xC1])?,
+            Some(forms::VPSLLVQ_YMM_YMM_YMM)
+        );
+        // vpsravd %ymm1, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x7D, 0x46, 0xC1])?,
+            Some(forms::VPSRAVD_YMM_YMM_YMM)
+        );
+        // vpsrlvd %ymm1, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x7D, 0x45, 0xC1])?,
+            Some(forms::VPSRLVD_YMM_YMM_YMM)
+        );
+        // vpsrlvq %ymm1, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0xFD, 0x45, 0xC1])?,
+            Some(forms::VPSRLVQ_YMM_YMM_YMM)
+        );
+        // vpsllvd %xmm1, %xmm0, %xmm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x79, 0x47, 0xC1])?,
+            Some(forms::VPSLLVD_XMM_XMM_XMM)
+        );
+        // vpermd %ymm1, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x7D, 0x36, 0xC1])?,
+            Some(forms::VPERMD_YMM_YMM_YMM)
+        );
+        // vpermps %ymm1, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x7D, 0x16, 0xC1])?,
+            Some(forms::VPERMPS_YMM_YMM_YMM)
+        );
+        // vpermq $0x1b, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE3, 0xFD, 0x00, 0xC0, 0x1B])?,
+            Some(forms::VPERMQ_YMM_YMM_IMM8)
+        );
+        // vpermpd $0x1b, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE3, 0xFD, 0x01, 0xC0, 0x1B])?,
+            Some(forms::VPERMPD_YMM_YMM_IMM8)
+        );
+        // vperm2i128 $0x1, %ymm1, %ymm0, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE3, 0x7D, 0x46, 0xC1, 0x01])?,
+            Some(forms::VPERM2I128_YMM_YMM_YMM_IMM8)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_avx2_saturating_abs_pack_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // vpaddusb %ymm2, %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF5, 0xDC, 0xC2])?, Some(forms::VPADDUSB_YMM_YMM_YMM));
+        // vpmulld %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x40, 0xC2])?,
+            Some(forms::VPMULLD_YMM_YMM_YMM)
+        );
+        // vpabsb %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC4, 0xE2, 0x7D, 0x1C, 0xC1])?, Some(forms::VPABSB_YMM_YMM));
+        // vpblendd $0x3, %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE3, 0x75, 0x02, 0xC2, 0x03])?,
+            Some(forms::VPBLENDD_YMM_YMM_YMM_IMM8)
+        );
+        // vpcmpeqd (%rax), %ymm1, %ymm0
+        assert_eq!(mapped(&[0xC5, 0xF5, 0x76, 0x00])?, Some(forms::VPCMPEQD_YMM_YMM_MEM256));
         Ok(())
     }
 }

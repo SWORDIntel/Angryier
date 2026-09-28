@@ -159,8 +159,10 @@ fn dword_lanes(values: &[u32; 8]) -> Vec<u8> {
 
 fn u32_lanes(bytes: &[u8]) -> Vec<u32> {
     bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap_or([0; 4])))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 
@@ -333,5 +335,367 @@ fn avx2_unpack_lane_semantics() -> Result<(), BoxError> {
         0xFFFF_FFFF,
     ];
     assert_eq!(got, expected.to_vec(), "vpunpckldq per-lane unpack");
+    Ok(())
+}
+
+#[test]
+fn avx2_variable_shifts_ymm() -> Result<(), BoxError> {
+    // vpsllvd ymm0, ymm0, ymm1: c4 e2 7d 47 c1
+    let val = dword_lanes(&[1, 1, 1, 1, 1, 1, 1, 1]);
+    let counts = dword_lanes(&[0, 1, 2, 4, 8, 16, 31, 32]);
+    let state = run_avx2(
+        &[0xc4, 0xe2, 0x7d, 0x47, 0xc1],
+        forms::VPSLLVD_YMM_YMM_YMM,
+        &val,
+        &counts,
+    )?;
+    let got = u32_lanes(&read_ymm(&state, ZMM0)?);
+    let expected = [1, 2, 4, 16, 256, 65536, 0x8000_0000, 0];
+    assert_eq!(got, expected.to_vec(), "vpsllvd variable dword shifts");
+
+    // vpsravd ymm0, ymm0, ymm1: c4 e2 7d 46 c1
+    let val = dword_lanes(&[
+        0x8000_0000,
+        0x8000_0000,
+        0x7000_0000,
+        0x7000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        0x7000_0000,
+        0x7000_0000,
+    ]);
+    let counts = dword_lanes(&[1, 31, 1, 31, 32, 64, 32, 64]);
+    let state = run_avx2(
+        &[0xc4, 0xe2, 0x7d, 0x46, 0xc1],
+        forms::VPSRAVD_YMM_YMM_YMM,
+        &val,
+        &counts,
+    )?;
+    let got = u32_lanes(&read_ymm(&state, ZMM0)?);
+    let expected = [0xC000_0000, 0xFFFF_FFFF, 0x3800_0000, 0, 0xFFFF_FFFF, 0xFFFF_FFFF, 0, 0];
+    assert_eq!(got, expected.to_vec(), "vpsravd arithmetic dword shifts");
+
+    // vpsrlvd ymm0, ymm0, ymm1: c4 e2 7d 45 c1
+    let val = dword_lanes(&[
+        0x8000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        0x8000_0000,
+        0x8000_0000,
+    ]);
+    let counts = dword_lanes(&[0, 1, 2, 4, 8, 16, 31, 32]);
+    let state = run_avx2(
+        &[0xc4, 0xe2, 0x7d, 0x45, 0xc1],
+        forms::VPSRLVD_YMM_YMM_YMM,
+        &val,
+        &counts,
+    )?;
+    let got = u32_lanes(&read_ymm(&state, ZMM0)?);
+    let expected = [
+        0x8000_0000,
+        0x4000_0000,
+        0x2000_0000,
+        0x0800_0000,
+        0x0080_0000,
+        0x0000_8000,
+        1,
+        0,
+    ];
+    assert_eq!(got, expected.to_vec(), "vpsrlvd logical dword shifts");
+
+    // vpsllvq ymm0, ymm0, ymm1: c4 e2 fd 47 c1
+    let mut val64 = Vec::new();
+    for v in [1u64, 1, 1, 1] {
+        val64.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut count64 = Vec::new();
+    for v in [0u64, 1, 63, 64] {
+        count64.extend_from_slice(&v.to_le_bytes());
+    }
+    let state = run_avx2(
+        &[0xc4, 0xe2, 0xfd, 0x47, 0xc1],
+        forms::VPSLLVQ_YMM_YMM_YMM,
+        &val64,
+        &count64,
+    )?;
+    let got = read_ymm(&state, ZMM0)?;
+    let mut expected = Vec::new();
+    for v in [1u64, 2, 0x8000_0000_0000_0000, 0] {
+        expected.extend_from_slice(&v.to_le_bytes());
+    }
+    assert_eq!(got, expected, "vpsllvq variable qword shifts");
+
+    Ok(())
+}
+
+#[test]
+fn avx2_cross_lane_permute_ymm() -> Result<(), BoxError> {
+    // vpermd ymm0, ymm0, ymm1: c4 e2 7d 36 c1
+    // dest = ymm0, index = ymm0, table = ymm1
+    let indices = dword_lanes(&[7, 6, 5, 4, 3, 2, 1, 0]);
+    let table = dword_lanes(&[10, 20, 30, 40, 50, 60, 70, 80]);
+    let state = run_avx2(
+        &[0xc4, 0xe2, 0x7d, 0x36, 0xc1],
+        forms::VPERMD_YMM_YMM_YMM,
+        &indices,
+        &table,
+    )?;
+    let got = u32_lanes(&read_ymm(&state, ZMM0)?);
+    let expected = [80, 70, 60, 50, 40, 30, 20, 10];
+    assert_eq!(got, expected.to_vec(), "vpermd cross-lane 32-bit permute");
+
+    // vpermq $0x1b, ymm0, ymm0: c4 e3 fd 00 c0 1b
+    let mut qwords = Vec::new();
+    for v in [100u64, 200, 300, 400] {
+        qwords.extend_from_slice(&v.to_le_bytes());
+    }
+    let state = run_avx2(
+        &[0xc4, 0xe3, 0xfd, 0x00, 0xc0, 0x1b],
+        forms::VPERMQ_YMM_YMM_IMM8,
+        &qwords,
+        &[0; 32],
+    )?;
+    let got = read_ymm(&state, ZMM0)?;
+    let mut expected = Vec::new();
+    for v in [400u64, 300, 200, 100] {
+        expected.extend_from_slice(&v.to_le_bytes());
+    }
+    assert_eq!(got, expected, "vpermq cross-lane 64-bit permute");
+
+    // vperm2i128 $0x01, ymm1, ymm0, ymm0: c4 e3 7d 46 c1 01
+    let mut halves = Vec::new();
+    for v in [111u64, 222, 333, 444] {
+        halves.extend_from_slice(&v.to_le_bytes());
+    }
+    let state = run_avx2(
+        &[0xc4, 0xe3, 0x7d, 0x46, 0xc1, 0x01],
+        forms::VPERM2I128_YMM_YMM_YMM_IMM8,
+        &halves,
+        &[0; 32],
+    )?;
+    let got = read_ymm(&state, ZMM0)?;
+    let mut expected = Vec::new();
+    for v in [333u64, 444, 111, 222] {
+        expected.extend_from_slice(&v.to_le_bytes());
+    }
+    assert_eq!(got, expected, "vperm2i128 swap 128-bit halves");
+
+    Ok(())
+}
+
+#[test]
+fn avx2_saturating_and_avg_ymm() -> Result<(), BoxError> {
+    // vpaddusb ymm0, ymm0, ymm1: c5 fd dc c1
+    let mut a = vec![200u8; 32];
+    a[0] = 200;
+    a[1] = 50;
+    let mut b = vec![100u8; 32];
+    b[0] = 100;
+    b[1] = 50;
+    let state = run_avx2(&[0xc5, 0xfd, 0xdc, 0xc1], forms::VPADDUSB_YMM_YMM_YMM, &a, &b)?;
+    let got = read_ymm(&state, ZMM0)?;
+    assert_eq!(got[0], 255, "vpaddusb 200+100 saturated to 255");
+    assert_eq!(got[1], 100, "vpaddusb 50+50 = 100");
+
+    // vpsubusb ymm0, ymm0, ymm1: c5 fd d8 c1
+    let state = run_avx2(&[0xc5, 0xfd, 0xd8, 0xc1], forms::VPSUBUSB_YMM_YMM_YMM, &a, &b)?;
+    let got = read_ymm(&state, ZMM0)?;
+    assert_eq!(got[0], 100, "vpsubusb 200-100 = 100");
+    assert_eq!(got[1], 0, "vpsubusb 50-50 = 0");
+
+    // vpavgb ymm0, ymm0, ymm1: c5 fd e0 c1 -> (a + b + 1) >> 1
+    a[0] = 10;
+    b[0] = 20; // (10 + 20 + 1) >> 1 = 15
+    a[1] = 11;
+    b[1] = 20; // (11 + 20 + 1) >> 1 = 16
+    let state = run_avx2(&[0xc5, 0xfd, 0xe0, 0xc1], forms::VPAVGB_YMM_YMM_YMM, &a, &b)?;
+    let got = read_ymm(&state, ZMM0)?;
+    assert_eq!(got[0], 15, "vpavgb (10+20+1)>>1 = 15");
+    assert_eq!(got[1], 16, "vpavgb (11+20+1)>>1 = 16");
+
+    Ok(())
+}
+
+#[test]
+fn avx2_mul_abs_sign_blend_ymm() -> Result<(), BoxError> {
+    // vpmulld ymm0, ymm0, ymm1: c4 e2 7d 40 c1
+    let a = dword_lanes(&[10, 20, 30, 40, 50, 60, 70, 80]);
+    let b = dword_lanes(&[2, 3, 4, 5, 6, 7, 8, 9]);
+    let state = run_avx2(&[0xc4, 0xe2, 0x7d, 0x40, 0xc1], forms::VPMULLD_YMM_YMM_YMM, &a, &b)?;
+    let got = u32_lanes(&read_ymm(&state, ZMM0)?);
+    assert_eq!(
+        got,
+        vec![20, 60, 120, 200, 300, 420, 560, 720],
+        "vpmulld low 32-bit products"
+    );
+
+    // vpabsd ymm0, ymm1: c4 e2 7d 1e c1
+    let signed_vals: [u32; 8] = [
+        (-10i32) as u32,
+        20,
+        (-30i32) as u32,
+        40,
+        (-50i32) as u32,
+        60,
+        (-70i32) as u32,
+        80,
+    ];
+    let src = dword_lanes(&signed_vals);
+    let state = run_avx2(&[0xc4, 0xe2, 0x7d, 0x1e, 0xc1], forms::VPABSD_YMM_YMM, &[0; 32], &src)?;
+    let got = u32_lanes(&read_ymm(&state, ZMM0)?);
+    assert_eq!(
+        got,
+        vec![10, 20, 30, 40, 50, 60, 70, 80],
+        "vpabsd 32-bit absolute values"
+    );
+
+    // vpsignd ymm0, ymm0, ymm1: c4 e2 7d 0a c1
+    // result = if b < 0 { -a } else if b == 0 { 0 } else { a }
+    let a_vals = dword_lanes(&[15, 25, 35, 45, 55, 65, 75, 85]);
+    let b_vals: [u32; 8] = [(-1i32) as u32, 1, 0, (-5i32) as u32, 10, 0, (-100i32) as u32, 100];
+    let state = run_avx2(
+        &[0xc4, 0xe2, 0x7d, 0x0a, 0xc1],
+        forms::VPSIGND_YMM_YMM_YMM,
+        &a_vals,
+        &dword_lanes(&b_vals),
+    )?;
+    let got = u32_lanes(&read_ymm(&state, ZMM0)?);
+    let expected = vec![(-15i32) as u32, 25, 0, (-45i32) as u32, 55, 0, (-75i32) as u32, 85];
+    assert_eq!(got, expected, "vpsignd signed neg/zero/pos");
+
+    // vpblendd $0x0f, ymm0, ymm1: c4 e3 7d 02 c1 0f
+    // blends low 4 dwords from ymm1 (operand 2), high 4 dwords from ymm0 (operand 1)
+    let state = run_avx2(
+        &[0xc4, 0xe3, 0x7d, 0x02, 0xc1, 0x0f],
+        forms::VPBLENDD_YMM_YMM_YMM_IMM8,
+        &dword_lanes(&[1, 2, 3, 4, 5, 6, 7, 8]),
+        &dword_lanes(&[10, 20, 30, 40, 50, 60, 70, 80]),
+    )?;
+    let got = u32_lanes(&read_ymm(&state, ZMM0)?);
+    assert_eq!(got, vec![10, 20, 30, 40, 5, 6, 7, 8], "vpblendd immediate mask blend");
+
+    Ok(())
+}
+
+#[test]
+fn debug_vpmulld() -> Result<(), BoxError> {
+    let decoder = XedDecoder::new();
+    let code = &[0xc4, 0xe2, 0x7d, 0x40, 0xc1];
+    let decoded = decoder.decode(CODE_BASE, code).map_err(|e| format!("decode: {e:?}"))?;
+    let registry = Intel64CorpusRegistry::new(SEMANTIC_VERSION);
+    let provider = registry
+        .provider_for_form(forms::VPMULLD_YMM_YMM_YMM)
+        .ok_or_else(|| "no provider for VPMULLD_YMM_YMM_YMM".to_string())?;
+    let mut builder = SemanticBlockBuilder::new(SEMANTIC_VERSION);
+    provider
+        .emit(&context(), &decoded, &mut builder)
+        .map_err(|e| format!("emit: {e:?}"))?;
+    let sealed = builder
+        .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+        .map_err(|e| format!("seal: {e:?}"))?;
+    let key = BlockValidityKey {
+        image: ImageId(1),
+        block: BlockId(1),
+        address: decoded.address,
+        semantic_version: SEMANTIC_VERSION,
+        target_profile: TARGET_PROFILE,
+        code_versions: vec![],
+    };
+    let ir = BasicSemanticLowerer
+        .lower_with_decode(&sealed, &key, &decoded)
+        .map_err(|e| format!("lower: {e:?}"))?;
+    for ins in &ir.instructions {
+        println!("{:?}", ins);
+    }
+    let state = create_state(code)?;
+    let outcome = ConcreteInterpreter::new().execute_block(&state, &ir, ExecutionMode::Concrete);
+    println!("Outcome: {:?}", outcome.err());
+    Ok(())
+}
+
+#[test]
+fn debug_vpmulld2() -> Result<(), BoxError> {
+    let a = dword_lanes(&[10, 20, 30, 40, 50, 60, 70, 80]);
+    let b = dword_lanes(&[2, 3, 4, 5, 6, 7, 8, 9]);
+    let res = run_avx2(&[0xc4, 0xe2, 0x7d, 0x40, 0xc1], forms::VPMULLD_YMM_YMM_YMM, &a, &b);
+    println!("run_avx2 result: {:?}", res.err());
+    Ok(())
+}
+
+#[test]
+fn debug_vpabsd() -> Result<(), BoxError> {
+    let signed_vals: [u32; 8] = [
+        (-10i32) as u32,
+        20,
+        (-30i32) as u32,
+        40,
+        (-50i32) as u32,
+        60,
+        (-70i32) as u32,
+        80,
+    ];
+    let src = dword_lanes(&signed_vals);
+    let res = run_avx2(&[0xc4, 0xe2, 0x7d, 0x1e, 0xc1], forms::VPABSD_YMM_YMM, &[0; 32], &src);
+    println!("vpabsd result: {:?}", res.err());
+    Ok(())
+}
+#[test]
+fn debug_vpsignd() -> Result<(), BoxError> {
+    let a_vals = dword_lanes(&[15, 25, 35, 45, 55, 65, 75, 85]);
+    let b_vals: [u32; 8] = [(-1i32) as u32, 1, 0, (-5i32) as u32, 10, 0, (-100i32) as u32, 100];
+    let res = run_avx2(
+        &[0xc4, 0xe2, 0x7d, 0x0a, 0xc1],
+        forms::VPSIGND_YMM_YMM_YMM,
+        &a_vals,
+        &dword_lanes(&b_vals),
+    );
+    println!("vpsignd result: {:?}", res.err());
+    Ok(())
+}
+#[test]
+fn debug_vpblendd() -> Result<(), BoxError> {
+    let res = run_avx2(
+        &[0xc4, 0xe3, 0x7d, 0x02, 0xc1, 0x0f],
+        forms::VPBLENDD_YMM_YMM_YMM_IMM8,
+        &dword_lanes(&[1, 2, 3, 4, 5, 6, 7, 8]),
+        &dword_lanes(&[10, 20, 30, 40, 50, 60, 70, 80]),
+    );
+    println!("vpblendd result: {:?}", res.err());
+    Ok(())
+}
+
+#[test]
+fn debug_vpblendd_ir() -> Result<(), BoxError> {
+    let decoder = XedDecoder::new();
+    let code = &[0xc4, 0xe3, 0x7d, 0x02, 0xc1, 0x0f];
+    let decoded = decoder.decode(CODE_BASE, code).map_err(|e| format!("decode: {e:?}"))?;
+    let registry = Intel64CorpusRegistry::new(SEMANTIC_VERSION);
+    let provider = registry
+        .provider_for_form(forms::VPBLENDD_YMM_YMM_YMM_IMM8)
+        .ok_or_else(|| "no provider for VPBLENDD_YMM_YMM_YMM_IMM8".to_string())?;
+    let mut builder = SemanticBlockBuilder::new(SEMANTIC_VERSION);
+    provider
+        .emit(&context(), &decoded, &mut builder)
+        .map_err(|e| format!("emit: {e:?}"))?;
+    let sealed = builder
+        .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+        .map_err(|e| format!("seal: {e:?}"))?;
+    let key = BlockValidityKey {
+        image: ImageId(1),
+        block: BlockId(1),
+        address: decoded.address,
+        semantic_version: SEMANTIC_VERSION,
+        target_profile: TARGET_PROFILE,
+        code_versions: vec![],
+    };
+    let ir = BasicSemanticLowerer
+        .lower_with_decode(&sealed, &key, &decoded)
+        .map_err(|e| format!("lower: {e:?}"))?;
+    for (i, ins) in ir.instructions.iter().enumerate() {
+        println!("{}: {:?}", i, ins);
+    }
     Ok(())
 }

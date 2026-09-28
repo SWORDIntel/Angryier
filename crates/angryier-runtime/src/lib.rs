@@ -453,7 +453,10 @@ impl Process {
     /// and is cloned exactly once when a snapshot shares it (the entry state
     /// captured at load time, or a forked sibling `Process`), so sequential
     /// stepping pays no per-write overlay copy.
-    fn write_pc(&mut self, pc: Address) -> Result<(), RuntimeError> {
+    ///
+    /// Public for the stable library API's entry-override path (the Lua
+    /// surface uses the same method in-crate).
+    pub fn write_pc(&mut self, pc: Address) -> Result<(), RuntimeError> {
         self.state
             .registers
             .write_in_place(register_id::RIP.0, &pc.to_le_bytes())

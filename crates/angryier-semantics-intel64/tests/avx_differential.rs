@@ -224,6 +224,28 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
         xed::XED_ICLASS_VUNPCKHPS => packed_form(&shapes, forms::VUNPCKHPS_YMM_YMM_YMM, forms::VUNPCKHPS_YMM_YMM_MEM),
         xed::XED_ICLASS_VUNPCKLPD => packed_form(&shapes, forms::VUNPCKLPD_YMM_YMM_YMM, forms::VUNPCKLPD_YMM_YMM_MEM),
         xed::XED_ICLASS_VUNPCKHPD => packed_form(&shapes, forms::VUNPCKHPD_YMM_YMM_YMM, forms::VUNPCKHPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VMINPS => packed_form(&shapes, forms::VMINPS_YMM_YMM_YMM, forms::VMINPS_YMM_YMM_MEM),
+        xed::XED_ICLASS_VMAXPS => packed_form(&shapes, forms::VMAXPS_YMM_YMM_YMM, forms::VMAXPS_YMM_YMM_MEM),
+        xed::XED_ICLASS_VMINPD => packed_form(&shapes, forms::VMINPD_YMM_YMM_YMM, forms::VMINPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VMAXPD => packed_form(&shapes, forms::VMAXPD_YMM_YMM_YMM, forms::VMAXPD_YMM_YMM_MEM),
+        xed::XED_ICLASS_VMINSS => scalar_form(&shapes, forms::VMINSS_XMM_XMM_XMM, forms::VMINSS_XMM_XMM_MEM32),
+        xed::XED_ICLASS_VMAXSS => scalar_form(&shapes, forms::VMAXSS_XMM_XMM_XMM, forms::VMAXSS_XMM_XMM_MEM32),
+        xed::XED_ICLASS_VMINSD => scalar_double_form(&shapes, forms::VMINSD_XMM_XMM_XMM, forms::VMINSD_XMM_XMM_MEM64),
+        xed::XED_ICLASS_VMAXSD => scalar_double_form(&shapes, forms::VMAXSD_XMM_XMM_XMM, forms::VMAXSD_XMM_XMM_MEM64),
+        xed::XED_ICLASS_VSQRTPS => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm] => Some(forms::VSQRTPS_YMM_YMM),
+            [Shape::Ymm, Shape::Mem] => Some(forms::VSQRTPS_YMM_MEM),
+            _ => None,
+        },
+        xed::XED_ICLASS_VSQRTPD => match shapes.as_slice() {
+            [Shape::Ymm, Shape::Ymm] => Some(forms::VSQRTPD_YMM_YMM),
+            [Shape::Ymm, Shape::Mem] => Some(forms::VSQRTPD_YMM_MEM),
+            _ => None,
+        },
+        xed::XED_ICLASS_VSQRTSS => scalar_form(&shapes, forms::VSQRTSS_XMM_XMM_XMM, forms::VSQRTSS_XMM_XMM_MEM32),
+        xed::XED_ICLASS_VSQRTSD => {
+            scalar_double_form(&shapes, forms::VSQRTSD_XMM_XMM_XMM, forms::VSQRTSD_XMM_XMM_MEM64)
+        }
         _ => None,
     }
 }
@@ -736,6 +758,53 @@ fn avx_shuf_unpck_differential() -> Result<(), BoxError> {
     }
     if count != 0 && count != 24 {
         return Err(format!("expected 24 native cases, ran {count}").into());
+    }
+    Ok(())
+}
+
+#[test]
+fn avx_minmax_sqrt_differential() -> Result<(), BoxError> {
+    let forms = [
+        ("vminps_reg", "vminps %ymm2, %ymm1, %ymm0"),
+        ("vminps_mem", "vminps 0x500020, %ymm1, %ymm0"),
+        ("vmaxps_reg", "vmaxps %ymm2, %ymm1, %ymm0"),
+        ("vmaxps_mem", "vmaxps 0x500020, %ymm1, %ymm0"),
+        ("vminpd_reg", "vminpd %ymm2, %ymm1, %ymm0"),
+        ("vminpd_mem", "vminpd 0x500020, %ymm1, %ymm0"),
+        ("vmaxpd_reg", "vmaxpd %ymm2, %ymm1, %ymm0"),
+        ("vmaxpd_mem", "vmaxpd 0x500020, %ymm1, %ymm0"),
+        ("vminss_reg", "vminss %xmm2, %xmm1, %xmm0"),
+        ("vminss_mem", "vminss 0x500020, %xmm1, %xmm0"),
+        ("vmaxss_reg", "vmaxss %xmm2, %xmm1, %xmm0"),
+        ("vmaxss_mem", "vmaxss 0x500020, %xmm1, %xmm0"),
+        ("vminsd_reg", "vminsd %xmm2, %xmm1, %xmm0"),
+        ("vminsd_mem", "vminsd 0x500020, %xmm1, %xmm0"),
+        ("vmaxsd_reg", "vmaxsd %xmm2, %xmm1, %xmm0"),
+        ("vmaxsd_mem", "vmaxsd 0x500020, %xmm1, %xmm0"),
+        ("vsqrtps_reg", "vsqrtps %ymm2, %ymm0"),
+        ("vsqrtps_mem", "vsqrtps 0x500020, %ymm0"),
+        ("vsqrtpd_reg", "vsqrtpd %ymm2, %ymm0"),
+        ("vsqrtpd_mem", "vsqrtpd 0x500020, %ymm0"),
+        ("vsqrtss_reg", "vsqrtss %xmm2, %xmm1, %xmm0"),
+        ("vsqrtss_mem", "vsqrtss 0x500020, %xmm1, %xmm0"),
+        ("vsqrtsd_reg", "vsqrtsd %xmm2, %xmm1, %xmm0"),
+        ("vsqrtsd_mem", "vsqrtsd 0x500020, %xmm1, %xmm0"),
+    ];
+    let mut count = 0usize;
+    for (pattern, (left, right)) in PATTERNS.into_iter().enumerate() {
+        for (name, instruction) in forms {
+            if differential_case(&format!("{name}_{pattern}"), instruction, left, right)? {
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        eprintln!("SKIP: binutils unavailable");
+    } else {
+        eprintln!("AVX min/max/sqrt differential: {count} native cases passed");
+    }
+    if count != 0 && count != 48 {
+        return Err(format!("expected 48 native cases, ran {count}").into());
     }
     Ok(())
 }

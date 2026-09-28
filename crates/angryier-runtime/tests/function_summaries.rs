@@ -9,6 +9,7 @@
 //! build per argument shape, one hit per collapsed call.
 
 #![cfg(feature = "xed")]
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

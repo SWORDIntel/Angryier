@@ -1285,8 +1285,121 @@ pub mod syscall {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Kernel environment-model procedures (IRP, version, unicode, threads)
 // ---------------------------------------------------------------------------
+
+/// `RtlInitUnicodeString(Destination, Source)`: writes a UNICODE_STRING
+/// {Length, MaximumLength, _pad, Buffer} describing the Source PCWSTR.
+/// Void return; the model writes through RCX (Destination).
+pub struct KernelInitUnicodeStringProcedure;
+
+impl SimProcedure for KernelInitUnicodeStringProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_init_unicode_string"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let dest = state.get_reg(1); // RCX = PUNICODE_STRING Destination
+        let src = state.get_reg(2); // RDX = PCWSTR Source
+        let mut next = state.clone();
+        if dest != 0 && src != 0 {
+            // Compute length by scanning for null terminator (max 510 chars)
+            let mut len: u16 = 0;
+            let mut addr = src;
+            loop {
+                let bytes = state.read_bytes(addr, 2);
+                if bytes.len() < 2 {
+                    break;
+                }
+                let ch = u16::from_le_bytes([bytes[0], bytes[1]]);
+                if ch == 0 || len >= 510 {
+                    break;
+                }
+                len += 2;
+                addr += 2;
+            }
+            next.write_memory(dest, len.to_le_bytes().to_vec());
+            next.write_memory(dest + 2, (len + 2).to_le_bytes().to_vec());
+            next.write_memory(dest + 8, src.to_le_bytes().to_vec());
+        }
+        SimResult::Continue(next)
+    }
+}
+
+/// `PsCreateSystemThread(ThreadHandle, DesiredAccess, ObjectAttributes,
+/// ProcessHandle, ClientId, StartRoutine, StartContext)`:
+/// returns a non-NULL pseudo-handle so the driver thinks the thread was
+/// created. The thread body is NOT executed (debt-recorded).
+pub struct KernelCreateSystemThreadProcedure;
+
+impl SimProcedure for KernelCreateSystemThreadProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_create_system_thread"
+    }
+    fn apply(&self, _state: &SimState) -> SimResult {
+        // A non-zero handle: drivers check for NULL/INVALID_HANDLE_VALUE
+        SimResult::Return(0xFFFF_FFFF_0000_0042)
+    }
+}
+
+/// `IoBuildDeviceIoControlRequest(IoControlCode, DeviceObject, InputBuffer,
+/// InputBufferLength, OutputBuffer, OutputBufferLength, InternalDeviceIoControl,
+/// Event, IoStatusBlock)`: allocates a zero-backed IRP-shaped block from the
+/// pool arena and returns it in RAX. Zero-backed means IoStatus reads
+/// STATUS_SUCCESS and uninitialized fields are benign defaults; the driver
+/// fills the stack-location and user-event fields itself, and
+/// `KeWaitForSingleObject` (default stub, STATUS_WAIT_0) completes the wait
+/// immediately. Debt-recorded: no completion routine or IRP lifetime model.
+pub struct KernelBuildIrpProcedure {
+    pub tracker: std::sync::Arc<KernelPoolTracker>,
+}
+
+impl SimProcedure for KernelBuildIrpProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_build_irp"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let irp = self.tracker.fresh_pointer();
+        let mut next = state.clone();
+        // IRP header: Type (u16 = 6, IO_TYPE_IRP) | Size (u16 = 0x100).
+        let type_size = (0x100u64 << 32) | 6;
+        next.write_memory(irp, type_size.to_le_bytes().to_vec());
+        // StackCount=1 / CurrentLocation=1 (x64 IRP layout offsets).
+        next.write_memory(irp + 0x53, 1u8.to_le_bytes().to_vec());
+        next.write_memory(irp + 0x54, 1u8.to_le_bytes().to_vec());
+        SimResult::Return(irp)
+    }
+}
+
+/// `RtlGetVersion(RTL_OSVERSIONINFOW*)`: writes a Windows-10-shaped version
+/// structure through RCX and returns STATUS_SUCCESS. Drivers branch large
+/// chunks of init on the reported version; the previous default stub left
+/// the structure untouched (zeros), which sent drivers down the legacy
+/// path and left runtime function-pointer tables unfilled (TbtBusDrv's
+/// NULL `jmp [rip+X]` slot). The caller pre-fills `dwOSVersionInfoSize`
+/// (0x90 for RTL_OSVERSIONINFOW, 0x150 for RTL_OSVERSIONINFOEXW) — the
+/// model preserves it and fills the version fields only.
+pub struct KernelGetVersionProcedure;
+
+impl SimProcedure for KernelGetVersionProcedure {
+    fn name(&self) -> &'static str {
+        "kernel_get_version"
+    }
+    fn apply(&self, state: &SimState) -> SimResult {
+        let out = state.get_reg(1); // RCX = PRTL_OSVERSIONINFOW
+        let mut next = state.clone();
+        if out != 0 {
+            let raw = state.read_bytes(out, 4);
+            let size = u32::from_le_bytes(raw.try_into().unwrap_or([0x90, 0, 0, 0]));
+            let size = if size == 0 { 0x90 } else { size };
+            next.write_memory(out, size.to_le_bytes().to_vec());
+            next.write_memory(out + 4, 10u32.to_le_bytes().to_vec()); // dwMajorVersion
+            next.write_memory(out + 8, 0u32.to_le_bytes().to_vec()); // dwMinorVersion
+            next.write_memory(out + 12, 19045u32.to_le_bytes().to_vec()); // dwBuildNumber
+            next.write_memory(out + 16, 2u32.to_le_bytes().to_vec()); // VER_PLATFORM_WIN32_NT
+        }
+        SimResult::Return(0) // STATUS_SUCCESS
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1694,118 +1807,5 @@ mod tests {
         assert_eq!(syscall::READ, 0);
         assert_eq!(syscall::WRITE, 1);
         assert_eq!(syscall::EXIT, 60);
-    }
-}
-
-/// `RtlInitUnicodeString(Destination, Source)`: writes a UNICODE_STRING
-/// {Length, MaximumLength, _pad, Buffer} describing the Source PCWSTR.
-/// Void return; the model writes through RCX (Destination).
-pub struct KernelInitUnicodeStringProcedure;
-
-impl SimProcedure for KernelInitUnicodeStringProcedure {
-    fn name(&self) -> &'static str {
-        "kernel_init_unicode_string"
-    }
-    fn apply(&self, state: &SimState) -> SimResult {
-        let dest = state.get_reg(1); // RCX = PUNICODE_STRING Destination
-        let src = state.get_reg(2); // RDX = PCWSTR Source
-        let mut next = state.clone();
-        if dest != 0 && src != 0 {
-            // Compute length by scanning for null terminator (max 510 chars)
-            let mut len: u16 = 0;
-            let mut addr = src;
-            loop {
-                let bytes = state.read_bytes(addr, 2);
-                if bytes.len() < 2 {
-                    break;
-                }
-                let ch = u16::from_le_bytes([bytes[0], bytes[1]]);
-                if ch == 0 || len >= 510 {
-                    break;
-                }
-                len += 2;
-                addr += 2;
-            }
-            next.write_memory(dest, len.to_le_bytes().to_vec());
-            next.write_memory(dest + 2, (len + 2).to_le_bytes().to_vec());
-            next.write_memory(dest + 8, src.to_le_bytes().to_vec());
-        }
-        SimResult::Continue(next)
-    }
-}
-
-/// `PsCreateSystemThread(ThreadHandle, DesiredAccess, ObjectAttributes,
-/// ProcessHandle, ClientId, StartRoutine, StartContext)`:
-/// returns a non-NULL pseudo-handle so the driver thinks the thread was
-/// created. The thread body is NOT executed (debt-recorded).
-pub struct KernelCreateSystemThreadProcedure;
-
-impl SimProcedure for KernelCreateSystemThreadProcedure {
-    fn name(&self) -> &'static str {
-        "kernel_create_system_thread"
-    }
-    fn apply(&self, _state: &SimState) -> SimResult {
-        // A non-zero handle: drivers check for NULL/INVALID_HANDLE_VALUE
-        SimResult::Return(0xFFFF_FFFF_0000_0042)
-    }
-}
-
-/// `IoBuildDeviceIoControlRequest(IoControlCode, DeviceObject, InputBuffer,
-/// InputBufferLength, OutputBuffer, OutputBufferLength, InternalDeviceIoControl,
-/// Event, IoStatusBlock)`: allocates a zero-backed IRP-shaped block from the
-/// pool arena and returns it in RAX. Zero-backed means IoStatus reads
-/// STATUS_SUCCESS and uninitialized fields are benign defaults; the driver
-/// fills the stack-location and user-event fields itself, and
-/// `KeWaitForSingleObject` (default stub, STATUS_WAIT_0) completes the wait
-/// immediately. Debt-recorded: no completion routine or IRP lifetime model.
-pub struct KernelBuildIrpProcedure {
-    pub tracker: std::sync::Arc<KernelPoolTracker>,
-}
-
-impl SimProcedure for KernelBuildIrpProcedure {
-    fn name(&self) -> &'static str {
-        "kernel_build_irp"
-    }
-    fn apply(&self, state: &SimState) -> SimResult {
-        let irp = self.tracker.fresh_pointer();
-        let mut next = state.clone();
-        // IRP header: Type (u16 = 6, IO_TYPE_IRP) | Size (u16 = 0x100).
-        let type_size = (0x100u64 << 32) | 6;
-        next.write_memory(irp, type_size.to_le_bytes().to_vec());
-        // StackCount=1 / CurrentLocation=1 (x64 IRP layout offsets).
-        next.write_memory(irp + 0x53, 1u8.to_le_bytes().to_vec());
-        next.write_memory(irp + 0x54, 1u8.to_le_bytes().to_vec());
-        SimResult::Return(irp)
-    }
-}
-
-/// `RtlGetVersion(RTL_OSVERSIONINFOW*)`: writes a Windows-10-shaped version
-/// structure through RCX and returns STATUS_SUCCESS. Drivers branch large
-/// chunks of init on the reported version; the previous default stub left
-/// the structure untouched (zeros), which sent drivers down the legacy
-/// path and left runtime function-pointer tables unfilled (TbtBusDrv's
-/// NULL `jmp [rip+X]` slot). The caller pre-fills `dwOSVersionInfoSize`
-/// (0x90 for RTL_OSVERSIONINFOW, 0x150 for RTL_OSVERSIONINFOEXW) — the
-/// model preserves it and fills the version fields only.
-pub struct KernelGetVersionProcedure;
-
-impl SimProcedure for KernelGetVersionProcedure {
-    fn name(&self) -> &'static str {
-        "kernel_get_version"
-    }
-    fn apply(&self, state: &SimState) -> SimResult {
-        let out = state.get_reg(1); // RCX = PRTL_OSVERSIONINFOW
-        let mut next = state.clone();
-        if out != 0 {
-            let raw = state.read_bytes(out, 4);
-            let size = u32::from_le_bytes(raw.try_into().unwrap_or([0x90, 0, 0, 0]));
-            let size = if size == 0 { 0x90 } else { size };
-            next.write_memory(out, size.to_le_bytes().to_vec());
-            next.write_memory(out + 4, 10u32.to_le_bytes().to_vec()); // dwMajorVersion
-            next.write_memory(out + 8, 0u32.to_le_bytes().to_vec()); // dwMinorVersion
-            next.write_memory(out + 12, 19045u32.to_le_bytes().to_vec()); // dwBuildNumber
-            next.write_memory(out + 16, 2u32.to_le_bytes().to_vec()); // VER_PLATFORM_WIN32_NT
-        }
-        SimResult::Return(0) // STATUS_SUCCESS
     }
 }

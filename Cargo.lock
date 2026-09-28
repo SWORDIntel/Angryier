@@ -3,6 +3,23 @@
 version = 4
 
 [[package]]
+name = "angryier"
+version = "0.1.0"
+dependencies = [
+ "angryier-arch",
+ "angryier-arch-intel64",
+ "angryier-arch-xed-ffi",
+ "angryier-expr",
+ "angryier-ir",
+ "angryier-memory",
+ "angryier-models",
+ "angryier-runtime",
+ "angryier-solver",
+ "angryier-solver-z3",
+ "angryier-types",
+]
+
+[[package]]
 name = "angryier-arch"
 version = "0.1.0"
 dependencies = [

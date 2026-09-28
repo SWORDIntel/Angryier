@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use angryier_arch::Decoder;
-use angryier_memory::{ByteValue, LayeredMemory};
+use angryier_memory::LayeredMemory;
 use angryier_runtime::Runtime;
 use angryier_types::{SemanticVersion, TargetProfileId};
 
@@ -175,13 +175,9 @@ fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("total steps executed: {}", totals.total_steps);
     println!("\n--- per image (sorted by steps, descending) ---");
-    rows.sort_by(|a, b| b.2.cmp(&a.2));
+    rows.sort_by_key(|a| std::cmp::Reverse(a.2));
     for (name, class, steps, seconds, detail) in rows {
-        let short = detail
-            .split(|c| c == '(' || c == ' ' || c == ':')
-            .next()
-            .unwrap_or("")
-            .to_string();
+        let short = detail.split(['(', ' ', ':']).next().unwrap_or("").to_string();
         let mut line = format!("{name:44} {class:12} {steps:>6} steps");
         if !short.is_empty() && class != "BUDGET" && class != "TERMINATED" {
             line.push_str(&format!("  [{detail}]"));

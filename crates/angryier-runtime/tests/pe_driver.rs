@@ -11,6 +11,7 @@
 //! sentinel exit hook.
 
 #![cfg(feature = "xed")]
+#![allow(clippy::unwrap_used, clippy::identity_op, unused_mut, unused_variables)]
 
 use angryier_arch_intel64::register_id;
 use angryier_memory::{ByteValue, LayeredMemory};

@@ -143,7 +143,7 @@ fn seed_x87(state: &mut EngineState, slot: u32, f64_bits: u64) -> Result<(), Box
 fn clear_x87_stack(state: &mut EngineState) -> Result<(), BoxError> {
     let mut empty = [0u8; 10];
     empty[8..].copy_from_slice(&u16::MAX.to_le_bytes());
-    for i in 0..u32::try_from(X87_COUNT).unwrap_or(8) {
+    for i in 0..u32::from(X87_COUNT) {
         state
             .registers
             .write_in_place(register_id::X87_BASE + i, &empty)

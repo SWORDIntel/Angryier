@@ -888,6 +888,27 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
         }
+        IrPrimitive::VecLaneFSqrt => {
+            require_arity(operation, &resolved, 1)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lanes = width_bits / lane_bits;
+            let src = as_u128(resolved[0]);
+            let mut result: u128 = 0;
+            for lane_idx in 0..lanes {
+                let shift = lane_idx * lane_bits;
+                let l = (src >> shift) & bit_mask(lane_bits as u16);
+                let lf = decode_float_lane(lane_bits as u16, l)?;
+                let lane_result = encode_float_lane(lane_bits as u16, lf.sqrt());
+                result |= lane_result << shift;
+            }
+            return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
         IrPrimitive::VecLaneShl | IrPrimitive::VecLaneLShr | IrPrimitive::VecLaneAShr => {
             require_arity(operation, &resolved, 2)?;
             let (width_bits, lane_bits) = match ty {
@@ -2386,6 +2407,65 @@ fn evaluate_primitive<R, M>(
             let mask = bit_mask(width_bits as u16);
             let result = if count >= 16 { 0 } else { (src & mask) >> (count * 8) };
             return Ok(ConcreteValue::from_u128(ty, result, width_bits as u16));
+        }
+        IrPrimitive::VecPermute32 => {
+            require_arity(operation, &resolved, 2)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 32 || width_bits != 256 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let table_bytes = resolved[0].bytes_le();
+            let index_bytes = resolved[1].bytes_le();
+            if table_bytes.len() < 32 || index_bytes.len() < 32 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let mut result_bytes = [0u8; 32];
+            for lane in 0..8 {
+                let idx_offset = lane * 4;
+                let idx = (u32::from_le_bytes(
+                    index_bytes[idx_offset..idx_offset + 4]
+                        .try_into()
+                        .map_err(|_| ConcreteExecutionError::TypeMismatch)?,
+                ) & 7) as usize;
+                let src_offset = idx * 4;
+                result_bytes[idx_offset..idx_offset + 4].copy_from_slice(&table_bytes[src_offset..src_offset + 4]);
+            }
+            return Ok(ConcreteValue::from_bytes_le(ty, &result_bytes));
+        }
+        IrPrimitive::VecLaneSatAddU | IrPrimitive::VecLaneSatSubU | IrPrimitive::VecLaneAvg => {
+            require_arity(operation, &resolved, 2)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            let num_lanes = (width_bits / lane_bits) as usize;
+            let lane_mask = if lane_bits == 128 {
+                u128::MAX
+            } else {
+                (1u128 << lane_bits) - 1
+            };
+            let a = as_u128(resolved[0]);
+            let b = as_u128(resolved[1]);
+            let mut result = 0u128;
+            for i in 0..num_lanes {
+                let av = (a >> (i * lane_bits as usize)) & lane_mask;
+                let bv = (b >> (i * lane_bits as usize)) & lane_mask;
+                let lane_val = match operation {
+                    IrPrimitive::VecLaneSatAddU => (av + bv).min(lane_mask),
+                    IrPrimitive::VecLaneSatSubU => av.saturating_sub(bv),
+                    // PAVGB/PAVGW: (a+b+1)>>1  (round-up average)
+                    _ => (av + bv + 1) >> 1,
+                };
+                result |= (lane_val & lane_mask) << (i * lane_bits as usize);
+            }
+            return Ok(ConcreteValue::from_u128(
+                ty,
+                result & bit_mask(output_bits),
+                output_bits,
+            ));
         }
     };
 

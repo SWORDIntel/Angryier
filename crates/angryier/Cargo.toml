@@ -1,0 +1,21 @@
+[package]
+name = "angryier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stable public library API for the Angryier dual-mode analysis engine"
+
+[dependencies]
+angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
+angryier-arch-xed-ffi = { path = "../angryier-arch-xed-ffi" }
+angryier-expr = { path = "../angryier-expr" }
+angryier-ir = { path = "../angryier-ir" }
+angryier-models = { path = "../angryier-models" }
+angryier-runtime = { path = "../angryier-runtime", features = ["xed", "z3"] }
+angryier-solver = { path = "../angryier-solver" }
+angryier-solver-z3 = { path = "../angryier-solver-z3" }
+angryier-types = { path = "../angryier-types" }
+
+[dev-dependencies]
+angryier-arch = { path = "../angryier-arch" }
+angryier-memory = { path = "../angryier-memory" }

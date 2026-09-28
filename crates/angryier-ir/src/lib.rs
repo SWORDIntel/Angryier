@@ -92,6 +92,7 @@ pub enum IrPrimitive {
     VecLaneFSub,
     VecLaneFMul,
     VecLaneFDiv,
+    VecLaneFSqrt,
     VecLaneShl,
     VecLaneLShr,
     VecLaneAShr,
@@ -127,6 +128,9 @@ pub enum IrPrimitive {
     VecHSub,
     VecLaneSignExtend,
     VecLaneZeroExtend,
+    VecLaneSatAddU,
+    VecLaneSatSubU,
+    VecLaneAvg,
     VecBlendImm,
     VecDotF,
     FCompareFlags,
@@ -144,6 +148,7 @@ pub enum IrPrimitive {
     VecHMinUW,
     VecShiftLeftBytes,
     VecShiftRightBytes,
+    VecPermute32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

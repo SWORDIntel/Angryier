@@ -200,6 +200,9 @@ pub enum VectorOp {
     HMinUW,
     ShiftLeftBytes,
     ShiftRightBytes,
+    SatAddU,
+    SatSubU,
+    Avg,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

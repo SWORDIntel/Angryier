@@ -780,6 +780,7 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                 FloatingOp::Sub => IrPrimitive::VecLaneFSub,
                 FloatingOp::Mul => IrPrimitive::VecLaneFMul,
                 FloatingOp::Div => IrPrimitive::VecLaneFDiv,
+                FloatingOp::Sqrt => IrPrimitive::VecLaneFSqrt,
                 _ => {
                     return Err(IrLoweringError::UnsupportedValue(
                         "unsupported lane-wise float operation",
@@ -821,6 +822,10 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::HMinUW => Ok(IrPrimitive::VecHMinUW),
             VectorOp::ShiftLeftBytes => Ok(IrPrimitive::VecShiftLeftBytes),
             VectorOp::ShiftRightBytes => Ok(IrPrimitive::VecShiftRightBytes),
+            VectorOp::Permute => Ok(IrPrimitive::VecPermute32),
+            VectorOp::SatAddU => Ok(IrPrimitive::VecLaneSatAddU),
+            VectorOp::SatSubU => Ok(IrPrimitive::VecLaneSatSubU),
+            VectorOp::Avg => Ok(IrPrimitive::VecLaneAvg),
             _ => Err(IrLoweringError::UnsupportedValue("non-lane-wise vector operation")),
         },
         SemanticOp::Tile(_) => Err(IrLoweringError::UnsupportedValue("non-primitive operation")),

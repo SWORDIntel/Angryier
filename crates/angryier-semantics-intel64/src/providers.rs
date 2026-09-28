@@ -353,7 +353,11 @@ pub(crate) fn fall_through(
 
 /// ZF and SF shifted flag values shared by every flag-writing helper.
 /// `sign_bit` is the operand's sign position (63 for r64, 31 for r32, ...).
-fn zf_sf(out: &mut dyn SemanticBuilder, result: ValueId, sign_bit: u16) -> Result<(ValueId, ValueId), SemanticError> {
+pub(crate) fn zf_sf(
+    out: &mut dyn SemanticBuilder,
+    result: ValueId,
+    sign_bit: u16,
+) -> Result<(ValueId, ValueId), SemanticError> {
     let zero = out.constant(U64, &0u64.to_le_bytes())?;
     let zf_bit = const_u64(out, u64::from(rflags::ZF_BIT))?;
     let sf_bit = const_u64(out, u64::from(rflags::SF_BIT))?;

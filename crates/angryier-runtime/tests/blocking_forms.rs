@@ -28,7 +28,7 @@ fn test_driver(path: &str, max_steps: usize) {
     let _ = runtime.attach_kernel_pool_model(&mut process, tracker.clone());
 
     let mut steps = 0;
-    for i in 0..max_steps {
+    for _ in 0..max_steps {
         match runtime.step(&mut process) {
             Ok(_) => steps += 1,
             Err(e) => {

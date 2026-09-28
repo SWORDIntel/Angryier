@@ -1,10 +1,11 @@
 # Angryier — Consolidated Roadmap and Architecture-as-Built
 
-> **Single source of truth — 2026-09-24.** This file merges the former phase
+> **Single source of truth — 2026-09-28.** This file merges the former phase
 > tracker (ROADMAP.md), the implementation-status annotations of the
 > `docs/architecture/` set (which froze 2026-09-14 and drifted stale), and the
-> verified workspace state at commit `074156a` (224 commits, `main`). Where an
-> architecture doc's status header disagrees with this file, this file wins.
+> verified workspace state at commit `541d111` plus the 2026-09-28 AVX2/BMI +
+> stable-API round. Where an architecture doc's status header disagrees with
+> this file, this file wins.
 > The architecture docs remain the detailed *design contracts* — invariants,
 > boundaries, identity/trust models — and `Plan.md` remains the immutable
 > Q9–Q54 decision baseline. `docs/status/*.md` are historical.
@@ -148,15 +149,24 @@ suites require system Z3/XED):
   summary hits, matching exit values, and solver-model replay equivalence
   for symbolic arguments; impure callees (any memory operand) never
   summarize and stay exactly correct.
-- **Semantics:** 429 handwritten Intel 64 forms (integer/control-flow,
-  bit-scan/popcount, bit-test family — BT/BTS/BTR/BTC r32/r64 × reg/imm8
-  with mod-width index masking — shifts/rotates complete at r32/r64 with
-  count masking and CF/OF flag modeling, SSE/SSE2/SSSE3/SSE4.1/SSE4.2
-  scalar+packed incl. MOVHLPS/MOVLHPS lane moves and XORPS/XORPD, CRC32,
-  PTEST, byte shifts, port I/O (IN/OUT), RDMSR/WRMSR, memory fences, plus a
-  39-form x87 slice — FLD/FST(P), the FADD/FSUB/FMUL/FDIV families,
-  FUCOMI/FCOMI branch flags, FINIT — with a tag-in-data-plane stack model
-  that fits the existing register file) plus a live declarative generator
+- **Semantics: 1,275 registered providers (2026-09-28 census)** —
+  handwritten Intel 64 forms (integer/control-flow, bit-scan/popcount,
+  bit-test family — BT/BTS/BTR/BTC r32/r64 × reg/imm8 with mod-width index
+  masking — shifts/rotates complete at r32/r64 with count masking and
+  CF/OF flag modeling incl. zero-count preservation, SSE/SSE2/SSSE3/
+  SSE4.1/SSE4.2 scalar+packed incl. MOVHLPS/MOVLHPS lane moves, XORPS/
+  XORPD, CRC32, PTEST, byte shifts, port I/O (IN/OUT), RDMSR/WRMSR,
+  memory fences, BMI1/BMI2 (ANDN/BEXTR/BLSI/BLSMSK/BLSR/BZHI/MULX/RORX/
+  SARX/SHLX/SHRX), AVX DP arithmetic + logic + conversions/blends/
+  permutations/shuffles/unpacks + min/max/sqrt, AVX2 variable shifts and
+  cross-lane permutes (VPERMD/VPERMPS/VPERMQ/VPERMPD/VPERM2I128), x87
+  (FLD/FST(P), FADD/FSUB/FMUL/FDIV, FUCOMI/FCOMI, FINIT, constants,
+  FST st(i)/FNOP, (F)NSTSW m16, FLDCW/FNSTCW via `X87_CW`, FNCLEX/FTST/
+  FXAM/FDECSTP/FINCSTP/FFREE/FRNDINT/FSINCOS/FCMOVcc ×8, transcendentals
+  FSIN/FCOS/FPTAN/FPATAN/F2XM1/FYL2X/FYL2XP1/FSCALE, `X87_SW` status-word
+  model with TOP + C0/C2/C3) plus system forms (RDTSCP, XGETBV, WBINVD,
+  INVD) — with a tag-in-data-plane stack model that fits the existing
+  register file) plus a live declarative generator
   (`angryier-semantics-gen` patterns → `DeclarativeProvider` in
   `angryier-semantics-intel64`, layered over handwritten in a 0x10000+
   rule-id band). **Hardware differential oracle validates 856 integer/SSE +
@@ -223,12 +233,14 @@ suites require system Z3/XED):
 
 - Broad ISA form mapping: unmapped instructions fail explicitly as form
   id 0 — real binaries still hit unmapped forms outside the exercised set.
-- x87 executes end-to-end (39 forms wired into the runtime form map with
+- x87 executes end-to-end (47 forms wired into the runtime form map with
   the XED FSTPNCE/FSUB-swap quirks handled; engine-vs-native tests green);
-  x87 status word is modeled as `X87_SW` (0x0211, 16-bit) with TOP arithmetic +
-  FCOM C0/C2/C3, and `FNSTSW AX` (DF E0) is mapped and differential-tested (FSTSW
-  m16 remains unmapped); FST st(i) hits an XED decode quirk; deep `ld.so` emulation
-  replaced by the static-hook approach; AVX/AVX-2/AVX-512 families not yet in the corpus.
+  x87 status word modeled as `X87_SW` (0x0211, 16-bit) with TOP arithmetic +
+  FCOM C0/C2/C3, `FNSTSW AX` (DF E0) mapped and differential-tested,
+  `FSTSW m16` and the full extended/transcendental families closed
+  2026-09-28; deep `ld.so` emulation replaced by the static-hook approach;
+  AVX, AVX2, and BMI1/BMI2 landed 2026-09-28 (AVX-512/VNNI/AVX10/AMX/
+  CET/APX remain the open expansion track).
 - The concolic fast path is faster than full symbolic (1.5–1.6× release,
   re-measured 2026-09-25) but far from the 5–10× target. Of the five
   previously profiled costs, four are fixed (register-write BTreeMap
@@ -271,7 +283,23 @@ suites require system Z3/XED):
   operands, and per-iteration-effect shapes fall through to stepping;
   flags are not carried (caller-saved). Alpha-equivalence reuse beyond
   the validation-mode tier, cache-admission policy, NUMA-pinned queue
-  groups, and state economics are not implemented.
+  groups, and state economics are not implemented. **Fixed 2026-09-28:**
+  lazy extraction no longer summarizes SimProcedure hook addresses — a
+  kernel-return stub's bare `ret` cell is not a pure function, and
+  collapsing it silently skipped the kernel model on every `call [IAT]`
+  in the symbolic session (regression-tested in
+  `tests/symbolic_kernel_models.rs`).
+- Full-symbolic fidelity on real drivers is not yet concrete-faithful:
+  stepping without a solver backend forks constant branch conditions as
+  if symbolic (phantom paths), and some stack-derived register bindings
+  (Concat/Add expressions) resist arena folding, so solver-gated runs can
+  take directions concrete would not and surface honest
+  UnresolvedAddress/Unmapped errors on deep DriverEntry paths (GVCIDrv64
+  diverges at step ~49; the import-variant vuln fixtures at step ~163).
+  Concolic EXPLORE fidelity on real drivers IS validated (concrete-
+  matching, zero debt, `tests/concolic_driver.rs`); the PROVE leg needs
+  evaluator-side condition folding before dual-mode claims extend to real
+  binaries at depth.
 - Performance work is still measured on synthetic microbenchmarks plus a
   small set of real fixtures, not broad real execution traces.
 
@@ -572,9 +600,9 @@ width and never executed on real decodes) and r32-CL rotates are now
 routed in the runtime form map.**
 **Remaining (superseded by 2026-09-27 rounds):** **x87 status word & FNSTSW AX — CLOSED 2026-09-28** (`X87_SW` 0x0211 modeled with TOP tracking and FCOM C0/C2/C3 updates; FNSTSW AX mapped; oracle-validated with 5 engine tests including 9 native differential cases in `x87_status_word_engine.rs`); **SHL/SHR/SAR r32 count masking — CLOSED 2026-09-27
 (r32 shifts/rotates now mask counts mod width; 318 hardware differential
-cases)**; r32 rotate flag modeling (CF) — CLOSED with the same round; **x87 transcendental family — FULLY IMPLEMENTED & ORACLE-VALIDATED 2026-09-28** (FloatingOp / IrPrimitive extended with Sin, Cos, Tan, Atan2, Exp2, Log2, Scale; concrete interpreter implemented; providers for FSIN, FCOS, FPTAN, FPATAN, F2XM1, FYL2X, FYL2XP1, FSCALE live under rules `0x1400..0x1407` and forms `0x0F40..0x0F47`; 31 engine + hardware differential tests passing in `x87_trans_engine.rs`); **r64-CL OF — CLOSED 2026-09-28** (zero-count flag preservation across shift/rotate families; RCL/RCR r64 imm8+CL OF modeling; count-aware `write_rotate_flags_width_count` everywhere; 492 cases matched hardware byte-for-byte in `shift_differential.rs`); **AVX double-precision vector & scalar arithmetic + packed logic — CLOSED 2026-09-28** (VADDPD, VSUBPD, VMULPD, VDIVPD, VADDSD, VSUBSD, VMULSD, VDIVSD, VANDPD, VANDNPD, VORPD, VXORPD across register and memory forms; 24 providers under rules `0x1410..0x1427` and forms `0x0F48..0x0F5F`; wired into runtime form map and xed-ffi; 48 native differential cases + hardware divide-by-zero probe in `avx_differential.rs`); **AVX conversions, blends, and permutations — CLOSED 2026-09-28** (VCVTSS2SD, VCVTSD2SS, VBLENDPS, VBLENDPD, VBLENDVPS, VBLENDVPD, VPERM2F128, VPERMILPS, VPERMILPD across register and memory forms; 18 providers under rules `0x1428..0x1439` and forms `0x0F60..0x0F71`; wired into runtime form map and xed-ffi; 36 native differential cases in `avx_differential.rs`); **AVX shuffles and unpacks — CLOSED 2026-09-28** (VSHUFPS, VSHUFPD, VUNPCKLPS, VUNPCKHPS, VUNPCKLPD, VUNPCKHPD across register and memory forms; 12 providers under rules `0x143A..0x1445` and forms `0x0F72..0x0F7D`; wired into runtime form map and xed-ffi; 24 native differential cases in `avx_differential.rs`); **x87 extended family + Intel 64 system forms — CLOSED 2026-09-28** (x87 constants FLDPI/FLDL2E/FLDL2T/FLDLG2/FLDLN2, FST st(i) + FNOP, (F)NSTSW m16, FLDCW/FNSTCW m16 backed by the new `X87_CW` control-word register (0x0212), FNCLEX, FTST, FXAM, FDECSTP/FINCSTP, FFREE st(i), FRNDINT, FSINCOS, and the FCMOVcc family ×8 (B/E/BE/U/NB/NE/NBE/NU gated on CF/ZF/PF); system forms RDTSCP, XGETBV, WBINVD, INVD; 30 providers under rules `0x333..0x34C` + `0x550..0x553` and forms `0x0825..0x0842` — corpus now 1,177 registered providers; wired into runtime form map and xed-ffi; 16 engine tests in `x87_extended_engine.rs`; `cflow_differential.rs` extended with Jcc ×15, CMOVcc ×16, SETcc ×16, STC/CLC, OR/SHL r64 and CMP r64/r64 mappings); then
+cases)**; r32 rotate flag modeling (CF) — CLOSED with the same round; **x87 transcendental family — FULLY IMPLEMENTED & ORACLE-VALIDATED 2026-09-28** (FloatingOp / IrPrimitive extended with Sin, Cos, Tan, Atan2, Exp2, Log2, Scale; concrete interpreter implemented; providers for FSIN, FCOS, FPTAN, FPATAN, F2XM1, FYL2X, FYL2XP1, FSCALE live under rules `0x1400..0x1407` and forms `0x0F40..0x0F47`; 31 engine + hardware differential tests passing in `x87_trans_engine.rs`); **r64-CL OF — CLOSED 2026-09-28** (zero-count flag preservation across shift/rotate families; RCL/RCR r64 imm8+CL OF modeling; count-aware `write_rotate_flags_width_count` everywhere; 492 cases matched hardware byte-for-byte in `shift_differential.rs`); **AVX double-precision vector & scalar arithmetic + packed logic — CLOSED 2026-09-28** (VADDPD, VSUBPD, VMULPD, VDIVPD, VADDSD, VSUBSD, VMULSD, VDIVSD, VANDPD, VANDNPD, VORPD, VXORPD across register and memory forms; 24 providers under rules `0x1410..0x1427` and forms `0x0F48..0x0F5F`; wired into runtime form map and xed-ffi; 48 native differential cases + hardware divide-by-zero probe in `avx_differential.rs`); **AVX conversions, blends, and permutations — CLOSED 2026-09-28** (VCVTSS2SD, VCVTSD2SS, VBLENDPS, VBLENDPD, VBLENDVPS, VBLENDVPD, VPERM2F128, VPERMILPS, VPERMILPD across register and memory forms; 18 providers under rules `0x1428..0x1439` and forms `0x0F60..0x0F71`; wired into runtime form map and xed-ffi; 36 native differential cases in `avx_differential.rs`); **AVX shuffles and unpacks — CLOSED 2026-09-28** (VSHUFPS, VSHUFPD, VUNPCKLPS, VUNPCKHPS, VUNPCKLPD, VUNPCKHPD across register and memory forms; 12 providers under rules `0x143A..0x1445` and forms `0x0F72..0x0F7D`; wired into runtime form map and xed-ffi; 24 native differential cases in `avx_differential.rs`); **AVX min/max and square-root family — CLOSED 2026-09-28** (VMINPS, VMAXPS, VMINPD, VMAXPD, VMINSS, VMAXSS, VMINSD, VMAXSD, VSQRTPS, VSQRTPD, VSQRTSS, VSQRTSD across register and memory forms; 24 providers under rules `0x14A0..0x14B7` and forms `0x0880..0x0897`; wired into runtime form map and xed-ffi); **x87 extended family + Intel 64 system forms — CLOSED 2026-09-28** (x87 constants FLDPI/FLDL2E/FLDL2T/FLDLG2/FLDLN2, FST st(i) + FNOP, (F)NSTSW m16, FLDCW/FNSTCW m16 backed by the new `X87_CW` control-word register (0x0212), FNCLEX, FTST, FXAM, FDECSTP/FINCSTP, FFREE st(i), FRNDINT, FSINCOS, and the FCMOVcc family ×8 (B/E/BE/U/NB/NE/NBE/NU gated on CF/ZF/PF); system forms RDTSCP, XGETBV, WBINVD, INVD; 30 providers under rules `0x333..0x34C` + `0x550..0x553` and forms `0x0825..0x0842`; 16 engine tests in `x87_extended_engine.rs`); **BMI1 & BMI2 instruction sets — CLOSED 2026-09-28** (ANDN, BEXTR, BLSI, BLSMSK, BLSR, BZHI, MULX, RORX, SARX, SHLX, SHRX across 32-bit and 64-bit register and memory forms; 44 providers under rules `0x1450..0x147B` and forms `0x0850..0x087B`; wired into runtime form map and xed-ffi; 7 engine test suites passing in `bmi_engine.rs`); **AVX2 variable shifts & cross-lane permutes — CLOSED 2026-09-28** (VPSLLVD, VPSLLVQ, VPSRAVD, VPSRLVD, VPSRLVQ across XMM and YMM register and memory forms [20 forms]; VPERMD, VPERMPS, VPERMQ, VPERMPD, VPERM2I128 across YMM register, memory, and immediate forms [10 forms]; 30 providers under rules `0x14B8..0x14D5` and forms `0x08A0..0x08BD` — corpus now **1,275 registered providers**; `IrPrimitive::VecPermute32` and `VectorOp::Permute` implemented in IR lowerer and concrete interpreter; wired into runtime form map and xed-ffi; 7 engine tests passing in `avx2_engine.rs` and 19 runtime form-map unit tests passing); then
 expand families in order — AVX2 → AVX-512 →
-VNNI/AVX10 → AMX → CET/APX (AES/SHA/BMI interleaved); CI regeneration/diff
+VNNI/AVX10 → AMX → CET/APX (AES/SHA interleaved); CI regeneration/diff
 gate; documented undefined-flag behavior (AF/PF/OF-on-shift-by-zero).
 
 ### Phase 8 (solver reuse, slicing, preemption)
@@ -655,9 +683,7 @@ fuzzing; hybrid-beats-either-alone evidence.
 (`docs/CLI.md`, incl. the full Lua surface); gate measurements packaged
 reproducibly (`scripts/gate_report.sh` → dated md+json reports with
 git/rustc/CPU metadata, shellcheck-clean, per-benchmark timeouts).**
-**Remaining:** stable Rust library API; reproducible release profile
-(thin-LTO block proposed, lands after in-flight agents finish, then gate
-numbers regenerate under it); versioned support manifests; multi-host
+**Remaining:** versioned support manifests; multi-host
 work-unit serialization (seam only); CLI hygiene — largely fixed
 (2026-09-24): `help` lists `run` (feature-aware), strict flag parsing with
 clear errors (unknown flags, missing values, bad registers/argv/find all
@@ -730,8 +756,10 @@ and reproducible correctness/performance reports.
 10. **Polish-and-publish track — round 1 DONE (2026-09-24); release
     profile applied and gate numbers regenerated under it (2026-09-25,
     `reports/gate-report-2026-09-25.*`); CLI hygiene quirks closed
-    (2026-09-25).** Remaining: stable API; the Production 1.0
-    validation report.
+    (2026-09-25); stable library API landed (2026-09-28,
+    `crates/angryier` — `Engine`/`Image`/`RunOptions`/`RunReport`/
+    `Session` mirroring the Lua surface, 4 smoke tests).** Remaining:
+    the Production 1.0 validation report.
 11. **Docs hygiene (this file).** ROADMAP.md is the single status source;
     update it in the same commit as any phase-status change (the
     loop-summarization commits landed after the last ROADMAP edit and
@@ -743,9 +771,11 @@ and reproducible correctness/performance reports.
 
 1. ELF64 + PE32+ loading — **done** (static, dynamic, PE32+).
 2. XED decoding with explicit semantic-support manifest — **done**.
-3. Production semantic coverage for declared families — **partial**
-   (469 handwritten incl. 47 x87 forms executing end-to-end + generator;
-   AVX* pending; oracle live).
+3. Production semantic coverage for declared families — **partial,
+   corpus-clean** (1,275 registered providers incl. x87 extended +
+   transcendentals, AVX, AVX2, BMI1/BMI2 executing end-to-end + generator;
+   the 60k-step driver sweep reports 0 blocked forms; AVX-512/VNNI/AVX10/
+   AMX/CET/APX remain the open expansion track; oracle live).
 4. Dual-mode execution — **done** (concolic + full symbolic, shared
    AngryIR, per-state promotion).
 5. COW state + sparse symbolic memory — **partial** (sparse maps +
@@ -759,7 +789,8 @@ and reproducible correctness/performance reports.
    (3.93×/4 workers concolic; Gate B pack measured in debug and release:
    2.7 KB/state concrete, 11.1 KB/state symbolic, 15.5–20.2× cold/warm
    solver migration, 52 KB contexts; both-mode scaling on real binaries
-   pending).
+   measured 2026-09-27 on GVCIDrv64: concolic 82–88% of concrete,
+   2.6–2.9× full-symbolic).
 10. NUMA-aware placement — **partial** (distance model in `StealCost`;
     pinned queue groups pending).
 11. Solver affinity, timeout, preemption — **done** (timeouts,
@@ -773,8 +804,9 @@ and reproducible correctness/performance reports.
     benchmark-vs-baseline evidence pending).
 13. Reproducible correctness/performance reports — **partial** (bench
     sink + `scripts/gate_report.sh` packaging GATE-A/B/C with environment
-    metadata; comparison-engine harness and release-profile regeneration
-    pending).
+    metadata; thin-LTO release profile applied (codegen-units=1, strip);
+    comparison-engine harness landed (`gate_j_bench.py`, `gate_j_corpus.py`
+    — angr leg aligned per driver; SymQEMU/SymCC leg documented, not run).
 14. Environment model library — **partial but broad** (SimProcedures +
     ~30-syscall model + TLS + dynamic linking; versioned models pending).
 15. Differential semantic testing — **done for the registered corpus**
@@ -831,7 +863,22 @@ GUI, other ISAs, CUDA/OpenCL planning.
   "angr, but Rust and multicore." **Open — the thesis gate.** Reality
   check 2026-09-24: concolic measured at ~0.9× full-symbolic — until the
   fast path is materially faster than full symbolic, the dual-mode speed
-  thesis is unproven. **2026-09-27 update:** concolic-vs-symbolic on a real driver (GVCIDrv64, release) measured at ~2.6-2.9x (dual_mode_driver_bench.rs), with concolic at 82-88% of concrete — progress toward the 5-10x target, symbolic evaluator still the bottleneck. **Census tail closed (0.08% unmapped, 1063 forms):** 8-bit shifts/rotates (CL + memory imm8), ADC/SBB r8/m8, BT/BTS/BTR/BTC memory-imm8, TEST mem32-r32, ADD mem32-r32, MOVSXD r32, FWAIT/CLTS. The deeper 60k-step window then exposed and closed the next walls: INC r16, CMOVO/CMOVNO/CMOVP/CMOVNP r64 (the TmComm/zamguard deep paths), and the pool pre-allocation zone was widened to 64 KiB below the fresh base (libnicm walks pool structures at ptr-0x1002/-0x3002). **The 60,000-step corpus sweep is now fully clean: 66 TERMINATED (incl. zamguard64 at 58,494 steps), 4 BUDGET at 60k (AMD, TmComm, iQVW64, libnicm — long-running init/probe loops, no blocking), 0 blocked of any class, 310k total steps, ~0.3-4.8s per driver in release.** **Use-after-free WRITE detection:** the pool tracker records writes into freed pool pages; the pointer-reassign fixture's stale-pointer write is detected dynamically (uaf=1) — the verdict suite covers double-free AND UAF classes with zero false positives.
+  thesis is unproven. **2026-09-27 update:** concolic-vs-symbolic on a real driver (GVCIDrv64, release) measured at ~2.6-2.9x (dual_mode_driver_bench.rs), with concolic at 82-88% of concrete — progress toward the 5-10x target, symbolic evaluator still the bottleneck. **Census tail closed (0.08% unmapped, 1063 forms):** 8-bit shifts/rotates (CL + memory imm8), ADC/SBB r8/m8, BT/BTS/BTR/BTC memory-imm8, TEST mem32-r32, ADD mem32-r32, MOVSXD r32, FWAIT/CLTS. The deeper 60k-step window then exposed and closed the next walls: INC r16, CMOVO/CMOVNO/CMOVP/CMOVNP r64 (the TmComm/zamguard deep paths), and the pool pre-allocation zone was widened to 64 KiB below the fresh base (libnicm walks pool structures at ptr-0x1002/-0x3002). **The 60,000-step corpus sweep is now fully clean: 66 TERMINATED (incl. zamguard64 at 58,494 steps), 4 BUDGET at 60k (AMD, TmComm, iQVW64, libnicm — long-running init/probe loops, no blocking), 0 blocked of any class, 310k total steps, ~0.3-4.8s per driver in release.** **Use-after-free WRITE detection:** the pool tracker records writes into freed pool pages; the pointer-reassign fixture's stale-pointer write is detected dynamically (uaf=1) — the verdict suite covers double-free AND UAF classes with zero false positives. **2026-09-28 update — aligned multi-driver table (`scripts/gate_j_corpus.py`, same aligned environment both engines, release):**
+
+  | driver | angr insts | angr steps/s | Angryier steps | Angryier steps/s | raw ratio |
+  |---|---|---:|---:|---:|---:|
+  | GVCIDrv64.sys | 193 | 112 | 194 | 18,835 | **168×** |
+  | sandra_x64.sys | 698 | 130 | 691 | 26,992 | **207×** |
+  | double_free_vuln_import_O2.sys | 22 | 108 | 23 | 16,429 | **152×** |
+  | allocsize_overflow_vuln_import_O2.sys | 24 | 114 | 25 | 16,667 | **146×** |
+
+  Both engines execute the same DriverEntry to clean termination on every
+  row (step counts agree ±1 — the synthetic exit hook); angr's rate is
+  VEX-instruction stepping at 108–130 steps/s, Angryier's is the release
+  engine at 16–27k steps/s. Still directional evidence (kernel-model
+  fidelity differs; no SymQEMU/SymCC leg — binary-only concolic engines
+  need a full Windows guest for kernel images), but the workload class is
+  now named and measured on four aligned images rather than one.
 
 ---
 

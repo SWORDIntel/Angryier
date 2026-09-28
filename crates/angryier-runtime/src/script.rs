@@ -161,10 +161,10 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             .load_elf(&bytes)
             .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?
     };
-    if let (Some(tracker), runtime_any) = (&kernel_pool, &runtime) {
-        if let Err(e) = runtime_any.attach_kernel_pool_model(&mut process, tracker.clone()) {
-            return Err(mlua::Error::external(format!("attach_kernel_pool_model: {e:?}")));
-        }
+    if let (Some(tracker), runtime_any) = (&kernel_pool, &runtime)
+        && let Err(e) = runtime_any.attach_kernel_pool_model(&mut process, tracker.clone())
+    {
+        return Err(mlua::Error::external(format!("attach_kernel_pool_model: {e:?}")));
     }
 
     // Entry override: start execution at an arbitrary address instead of
@@ -172,27 +172,27 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // dispatch routines, which DriverEntry never calls — analysis of those
     // paths requires entering the handler directly (under-constrained
     // execution; the caller seeds IRP-shaped symbolic arguments).
-    if let Ok(entry) = opts.get::<i64>("entry") {
-        if entry > 0 {
-            process
-                .write_pc(entry as u64)
-                .map_err(|e| mlua::Error::external(format!("entry override: {e:?}")))?;
-            // Push the exit sentinel: an entry-overridden function has no
-            // caller frame, so its `ret` (and a SimProcedure's pop) would
-            // otherwise read stale stack and land in unmapped padding.
-            let rsp = process
-                .read_register(crate::register_id::GPR_BASE + 4)
-                .map_err(|e| mlua::Error::external(format!("entry rsp: {e:?}")))?;
-            process.state.memory = process
-                .state
-                .memory
-                .load_concrete(rsp.wrapping_sub(8), &crate::EXIT_HOOK.to_le_bytes())
-                .map_err(|e| mlua::Error::external(format!("entry frame: {e:?}")))?;
-            process
-                .write_register(crate::register_id::GPR_BASE + 4, rsp.wrapping_sub(8))
-                .map_err(|e| mlua::Error::external(format!("entry rsp set: {e:?}")))?;
-            process.hook_simproc(crate::EXIT_HOOK, "exit");
-        }
+    if let Ok(entry) = opts.get::<i64>("entry")
+        && entry > 0
+    {
+        process
+            .write_pc(entry as u64)
+            .map_err(|e| mlua::Error::external(format!("entry override: {e:?}")))?;
+        // Push the exit sentinel: an entry-overridden function has no
+        // caller frame, so its `ret` (and a SimProcedure's pop) would
+        // otherwise read stale stack and land in unmapped padding.
+        let rsp = process
+            .read_register(crate::register_id::GPR_BASE + 4)
+            .map_err(|e| mlua::Error::external(format!("entry rsp: {e:?}")))?;
+        process.state.memory = process
+            .state
+            .memory
+            .load_concrete(rsp.wrapping_sub(8), &crate::EXIT_HOOK.to_le_bytes())
+            .map_err(|e| mlua::Error::external(format!("entry frame: {e:?}")))?;
+        process
+            .write_register(crate::register_id::GPR_BASE + 4, rsp.wrapping_sub(8))
+            .map_err(|e| mlua::Error::external(format!("entry rsp set: {e:?}")))?;
+        process.hook_simproc(crate::EXIT_HOOK, "exit");
     }
 
     // Under-constrained memory guard (opt-in, debt-recorded): map the low
@@ -306,7 +306,6 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         .unwrap_or_default();
     let steps = opts.get::<u64>("steps").unwrap_or(DEFAULT_STEPS);
     let max_states = opts.get::<usize>("states").unwrap_or(DEFAULT_MAX_STATES);
-    let use_solver = opts.get::<bool>("solve").unwrap_or(false);
 
     let policy = crate::ExplorationPolicy {
         find,
@@ -535,7 +534,7 @@ mod tests {
 
     #[test]
     fn registers_resolve_by_gpr_name() {
-        let base = angryier_arch_intel64::crate::register_id::GPR_BASE;
+        let base = angryier_arch_intel64::register_id::GPR_BASE;
         assert_eq!(reg_by_name("rdi"), Some(base + 7));
         assert_eq!(reg_by_name("r15"), Some(base + 15));
         assert_eq!(reg_by_name("xmm0"), None);

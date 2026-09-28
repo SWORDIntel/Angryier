@@ -526,6 +526,19 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         target: Address,
         ret_addr: Address,
     ) -> Option<SymbolicStepOutcome> {
+        // SimProcedure hook addresses (kernel-return stubs, the exit hook)
+        // are NOT pure functions: their body is a bare `ret` cell whose
+        // observable effect is the kernel-model dispatch. Summarizing them
+        // would silently skip the model (pool allocations, status results)
+        // and diverge the symbolic path from concrete — real drivers hit
+        // this on every `call [IAT]`. Refuse, so stepping reaches the stub
+        // and the top-of-step SimProcedure dispatch runs the model.
+        let process = self.states.get(index)?;
+        if process.process.simproc_hooks.contains_key(&target)
+            || process.process.simproc_instances.contains_key(&target)
+        {
+            return None;
+        }
         // An empty map does not bail: indirect-only callees never appear in
         // the static pass, so an unseen target earns one lazy extraction.
         if self.function_summaries.is_empty() && self.lazy_summary_targets.contains(&target) {

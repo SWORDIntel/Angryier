@@ -211,9 +211,12 @@ fn x87_program_divergence_matches_native() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn unmapped_x87_forms_fail_explicitly() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    // FNOP/FST st(i) are mapped since the x87 extended round; the BCD
+    // load/store family (FBLD/FBSTP) remains unmapped and must keep
+    // failing closed with form id 0.
     for body in [
-        "_start:\n    fninit\n    fnop\n    hlt\n",
-        "_start:\n    fninit\n    fld1\n    fst %st(1)\n    hlt\n",
+        "_start:\n    fninit\n    fbstp (%rsp)\n    hlt\n",
+        "_start:\n    fninit\n    fbld (%rsp)\n    hlt\n",
     ] {
         let Some((elf, _binary)) = build_binary(body) else {
             eprintln!("skipping: binutils (as/ld) unavailable");

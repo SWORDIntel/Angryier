@@ -9,12 +9,14 @@
 //!
 //! See `docs/status/implementation-plan.md` Phase 4 for the exit gate.
 
+mod bmi;
 mod providers;
 mod providers_ext;
 mod registry;
 mod x87;
 
 pub mod declarative;
+pub use bmi::*;
 pub use declarative::{DeclarativeProvider, GENERATED_RULE_BASE, generated_providers};
 pub use providers::*;
 pub use providers_ext::*;
@@ -1011,6 +1013,126 @@ pub mod forms {
     pub const VUNPCKHPD_YMM_YMM_YMM: u32 = 0x0F7C;
     pub const VUNPCKHPD_YMM_YMM_MEM: u32 = 0x0F7D;
 
+    // AVX min/max and square-root family (0x0880..0x0897).
+    pub const VMINPS_YMM_YMM_YMM: u32 = 0x0880;
+    pub const VMINPS_YMM_YMM_MEM: u32 = 0x0881;
+    pub const VMAXPS_YMM_YMM_YMM: u32 = 0x0882;
+    pub const VMAXPS_YMM_YMM_MEM: u32 = 0x0883;
+    pub const VMINPD_YMM_YMM_YMM: u32 = 0x0884;
+    pub const VMINPD_YMM_YMM_MEM: u32 = 0x0885;
+    pub const VMAXPD_YMM_YMM_YMM: u32 = 0x0886;
+    pub const VMAXPD_YMM_YMM_MEM: u32 = 0x0887;
+    pub const VMINSS_XMM_XMM_XMM: u32 = 0x0888;
+    pub const VMINSS_XMM_XMM_MEM32: u32 = 0x0889;
+    pub const VMAXSS_XMM_XMM_XMM: u32 = 0x088A;
+    pub const VMAXSS_XMM_XMM_MEM32: u32 = 0x088B;
+    pub const VMINSD_XMM_XMM_XMM: u32 = 0x088C;
+    pub const VMINSD_XMM_XMM_MEM64: u32 = 0x088D;
+    pub const VMAXSD_XMM_XMM_XMM: u32 = 0x088E;
+    pub const VMAXSD_XMM_XMM_MEM64: u32 = 0x088F;
+    pub const VSQRTPS_YMM_YMM: u32 = 0x0890;
+    pub const VSQRTPS_YMM_MEM: u32 = 0x0891;
+    pub const VSQRTPD_YMM_YMM: u32 = 0x0892;
+    pub const VSQRTPD_YMM_MEM: u32 = 0x0893;
+    pub const VSQRTSS_XMM_XMM_XMM: u32 = 0x0894;
+    pub const VSQRTSS_XMM_XMM_MEM32: u32 = 0x0895;
+    pub const VSQRTSD_XMM_XMM_XMM: u32 = 0x0896;
+    pub const VSQRTSD_XMM_XMM_MEM64: u32 = 0x0897;
+
+    // AVX2 variable shifts and cross-lane permutes (0x08A0..0x08BD).
+    // Variable shifts (0x08A0..0x08B3):
+    pub const VPSLLVD_XMM_XMM_XMM: u32 = 0x08A0;
+    pub const VPSLLVD_XMM_XMM_MEM128: u32 = 0x08A1;
+    pub const VPSLLVD_YMM_YMM_YMM: u32 = 0x08A2;
+    pub const VPSLLVD_YMM_YMM_MEM256: u32 = 0x08A3;
+    pub const VPSLLVQ_XMM_XMM_XMM: u32 = 0x08A4;
+    pub const VPSLLVQ_XMM_XMM_MEM128: u32 = 0x08A5;
+    pub const VPSLLVQ_YMM_YMM_YMM: u32 = 0x08A6;
+    pub const VPSLLVQ_YMM_YMM_MEM256: u32 = 0x08A7;
+    pub const VPSRAVD_XMM_XMM_XMM: u32 = 0x08A8;
+    pub const VPSRAVD_XMM_XMM_MEM128: u32 = 0x08A9;
+    pub const VPSRAVD_YMM_YMM_YMM: u32 = 0x08AA;
+    pub const VPSRAVD_YMM_YMM_MEM256: u32 = 0x08AB;
+    pub const VPSRLVD_XMM_XMM_XMM: u32 = 0x08AC;
+    pub const VPSRLVD_XMM_XMM_MEM128: u32 = 0x08AD;
+    pub const VPSRLVD_YMM_YMM_YMM: u32 = 0x08AE;
+    pub const VPSRLVD_YMM_YMM_MEM256: u32 = 0x08AF;
+    pub const VPSRLVQ_XMM_XMM_XMM: u32 = 0x08B0;
+    pub const VPSRLVQ_XMM_XMM_MEM128: u32 = 0x08B1;
+    pub const VPSRLVQ_YMM_YMM_YMM: u32 = 0x08B2;
+    pub const VPSRLVQ_YMM_YMM_MEM256: u32 = 0x08B3;
+
+    // Cross-lane permutes (0x08B4..0x08BD):
+    pub const VPERMD_YMM_YMM_YMM: u32 = 0x08B4;
+    pub const VPERMD_YMM_YMM_MEM256: u32 = 0x08B5;
+    pub const VPERMPS_YMM_YMM_YMM: u32 = 0x08B6;
+    pub const VPERMPS_YMM_YMM_MEM256: u32 = 0x08B7;
+    pub const VPERMQ_YMM_YMM_IMM8: u32 = 0x08B8;
+    pub const VPERMQ_YMM_MEM256_IMM8: u32 = 0x08B9;
+    pub const VPERMPD_YMM_YMM_IMM8: u32 = 0x08BA;
+    pub const VPERMPD_YMM_MEM256_IMM8: u32 = 0x08BB;
+    pub const VPERM2I128_YMM_YMM_YMM_IMM8: u32 = 0x08BC;
+    pub const VPERM2I128_YMM_YMM_MEM256_IMM8: u32 = 0x08BD;
+
+    // AVX2 saturating add/sub unsigned + average (0x08BE..0x08C9).
+    pub const VPADDUSB_YMM_YMM_YMM: u32 = 0x08BE;
+    pub const VPADDUSB_YMM_YMM_MEM256: u32 = 0x08BF;
+    pub const VPADDUSW_YMM_YMM_YMM: u32 = 0x08C0;
+    pub const VPADDUSW_YMM_YMM_MEM256: u32 = 0x08C1;
+    pub const VPSUBUSB_YMM_YMM_YMM: u32 = 0x08C2;
+    pub const VPSUBUSB_YMM_YMM_MEM256: u32 = 0x08C3;
+    pub const VPSUBUSW_YMM_YMM_YMM: u32 = 0x08C4;
+    pub const VPSUBUSW_YMM_YMM_MEM256: u32 = 0x08C5;
+    pub const VPAVGB_YMM_YMM_YMM: u32 = 0x08C6;
+    pub const VPAVGB_YMM_YMM_MEM256: u32 = 0x08C7;
+    pub const VPAVGW_YMM_YMM_YMM: u32 = 0x08C8;
+    pub const VPAVGW_YMM_YMM_MEM256: u32 = 0x08C9;
+
+    // AVX2 multiply low dword + multiply high unsigned word (0x08CA..0x08CD).
+    pub const VPMULLD_YMM_YMM_YMM: u32 = 0x08CA;
+    pub const VPMULLD_YMM_YMM_MEM256: u32 = 0x08CB;
+    pub const VPMULHUW_YMM_YMM_YMM: u32 = 0x08CC;
+    pub const VPMULHUW_YMM_YMM_MEM256: u32 = 0x08CD;
+
+    // AVX2 packed absolute value (0x08CE..0x08D3).
+    pub const VPABSB_YMM_YMM: u32 = 0x08CE;
+    pub const VPABSB_YMM_MEM256: u32 = 0x08CF;
+    pub const VPABSW_YMM_YMM: u32 = 0x08D0;
+    pub const VPABSW_YMM_MEM256: u32 = 0x08D1;
+    pub const VPABSD_YMM_YMM: u32 = 0x08D2;
+    pub const VPABSD_YMM_MEM256: u32 = 0x08D3;
+
+    // AVX2 packed sign (0x08D4..0x08D9).
+    pub const VPSIGNB_YMM_YMM_YMM: u32 = 0x08D4;
+    pub const VPSIGNB_YMM_YMM_MEM256: u32 = 0x08D5;
+    pub const VPSIGNW_YMM_YMM_YMM: u32 = 0x08D6;
+    pub const VPSIGNW_YMM_YMM_MEM256: u32 = 0x08D7;
+    pub const VPSIGND_YMM_YMM_YMM: u32 = 0x08D8;
+    pub const VPSIGND_YMM_YMM_MEM256: u32 = 0x08D9;
+
+    // AVX2 pack with saturation (0x08DA..0x08E1).
+    pub const VPACKSSWB_YMM_YMM_YMM: u32 = 0x08DA;
+    pub const VPACKSSWB_YMM_YMM_MEM256: u32 = 0x08DB;
+    pub const VPACKSSDW_YMM_YMM_YMM: u32 = 0x08DC;
+    pub const VPACKSSDW_YMM_YMM_MEM256: u32 = 0x08DD;
+    pub const VPACKUSWB_YMM_YMM_YMM: u32 = 0x08DE;
+    pub const VPACKUSWB_YMM_YMM_MEM256: u32 = 0x08DF;
+    pub const VPACKUSDW_YMM_YMM_YMM: u32 = 0x08E0;
+    pub const VPACKUSDW_YMM_YMM_MEM256: u32 = 0x08E1;
+
+    // AVX2 blend with immediate (0x08E2..0x08E3).
+    pub const VPBLENDD_YMM_YMM_YMM_IMM8: u32 = 0x08E2;
+    pub const VPBLENDD_YMM_YMM_MEM256_IMM8: u32 = 0x08E3;
+
+    // Memory forms for existing VPCMPEQ/VPCMPGT YMM providers (0x08E4..0x08EA).
+    pub const VPCMPEQW_YMM_YMM_MEM256: u32 = 0x08E4;
+    pub const VPCMPEQD_YMM_YMM_MEM256: u32 = 0x08E5;
+    pub const VPCMPEQQ_YMM_YMM_MEM256: u32 = 0x08E6;
+    pub const VPCMPGTB_YMM_YMM_MEM256: u32 = 0x08E7;
+    pub const VPCMPGTW_YMM_YMM_MEM256: u32 = 0x08E8;
+    pub const VPCMPGTD_YMM_YMM_MEM256: u32 = 0x08E9;
+    pub const VPCMPGTQ_YMM_YMM_MEM256: u32 = 0x08EA;
+
     // 16-bit integer arithmetic, IMUL, and MOVSXD expansion.
     pub const ADD_R16_IMM16: u32 = 0x0420;
     pub const ADD_R16_IMM8: u32 = 0x0421;
@@ -1351,6 +1473,54 @@ pub mod forms {
     pub const XGETBV: u32 = 0x0840;
     pub const WBINVD: u32 = 0x0841;
     pub const INVD: u32 = 0x0842;
+
+    // BMI1 instructions (0x0850..0x0863)
+    pub const ANDN_R32_R32_R32: u32 = 0x0850;
+    pub const ANDN_R32_R32_MEM32: u32 = 0x0851;
+    pub const ANDN_R64_R64_R64: u32 = 0x0852;
+    pub const ANDN_R64_R64_MEM64: u32 = 0x0853;
+    pub const BEXTR_R32_R32_R32: u32 = 0x0854;
+    pub const BEXTR_R32_MEM32_R32: u32 = 0x0855;
+    pub const BEXTR_R64_R64_R64: u32 = 0x0856;
+    pub const BEXTR_R64_MEM64_R64: u32 = 0x0857;
+    pub const BLSI_R32_R32: u32 = 0x0858;
+    pub const BLSI_R32_MEM32: u32 = 0x0859;
+    pub const BLSI_R64_R64: u32 = 0x085A;
+    pub const BLSI_R64_MEM64: u32 = 0x085B;
+    pub const BLSMSK_R32_R32: u32 = 0x085C;
+    pub const BLSMSK_R32_MEM32: u32 = 0x085D;
+    pub const BLSMSK_R64_R64: u32 = 0x085E;
+    pub const BLSMSK_R64_MEM64: u32 = 0x085F;
+    pub const BLSR_R32_R32: u32 = 0x0860;
+    pub const BLSR_R32_MEM32: u32 = 0x0861;
+    pub const BLSR_R64_R64: u32 = 0x0862;
+    pub const BLSR_R64_MEM64: u32 = 0x0863;
+
+    // BMI2 instructions (0x0864..0x087B)
+    pub const BZHI_R32_R32_R32: u32 = 0x0864;
+    pub const BZHI_R32_MEM32_R32: u32 = 0x0865;
+    pub const BZHI_R64_R64_R64: u32 = 0x0866;
+    pub const BZHI_R64_MEM64_R64: u32 = 0x0867;
+    pub const MULX_R32_R32_R32: u32 = 0x0868;
+    pub const MULX_R32_R32_MEM32: u32 = 0x0869;
+    pub const MULX_R64_R64_R64: u32 = 0x086A;
+    pub const MULX_R64_R64_MEM64: u32 = 0x086B;
+    pub const RORX_R32_R32_IMM8: u32 = 0x086C;
+    pub const RORX_R32_MEM32_IMM8: u32 = 0x086D;
+    pub const RORX_R64_R64_IMM8: u32 = 0x086E;
+    pub const RORX_R64_MEM64_IMM8: u32 = 0x086F;
+    pub const SARX_R32_R32_R32: u32 = 0x0870;
+    pub const SARX_R32_MEM32_R32: u32 = 0x0871;
+    pub const SARX_R64_R64_R64: u32 = 0x0872;
+    pub const SARX_R64_MEM64_R64: u32 = 0x0873;
+    pub const SHLX_R32_R32_R32: u32 = 0x0874;
+    pub const SHLX_R32_MEM32_R32: u32 = 0x0875;
+    pub const SHLX_R64_R64_R64: u32 = 0x0876;
+    pub const SHLX_R64_MEM64_R64: u32 = 0x0877;
+    pub const SHRX_R32_R32_R32: u32 = 0x0878;
+    pub const SHRX_R32_MEM32_R32: u32 = 0x0879;
+    pub const SHRX_R64_R64_R64: u32 = 0x087A;
+    pub const SHRX_R64_MEM64_R64: u32 = 0x087B;
 
     // x87 transcendental family (assigned form ID band: 0x0F40..0x0F7F)
     // Providers are SKIPPED: the IR/interpreter has no sin/cos/tan/atan/exp2/log2

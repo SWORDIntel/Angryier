@@ -15,6 +15,7 @@
 //! differential: summaries on vs summaries off, both to termination.
 
 #![cfg(feature = "xed")]
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

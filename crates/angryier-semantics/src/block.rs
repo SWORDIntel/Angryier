@@ -520,6 +520,9 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::HMinUW => out.byte(39),
                 VectorOp::ShiftLeftBytes => out.byte(40),
                 VectorOp::ShiftRightBytes => out.byte(41),
+                VectorOp::SatAddU => out.byte(42),
+                VectorOp::SatSubU => out.byte(43),
+                VectorOp::Avg => out.byte(44),
             }
         }
         SemanticOp::Tile(op) => {

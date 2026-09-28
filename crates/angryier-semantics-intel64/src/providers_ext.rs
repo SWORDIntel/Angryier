@@ -9447,6 +9447,442 @@ vunpck_ymm!(
     0x1445
 );
 
+// ---------------------------------------------------------------------------
+// AVX min/max and square-root family (rules 0x14A0..0x14B7).
+//
+// Packed YMM forms split into 128-bit halves: the concrete interpreter's
+// VecFMin/VecFMax and VecLaneFSqrt cover exactly 128-bit vectors, so both
+// halves are reduced independently and concatenated back — matching the
+// per-lane x86 semantics.
+// ---------------------------------------------------------------------------
+
+/// `vm{in,ax}p{s,d} ymm, ymm, ymm/m256` — packed float min/max per 128-bit half.
+macro_rules! packed_minmax_ymm {
+    ($name:ident, $form:expr, $half_ty:expr, $full_ty:expr, $vecop:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let left = out.read_operand(1, $full_ty)?;
+                let right = out.read_operand(2, $full_ty)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let left_low = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[left, zero],
+                )?;
+                let left_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[left, high_offset],
+                )?;
+                let right_low = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[right, zero],
+                )?;
+                let right_high = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[right, high_offset],
+                )?;
+                let low = out.emit(SemanticOp::Vector($vecop), $half_ty, &[left_low, right_low])?;
+                let high = out.emit(SemanticOp::Vector($vecop), $half_ty, &[left_high, right_high])?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $full_ty, &[low, high])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_minmax_ymm!(
+    VminpsYmmYmmYmm,
+    forms::VMINPS_YMM_YMM_YMM,
+    F32X4,
+    F32X8,
+    VectorOp::FMin,
+    0x14A0
+);
+packed_minmax_ymm!(
+    VminpsYmmYmmMem,
+    forms::VMINPS_YMM_YMM_MEM,
+    F32X4,
+    F32X8,
+    VectorOp::FMin,
+    0x14A1
+);
+packed_minmax_ymm!(
+    VmaxpsYmmYmmYmm,
+    forms::VMAXPS_YMM_YMM_YMM,
+    F32X4,
+    F32X8,
+    VectorOp::FMax,
+    0x14A2
+);
+packed_minmax_ymm!(
+    VmaxpsYmmYmmMem,
+    forms::VMAXPS_YMM_YMM_MEM,
+    F32X4,
+    F32X8,
+    VectorOp::FMax,
+    0x14A3
+);
+packed_minmax_ymm!(
+    VminpdYmmYmmYmm,
+    forms::VMINPD_YMM_YMM_YMM,
+    F64X2,
+    F64X4,
+    VectorOp::FMin,
+    0x14A4
+);
+packed_minmax_ymm!(
+    VminpdYmmYmmMem,
+    forms::VMINPD_YMM_YMM_MEM,
+    F64X2,
+    F64X4,
+    VectorOp::FMin,
+    0x14A5
+);
+packed_minmax_ymm!(
+    VmaxpdYmmYmmYmm,
+    forms::VMAXPD_YMM_YMM_YMM,
+    F64X2,
+    F64X4,
+    VectorOp::FMax,
+    0x14A6
+);
+packed_minmax_ymm!(
+    VmaxpdYmmYmmMem,
+    forms::VMAXPD_YMM_YMM_MEM,
+    F64X2,
+    F64X4,
+    VectorOp::FMax,
+    0x14A7
+);
+
+/// `vm{in,ax}s{s,d} xmm, xmm, xmm/m` — scalar float min/max on lane 0;
+/// upper lanes copy src1 (VEX three-operand form).
+macro_rules! scalar_minmax_xmm {
+    ($name:ident, $form:expr, $vec_ty:expr, $lane_ty:expr, $rest_ty:expr, $lane_bits:expr, $vecop:expr, $memory:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, $vec_ty)?;
+                let src2 = if $memory {
+                    let scalar = out.read_operand(2, $lane_ty)?;
+                    let zeros = const_typed(out, $rest_ty, 0)?;
+                    out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::Concat),
+                        $vec_ty,
+                        &[scalar, zeros],
+                    )?
+                } else {
+                    out.read_operand(2, $vec_ty)?
+                };
+                let vec = out.emit(SemanticOp::Vector($vecop), $vec_ty, &[src1, src2])?;
+                let zero = const_u64(out, 0)?;
+                let lane_offset = const_u64(out, $lane_bits)?;
+                let low = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $lane_ty,
+                    &[vec, zero],
+                )?;
+                let upper = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $rest_ty,
+                    &[src1, lane_offset],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $vec_ty, &[low, upper])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+scalar_minmax_xmm!(
+    VminssXmmXmmXmm,
+    forms::VMINSS_XMM_XMM_XMM,
+    F32X4,
+    F32,
+    U96,
+    32,
+    VectorOp::FMin,
+    false,
+    0x14A8
+);
+scalar_minmax_xmm!(
+    VminssXmmXmmMem32,
+    forms::VMINSS_XMM_XMM_MEM32,
+    F32X4,
+    F32,
+    U96,
+    32,
+    VectorOp::FMin,
+    true,
+    0x14A9
+);
+scalar_minmax_xmm!(
+    VmaxssXmmXmmXmm,
+    forms::VMAXSS_XMM_XMM_XMM,
+    F32X4,
+    F32,
+    U96,
+    32,
+    VectorOp::FMax,
+    false,
+    0x14AA
+);
+scalar_minmax_xmm!(
+    VmaxssXmmXmmMem32,
+    forms::VMAXSS_XMM_XMM_MEM32,
+    F32X4,
+    F32,
+    U96,
+    32,
+    VectorOp::FMax,
+    true,
+    0x14AB
+);
+scalar_minmax_xmm!(
+    VminsdXmmXmmXmm,
+    forms::VMINSD_XMM_XMM_XMM,
+    F64X2,
+    F64,
+    U64,
+    64,
+    VectorOp::FMin,
+    false,
+    0x14AC
+);
+scalar_minmax_xmm!(
+    VminsdXmmXmmMem64,
+    forms::VMINSD_XMM_XMM_MEM64,
+    F64X2,
+    F64,
+    U64,
+    64,
+    VectorOp::FMin,
+    true,
+    0x14AD
+);
+scalar_minmax_xmm!(
+    VmaxsdXmmXmmXmm,
+    forms::VMAXSD_XMM_XMM_XMM,
+    F64X2,
+    F64,
+    U64,
+    64,
+    VectorOp::FMax,
+    false,
+    0x14AE
+);
+scalar_minmax_xmm!(
+    VmaxsdXmmXmmMem64,
+    forms::VMAXSD_XMM_XMM_MEM64,
+    F64X2,
+    F64,
+    U64,
+    64,
+    VectorOp::FMax,
+    true,
+    0x14AF
+);
+
+/// `vsqrtp{s,d} ymm, ymm/m256` — packed square root per 128-bit half.
+macro_rules! packed_sqrt_ymm {
+    ($name:ident, $form:expr, $half_ty:expr, $full_ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src = out.read_operand(1, $full_ty)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let lo = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[src, zero],
+                )?;
+                let hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[src, high_offset],
+                )?;
+                let lo_sqrt = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Sqrt)),
+                    $half_ty,
+                    &[lo],
+                )?;
+                let hi_sqrt = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat(FloatingOp::Sqrt)),
+                    $half_ty,
+                    &[hi],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    $full_ty,
+                    &[lo_sqrt, hi_sqrt],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_sqrt_ymm!(VsqrtpsYmmYmm, forms::VSQRTPS_YMM_YMM, F32X4, F32X8, 0x14B0);
+packed_sqrt_ymm!(VsqrtpsYmmMem, forms::VSQRTPS_YMM_MEM, F32X4, F32X8, 0x14B1);
+packed_sqrt_ymm!(VsqrtpdYmmYmm, forms::VSQRTPD_YMM_YMM, F64X2, F64X4, 0x14B2);
+packed_sqrt_ymm!(VsqrtpdYmmMem, forms::VSQRTPD_YMM_MEM, F64X2, F64X4, 0x14B3);
+
+/// `vsqrts{s,d} xmm, xmm, xmm/m` — scalar square root of src2 lane 0;
+/// upper lanes copy src1 (VEX three-operand form).
+macro_rules! scalar_sqrt_xmm {
+    ($name:ident, $form:expr, $vec_ty:expr, $lane_ty:expr, $rest_ty:expr, $lane_bits:expr, $memory:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src1 = out.read_operand(1, $vec_ty)?;
+                let right = if $memory {
+                    out.read_operand(2, $lane_ty)?
+                } else {
+                    let src2 = out.read_operand(2, $vec_ty)?;
+                    let zero = const_u64(out, 0)?;
+                    out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::Extract),
+                        $lane_ty,
+                        &[src2, zero],
+                    )?
+                };
+                let root = out.emit(SemanticOp::Float(FloatingOp::Sqrt), $lane_ty, &[right])?;
+                let lane_offset = const_u64(out, $lane_bits)?;
+                let upper = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $rest_ty,
+                    &[src1, lane_offset],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    $vec_ty,
+                    &[root, upper],
+                )?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+scalar_sqrt_xmm!(
+    VsqrtssXmmXmmXmm,
+    forms::VSQRTSS_XMM_XMM_XMM,
+    F32X4,
+    F32,
+    U96,
+    32,
+    false,
+    0x14B4
+);
+scalar_sqrt_xmm!(
+    VsqrtssXmmXmmMem32,
+    forms::VSQRTSS_XMM_XMM_MEM32,
+    F32X4,
+    F32,
+    U96,
+    32,
+    true,
+    0x14B5
+);
+scalar_sqrt_xmm!(
+    VsqrtsdXmmXmmXmm,
+    forms::VSQRTSD_XMM_XMM_XMM,
+    F64X2,
+    F64,
+    U64,
+    64,
+    false,
+    0x14B6
+);
+scalar_sqrt_xmm!(
+    VsqrtsdXmmXmmMem64,
+    forms::VSQRTSD_XMM_XMM_MEM64,
+    F64X2,
+    F64,
+    U64,
+    64,
+    true,
+    0x14B7
+);
+
 /// `vpcmpeqb ymm, ymm, ymm` — per-byte equality mask (0xFF where equal).
 #[derive(Clone, Copy, Debug)]
 pub struct VpcmpeqbYmmYmmYmm;
@@ -13603,3 +14039,843 @@ impl SemanticProvider for Fscale {
         Ok(receipt(0x1407, context))
     }
 }
+
+// ---------------------------------------------------------------------------
+// AVX2 Variable Shifts (0x14B8..0x14CB) & Cross-Lane Permutes (0x14CC..0x14D5)
+// ---------------------------------------------------------------------------
+
+const I32X8: SemanticType = SemanticType::Vector {
+    lanes: 8,
+    lane: ScalarType::BitVec(32),
+};
+
+macro_rules! packed_varshift_xmm {
+    ($name:ident, $form:expr, $op:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let left = out.read_operand(1, $ty)?;
+                let right = out.read_operand(2, $ty)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $ty, &[left, right])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+// 128-bit variable shifts:
+packed_varshift_xmm!(
+    VpsllvdXmmXmmXmm,
+    forms::VPSLLVD_XMM_XMM_XMM,
+    PrimitiveOp::ShiftLeft,
+    I32X4,
+    0x14B8
+);
+packed_varshift_xmm!(
+    VpsllvdXmmXmmMem128,
+    forms::VPSLLVD_XMM_XMM_MEM128,
+    PrimitiveOp::ShiftLeft,
+    I32X4,
+    0x14B9
+);
+packed_varshift_xmm!(
+    VpsllvqXmmXmmXmm,
+    forms::VPSLLVQ_XMM_XMM_XMM,
+    PrimitiveOp::ShiftLeft,
+    I64X2,
+    0x14BC
+);
+packed_varshift_xmm!(
+    VpsllvqXmmXmmMem128,
+    forms::VPSLLVQ_XMM_XMM_MEM128,
+    PrimitiveOp::ShiftLeft,
+    I64X2,
+    0x14BD
+);
+packed_varshift_xmm!(
+    VpsravdXmmXmmXmm,
+    forms::VPSRAVD_XMM_XMM_XMM,
+    PrimitiveOp::ArithmeticShiftRight,
+    I32X4,
+    0x14C0
+);
+packed_varshift_xmm!(
+    VpsravdXmmXmmMem128,
+    forms::VPSRAVD_XMM_XMM_MEM128,
+    PrimitiveOp::ArithmeticShiftRight,
+    I32X4,
+    0x14C1
+);
+packed_varshift_xmm!(
+    VpsrlvdXmmXmmXmm,
+    forms::VPSRLVD_XMM_XMM_XMM,
+    PrimitiveOp::LogicalShiftRight,
+    I32X4,
+    0x14C4
+);
+packed_varshift_xmm!(
+    VpsrlvdXmmXmmMem128,
+    forms::VPSRLVD_XMM_XMM_MEM128,
+    PrimitiveOp::LogicalShiftRight,
+    I32X4,
+    0x14C5
+);
+packed_varshift_xmm!(
+    VpsrlvqXmmXmmXmm,
+    forms::VPSRLVQ_XMM_XMM_XMM,
+    PrimitiveOp::LogicalShiftRight,
+    I64X2,
+    0x14C8
+);
+packed_varshift_xmm!(
+    VpsrlvqXmmXmmMem128,
+    forms::VPSRLVQ_XMM_XMM_MEM128,
+    PrimitiveOp::LogicalShiftRight,
+    I64X2,
+    0x14C9
+);
+
+// 256-bit variable shifts (using packed_int_ymm):
+packed_int_ymm!(
+    VpsllvdYmmYmmYmm,
+    forms::VPSLLVD_YMM_YMM_YMM,
+    PrimitiveOp::ShiftLeft,
+    I32X4,
+    0x14BA
+);
+packed_int_ymm!(
+    VpsllvdYmmYmmMem256,
+    forms::VPSLLVD_YMM_YMM_MEM256,
+    PrimitiveOp::ShiftLeft,
+    I32X4,
+    0x14BB
+);
+packed_int_ymm!(
+    VpsllvqYmmYmmYmm,
+    forms::VPSLLVQ_YMM_YMM_YMM,
+    PrimitiveOp::ShiftLeft,
+    I64X2,
+    0x14BE
+);
+packed_int_ymm!(
+    VpsllvqYmmYmmMem256,
+    forms::VPSLLVQ_YMM_YMM_MEM256,
+    PrimitiveOp::ShiftLeft,
+    I64X2,
+    0x14BF
+);
+packed_int_ymm!(
+    VpsravdYmmYmmYmm,
+    forms::VPSRAVD_YMM_YMM_YMM,
+    PrimitiveOp::ArithmeticShiftRight,
+    I32X4,
+    0x14C2
+);
+packed_int_ymm!(
+    VpsravdYmmYmmMem256,
+    forms::VPSRAVD_YMM_YMM_MEM256,
+    PrimitiveOp::ArithmeticShiftRight,
+    I32X4,
+    0x14C3
+);
+packed_int_ymm!(
+    VpsrlvdYmmYmmYmm,
+    forms::VPSRLVD_YMM_YMM_YMM,
+    PrimitiveOp::LogicalShiftRight,
+    I32X4,
+    0x14C6
+);
+packed_int_ymm!(
+    VpsrlvdYmmYmmMem256,
+    forms::VPSRLVD_YMM_YMM_MEM256,
+    PrimitiveOp::LogicalShiftRight,
+    I32X4,
+    0x14C7
+);
+packed_int_ymm!(
+    VpsrlvqYmmYmmYmm,
+    forms::VPSRLVQ_YMM_YMM_YMM,
+    PrimitiveOp::LogicalShiftRight,
+    I64X2,
+    0x14CA
+);
+packed_int_ymm!(
+    VpsrlvqYmmYmmMem256,
+    forms::VPSRLVQ_YMM_YMM_MEM256,
+    PrimitiveOp::LogicalShiftRight,
+    I64X2,
+    0x14CB
+);
+
+// Cross-lane permutes: VPERMD / VPERMPS
+macro_rules! vpermd_ymm {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let index = out.read_operand(1, I32X8)?;
+                let table = out.read_operand(2, I32X8)?;
+                let result = out.emit(SemanticOp::Vector(VectorOp::Permute), I32X8, &[table, index])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+vpermd_ymm!(VpermdYmmYmmYmm, forms::VPERMD_YMM_YMM_YMM, 0x14CC);
+vpermd_ymm!(VpermdYmmYmmMem256, forms::VPERMD_YMM_YMM_MEM256, 0x14CD);
+vpermd_ymm!(VpermpsYmmYmmYmm, forms::VPERMPS_YMM_YMM_YMM, 0x14CE);
+vpermd_ymm!(VpermpsYmmYmmMem256, forms::VPERMPS_YMM_YMM_MEM256, 0x14CF);
+
+// Cross-lane permutes: VPERMQ / VPERMPD
+macro_rules! vpermq_ymm {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src = out.read_operand(1, U256)?;
+                let imm = insn
+                    .operand(2)
+                    .and_then(|op| match op.kind {
+                        OperandKind::Immediate(imm) => Some(imm.value),
+                        _ => None,
+                    })
+                    .unwrap_or(0) as u8;
+                let zero = const_u64(out, 0)?;
+                let q1_off = const_u64(out, 64)?;
+                let q2_off = const_u64(out, 128)?;
+                let q3_off = const_u64(out, 192)?;
+                let q0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src, zero])?;
+                let q1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src, q1_off])?;
+                let q2 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src, q2_off])?;
+                let q3 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), U64, &[src, q3_off])?;
+                let select_q = |sel: u8| match sel {
+                    0 => q0,
+                    1 => q1,
+                    2 => q2,
+                    _ => q3,
+                };
+                let d0 = select_q(imm & 0x03);
+                let d1 = select_q((imm >> 2) & 0x03);
+                let d2 = select_q((imm >> 4) & 0x03);
+                let d3 = select_q((imm >> 6) & 0x03);
+                let low = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U128, &[d0, d1])?;
+                let high = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U128, &[d2, d3])?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[low, high])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+vpermq_ymm!(VpermqYmmYmmImm8, forms::VPERMQ_YMM_YMM_IMM8, 0x14D0);
+vpermq_ymm!(VpermqYmmMem256Imm8, forms::VPERMQ_YMM_MEM256_IMM8, 0x14D1);
+vpermq_ymm!(VpermpdYmmYmmImm8, forms::VPERMPD_YMM_YMM_IMM8, 0x14D2);
+vpermq_ymm!(VpermpdYmmMem256Imm8, forms::VPERMPD_YMM_MEM256_IMM8, 0x14D3);
+
+vperm2f128!(Vperm2i128YmmYmmYmmImm8, forms::VPERM2I128_YMM_YMM_YMM_IMM8, 0x14D4);
+vperm2f128!(
+    Vperm2i128YmmYmmMem256Imm8,
+    forms::VPERM2I128_YMM_YMM_MEM256_IMM8,
+    0x14D5
+);
+
+// ---------------------------------------------------------------------------
+// AVX2 saturating add/sub unsigned + average (0x08BE..0x08C9)
+// Uses the new VectorOp::SatAddU / SatSubU / Avg variants which map to the
+// VecLaneSatAddU / VecLaneSatSubU / VecLaneAvg IR primitives.
+// ---------------------------------------------------------------------------
+
+/// Macro for 256-bit (YMM) lane-wise saturating/avg vector ops via lo/hi split.
+macro_rules! packed_sat_ymm {
+    ($name:ident, $form:expr, $vop:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let left = out.read_operand(1, U256)?;
+                let right = out.read_operand(2, U256)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let ll = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[left, zero])?;
+                let lh = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $ty,
+                    &[left, high_offset],
+                )?;
+                let rl = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[right, zero])?;
+                let rh = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $ty,
+                    &[right, high_offset],
+                )?;
+                let lo = out.emit(SemanticOp::Vector($vop), $ty, &[ll, rl])?;
+                let hi = out.emit(SemanticOp::Vector($vop), $ty, &[lh, rh])?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[lo, hi])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+// VPADDUSB YMM
+packed_sat_ymm!(
+    VpaddusbymmYmmYmm,
+    forms::VPADDUSB_YMM_YMM_YMM,
+    VectorOp::SatAddU,
+    I8X16,
+    0x14D6
+);
+packed_sat_ymm!(
+    VpaddusbymmYmmMem256,
+    forms::VPADDUSB_YMM_YMM_MEM256,
+    VectorOp::SatAddU,
+    I8X16,
+    0x14D7
+);
+// VPADDUSW YMM
+packed_sat_ymm!(
+    VpadduswYmmYmmYmm,
+    forms::VPADDUSW_YMM_YMM_YMM,
+    VectorOp::SatAddU,
+    I16X8,
+    0x14D8
+);
+packed_sat_ymm!(
+    VpadduswYmmYmmMem256,
+    forms::VPADDUSW_YMM_YMM_MEM256,
+    VectorOp::SatAddU,
+    I16X8,
+    0x14D9
+);
+// VPSUBUSB YMM
+packed_sat_ymm!(
+    VpsubusbymmYmmYmm,
+    forms::VPSUBUSB_YMM_YMM_YMM,
+    VectorOp::SatSubU,
+    I8X16,
+    0x14DA
+);
+packed_sat_ymm!(
+    VpsubusbymmYmmMem256,
+    forms::VPSUBUSB_YMM_YMM_MEM256,
+    VectorOp::SatSubU,
+    I8X16,
+    0x14DB
+);
+// VPSUBUSW YMM
+packed_sat_ymm!(
+    VpsubuswYmmYmmYmm,
+    forms::VPSUBUSW_YMM_YMM_YMM,
+    VectorOp::SatSubU,
+    I16X8,
+    0x14DC
+);
+packed_sat_ymm!(
+    VpsubuswYmmYmmMem256,
+    forms::VPSUBUSW_YMM_YMM_MEM256,
+    VectorOp::SatSubU,
+    I16X8,
+    0x14DD
+);
+// VPAVGB YMM
+packed_sat_ymm!(VpavgbYmmYmmYmm, forms::VPAVGB_YMM_YMM_YMM, VectorOp::Avg, I8X16, 0x14DE);
+packed_sat_ymm!(
+    VpavgbYmmYmmMem256,
+    forms::VPAVGB_YMM_YMM_MEM256,
+    VectorOp::Avg,
+    I8X16,
+    0x14DF
+);
+// VPAVGW YMM
+packed_sat_ymm!(VpavgwYmmYmmYmm, forms::VPAVGW_YMM_YMM_YMM, VectorOp::Avg, I16X8, 0x14E0);
+packed_sat_ymm!(
+    VpavgwYmmYmmMem256,
+    forms::VPAVGW_YMM_YMM_MEM256,
+    VectorOp::Avg,
+    I16X8,
+    0x14E1
+);
+
+// VPMULLD YMM: lane-wise 32-bit multiply (low result), reuse packed_int_ymm macro.
+packed_int_ymm!(
+    VpmulldYmmYmmYmm,
+    forms::VPMULLD_YMM_YMM_YMM,
+    PrimitiveOp::Mul,
+    I32X4,
+    0x14E2
+);
+packed_int_ymm!(
+    VpmulldYmmYmmMem256,
+    forms::VPMULLD_YMM_YMM_MEM256,
+    PrimitiveOp::Mul,
+    I32X4,
+    0x14E3
+);
+// VPMULHUW YMM: high unsigned word multiply, reuse packed_int_ymm with MulHighU.
+packed_int_ymm!(
+    VpmulhuwYmmYmmYmm,
+    forms::VPMULHUW_YMM_YMM_YMM,
+    PrimitiveOp::MulHighU,
+    I16X8,
+    0x14E4
+);
+packed_int_ymm!(
+    VpmulhuwYmmYmmMem256,
+    forms::VPMULHUW_YMM_YMM_MEM256,
+    PrimitiveOp::MulHighU,
+    I16X8,
+    0x14E5
+);
+
+// ---------------------------------------------------------------------------
+// AVX2 packed absolute value (unary YMM). Each macro takes a 2-operand VEX
+// encoding: dst = VPABS* src.  We reuse `packed_unary_lane` logic via a
+// YMM-split variant.
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_unary_ymm {
+    ($name:ident, $form:expr, $op:expr, $ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let src = out.read_operand(1, U256)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let src_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $ty, &[src, zero])?;
+                let src_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $ty,
+                    &[src, high_offset],
+                )?;
+                let lo = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $ty, &[src_lo])?;
+                let hi = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $ty, &[src_hi])?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[lo, hi])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_unary_ymm!(VpabsbYmmYmm, forms::VPABSB_YMM_YMM, PrimitiveOp::Abs, I8X16, 0x14E6);
+packed_unary_ymm!(
+    VpabsbYmmMem256,
+    forms::VPABSB_YMM_MEM256,
+    PrimitiveOp::Abs,
+    I8X16,
+    0x14E7
+);
+packed_unary_ymm!(VpabswYmmYmm, forms::VPABSW_YMM_YMM, PrimitiveOp::Abs, I16X8, 0x14E8);
+packed_unary_ymm!(
+    VpabswYmmMem256,
+    forms::VPABSW_YMM_MEM256,
+    PrimitiveOp::Abs,
+    I16X8,
+    0x14E9
+);
+packed_unary_ymm!(VpabsdYmmYmm, forms::VPABSD_YMM_YMM, PrimitiveOp::Abs, I32X4, 0x14EA);
+packed_unary_ymm!(
+    VpabsdYmmMem256,
+    forms::VPABSD_YMM_MEM256,
+    PrimitiveOp::Abs,
+    I32X4,
+    0x14EB
+);
+
+// VPSIGN* YMM: 3-operand, use packed_int_ymm with Sign.
+packed_int_ymm!(
+    VpsignbYmmYmmYmm,
+    forms::VPSIGNB_YMM_YMM_YMM,
+    PrimitiveOp::Sign,
+    I8X16,
+    0x14EC
+);
+packed_int_ymm!(
+    VpsignbYmmYmmMem256,
+    forms::VPSIGNB_YMM_YMM_MEM256,
+    PrimitiveOp::Sign,
+    I8X16,
+    0x14ED
+);
+packed_int_ymm!(
+    VpsignwYmmYmmYmm,
+    forms::VPSIGNW_YMM_YMM_YMM,
+    PrimitiveOp::Sign,
+    I16X8,
+    0x14EE
+);
+packed_int_ymm!(
+    VpsignwYmmYmmMem256,
+    forms::VPSIGNW_YMM_YMM_MEM256,
+    PrimitiveOp::Sign,
+    I16X8,
+    0x14EF
+);
+packed_int_ymm!(
+    VpsigndYmmYmmYmm,
+    forms::VPSIGND_YMM_YMM_YMM,
+    PrimitiveOp::Sign,
+    I32X4,
+    0x14F0
+);
+packed_int_ymm!(
+    VpsigndYmmYmmMem256,
+    forms::VPSIGND_YMM_YMM_MEM256,
+    PrimitiveOp::Sign,
+    I32X4,
+    0x14F1
+);
+
+// ---------------------------------------------------------------------------
+// AVX2 VPACK* YMM — pack with saturation.
+// The semantics crate's VectorOp::Pack / PackUnsigned already implement the
+// signed / unsigned saturation; these are the 256-bit (VEX) forms.
+// VPACKSSWB: 2×(8×I16) → 16×I8 signed-saturated.
+// VPACKSSDW: 2×(4×I32) → 8×I16 signed-saturated.
+// VPACKUSWB: 2×(8×I16) → 16×U8 unsigned-saturated.
+// VPACKUSDW: 2×(4×I32) → 8×U16 unsigned-saturated.
+// For YMM the pack operates in two independent 128-bit lanes, so we use the
+// generic packed_sat_ymm pattern re-parameterised with VectorOp::Pack /
+// PackUnsigned directly (not LaneWise).
+// ---------------------------------------------------------------------------
+
+macro_rules! packed_pack_ymm {
+    ($name:ident, $form:expr, $vop:expr, $src_ty:expr, $dst_ty:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                // VEX VPACKSSWB reads dst from operand 1, src from operand 2.
+                let left = out.read_operand(1, U256)?;
+                let right = out.read_operand(2, U256)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let ll = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $src_ty,
+                    &[left, zero],
+                )?;
+                let lh = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $src_ty,
+                    &[left, high_offset],
+                )?;
+                let rl = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $src_ty,
+                    &[right, zero],
+                )?;
+                let rh = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $src_ty,
+                    &[right, high_offset],
+                )?;
+                let lo = out.emit(SemanticOp::Vector($vop), $dst_ty, &[ll, rl])?;
+                let hi = out.emit(SemanticOp::Vector($vop), $dst_ty, &[lh, rh])?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[lo, hi])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+// Type constants for pack destination types (128-bit) are already defined at top of file.
+
+packed_pack_ymm!(
+    VpacksswbYmmYmmYmm,
+    forms::VPACKSSWB_YMM_YMM_YMM,
+    VectorOp::Pack,
+    I16X8,
+    I8X16,
+    0x14F2
+);
+packed_pack_ymm!(
+    VpacksswbYmmYmmMem256,
+    forms::VPACKSSWB_YMM_YMM_MEM256,
+    VectorOp::Pack,
+    I16X8,
+    I8X16,
+    0x14F3
+);
+packed_pack_ymm!(
+    VpackssdwYmmYmmYmm,
+    forms::VPACKSSDW_YMM_YMM_YMM,
+    VectorOp::Pack,
+    I32X4,
+    I16X8,
+    0x14F4
+);
+packed_pack_ymm!(
+    VpackssdwYmmYmmMem256,
+    forms::VPACKSSDW_YMM_YMM_MEM256,
+    VectorOp::Pack,
+    I32X4,
+    I16X8,
+    0x14F5
+);
+packed_pack_ymm!(
+    VpackuswbYmmYmmYmm,
+    forms::VPACKUSWB_YMM_YMM_YMM,
+    VectorOp::PackUnsigned,
+    I16X8,
+    I8X16,
+    0x14F6
+);
+packed_pack_ymm!(
+    VpackuswbYmmYmmMem256,
+    forms::VPACKUSWB_YMM_YMM_MEM256,
+    VectorOp::PackUnsigned,
+    I16X8,
+    I8X16,
+    0x14F7
+);
+packed_pack_ymm!(
+    VpackusdwYmmYmmYmm,
+    forms::VPACKUSDW_YMM_YMM_YMM,
+    VectorOp::PackUnsigned,
+    I32X4,
+    I16X8,
+    0x14F8
+);
+packed_pack_ymm!(
+    VpackusdwYmmYmmMem256,
+    forms::VPACKUSDW_YMM_YMM_MEM256,
+    VectorOp::PackUnsigned,
+    I32X4,
+    I16X8,
+    0x14F9
+);
+
+// ---------------------------------------------------------------------------
+// VPBLENDD YMM: blend dwords by immediate mask, like VBLENDPS but integer.
+// Uses VectorOp::BlendImm on I32X4 in two 128-bit halves.
+// ---------------------------------------------------------------------------
+
+macro_rules! vpblendd_ymm {
+    ($name:ident, $form:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                // Operand layout: dst(0), src1(1), src2(2), imm8(3)
+                let left = out.read_operand(1, U256)?;
+                let right = out.read_operand(2, U256)?;
+                let imm = out.read_operand(3, U8)?;
+                let zero = const_u64(out, 0)?;
+                let high_offset = const_u64(out, 128)?;
+                let ll = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), I32X4, &[left, zero])?;
+                let lh = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I32X4,
+                    &[left, high_offset],
+                )?;
+                let rl = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), I32X4, &[right, zero])?;
+                let rh = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    I32X4,
+                    &[right, high_offset],
+                )?;
+                // Split imm8 into two nibbles for low/high 128-bit halves.
+                let four = out.constant(U8, &[4])?;
+                let mask_0f = out.constant(U8, &[0x0F])?;
+                let low_nibble = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U8, &[imm, mask_0f])?;
+                let high_nibble = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
+                    U8,
+                    &[imm, four],
+                )?;
+                let lo = out.emit(
+                    SemanticOp::Vector(VectorOp::BlendImm),
+                    I32X4,
+                    &[ll, rl, low_nibble],
+                )?;
+                let hi = out.emit(
+                    SemanticOp::Vector(VectorOp::BlendImm),
+                    I32X4,
+                    &[lh, rh, high_nibble],
+                )?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), U256, &[lo, hi])?;
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+vpblendd_ymm!(VpblenddYmmYmmYmmImm8, forms::VPBLENDD_YMM_YMM_YMM_IMM8, 0x14FA);
+vpblendd_ymm!(VpblenddYmmYmmMem256Imm8, forms::VPBLENDD_YMM_YMM_MEM256_IMM8, 0x14FB);
+
+// ---------------------------------------------------------------------------
+// Memory forms for existing VPCMPEQ/VPCMPGT YMM providers.
+// These use the same macro as the reg-reg forms — just different form ids.
+// ---------------------------------------------------------------------------
+
+packed_int_ymm!(
+    VpcmpeqwYmmYmmMem256,
+    forms::VPCMPEQW_YMM_YMM_MEM256,
+    PrimitiveOp::MaskEq,
+    I16X8,
+    0x1510
+);
+packed_int_ymm!(
+    VpcmpeqdYmmYmmMem256,
+    forms::VPCMPEQD_YMM_YMM_MEM256,
+    PrimitiveOp::MaskEq,
+    I32X4,
+    0x1511
+);
+packed_int_ymm!(
+    VpcmpeqqYmmYmmMem256,
+    forms::VPCMPEQQ_YMM_YMM_MEM256,
+    PrimitiveOp::MaskEq,
+    I64X2,
+    0x1512
+);
+packed_int_ymm!(
+    VpcmpgtbYmmYmmMem256,
+    forms::VPCMPGTB_YMM_YMM_MEM256,
+    PrimitiveOp::MaskSgt,
+    I8X16,
+    0x1513
+);
+packed_int_ymm!(
+    VpcmpgtwYmmYmmMem256,
+    forms::VPCMPGTW_YMM_YMM_MEM256,
+    PrimitiveOp::MaskSgt,
+    I16X8,
+    0x1514
+);
+packed_int_ymm!(
+    VpcmpgtdYmmYmmMem256,
+    forms::VPCMPGTD_YMM_YMM_MEM256,
+    PrimitiveOp::MaskSgt,
+    I32X4,
+    0x1515
+);
+packed_int_ymm!(
+    VpcmpgtqYmmYmmMem256,
+    forms::VPCMPGTQ_YMM_YMM_MEM256,
+    PrimitiveOp::MaskSgt,
+    I64X2,
+    0x1516
+);
