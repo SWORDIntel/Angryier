@@ -1382,6 +1382,42 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VPACKUSDW_YMM_YMM_MEM256),
             _ => None,
         },
+        iclass::XED_ICLASS_VPDPBUSD => match shapes {
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VPDPBUSD_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] => Some(evex_forms::VPDPBUSD_XMM_XMM_MEM128),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VPDPBUSD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] => Some(evex_forms::VPDPBUSD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(evex_forms::VPDPBUSD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(evex_forms::VPDPBUSD_ZMM_ZMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPDPBUSDS => match shapes {
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VPDPBUSDS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] => Some(evex_forms::VPDPBUSDS_XMM_XMM_MEM128),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VPDPBUSDS_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] => Some(evex_forms::VPDPBUSDS_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(evex_forms::VPDPBUSDS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(evex_forms::VPDPBUSDS_ZMM_ZMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPDPWSSD => match shapes {
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VPDPWSSD_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] => Some(evex_forms::VPDPWSSD_XMM_XMM_MEM128),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VPDPWSSD_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] => Some(evex_forms::VPDPWSSD_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(evex_forms::VPDPWSSD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(evex_forms::VPDPWSSD_ZMM_ZMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPDPWSSDS => match shapes {
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VPDPWSSDS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] => Some(evex_forms::VPDPWSSDS_XMM_XMM_MEM128),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VPDPWSSDS_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] => Some(evex_forms::VPDPWSSDS_YMM_YMM_MEM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(evex_forms::VPDPWSSDS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(evex_forms::VPDPWSSDS_ZMM_ZMM_MEM),
+            _ => None,
+        },
         iclass::XED_ICLASS_VPBLENDD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPBLENDD_YMM_YMM_YMM_IMM8),
             [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPBLENDD_YMM_YMM_MEM256_IMM8),
@@ -3076,6 +3112,47 @@ mod tests {
         assert_eq!(mapped(&[0xC4, 0xE1, 0xE4, 0x45, 0xE2])?, Some(evex_forms::KORQ_K_K_K));
         // KNOTQ %k2, %k4 (two-operand form)
         assert_eq!(mapped(&[0xC4, 0xE1, 0xF8, 0x44, 0xE2])?, Some(evex_forms::KNOTQ_K_K));
+        Ok(())
+    }
+
+    #[test]
+    fn maps_vnni_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // All VNNI encodings are EVEX and report [dst, opmask, src1, src2].
+        // vpdpbusd %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0x62, 0xF2, 0x75, 0x28, 0x50, 0xC2])?,
+            Some(evex_forms::VPDPBUSD_YMM_YMM_YMM)
+        );
+        // vpdpbusd (%rax), %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0x62, 0xF2, 0x75, 0x28, 0x50, 0x00])?,
+            Some(evex_forms::VPDPBUSD_YMM_YMM_MEM)
+        );
+        // vpdpbusd %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF2, 0x75, 0x08, 0x50, 0xC2])?,
+            Some(evex_forms::VPDPBUSD_XMM_XMM_XMM)
+        );
+        // vpdpbusd %zmm2, %zmm1, %zmm0{%k1}
+        assert_eq!(
+            mapped(&[0x62, 0xF2, 0x75, 0x49, 0x50, 0xC2])?,
+            Some(evex_forms::VPDPBUSD_ZMM_ZMM_ZMM)
+        );
+        // vpdpbusds %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0x62, 0xF2, 0x75, 0x28, 0x51, 0xC2])?,
+            Some(evex_forms::VPDPBUSDS_YMM_YMM_YMM)
+        );
+        // vpdpwssd %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0x62, 0xF2, 0x75, 0x28, 0x52, 0xC2])?,
+            Some(evex_forms::VPDPWSSD_YMM_YMM_YMM)
+        );
+        // vpdpwssds %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0x62, 0xF2, 0x75, 0x28, 0x53, 0xC2])?,
+            Some(evex_forms::VPDPWSSDS_YMM_YMM_YMM)
+        );
         Ok(())
     }
 }

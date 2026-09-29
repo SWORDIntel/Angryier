@@ -203,6 +203,10 @@ pub enum VectorOp {
     SatAddU,
     SatSubU,
     Avg,
+    /// Four-way unsigned-byte × signed-byte dot product to i32 lanes (VNNI).
+    DotU8S8,
+    /// Signed saturating lane-wise addition.
+    SatAddS,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

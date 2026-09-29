@@ -104,6 +104,33 @@ pub mod forms {
     pub const KXORQ_K_K_K: u32 = 0x1139;
     pub const KNOTQ_K_K: u32 = 0x113A;
     pub const KXNORQ_K_K_K: u32 = 0x113B;
+
+    // AVX-512/AVX VNNI dot-product forms (0x1140..0x1157).
+    // All VNNI encodings are EVEX: [dst, opmask, src1, src2].
+    pub const VPDPBUSD_XMM_XMM_XMM: u32 = 0x1140;
+    pub const VPDPBUSD_XMM_XMM_MEM128: u32 = 0x1141;
+    pub const VPDPBUSD_YMM_YMM_YMM: u32 = 0x1142;
+    pub const VPDPBUSD_YMM_YMM_MEM: u32 = 0x1143;
+    pub const VPDPBUSD_ZMM_ZMM_ZMM: u32 = 0x1144;
+    pub const VPDPBUSD_ZMM_ZMM_MEM: u32 = 0x1145;
+    pub const VPDPBUSDS_XMM_XMM_XMM: u32 = 0x1146;
+    pub const VPDPBUSDS_XMM_XMM_MEM128: u32 = 0x1147;
+    pub const VPDPBUSDS_YMM_YMM_YMM: u32 = 0x1148;
+    pub const VPDPBUSDS_YMM_YMM_MEM: u32 = 0x1149;
+    pub const VPDPBUSDS_ZMM_ZMM_ZMM: u32 = 0x114A;
+    pub const VPDPBUSDS_ZMM_ZMM_MEM: u32 = 0x114B;
+    pub const VPDPWSSD_XMM_XMM_XMM: u32 = 0x114C;
+    pub const VPDPWSSD_XMM_XMM_MEM128: u32 = 0x114D;
+    pub const VPDPWSSD_YMM_YMM_YMM: u32 = 0x114E;
+    pub const VPDPWSSD_YMM_YMM_MEM: u32 = 0x114F;
+    pub const VPDPWSSD_ZMM_ZMM_ZMM: u32 = 0x1150;
+    pub const VPDPWSSD_ZMM_ZMM_MEM: u32 = 0x1151;
+    pub const VPDPWSSDS_XMM_XMM_XMM: u32 = 0x1152;
+    pub const VPDPWSSDS_XMM_XMM_MEM128: u32 = 0x1153;
+    pub const VPDPWSSDS_YMM_YMM_YMM: u32 = 0x1154;
+    pub const VPDPWSSDS_YMM_YMM_MEM: u32 = 0x1155;
+    pub const VPDPWSSDS_ZMM_ZMM_ZMM: u32 = 0x1156;
+    pub const VPDPWSSDS_ZMM_ZMM_MEM: u32 = 0x1157;
 }
 
 const U512: SemanticType = SemanticType::Scalar(ScalarType::BitVec(512));
@@ -138,6 +165,43 @@ const F64X4: SemanticType = SemanticType::Vector {
 const F64X8: SemanticType = SemanticType::Vector {
     lanes: 8,
     lane: ScalarType::Float(FloatFormat::F64),
+};
+
+const I8X16: SemanticType = SemanticType::Vector {
+    lanes: 16,
+    lane: ScalarType::BitVec(8),
+};
+const I8X32: SemanticType = SemanticType::Vector {
+    lanes: 32,
+    lane: ScalarType::BitVec(8),
+};
+const I8X64: SemanticType = SemanticType::Vector {
+    lanes: 64,
+    lane: ScalarType::BitVec(8),
+};
+const I16X8: SemanticType = SemanticType::Vector {
+    lanes: 8,
+    lane: ScalarType::BitVec(16),
+};
+const I16X16: SemanticType = SemanticType::Vector {
+    lanes: 16,
+    lane: ScalarType::BitVec(16),
+};
+const I16X32: SemanticType = SemanticType::Vector {
+    lanes: 32,
+    lane: ScalarType::BitVec(16),
+};
+const I32X4: SemanticType = SemanticType::Vector {
+    lanes: 4,
+    lane: ScalarType::BitVec(32),
+};
+const I32X8: SemanticType = SemanticType::Vector {
+    lanes: 8,
+    lane: ScalarType::BitVec(32),
+};
+const I32X16: SemanticType = SemanticType::Vector {
+    lanes: 16,
+    lane: ScalarType::BitVec(32),
 };
 
 fn const_u64(out: &mut dyn SemanticBuilder, val: u64) -> Result<ValueId, SemanticError> {
@@ -949,6 +1013,400 @@ mask_binop!(KxorqKKK, forms::KXORQ_K_K_K, Xor, false, 0x1639);
 mask_knot!(KnotqKK, forms::KNOTQ_K_K, false, 0x163A);
 mask_kxnor!(KxnorqKKK, forms::KXNORQ_K_K_K, false, 0x163B);
 
+// ---------------------------------------------------------------------------
+// VNNI dot-product accumulate providers (VPDPBUSD(S) / VPDPWSSD(S))
+// ---------------------------------------------------------------------------
+//
+// VNNI form: dst += Σ src1[*] * src2[*] grouped by i32 lane.
+// The dot is emitted as a dedicated vector op (DotU8S8 / Madd16), the
+// accumulate as LaneWise(Add) or SatAddS for the saturating variants.
+
+// The lane-wise evaluator handles at most 128-bit vectors, so VNNI ops
+// decompose into 128-bit slices the same way the packed-float providers do.
+macro_rules! vnni_dot {
+    ($name:ident, $form:expr, $dot_op:expr, $acc_op:expr, $out_ty:expr, $mid_ty:expr, $src_ty:expr, $sl_out_ty:expr, $sl_src_ty:expr, $slices:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let dst = out.read_operand(0, $out_ty)?;
+                let (src1_idx, src2_idx) = evex_source_indices(insn);
+                let a = out.read_operand(src1_idx, $src_ty)?;
+                let b = out.read_operand(src2_idx, $src_ty)?;
+                let mut acc_slices: Vec<ValueId> = Vec::with_capacity($slices);
+                for i in 0..$slices {
+                    let off = const_u64(out, (i as u64) * 128)?;
+                    let dst_i = out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::Extract),
+                        $sl_out_ty,
+                        &[dst, off],
+                    )?;
+                    let a_i = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $sl_src_ty, &[a, off])?;
+                    let b_i = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $sl_src_ty, &[b, off])?;
+                    let dot_i = out.emit(SemanticOp::Vector($dot_op), $sl_out_ty, &[a_i, b_i])?;
+                    acc_slices.push(out.emit(SemanticOp::Vector($acc_op), $sl_out_ty, &[dst_i, dot_i])?);
+                }
+                let result = if acc_slices.len() == 1 {
+                    acc_slices[0]
+                } else if acc_slices.len() == 2 {
+                    out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::Concat),
+                        $out_ty,
+                        &[acc_slices[0], acc_slices[1]],
+                    )?
+                } else {
+                    let lo = out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::Concat),
+                        $mid_ty,
+                        &[acc_slices[0], acc_slices[1]],
+                    )?;
+                    let hi = out.emit(
+                        SemanticOp::Primitive(PrimitiveOp::Concat),
+                        $mid_ty,
+                        &[acc_slices[2], acc_slices[3]],
+                    )?;
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $out_ty, &[lo, hi])?
+                };
+                out.write_operand(0, result)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+// VPDPBUSD: u8×i8 dot, non-saturating accumulate
+vnni_dot!(
+    VpdpbusdXmmXmmXmm,
+    forms::VPDPBUSD_XMM_XMM_XMM,
+    VectorOp::DotU8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x1640
+);
+vnni_dot!(
+    VpdpbusdXmmXmmMem128,
+    forms::VPDPBUSD_XMM_XMM_MEM128,
+    VectorOp::DotU8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x1641
+);
+vnni_dot!(
+    VpdpbusdYmmYmmYmm,
+    forms::VPDPBUSD_YMM_YMM_YMM,
+    VectorOp::DotU8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x1642
+);
+vnni_dot!(
+    VpdpbusdYmmYmmMem,
+    forms::VPDPBUSD_YMM_YMM_MEM,
+    VectorOp::DotU8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x1643
+);
+vnni_dot!(
+    VpdpbusdZmmZmmZmm,
+    forms::VPDPBUSD_ZMM_ZMM_ZMM,
+    VectorOp::DotU8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x1644
+);
+vnni_dot!(
+    VpdpbusdZmmZmmMem,
+    forms::VPDPBUSD_ZMM_ZMM_MEM,
+    VectorOp::DotU8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x1645
+);
+// VPDPBUSDS: u8×i8 dot, signed-saturating accumulate
+vnni_dot!(
+    VpdpbusdsXmmXmmXmm,
+    forms::VPDPBUSDS_XMM_XMM_XMM,
+    VectorOp::DotU8S8,
+    VectorOp::SatAddS,
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x1646
+);
+vnni_dot!(
+    VpdpbusdsXmmXmmMem128,
+    forms::VPDPBUSDS_XMM_XMM_MEM128,
+    VectorOp::DotU8S8,
+    VectorOp::SatAddS,
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x1647
+);
+vnni_dot!(
+    VpdpbusdsYmmYmmYmm,
+    forms::VPDPBUSDS_YMM_YMM_YMM,
+    VectorOp::DotU8S8,
+    VectorOp::SatAddS,
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x1648
+);
+vnni_dot!(
+    VpdpbusdsYmmYmmMem,
+    forms::VPDPBUSDS_YMM_YMM_MEM,
+    VectorOp::DotU8S8,
+    VectorOp::SatAddS,
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x1649
+);
+vnni_dot!(
+    VpdpbusdsZmmZmmZmm,
+    forms::VPDPBUSDS_ZMM_ZMM_ZMM,
+    VectorOp::DotU8S8,
+    VectorOp::SatAddS,
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x164A
+);
+vnni_dot!(
+    VpdpbusdsZmmZmmMem,
+    forms::VPDPBUSDS_ZMM_ZMM_MEM,
+    VectorOp::DotU8S8,
+    VectorOp::SatAddS,
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x164B
+);
+// VPDPWSSD: i16 madd, non-saturating accumulate
+vnni_dot!(
+    VpdpwssdXmmXmmXmm,
+    forms::VPDPWSSD_XMM_XMM_XMM,
+    VectorOp::Madd16,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X4,
+    I32X4,
+    I16X8,
+    I32X4,
+    I16X8,
+    1,
+    0x164C
+);
+vnni_dot!(
+    VpdpwssdXmmXmmMem128,
+    forms::VPDPWSSD_XMM_XMM_MEM128,
+    VectorOp::Madd16,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X4,
+    I32X4,
+    I16X8,
+    I32X4,
+    I16X8,
+    1,
+    0x164D
+);
+vnni_dot!(
+    VpdpwssdYmmYmmYmm,
+    forms::VPDPWSSD_YMM_YMM_YMM,
+    VectorOp::Madd16,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X8,
+    I32X8,
+    I16X16,
+    I32X4,
+    I16X8,
+    2,
+    0x164E
+);
+vnni_dot!(
+    VpdpwssdYmmYmmMem,
+    forms::VPDPWSSD_YMM_YMM_MEM,
+    VectorOp::Madd16,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X8,
+    I32X8,
+    I16X16,
+    I32X4,
+    I16X8,
+    2,
+    0x164F
+);
+vnni_dot!(
+    VpdpwssdZmmZmmZmm,
+    forms::VPDPWSSD_ZMM_ZMM_ZMM,
+    VectorOp::Madd16,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X16,
+    I32X8,
+    I16X32,
+    I32X4,
+    I16X8,
+    4,
+    0x1650
+);
+vnni_dot!(
+    VpdpwssdZmmZmmMem,
+    forms::VPDPWSSD_ZMM_ZMM_MEM,
+    VectorOp::Madd16,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X16,
+    I32X8,
+    I16X32,
+    I32X4,
+    I16X8,
+    4,
+    0x1651
+);
+// VPDPWSSDS: i16 madd, signed-saturating accumulate
+vnni_dot!(
+    VpdpwssdsXmmXmmXmm,
+    forms::VPDPWSSDS_XMM_XMM_XMM,
+    VectorOp::Madd16,
+    VectorOp::SatAddS,
+    I32X4,
+    I32X4,
+    I16X8,
+    I32X4,
+    I16X8,
+    1,
+    0x1652
+);
+vnni_dot!(
+    VpdpwssdsXmmXmmMem128,
+    forms::VPDPWSSDS_XMM_XMM_MEM128,
+    VectorOp::Madd16,
+    VectorOp::SatAddS,
+    I32X4,
+    I32X4,
+    I16X8,
+    I32X4,
+    I16X8,
+    1,
+    0x1653
+);
+vnni_dot!(
+    VpdpwssdsYmmYmmYmm,
+    forms::VPDPWSSDS_YMM_YMM_YMM,
+    VectorOp::Madd16,
+    VectorOp::SatAddS,
+    I32X8,
+    I32X8,
+    I16X16,
+    I32X4,
+    I16X8,
+    2,
+    0x1654
+);
+vnni_dot!(
+    VpdpwssdsYmmYmmMem,
+    forms::VPDPWSSDS_YMM_YMM_MEM,
+    VectorOp::Madd16,
+    VectorOp::SatAddS,
+    I32X8,
+    I32X8,
+    I16X16,
+    I32X4,
+    I16X8,
+    2,
+    0x1655
+);
+vnni_dot!(
+    VpdpwssdsZmmZmmZmm,
+    forms::VPDPWSSDS_ZMM_ZMM_ZMM,
+    VectorOp::Madd16,
+    VectorOp::SatAddS,
+    I32X16,
+    I32X8,
+    I16X32,
+    I32X4,
+    I16X8,
+    4,
+    0x1656
+);
+vnni_dot!(
+    VpdpwssdsZmmZmmMem,
+    forms::VPDPWSSDS_ZMM_ZMM_MEM,
+    VectorOp::Madd16,
+    VectorOp::SatAddS,
+    I32X16,
+    I32X8,
+    I16X32,
+    I32X4,
+    I16X8,
+    4,
+    0x1657
+);
+
 /// Returns all AVX-512 and opmask semantic providers.
 pub fn providers() -> Vec<Arc<dyn SemanticProvider>> {
     vec![
@@ -1018,6 +1476,31 @@ pub fn providers() -> Vec<Arc<dyn SemanticProvider>> {
         Arc::new(KxorqKKK),
         Arc::new(KnotqKK),
         Arc::new(KxnorqKKK),
+        // VNNI dot-product accumulate (24)
+        Arc::new(VpdpbusdXmmXmmXmm),
+        Arc::new(VpdpbusdXmmXmmMem128),
+        Arc::new(VpdpbusdYmmYmmYmm),
+        Arc::new(VpdpbusdYmmYmmMem),
+        Arc::new(VpdpbusdZmmZmmZmm),
+        Arc::new(VpdpbusdZmmZmmMem),
+        Arc::new(VpdpbusdsXmmXmmXmm),
+        Arc::new(VpdpbusdsXmmXmmMem128),
+        Arc::new(VpdpbusdsYmmYmmYmm),
+        Arc::new(VpdpbusdsYmmYmmMem),
+        Arc::new(VpdpbusdsZmmZmmZmm),
+        Arc::new(VpdpbusdsZmmZmmMem),
+        Arc::new(VpdpwssdXmmXmmXmm),
+        Arc::new(VpdpwssdXmmXmmMem128),
+        Arc::new(VpdpwssdYmmYmmYmm),
+        Arc::new(VpdpwssdYmmYmmMem),
+        Arc::new(VpdpwssdZmmZmmZmm),
+        Arc::new(VpdpwssdZmmZmmMem),
+        Arc::new(VpdpwssdsXmmXmmXmm),
+        Arc::new(VpdpwssdsXmmXmmMem128),
+        Arc::new(VpdpwssdsYmmYmmYmm),
+        Arc::new(VpdpwssdsYmmYmmMem),
+        Arc::new(VpdpwssdsZmmZmmZmm),
+        Arc::new(VpdpwssdsZmmZmmMem),
     ]
 }
 

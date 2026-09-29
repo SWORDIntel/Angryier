@@ -262,21 +262,21 @@ impl DecodedInstructionView for SyntheticDecoded {
 #[test]
 fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
     let providers = avx512::providers();
-    assert_eq!(providers.len(), 60, "expected 60 AVX-512 providers");
+    assert_eq!(providers.len(), 84, "expected 84 AVX-512 providers");
 
     let mut rule_ids = BTreeSet::new();
     for provider in &providers {
         let rid = provider.rule_id();
         assert!(
-            rid.0 >= 0x2600 && rid.0 <= 0x2650,
-            "rule id {:#x} outside assigned band 0x2600..0x2650",
+            rid.0 >= 0x2600 && rid.0 <= 0x2660,
+            "rule id {:#x} outside assigned band 0x2600..0x2660",
             rid.0
         );
         let inserted = rule_ids.insert(rid.0);
         assert!(inserted, "duplicate rule id {:#x}", rid.0);
     }
 
-    assert_eq!(rule_ids.len(), 60, "all 60 rule IDs must be unique");
+    assert_eq!(rule_ids.len(), 84, "all 84 rule IDs must be unique");
 
     // All form constants in forms module
     let all_forms = [
@@ -340,6 +340,30 @@ fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
         avx512::forms::KXORQ_K_K_K,
         avx512::forms::KNOTQ_K_K,
         avx512::forms::KXNORQ_K_K_K,
+        avx512::forms::VPDPBUSD_XMM_XMM_XMM,
+        avx512::forms::VPDPBUSD_XMM_XMM_MEM128,
+        avx512::forms::VPDPBUSD_YMM_YMM_YMM,
+        avx512::forms::VPDPBUSD_YMM_YMM_MEM,
+        avx512::forms::VPDPBUSD_ZMM_ZMM_ZMM,
+        avx512::forms::VPDPBUSD_ZMM_ZMM_MEM,
+        avx512::forms::VPDPBUSDS_XMM_XMM_XMM,
+        avx512::forms::VPDPBUSDS_XMM_XMM_MEM128,
+        avx512::forms::VPDPBUSDS_YMM_YMM_YMM,
+        avx512::forms::VPDPBUSDS_YMM_YMM_MEM,
+        avx512::forms::VPDPBUSDS_ZMM_ZMM_ZMM,
+        avx512::forms::VPDPBUSDS_ZMM_ZMM_MEM,
+        avx512::forms::VPDPWSSD_XMM_XMM_XMM,
+        avx512::forms::VPDPWSSD_XMM_XMM_MEM128,
+        avx512::forms::VPDPWSSD_YMM_YMM_YMM,
+        avx512::forms::VPDPWSSD_YMM_YMM_MEM,
+        avx512::forms::VPDPWSSD_ZMM_ZMM_ZMM,
+        avx512::forms::VPDPWSSD_ZMM_ZMM_MEM,
+        avx512::forms::VPDPWSSDS_XMM_XMM_XMM,
+        avx512::forms::VPDPWSSDS_XMM_XMM_MEM128,
+        avx512::forms::VPDPWSSDS_YMM_YMM_YMM,
+        avx512::forms::VPDPWSSDS_YMM_YMM_MEM,
+        avx512::forms::VPDPWSSDS_ZMM_ZMM_ZMM,
+        avx512::forms::VPDPWSSDS_ZMM_ZMM_MEM,
     ];
 
     let mut form_set = BTreeSet::new();
@@ -1304,6 +1328,112 @@ fn test_opmask_logic_qword() -> Result<(), BoxError> {
     })?;
     let k1 = read_k_reg(&s, K1)?;
     assert_eq!(k1, !(val2 ^ val3), "kxnorq");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 8. VNNI Dot-Product Accumulate Engine Tests (VPDPBUSD/VPDPWSSD + saturating)
+// ---------------------------------------------------------------------------
+
+fn vnni_u8s8_dot(a: &[u8; 64], b: &[u8; 64]) -> [i32; 8] {
+    let mut out = [0i32; 8];
+    for (i, lane) in out.iter_mut().enumerate() {
+        let mut acc = 0i32;
+        for j in 0..4 {
+            acc = acc.wrapping_add(a[4 * i + j] as i32 * (b[4 * i + j] as i8 as i32));
+        }
+        *lane = acc;
+    }
+    out
+}
+
+fn vnni_i16_madd(a: &[u8; 64], b: &[u8; 64]) -> [i32; 8] {
+    let mut out = [0i32; 8];
+    for (i, lane) in out.iter_mut().enumerate() {
+        let a0 = i16::from_le_bytes([a[4 * i], a[4 * i + 1]]) as i32;
+        let a1 = i16::from_le_bytes([a[4 * i + 2], a[4 * i + 3]]) as i32;
+        let b0 = i16::from_le_bytes([b[4 * i], b[4 * i + 1]]) as i32;
+        let b1 = i16::from_le_bytes([b[4 * i + 2], b[4 * i + 3]]) as i32;
+        *lane = a0.wrapping_mul(b0).wrapping_add(a1.wrapping_mul(b1));
+    }
+    out
+}
+
+#[test]
+fn test_vnni_dot_products() -> Result<(), BoxError> {
+    let mut left = [0u8; 64];
+    let mut right = [0u8; 64];
+    for i in 0..32 {
+        left[i] = ((i * 7 + 3) & 0xFF) as u8;
+        right[i] = ((i * 13 + 91) & 0xFF) as u8;
+    }
+    let dot_exp = vnni_u8s8_dot(&left, &right);
+    let madd_exp = vnni_i16_madd(&left, &right);
+
+    // vpdpbusd %ymm2, %ymm1, %ymm0 — 62 f2 75 28 50 c2
+    let s = run_engine(EngineCase {
+        code: &[0x62, 0xf2, 0x75, 0x28, 0x50, 0xc2],
+        provider: &avx512::VpdpbusdYmmYmmYmm,
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for (i, &exp) in dot_exp.iter().enumerate() {
+        let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        assert_eq!(got, exp, "vpdpbusd ymm lane {i}");
+    }
+
+    // vpdpbusds %ymm2, %ymm1, %ymm0 — 62 f2 75 28 51 c2 (same value, no saturation at zero dst)
+    let s = run_engine(EngineCase {
+        code: &[0x62, 0xf2, 0x75, 0x28, 0x51, 0xc2],
+        provider: &avx512::VpdpbusdsYmmYmmYmm,
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for (i, &exp) in dot_exp.iter().enumerate() {
+        let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        assert_eq!(got, exp, "vpdpbusds ymm lane {i}");
+    }
+
+    // vpdpwssd %ymm2, %ymm1, %ymm0 — 62 f2 75 28 52 c2
+    let s = run_engine(EngineCase {
+        code: &[0x62, 0xf2, 0x75, 0x28, 0x52, 0xc2],
+        provider: &avx512::VpdpwssdYmmYmmYmm,
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for (i, &exp) in madd_exp.iter().enumerate() {
+        let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        assert_eq!(got, exp, "vpdpwssd ymm lane {i}");
+    }
+
+    // vpdpwssds %ymm2, %ymm1, %ymm0 — 62 f2 75 28 53 c2
+    let s = run_engine(EngineCase {
+        code: &[0x62, 0xf2, 0x75, 0x28, 0x53, 0xc2],
+        provider: &avx512::VpdpwssdsYmmYmmYmm,
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for (i, &exp) in madd_exp.iter().enumerate() {
+        let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        assert_eq!(got, exp, "vpdpwssds ymm lane {i}");
+    }
 
     Ok(())
 }

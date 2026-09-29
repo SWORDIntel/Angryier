@@ -130,6 +130,8 @@ pub enum IrPrimitive {
     VecLaneZeroExtend,
     VecLaneSatAddU,
     VecLaneSatSubU,
+    VecLaneSatAddS,
+    VecDotU8S8,
     VecLaneAvg,
     VecBlendImm,
     VecDotF,

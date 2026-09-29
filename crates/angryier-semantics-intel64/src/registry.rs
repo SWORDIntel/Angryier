@@ -1451,7 +1451,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1380] = [
+const ALL_FORMS: [u32; 1404] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2845,6 +2845,30 @@ const ALL_FORMS: [u32; 1380] = [
     crate::avx512::forms::KXORQ_K_K_K,
     crate::avx512::forms::KNOTQ_K_K,
     crate::avx512::forms::KXNORQ_K_K_K,
+    crate::avx512::forms::VPDPBUSD_XMM_XMM_XMM,
+    crate::avx512::forms::VPDPBUSD_XMM_XMM_MEM128,
+    crate::avx512::forms::VPDPBUSD_YMM_YMM_YMM,
+    crate::avx512::forms::VPDPBUSD_YMM_YMM_MEM,
+    crate::avx512::forms::VPDPBUSD_ZMM_ZMM_ZMM,
+    crate::avx512::forms::VPDPBUSD_ZMM_ZMM_MEM,
+    crate::avx512::forms::VPDPBUSDS_XMM_XMM_XMM,
+    crate::avx512::forms::VPDPBUSDS_XMM_XMM_MEM128,
+    crate::avx512::forms::VPDPBUSDS_YMM_YMM_YMM,
+    crate::avx512::forms::VPDPBUSDS_YMM_YMM_MEM,
+    crate::avx512::forms::VPDPBUSDS_ZMM_ZMM_ZMM,
+    crate::avx512::forms::VPDPBUSDS_ZMM_ZMM_MEM,
+    crate::avx512::forms::VPDPWSSD_XMM_XMM_XMM,
+    crate::avx512::forms::VPDPWSSD_XMM_XMM_MEM128,
+    crate::avx512::forms::VPDPWSSD_YMM_YMM_YMM,
+    crate::avx512::forms::VPDPWSSD_YMM_YMM_MEM,
+    crate::avx512::forms::VPDPWSSD_ZMM_ZMM_ZMM,
+    crate::avx512::forms::VPDPWSSD_ZMM_ZMM_MEM,
+    crate::avx512::forms::VPDPWSSDS_XMM_XMM_XMM,
+    crate::avx512::forms::VPDPWSSDS_XMM_XMM_MEM128,
+    crate::avx512::forms::VPDPWSSDS_YMM_YMM_YMM,
+    crate::avx512::forms::VPDPWSSDS_YMM_YMM_MEM,
+    crate::avx512::forms::VPDPWSSDS_ZMM_ZMM_ZMM,
+    crate::avx512::forms::VPDPWSSDS_ZMM_ZMM_MEM,
 ];
 
 #[cfg(test)]

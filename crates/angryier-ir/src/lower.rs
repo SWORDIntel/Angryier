@@ -825,6 +825,8 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::Permute => Ok(IrPrimitive::VecPermute32),
             VectorOp::SatAddU => Ok(IrPrimitive::VecLaneSatAddU),
             VectorOp::SatSubU => Ok(IrPrimitive::VecLaneSatSubU),
+            VectorOp::SatAddS => Ok(IrPrimitive::VecLaneSatAddS),
+            VectorOp::DotU8S8 => Ok(IrPrimitive::VecDotU8S8),
             VectorOp::Avg => Ok(IrPrimitive::VecLaneAvg),
             _ => Err(IrLoweringError::UnsupportedValue("non-lane-wise vector operation")),
         },
