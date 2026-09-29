@@ -18,7 +18,7 @@
 use angryier_arch::{DecodedInstruction, Operand, OperandKind, OperandVisibility};
 use angryier_arch_intel64::register_id;
 use angryier_arch_xed_ffi::iclass;
-use angryier_semantics_intel64::forms;
+use angryier_semantics_intel64::{evex_forms, forms};
 
 /// Form id reported for instructions XED can decode but the corpus cannot
 /// execute exactly. No registered corpus form uses this id.
@@ -678,6 +678,54 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_CQO => Some(forms::CQO),
+        iclass::XED_ICLASS_KANDW => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KANDW_K_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KANDNW => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KANDNW_K_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KORW => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KORW_K_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KXORW => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KXORW_K_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KNOTW => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(evex_forms::KNOTW_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KXNORW => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KXNORW_K_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KANDQ => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KANDQ_K_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KANDNQ => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KANDNQ_K_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KORQ => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KORQ_K_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KXORQ => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KXORQ_K_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KNOTQ => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(evex_forms::KNOTQ_K_K),
+            _ => None,
+        },
+        iclass::XED_ICLASS_KXNORQ => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(evex_forms::KXNORQ_K_K_K),
+            _ => None,
+        },
         iclass::XED_ICLASS_LEAVE => Some(forms::LEAVE),
         iclass::XED_ICLASS_STOSB => Some(STOSB_FORM_ID),
         iclass::XED_ICLASS_STOSW => Some(STOSW_FORM_ID),
@@ -879,21 +927,29 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_VADDSS => match shapes {
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VADDSS_XMM_XMM_XMM),
             [Shape::Xmm, Shape::Xmm, Shape::Mem32] => Some(forms::VADDSS_XMM_XMM_MEM32),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VADDSS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem32] => Some(evex_forms::VADDSS_EVEX_XMM_XMM_MEM32),
             _ => None,
         },
         iclass::XED_ICLASS_VSUBSS => match shapes {
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VSUBSS_XMM_XMM_XMM),
             [Shape::Xmm, Shape::Xmm, Shape::Mem32] => Some(forms::VSUBSS_XMM_XMM_MEM32),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VSUBSS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem32] => Some(evex_forms::VSUBSS_EVEX_XMM_XMM_MEM32),
             _ => None,
         },
         iclass::XED_ICLASS_VMULSS => match shapes {
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VMULSS_XMM_XMM_XMM),
             [Shape::Xmm, Shape::Xmm, Shape::Mem32] => Some(forms::VMULSS_XMM_XMM_MEM32),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VMULSS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem32] => Some(evex_forms::VMULSS_EVEX_XMM_XMM_MEM32),
             _ => None,
         },
         iclass::XED_ICLASS_VDIVSS => match shapes {
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VDIVSS_XMM_XMM_XMM),
             [Shape::Xmm, Shape::Xmm, Shape::Mem32] => Some(forms::VDIVSS_XMM_XMM_MEM32),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VDIVSS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem32] => Some(evex_forms::VDIVSS_EVEX_XMM_XMM_MEM32),
             _ => None,
         },
         iclass::XED_ICLASS_VANDPS => match shapes {
@@ -948,21 +1004,29 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_VADDSD => match shapes {
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VADDSD_XMM_XMM_XMM),
             [Shape::Xmm, Shape::Xmm, Shape::Mem64] => Some(forms::VADDSD_XMM_XMM_MEM64),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VADDSD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem64] => Some(evex_forms::VADDSD_EVEX_XMM_XMM_MEM64),
             _ => None,
         },
         iclass::XED_ICLASS_VSUBSD => match shapes {
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VSUBSD_XMM_XMM_XMM),
             [Shape::Xmm, Shape::Xmm, Shape::Mem64] => Some(forms::VSUBSD_XMM_XMM_MEM64),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VSUBSD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem64] => Some(evex_forms::VSUBSD_EVEX_XMM_XMM_MEM64),
             _ => None,
         },
         iclass::XED_ICLASS_VMULSD => match shapes {
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VMULSD_XMM_XMM_XMM),
             [Shape::Xmm, Shape::Xmm, Shape::Mem64] => Some(forms::VMULSD_XMM_XMM_MEM64),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VMULSD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem64] => Some(evex_forms::VMULSD_EVEX_XMM_XMM_MEM64),
             _ => None,
         },
         iclass::XED_ICLASS_VDIVSD => match shapes {
             [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VDIVSD_XMM_XMM_XMM),
             [Shape::Xmm, Shape::Xmm, Shape::Mem64] => Some(forms::VDIVSD_XMM_XMM_MEM64),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VDIVSD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem64] => Some(evex_forms::VDIVSD_EVEX_XMM_XMM_MEM64),
             _ => None,
         },
         iclass::XED_ICLASS_VANDPD => match shapes {
@@ -2947,6 +3011,71 @@ mod tests {
         );
         // vpcmpeqd (%rax), %ymm1, %ymm0
         assert_eq!(mapped(&[0xC5, 0xF5, 0x76, 0x00])?, Some(forms::VPCMPEQD_YMM_YMM_MEM256));
+        Ok(())
+    }
+
+    #[test]
+    fn maps_avx512_scalar_and_opmask_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // EVEX scalar forms report the opmask as a Reg64 operand:
+        // [Xmm, Reg64(k), Xmm, Xmm] and [Xmm, Reg64(k), Xmm, Mem].
+        // vaddsd %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0xF7, 0x08, 0x58, 0xC2])?,
+            Some(evex_forms::VADDSD_EVEX_XMM_XMM_XMM)
+        );
+        // vaddss %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x76, 0x08, 0x58, 0xC2])?,
+            Some(evex_forms::VADDSS_EVEX_XMM_XMM_XMM)
+        );
+        // vsubsd %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0xF7, 0x08, 0x5C, 0xC2])?,
+            Some(evex_forms::VSUBSD_EVEX_XMM_XMM_XMM)
+        );
+        // vsubss %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x76, 0x08, 0x5C, 0xC2])?,
+            Some(evex_forms::VSUBSS_EVEX_XMM_XMM_XMM)
+        );
+        // vmulsd %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0xF7, 0x08, 0x59, 0xC2])?,
+            Some(evex_forms::VMULSD_EVEX_XMM_XMM_XMM)
+        );
+        // vmulss %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x76, 0x08, 0x59, 0xC2])?,
+            Some(evex_forms::VMULSS_EVEX_XMM_XMM_XMM)
+        );
+        // vdivsd %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0xF7, 0x08, 0x5E, 0xC2])?,
+            Some(evex_forms::VDIVSD_EVEX_XMM_XMM_XMM)
+        );
+        // vdivss %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x76, 0x08, 0x5E, 0xC2])?,
+            Some(evex_forms::VDIVSS_EVEX_XMM_XMM_XMM)
+        );
+        // Opmask word forms (VEX 0F 4x): KANDW %k2, %k3, %k4
+        assert_eq!(mapped(&[0xC5, 0xE4, 0x41, 0xE2])?, Some(evex_forms::KANDW_K_K_K));
+        // KANDNW %k2, %k3, %k4
+        assert_eq!(mapped(&[0xC5, 0xE4, 0x42, 0xE2])?, Some(evex_forms::KANDNW_K_K_K));
+        // KORW %k2, %k3, %k4
+        assert_eq!(mapped(&[0xC5, 0xE4, 0x45, 0xE2])?, Some(evex_forms::KORW_K_K_K));
+        // KXORW %k2, %k3, %k4
+        assert_eq!(mapped(&[0xC5, 0xE4, 0x47, 0xE2])?, Some(evex_forms::KXORW_K_K_K));
+        // KXNORW %k2, %k3, %k4
+        assert_eq!(mapped(&[0xC5, 0xE4, 0x46, 0xE2])?, Some(evex_forms::KXNORW_K_K_K));
+        // KNOTW %k2, %k4 (two-operand form)
+        assert_eq!(mapped(&[0xC5, 0xF8, 0x44, 0xE2])?, Some(evex_forms::KNOTW_K_K));
+        // Opmask qword forms (VEX3 W=1): KANDQ %k2, %k3, %k4
+        assert_eq!(mapped(&[0xC4, 0xE1, 0xE4, 0x41, 0xE2])?, Some(evex_forms::KANDQ_K_K_K));
+        // KORQ %k2, %k3, %k4
+        assert_eq!(mapped(&[0xC4, 0xE1, 0xE4, 0x45, 0xE2])?, Some(evex_forms::KORQ_K_K_K));
+        // KNOTQ %k2, %k4 (two-operand form)
+        assert_eq!(mapped(&[0xC4, 0xE1, 0xF8, 0x44, 0xE2])?, Some(evex_forms::KNOTQ_K_K));
         Ok(())
     }
 }

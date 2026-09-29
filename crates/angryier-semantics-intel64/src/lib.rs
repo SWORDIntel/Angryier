@@ -22,6 +22,7 @@ mod registry;
 mod x87;
 
 pub mod declarative;
+pub use avx512::forms as evex_forms;
 pub use avx512::*;
 pub use bmi::*;
 pub use declarative::{DeclarativeProvider, GENERATED_RULE_BASE, generated_providers};
