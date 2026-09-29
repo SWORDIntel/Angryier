@@ -17,6 +17,7 @@ extern crate self as angryier_semantics_intel64;
 mod amx;
 mod avx512;
 mod bmi;
+pub mod cet;
 mod providers;
 mod providers_ext;
 mod registry;
@@ -1803,6 +1804,20 @@ pub mod forms {
     pub const MOV_R32_SREG: u32 = 0x0F8B;
     pub const ADC_R8_MEM8: u32 = 0x0F8C;
     pub const SBB_R8_MEM8: u32 = 0x0F8D;
+
+    // CET (Control-flow Enforcement Technology) forms
+    pub const INCSSPD_R32: u32 = 0x0F90;
+    pub const INCSSPQ_R64: u32 = 0x0F91;
+    pub const RDSSPD_R32: u32 = 0x0F92;
+    pub const RDSSPQ_R64: u32 = 0x0F93;
+    pub const SAVEPREVSSP: u32 = 0x0F94;
+    pub const RSTORSSP_MEM64: u32 = 0x0F95;
+    pub const SETSSBSY: u32 = 0x0F96;
+    pub const CLRSSBSY_MEM64: u32 = 0x0F97;
+    pub const WRSSD_MEM32_R32: u32 = 0x0F98;
+    pub const WRSSQ_MEM64_R64: u32 = 0x0F99;
+    pub const WRUSSD_MEM32_R32: u32 = 0x0F9A;
+    pub const WRUSSQ_MEM64_R64: u32 = 0x0F9B;
 }
 
 /// RFLAGS bit positions used by the corpus.

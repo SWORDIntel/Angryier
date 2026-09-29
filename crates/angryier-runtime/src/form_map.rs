@@ -2018,6 +2018,49 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Tmm, Shape::Tmm, Shape::Tmm] => Some(amx_forms::TDPFP16PS_TMM_TMM_TMM),
             _ => None,
         },
+        // CET shadow stack instructions
+        iclass::XED_ICLASS_RDSSPD => match shapes {
+            [Shape::Reg32] => Some(forms::RDSSPD_R32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_RDSSPQ => match shapes {
+            [Shape::Reg64] => Some(forms::RDSSPQ_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_INCSSPD => match shapes {
+            [Shape::Reg32] => Some(forms::INCSSPD_R32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_INCSSPQ => match shapes {
+            [Shape::Reg64] => Some(forms::INCSSPQ_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_SAVEPREVSSP => Some(forms::SAVEPREVSSP),
+        iclass::XED_ICLASS_RSTORSSP => match shapes {
+            [Shape::Mem64] => Some(forms::RSTORSSP_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_SETSSBSY => Some(forms::SETSSBSY),
+        iclass::XED_ICLASS_CLRSSBSY => match shapes {
+            [Shape::Mem64] => Some(forms::CLRSSBSY_MEM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_WRSSD => match shapes {
+            [Shape::Mem32, Shape::Reg32] => Some(forms::WRSSD_MEM32_R32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_WRSSQ => match shapes {
+            [Shape::Mem64, Shape::Reg64] => Some(forms::WRSSQ_MEM64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_WRUSSD => match shapes {
+            [Shape::Mem32, Shape::Reg32] => Some(forms::WRUSSD_MEM32_R32),
+            _ => None,
+        },
+        iclass::XED_ICLASS_WRUSSQ => match shapes {
+            [Shape::Mem64, Shape::Reg64] => Some(forms::WRUSSQ_MEM64_R64),
+            _ => None,
+        },
         iclass::XED_ICLASS_BSWAP => match shapes {
             [Shape::Reg64] => Some(forms::BSWAP_R64),
             [Shape::Reg32] => Some(forms::BSWAP_R32),
@@ -2817,6 +2860,40 @@ mod tests {
         assert_eq!(
             mapped(&[0xc4, 0xe2, 0x6b, 0x5c, 0xc1])?,
             Some(amx_forms::TDPFP16PS_TMM_TMM_TMM)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_cet_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // endbr64
+        assert_eq!(mapped(&[0xf3, 0x0f, 0x1e, 0xfa])?, Some(forms::NOP2));
+        // rdsspd %eax
+        assert_eq!(mapped(&[0xf3, 0x0f, 0x1e, 0xc8])?, Some(forms::RDSSPD_R32));
+        // rdsspq %rax
+        assert_eq!(mapped(&[0xf3, 0x48, 0x0f, 0x1e, 0xc8])?, Some(forms::RDSSPQ_R64));
+        // incsspd %eax
+        assert_eq!(mapped(&[0xf3, 0x0f, 0xae, 0xe8])?, Some(forms::INCSSPD_R32));
+        // incsspq %rax
+        assert_eq!(mapped(&[0xf3, 0x48, 0x0f, 0xae, 0xe8])?, Some(forms::INCSSPQ_R64));
+        // saveprevssp
+        assert_eq!(mapped(&[0xf3, 0x0f, 0x01, 0xea])?, Some(forms::SAVEPREVSSP));
+        // rstorssp (%rax)
+        assert_eq!(mapped(&[0xf3, 0x0f, 0x01, 0x28])?, Some(forms::RSTORSSP_MEM64));
+        // setssbsy
+        assert_eq!(mapped(&[0xf3, 0x0f, 0x01, 0xe8])?, Some(forms::SETSSBSY));
+        // clrssbsy (%rax)
+        assert_eq!(mapped(&[0xf3, 0x0f, 0xae, 0x30])?, Some(forms::CLRSSBSY_MEM64));
+        // wrssd %eax, (%rcx)
+        assert_eq!(mapped(&[0x0f, 0x38, 0xf6, 0x01])?, Some(forms::WRSSD_MEM32_R32));
+        // wrssq %rax, (%rcx)
+        assert_eq!(mapped(&[0x48, 0x0f, 0x38, 0xf6, 0x01])?, Some(forms::WRSSQ_MEM64_R64));
+        // wrussd %eax, (%rcx)
+        assert_eq!(mapped(&[0x66, 0x0f, 0x38, 0xf5, 0x01])?, Some(forms::WRUSSD_MEM32_R32));
+        // wrussq %rax, (%rcx)
+        assert_eq!(
+            mapped(&[0x66, 0x48, 0x0f, 0x38, 0xf5, 0x01])?,
+            Some(forms::WRUSSQ_MEM64_R64)
         );
         Ok(())
     }

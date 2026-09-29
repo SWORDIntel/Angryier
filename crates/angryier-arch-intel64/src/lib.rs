@@ -94,6 +94,8 @@ pub mod register_id {
     pub const FS_BASE: RegisterId = RegisterId(0x0022);
     /// GS segment base address.
     pub const GS_BASE: RegisterId = RegisterId(0x0023);
+    /// CET Shadow Stack Pointer (SSP).
+    pub const SSP: RegisterId = RegisterId(0x0024);
     pub const ZMM_BASE: u32 = 0x0100;
     pub const OPMASK_BASE: u32 = 0x0140;
     pub const X87_BASE: u32 = 0x0180;
@@ -115,7 +117,7 @@ pub const OPMASK_COUNT: u8 = 8;
 pub const X87_COUNT: u8 = 8;
 pub const TILE_COUNT: u8 = 8;
 pub const TMM_MAX_BITS: u16 = 8192;
-pub const INTEL64_PARENT_REGISTER_COUNT: usize = 96;
+pub const INTEL64_PARENT_REGISTER_COUNT: usize = 97;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GprViewKind {
@@ -300,6 +302,7 @@ impl Intel64RegisterFile {
         registers.push((register_id::RFLAGS, 64));
         registers.push((register_id::FS_BASE, 64));
         registers.push((register_id::GS_BASE, 64));
+        registers.push((register_id::SSP, 64));
 
         for index in 0..VECTOR_COUNT {
             registers.push((RegisterId(register_id::ZMM_BASE + u32::from(index)), 512));
@@ -337,7 +340,13 @@ impl Intel64RegisterFile {
 pub const fn canonical_parent_width(register: RegisterId) -> Option<u16> {
     let raw = register.0;
 
-    if raw < register_id::GPR_BASE + GPR_COUNT as u32 || raw == register_id::RIP.0 || raw == register_id::RFLAGS.0 {
+    if raw < register_id::GPR_BASE + GPR_COUNT as u32
+        || raw == register_id::RIP.0
+        || raw == register_id::RFLAGS.0
+        || raw == register_id::FS_BASE.0
+        || raw == register_id::GS_BASE.0
+        || raw == register_id::SSP.0
+    {
         Some(64)
     } else if raw >= register_id::ZMM_BASE && raw < register_id::ZMM_BASE + VECTOR_COUNT as u32 {
         Some(512)

@@ -1362,6 +1362,7 @@ impl Intel64CorpusRegistry {
         // encoding-aware form-map tier lands (see form_map.rs ZMM arms).
         providers.extend(crate::avx512::providers());
         providers.extend(crate::amx::providers());
+        providers.extend(crate::cet::providers());
 
         // Build form index from known form IDs. Each provider corresponds to
         // exactly one form. The ALL_FORMS array is hardcoded with unique entries
@@ -1452,7 +1453,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1441] = [
+const ALL_FORMS: [u32; 1453] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2908,6 +2909,19 @@ const ALL_FORMS: [u32; 1441] = [
     crate::amx::forms::TDPBUUD_TMM_TMM_TMM,
     crate::amx::forms::TDPBF16PS_TMM_TMM_TMM,
     crate::amx::forms::TDPFP16PS_TMM_TMM_TMM,
+    // CET forms (12 forms: 0x0F90..0x0F9B)
+    crate::forms::RDSSPD_R32,
+    crate::forms::RDSSPQ_R64,
+    crate::forms::INCSSPD_R32,
+    crate::forms::INCSSPQ_R64,
+    crate::forms::SAVEPREVSSP,
+    crate::forms::RSTORSSP_MEM64,
+    crate::forms::SETSSBSY,
+    crate::forms::CLRSSBSY_MEM64,
+    crate::forms::WRSSD_MEM32_R32,
+    crate::forms::WRSSQ_MEM64_R64,
+    crate::forms::WRUSSD_MEM32_R32,
+    crate::forms::WRUSSQ_MEM64_R64,
 ];
 
 #[cfg(test)]

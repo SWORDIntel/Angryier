@@ -92,6 +92,7 @@ unsafe fn decode_raw(bytes: &[u8], max_bytes: c_uint) -> Result<XedDecodedMetada
 
     xed_decoded_inst_zero(xedd_ptr);
     xed_decoded_inst_set_mode(xedd_ptr, XED_MACHINE_MODE_LONG_64, XED_ADDRESS_WIDTH_64b);
+    xed_sys::xed3_operand_set_cet(xedd_ptr, 1);
 
     let error: xed_error_enum_t = xed_decode(xedd_ptr, bytes.as_ptr(), max_bytes);
     if error != XED_ERROR_NONE {

@@ -149,7 +149,11 @@ pub mod iclass {
         XED_ICLASS_XADD_LOCK, XED_ICLASS_XCHG, XED_ICLASS_XGETBV, XED_ICLASS_XOR, XED_ICLASS_XOR_LOCK,
         XED_ICLASS_XORPD, XED_ICLASS_XORPS,
     };
-    pub use xed_sys::{XED_ICLASS_MOV_CR, XED_ICLASS_MOV_DR};
+    pub use xed_sys::{
+        XED_ICLASS_CLRSSBSY, XED_ICLASS_INCSSPD, XED_ICLASS_INCSSPQ, XED_ICLASS_MOV_CR, XED_ICLASS_MOV_DR,
+        XED_ICLASS_RDSSPD, XED_ICLASS_RDSSPQ, XED_ICLASS_RSTORSSP, XED_ICLASS_SAVEPREVSSP, XED_ICLASS_SETSSBSY,
+        XED_ICLASS_WRSSD, XED_ICLASS_WRSSQ, XED_ICLASS_WRUSSD, XED_ICLASS_WRUSSQ,
+    };
 }
 
 use angryier_arch::{DecodedInstruction, Decoder};
@@ -578,5 +582,69 @@ mod tests {
         // 0x06 is PUSH ES, invalid in 64-bit mode.
         let result = decoder.decode(0x4000, &[0x06]);
         assert_eq!(result, Err(XedAdapterError::DecodeFailed));
+    }
+
+    #[test]
+    fn decode_cet_instructions() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+        let rdsspd = decoder.decode(0x1000, &[0xf3, 0x0f, 0x1e, 0xc8])?;
+        assert_eq!(rdsspd.form_id, iclass::XED_ICLASS_RDSSPD);
+        assert_eq!(rdsspd.operands.len(), 1);
+
+        let rdsspq = decoder.decode(0x1000, &[0xf3, 0x48, 0x0f, 0x1e, 0xc8])?;
+        assert_eq!(rdsspq.form_id, iclass::XED_ICLASS_RDSSPQ);
+        assert_eq!(rdsspq.operands.len(), 1);
+
+        let incsspd = decoder.decode(0x1000, &[0xf3, 0x0f, 0xae, 0xe8])?;
+        assert_eq!(incsspd.form_id, iclass::XED_ICLASS_INCSSPD);
+        assert_eq!(incsspd.operands.len(), 1);
+
+        let incsspq = decoder.decode(0x1000, &[0xf3, 0x48, 0x0f, 0xae, 0xe8])?;
+        assert_eq!(incsspq.form_id, iclass::XED_ICLASS_INCSSPQ);
+        assert_eq!(incsspq.operands.len(), 1);
+
+        let saveprevssp = decoder.decode(0x1000, &[0xf3, 0x0f, 0x01, 0xea])?;
+        assert_eq!(saveprevssp.form_id, iclass::XED_ICLASS_SAVEPREVSSP);
+
+        let rstorssp = decoder.decode(0x1000, &[0xf3, 0x0f, 0x01, 0x28])?;
+        assert_eq!(rstorssp.form_id, iclass::XED_ICLASS_RSTORSSP);
+        assert_eq!(rstorssp.operands.len(), 1);
+
+        let setssbsy = decoder.decode(0x1000, &[0xf3, 0x0f, 0x01, 0xe8])?;
+        assert_eq!(setssbsy.form_id, iclass::XED_ICLASS_SETSSBSY);
+
+        let clrssbsy = decoder.decode(0x1000, &[0xf3, 0x0f, 0xae, 0x30])?;
+        assert_eq!(clrssbsy.form_id, iclass::XED_ICLASS_CLRSSBSY);
+        assert_eq!(clrssbsy.operands.len(), 1);
+
+        let wrssd = decoder.decode(0x1000, &[0x0f, 0x38, 0xf6, 0x01])?;
+        assert_eq!(wrssd.form_id, iclass::XED_ICLASS_WRSSD);
+        assert_eq!(wrssd.operands.len(), 2);
+        assert!(matches!(wrssd.operands[0].kind, OperandKind::Memory(_)));
+        assert!(matches!(wrssd.operands[1].kind, OperandKind::Register(_)));
+        assert_eq!(wrssd.operands[0].width_bits, 32);
+        assert_eq!(wrssd.operands[1].width_bits, 32);
+
+        let wrssq = decoder.decode(0x1000, &[0x48, 0x0f, 0x38, 0xf6, 0x01])?;
+        assert_eq!(wrssq.form_id, iclass::XED_ICLASS_WRSSQ);
+        assert_eq!(wrssq.operands.len(), 2);
+        assert!(matches!(wrssq.operands[0].kind, OperandKind::Memory(_)));
+        assert!(matches!(wrssq.operands[1].kind, OperandKind::Register(_)));
+        assert_eq!(wrssq.operands[0].width_bits, 64);
+        assert_eq!(wrssq.operands[1].width_bits, 64);
+
+        let wrussd = decoder.decode(0x1000, &[0x66, 0x0f, 0x38, 0xf5, 0x01])?;
+        assert_eq!(wrussd.form_id, iclass::XED_ICLASS_WRUSSD);
+        assert_eq!(wrussd.operands.len(), 2);
+        assert!(matches!(wrussd.operands[0].kind, OperandKind::Memory(_)));
+        assert!(matches!(wrussd.operands[1].kind, OperandKind::Register(_)));
+
+        let wrussq = decoder.decode(0x1000, &[0x66, 0x48, 0x0f, 0x38, 0xf5, 0x01])?;
+        assert_eq!(wrussq.form_id, iclass::XED_ICLASS_WRUSSQ);
+        assert_eq!(wrussq.operands.len(), 2);
+        assert!(matches!(wrussq.operands[0].kind, OperandKind::Memory(_)));
+        assert!(matches!(wrussq.operands[1].kind, OperandKind::Register(_)));
+
+        Ok(())
     }
 }
