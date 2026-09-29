@@ -239,8 +239,8 @@ suites require system Z3/XED):
   FCOM C0/C2/C3, `FNSTSW AX` (DF E0) mapped and differential-tested,
   `FSTSW m16` and the full extended/transcendental families closed
   2026-09-28; deep `ld.so` emulation replaced by the static-hook approach;
-  AVX, AVX2, BMI1/BMI2, the AVX-512 first+scalar/opmask slices, core
-  VNNI, and VNNI-INT8 landed 2026-09-28/29 (AVX10/AMX/CET/APX remain the open
+  AVX, AVX2, BMI1/BMI2, the AVX-512 first+scalar/opmask/masking slices, core
+  VNNI, VNNI-INT8, and AMX landed 2026-09-28/29 (AVX10/CET/APX remain the open
   expansion track).
 - The concolic fast path is faster than full symbolic (1.5–1.6× release,
   re-measured 2026-09-25) but far from the 5–10× target. Of the five
@@ -625,8 +625,15 @@ interpreter; `test_vnni_int8_dot_products` and 17 `form_map` tests pass).
 **EVEX opmask semantics landed 2026-09-29** (full merging and zeroing masking
 extracted from XED modifiers and wired across all EVEX providers: packed float,
 packed double, scalar float, packed logic, and VNNI via `MaskMerge`/`MaskZero`
-primitives; verified by `test_evex_merging_masking` and `test_evex_zeroing_masking`;
-AMX tiles remain next in order).
+primitives; verified by `test_evex_merging_masking` and `test_evex_zeroing_masking`).
+**AMX tile ISA slice landed 2026-09-29** (`src/amx.rs`, 13 forms across AMX-TILE,
+AMX-INT8, AMX-BF16, and AMX-FP16: LDTILECFG, STTILECFG, TILERELEASE, TILEZERO,
+TILELOADD, TILELOADDT1, TILESTORED, TDPBSSD, TDPBSUD, TDPBUSD, TDPBUUD, TDPBF16PS,
+TDPFP16PS; `ConcreteStorage` enum supporting boxed tile storage while preserving <=80B
+`ConcreteValue` zero-allocation invariant for scalar/vector hot path; 8192-bit tile loads/stores
+and matrix dot-product engine with IEEE-754 FP16/BF16 FMA; all 8 end-to-end interpreter
+tests passing in `amx_engine.rs`; corpus now **1,441 registered forms**; AVX10/CET/APX
+remain next in order).
 
 ### Phase 8 (solver reuse, slicing, preemption)
 **Status: slicing, exact reuse, UNSAT cores, incremental contexts, interrupt
@@ -795,10 +802,10 @@ and reproducible correctness/performance reports.
 1. ELF64 + PE32+ loading — **done** (static, dynamic, PE32+).
 2. XED decoding with explicit semantic-support manifest — **done**.
 3. Production semantic coverage for declared families — **partial,
-   corpus-clean** (1,275 registered providers incl. x87 extended +
-   transcendentals, AVX, AVX2, BMI1/BMI2 executing end-to-end + generator;
-   the 60k-step driver sweep reports 0 blocked forms; AVX-512/VNNI/AVX10/
-   AMX/CET/APX remain the open expansion track; oracle live).
+   corpus-clean** (1,441 registered forms incl. x87 extended +
+   transcendentals, AVX, AVX2, BMI1/BMI2, AVX-512 vector/scalar/opmask/masking,
+   VNNI/VNNI-INT8, and AMX executing end-to-end; AVX10/CET/APX remain the open
+   expansion track; oracle live).
 4. Dual-mode execution — **done** (concolic + full symbolic, shared
    AngryIR, per-state promotion).
 5. COW state + sparse symbolic memory — **partial** (sparse maps +
