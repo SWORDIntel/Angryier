@@ -51,7 +51,7 @@ const REG_FLAGS: xed_reg_enum_t = 31;
 const REG_EFLAGS: xed_reg_enum_t = 32;
 const REG_RFLAGS: xed_reg_enum_t = 33;
 
-const REG_K0: xed_reg_enum_t = 170; // K0 .. K7 (opmask, 64b)
+pub(crate) const REG_K0: xed_reg_enum_t = 170; // K0 .. K7 (opmask, 64b)
 const REG_TMM0: xed_reg_enum_t = 251; // TMM0 .. TMM7 (AMX tile, 8192b)
 const REG_ST0: xed_reg_enum_t = 260; // ST0 .. ST7 (x87, 80b)
 const REG_XMM0: xed_reg_enum_t = 269; // XMM0 .. XMM31 (128b)

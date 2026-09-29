@@ -205,6 +205,10 @@ pub enum VectorOp {
     Avg,
     /// Four-way unsigned-byte × signed-byte dot product to i32 lanes (VNNI).
     DotU8S8,
+    /// Four-way signed-byte × signed-byte dot product to i32 lanes (VNNI-INT8).
+    DotS8S8,
+    /// Four-way signed-byte × unsigned-byte dot product to i32 lanes (VNNI-INT8).
+    DotS8U8,
     /// Signed saturating lane-wise addition.
     SatAddS,
 }
@@ -266,6 +270,9 @@ pub trait DecodedInstructionView: Debug + Send + Sync {
     fn feature_ids(&self) -> &[FeatureId];
     fn operand_count(&self) -> usize;
     fn operand(&self, index: u8) -> Option<OperandDescriptor>;
+    fn is_zeroing_mask(&self) -> bool {
+        false
+    }
 }
 
 impl DecodedInstructionView for DecodedInstruction {
@@ -287,6 +294,13 @@ impl DecodedInstructionView for DecodedInstruction {
 
     fn operand_count(&self) -> usize {
         self.operands.len()
+    }
+
+    fn is_zeroing_mask(&self) -> bool {
+        self.modifiers
+            .predicate
+            .map(|p| p.mode == angryier_arch::PredicateMode::Zero)
+            .unwrap_or(false)
     }
 
     fn operand(&self, index: u8) -> Option<OperandDescriptor> {

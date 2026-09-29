@@ -131,6 +131,32 @@ pub mod forms {
     pub const VPDPWSSDS_YMM_YMM_MEM: u32 = 0x1155;
     pub const VPDPWSSDS_ZMM_ZMM_ZMM: u32 = 0x1156;
     pub const VPDPWSSDS_ZMM_ZMM_MEM: u32 = 0x1157;
+
+    // AVX VNNI INT8 dot-product forms (0x1158..0x116F).
+    pub const VPDPBSSD_XMM_XMM_XMM: u32 = 0x1158;
+    pub const VPDPBSSD_XMM_XMM_MEM128: u32 = 0x1159;
+    pub const VPDPBSSD_YMM_YMM_YMM: u32 = 0x115A;
+    pub const VPDPBSSD_YMM_YMM_MEM: u32 = 0x115B;
+    pub const VPDPBSSD_ZMM_ZMM_ZMM: u32 = 0x115C;
+    pub const VPDPBSSD_ZMM_ZMM_MEM: u32 = 0x115D;
+    pub const VPDPBSSDS_XMM_XMM_XMM: u32 = 0x115E;
+    pub const VPDPBSSDS_XMM_XMM_MEM128: u32 = 0x115F;
+    pub const VPDPBSSDS_YMM_YMM_YMM: u32 = 0x1160;
+    pub const VPDPBSSDS_YMM_YMM_MEM: u32 = 0x1161;
+    pub const VPDPBSSDS_ZMM_ZMM_ZMM: u32 = 0x1162;
+    pub const VPDPBSSDS_ZMM_ZMM_MEM: u32 = 0x1163;
+    pub const VPDPBSUD_XMM_XMM_XMM: u32 = 0x1164;
+    pub const VPDPBSUD_XMM_XMM_MEM128: u32 = 0x1165;
+    pub const VPDPBSUD_YMM_YMM_YMM: u32 = 0x1166;
+    pub const VPDPBSUD_YMM_YMM_MEM: u32 = 0x1167;
+    pub const VPDPBSUD_ZMM_ZMM_ZMM: u32 = 0x1168;
+    pub const VPDPBSUD_ZMM_ZMM_MEM: u32 = 0x1169;
+    pub const VPDPBSUDS_XMM_XMM_XMM: u32 = 0x116A;
+    pub const VPDPBSUDS_XMM_XMM_MEM128: u32 = 0x116B;
+    pub const VPDPBSUDS_YMM_YMM_YMM: u32 = 0x116C;
+    pub const VPDPBSUDS_YMM_YMM_MEM: u32 = 0x116D;
+    pub const VPDPBSUDS_ZMM_ZMM_ZMM: u32 = 0x116E;
+    pub const VPDPBSUDS_ZMM_ZMM_MEM: u32 = 0x116F;
 }
 
 const U512: SemanticType = SemanticType::Scalar(ScalarType::BitVec(512));
@@ -199,13 +225,75 @@ const I32X8: SemanticType = SemanticType::Vector {
     lanes: 8,
     lane: ScalarType::BitVec(32),
 };
+const U1: SemanticType = SemanticType::Scalar(ScalarType::BitVec(1));
+
 const I32X16: SemanticType = SemanticType::Vector {
     lanes: 16,
     lane: ScalarType::BitVec(32),
 };
+const I64X8: SemanticType = SemanticType::Vector {
+    lanes: 8,
+    lane: ScalarType::BitVec(64),
+};
 
 fn const_u64(out: &mut dyn SemanticBuilder, val: u64) -> Result<ValueId, SemanticError> {
     out.constant(U64, &val.to_le_bytes())
+}
+
+fn const_f32(out: &mut dyn SemanticBuilder, val: f32) -> Result<ValueId, SemanticError> {
+    out.constant(F32, &val.to_le_bytes())
+}
+
+fn const_f64(out: &mut dyn SemanticBuilder, val: f64) -> Result<ValueId, SemanticError> {
+    out.constant(F64, &val.to_le_bytes())
+}
+
+/// Discovers if an EVEX instruction has an opmask register (k0..k7) as operand 1.
+///
+/// Returns `Some(0)` for `k0` (unmasked), `Some(1..=7)` for `k1..k7`, or `None` if
+/// no opmask register is present.
+fn evex_opmask(insn: &dyn DecodedInstructionView) -> Option<u32> {
+    if insn.operand_count() < 4 {
+        return None;
+    }
+    let op = insn.operand(1)?;
+    let angryier_semantics::OperandKind::Register(reg) = op.kind else {
+        return None;
+    };
+    const OPMASK_BASE: u32 = 0x0140;
+    let id = reg.parent.0;
+    if (OPMASK_BASE..=OPMASK_BASE + 7).contains(&id) {
+        Some(id - OPMASK_BASE)
+    } else {
+        None
+    }
+}
+
+/// Applies EVEX opmask semantics (merging or zeroing masking) to a computed vector result.
+fn apply_evex_mask(
+    insn: &dyn DecodedInstructionView,
+    out: &mut dyn SemanticBuilder,
+    dst_ty: SemanticType,
+    old_dst: Option<ValueId>,
+    new_val: ValueId,
+) -> Result<ValueId, SemanticError> {
+    let Some(k) = evex_opmask(insn) else {
+        return Ok(new_val);
+    };
+    if k == 0 {
+        return Ok(new_val);
+    }
+    let mask = out.read_operand(1, U64)?;
+    if insn.is_zeroing_mask() {
+        let dummy = old_dst.unwrap_or(new_val);
+        out.emit(SemanticOp::Vector(VectorOp::MaskZero), dst_ty, &[dummy, new_val, mask])
+    } else {
+        let old = match old_dst {
+            Some(v) => v,
+            None => out.read_operand(0, dst_ty)?,
+        };
+        out.emit(SemanticOp::Vector(VectorOp::MaskMerge), dst_ty, &[old, new_val, mask])
+    }
 }
 
 fn fall_through(out: &mut dyn SemanticBuilder, insn: &dyn DecodedInstructionView) -> Result<(), SemanticError> {
@@ -327,7 +415,8 @@ macro_rules! packed_float_zmm {
                     &[low_256, high_256],
                 )?;
 
-                out.write_operand(0, result)?;
+                let final_res = apply_evex_mask(insn, out, F32X16, None, result)?;
+                out.write_operand(0, final_res)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }
@@ -480,7 +569,8 @@ macro_rules! packed_double_zmm {
                     &[low_256, high_256],
                 )?;
 
-                out.write_operand(0, result)?;
+                let final_res = apply_evex_mask(insn, out, F64X8, None, result)?;
+                out.write_operand(0, final_res)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }
@@ -574,12 +664,45 @@ macro_rules! scalar_float_evex {
                     out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32, &[src2, zero])?
                 };
                 let low = out.emit(SemanticOp::Float($op), F32, &[left, right])?;
+                let final_low = if let Some(k) = evex_opmask(insn) {
+                    if k >= 1 {
+                        let mask = out.read_operand(1, U64)?;
+                        let one = const_u64(out, 1)?;
+                        let mask_bit0 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[mask, one])?;
+                        let cond = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[mask_bit0, one])?;
+                        if insn.is_zeroing_mask() {
+                            let zero_f = const_f32(out, 0.0)?;
+                            out.emit(
+                                SemanticOp::Primitive(PrimitiveOp::Select),
+                                F32,
+                                &[cond, low, zero_f],
+                            )?
+                        } else {
+                            let old_dst = out.read_operand(0, F32X4)?;
+                            let old_low =
+                                out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32, &[old_dst, zero])?;
+                            out.emit(
+                                SemanticOp::Primitive(PrimitiveOp::Select),
+                                F32,
+                                &[cond, low, old_low],
+                            )?
+                        }
+                    } else {
+                        low
+                    }
+                } else {
+                    low
+                };
                 let upper = out.emit(
                     SemanticOp::Primitive(PrimitiveOp::Extract),
                     U96,
                     &[src1, thirty_two],
                 )?;
-                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), F32X4, &[low, upper])?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    F32X4,
+                    &[final_low, upper],
+                )?;
                 out.write_operand(0, result)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
@@ -682,12 +805,45 @@ macro_rules! scalar_double_evex {
                     out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64, &[src2, zero])?
                 };
                 let low = out.emit(SemanticOp::Float($op), F64, &[left, right])?;
+                let final_low = if let Some(k) = evex_opmask(insn) {
+                    if k >= 1 {
+                        let mask = out.read_operand(1, U64)?;
+                        let one = const_u64(out, 1)?;
+                        let mask_bit0 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[mask, one])?;
+                        let cond = out.emit(SemanticOp::Primitive(PrimitiveOp::Eq), U1, &[mask_bit0, one])?;
+                        if insn.is_zeroing_mask() {
+                            let zero_f = const_f64(out, 0.0)?;
+                            out.emit(
+                                SemanticOp::Primitive(PrimitiveOp::Select),
+                                F64,
+                                &[cond, low, zero_f],
+                            )?
+                        } else {
+                            let old_dst = out.read_operand(0, F64X2)?;
+                            let old_low =
+                                out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F64, &[old_dst, zero])?;
+                            out.emit(
+                                SemanticOp::Primitive(PrimitiveOp::Select),
+                                F64,
+                                &[cond, low, old_low],
+                            )?
+                        }
+                    } else {
+                        low
+                    }
+                } else {
+                    low
+                };
                 let upper = out.emit(
                     SemanticOp::Primitive(PrimitiveOp::Extract),
                     U64,
                     &[src1, sixty_four],
                 )?;
-                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), F64X2, &[low, upper])?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    F64X2,
+                    &[final_low, upper],
+                )?;
                 out.write_operand(0, result)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
@@ -758,7 +914,7 @@ scalar_double_evex!(
 // ---------------------------------------------------------------------------
 
 macro_rules! logic_zmm {
-    ($name:ident, $form:expr, $op:ident, $rule:expr) => {
+    ($name:ident, $form:expr, $op:ident, $ty:expr, $rule:expr) => {
         #[derive(Clone, Copy, Debug)]
         pub struct $name;
 
@@ -779,10 +935,11 @@ macro_rules! logic_zmm {
                 out: &mut dyn SemanticBuilder,
             ) -> Result<SemanticReceipt, SemanticError> {
                 let (src1_idx, src2_idx) = evex_source_indices(insn);
-                let left = out.read_operand(src1_idx, U512)?;
-                let right = out.read_operand(src2_idx, U512)?;
-                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::$op), U512, &[left, right])?;
-                out.write_operand(0, result)?;
+                let left = out.read_operand(src1_idx, $ty)?;
+                let right = out.read_operand(src2_idx, $ty)?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::$op), $ty, &[left, right])?;
+                let final_res = apply_evex_mask(insn, out, $ty, None, result)?;
+                out.write_operand(0, final_res)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }
@@ -791,7 +948,7 @@ macro_rules! logic_zmm {
 }
 
 macro_rules! andn_zmm {
-    ($name:ident, $form:expr, $rule:expr) => {
+    ($name:ident, $form:expr, $ty:expr, $rule:expr) => {
         #[derive(Clone, Copy, Debug)]
         pub struct $name;
 
@@ -812,11 +969,12 @@ macro_rules! andn_zmm {
                 out: &mut dyn SemanticBuilder,
             ) -> Result<SemanticReceipt, SemanticError> {
                 let (src1_idx, src2_idx) = evex_source_indices(insn);
-                let left = out.read_operand(src1_idx, U512)?;
-                let right = out.read_operand(src2_idx, U512)?;
-                let not_left = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U512, &[left])?;
-                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U512, &[not_left, right])?;
-                out.write_operand(0, result)?;
+                let left = out.read_operand(src1_idx, $ty)?;
+                let right = out.read_operand(src2_idx, $ty)?;
+                let not_left = out.emit(SemanticOp::Primitive(PrimitiveOp::Not), $ty, &[left])?;
+                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::And), $ty, &[not_left, right])?;
+                let final_res = apply_evex_mask(insn, out, $ty, None, result)?;
+                out.write_operand(0, final_res)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }
@@ -824,23 +982,23 @@ macro_rules! andn_zmm {
     };
 }
 
-logic_zmm!(VandpsZmmZmmZmm, engine_forms::VANDPS_ZMM_ZMM_ZMM, And, 0x1620);
-logic_zmm!(VandpsZmmZmmMem, engine_forms::VANDPS_ZMM_ZMM_MEM, And, 0x1621);
-andn_zmm!(VandnpsZmmZmmZmm, engine_forms::VANDNPS_ZMM_ZMM_ZMM, 0x1622);
-andn_zmm!(VandnpsZmmZmmMem, engine_forms::VANDNPS_ZMM_ZMM_MEM, 0x1623);
-logic_zmm!(VorpsZmmZmmZmm, engine_forms::VORPS_ZMM_ZMM_ZMM, Or, 0x1624);
-logic_zmm!(VorpsZmmZmmMem, engine_forms::VORPS_ZMM_ZMM_MEM, Or, 0x1625);
-logic_zmm!(VxorpsZmmZmmZmm, engine_forms::VXORPS_ZMM_ZMM_ZMM, Xor, 0x1626);
-logic_zmm!(VxorpsZmmZmmMem, engine_forms::VXORPS_ZMM_ZMM_MEM, Xor, 0x1627);
+logic_zmm!(VandpsZmmZmmZmm, engine_forms::VANDPS_ZMM_ZMM_ZMM, And, I32X16, 0x1620);
+logic_zmm!(VandpsZmmZmmMem, engine_forms::VANDPS_ZMM_ZMM_MEM, And, I32X16, 0x1621);
+andn_zmm!(VandnpsZmmZmmZmm, engine_forms::VANDNPS_ZMM_ZMM_ZMM, I32X16, 0x1622);
+andn_zmm!(VandnpsZmmZmmMem, engine_forms::VANDNPS_ZMM_ZMM_MEM, I32X16, 0x1623);
+logic_zmm!(VorpsZmmZmmZmm, engine_forms::VORPS_ZMM_ZMM_ZMM, Or, I32X16, 0x1624);
+logic_zmm!(VorpsZmmZmmMem, engine_forms::VORPS_ZMM_ZMM_MEM, Or, I32X16, 0x1625);
+logic_zmm!(VxorpsZmmZmmZmm, engine_forms::VXORPS_ZMM_ZMM_ZMM, Xor, I32X16, 0x1626);
+logic_zmm!(VxorpsZmmZmmMem, engine_forms::VXORPS_ZMM_ZMM_MEM, Xor, I32X16, 0x1627);
 
-logic_zmm!(VandpdZmmZmmZmm, engine_forms::VANDPD_ZMM_ZMM_ZMM, And, 0x1628);
-logic_zmm!(VandpdZmmZmmMem, engine_forms::VANDPD_ZMM_ZMM_MEM, And, 0x1629);
-andn_zmm!(VandnpdZmmZmmZmm, engine_forms::VANDNPD_ZMM_ZMM_ZMM, 0x162A);
-andn_zmm!(VandnpdZmmZmmMem, engine_forms::VANDNPD_ZMM_ZMM_MEM, 0x162B);
-logic_zmm!(VorpdZmmZmmZmm, engine_forms::VORPD_ZMM_ZMM_ZMM, Or, 0x162C);
-logic_zmm!(VorpdZmmZmmMem, engine_forms::VORPD_ZMM_ZMM_MEM, Or, 0x162D);
-logic_zmm!(VxorpdZmmZmmZmm, engine_forms::VXORPD_ZMM_ZMM_ZMM, Xor, 0x162E);
-logic_zmm!(VxorpdZmmZmmMem, engine_forms::VXORPD_ZMM_ZMM_MEM, Xor, 0x162F);
+logic_zmm!(VandpdZmmZmmZmm, engine_forms::VANDPD_ZMM_ZMM_ZMM, And, I64X8, 0x1628);
+logic_zmm!(VandpdZmmZmmMem, engine_forms::VANDPD_ZMM_ZMM_MEM, And, I64X8, 0x1629);
+andn_zmm!(VandnpdZmmZmmZmm, engine_forms::VANDNPD_ZMM_ZMM_ZMM, I64X8, 0x162A);
+andn_zmm!(VandnpdZmmZmmMem, engine_forms::VANDNPD_ZMM_ZMM_MEM, I64X8, 0x162B);
+logic_zmm!(VorpdZmmZmmZmm, engine_forms::VORPD_ZMM_ZMM_ZMM, Or, I64X8, 0x162C);
+logic_zmm!(VorpdZmmZmmMem, engine_forms::VORPD_ZMM_ZMM_MEM, Or, I64X8, 0x162D);
+logic_zmm!(VxorpdZmmZmmZmm, engine_forms::VXORPD_ZMM_ZMM_ZMM, Xor, I64X8, 0x162E);
+logic_zmm!(VxorpdZmmZmmMem, engine_forms::VXORPD_ZMM_ZMM_MEM, Xor, I64X8, 0x162F);
 
 // ---------------------------------------------------------------------------
 // Mask-register logic operations (KAND, KANDN, KOR, KXOR, KNOT, KXNOR)
@@ -1082,7 +1240,8 @@ macro_rules! vnni_dot {
                     )?;
                     out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $out_ty, &[lo, hi])?
                 };
-                out.write_operand(0, result)?;
+                let final_res = apply_evex_mask(insn, out, $out_ty, Some(dst), result)?;
+                out.write_operand(0, final_res)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }
@@ -1407,6 +1566,326 @@ vnni_dot!(
     0x1657
 );
 
+// VPDPBSSD: s8×s8 dot, non-saturating accumulate
+vnni_dot!(
+    VpdpbssdXmmXmmXmm,
+    forms::VPDPBSSD_XMM_XMM_XMM,
+    VectorOp::DotS8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x1658
+);
+vnni_dot!(
+    VpdpbssdXmmXmmMem128,
+    forms::VPDPBSSD_XMM_XMM_MEM128,
+    VectorOp::DotS8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x1659
+);
+vnni_dot!(
+    VpdpbssdYmmYmmYmm,
+    forms::VPDPBSSD_YMM_YMM_YMM,
+    VectorOp::DotS8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x165A
+);
+vnni_dot!(
+    VpdpbssdYmmYmmMem,
+    forms::VPDPBSSD_YMM_YMM_MEM,
+    VectorOp::DotS8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x165B
+);
+vnni_dot!(
+    VpdpbssdZmmZmmZmm,
+    forms::VPDPBSSD_ZMM_ZMM_ZMM,
+    VectorOp::DotS8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x165C
+);
+vnni_dot!(
+    VpdpbssdZmmZmmMem,
+    forms::VPDPBSSD_ZMM_ZMM_MEM,
+    VectorOp::DotS8S8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x165D
+);
+
+// VPDPBSSDS: s8×s8 dot, signed saturating accumulate
+vnni_dot!(
+    VpdpbssdsXmmXmmXmm,
+    forms::VPDPBSSDS_XMM_XMM_XMM,
+    VectorOp::DotS8S8,
+    VectorOp::SatAddS,
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x165E
+);
+vnni_dot!(
+    VpdpbssdsXmmXmmMem128,
+    forms::VPDPBSSDS_XMM_XMM_MEM128,
+    VectorOp::DotS8S8,
+    VectorOp::SatAddS,
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x165F
+);
+vnni_dot!(
+    VpdpbssdsYmmYmmYmm,
+    forms::VPDPBSSDS_YMM_YMM_YMM,
+    VectorOp::DotS8S8,
+    VectorOp::SatAddS,
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x1660
+);
+vnni_dot!(
+    VpdpbssdsYmmYmmMem,
+    forms::VPDPBSSDS_YMM_YMM_MEM,
+    VectorOp::DotS8S8,
+    VectorOp::SatAddS,
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x1661
+);
+vnni_dot!(
+    VpdpbssdsZmmZmmZmm,
+    forms::VPDPBSSDS_ZMM_ZMM_ZMM,
+    VectorOp::DotS8S8,
+    VectorOp::SatAddS,
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x1662
+);
+vnni_dot!(
+    VpdpbssdsZmmZmmMem,
+    forms::VPDPBSSDS_ZMM_ZMM_MEM,
+    VectorOp::DotS8S8,
+    VectorOp::SatAddS,
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x1663
+);
+
+// VPDPBSUD: s8×u8 dot, non-saturating accumulate
+vnni_dot!(
+    VpdpbsudXmmXmmXmm,
+    forms::VPDPBSUD_XMM_XMM_XMM,
+    VectorOp::DotS8U8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x1664
+);
+vnni_dot!(
+    VpdpbsudXmmXmmMem128,
+    forms::VPDPBSUD_XMM_XMM_MEM128,
+    VectorOp::DotS8U8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x1665
+);
+vnni_dot!(
+    VpdpbsudYmmYmmYmm,
+    forms::VPDPBSUD_YMM_YMM_YMM,
+    VectorOp::DotS8U8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x1666
+);
+vnni_dot!(
+    VpdpbsudYmmYmmMem,
+    forms::VPDPBSUD_YMM_YMM_MEM,
+    VectorOp::DotS8U8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x1667
+);
+vnni_dot!(
+    VpdpbsudZmmZmmZmm,
+    forms::VPDPBSUD_ZMM_ZMM_ZMM,
+    VectorOp::DotS8U8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x1668
+);
+vnni_dot!(
+    VpdpbsudZmmZmmMem,
+    forms::VPDPBSUD_ZMM_ZMM_MEM,
+    VectorOp::DotS8U8,
+    VectorOp::LaneWise(PrimitiveOp::Add),
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x1669
+);
+
+// VPDPBSUDS: s8×u8 dot, signed saturating accumulate
+vnni_dot!(
+    VpdpbsudsXmmXmmXmm,
+    forms::VPDPBSUDS_XMM_XMM_XMM,
+    VectorOp::DotS8U8,
+    VectorOp::SatAddS,
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x166A
+);
+vnni_dot!(
+    VpdpbsudsXmmXmmMem128,
+    forms::VPDPBSUDS_XMM_XMM_MEM128,
+    VectorOp::DotS8U8,
+    VectorOp::SatAddS,
+    I32X4,
+    I32X4,
+    I8X16,
+    I32X4,
+    I8X16,
+    1,
+    0x166B
+);
+vnni_dot!(
+    VpdpbsudsYmmYmmYmm,
+    forms::VPDPBSUDS_YMM_YMM_YMM,
+    VectorOp::DotS8U8,
+    VectorOp::SatAddS,
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x166C
+);
+vnni_dot!(
+    VpdpbsudsYmmYmmMem,
+    forms::VPDPBSUDS_YMM_YMM_MEM,
+    VectorOp::DotS8U8,
+    VectorOp::SatAddS,
+    I32X8,
+    I32X8,
+    I8X32,
+    I32X4,
+    I8X16,
+    2,
+    0x166D
+);
+vnni_dot!(
+    VpdpbsudsZmmZmmZmm,
+    forms::VPDPBSUDS_ZMM_ZMM_ZMM,
+    VectorOp::DotS8U8,
+    VectorOp::SatAddS,
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x166E
+);
+vnni_dot!(
+    VpdpbsudsZmmZmmMem,
+    forms::VPDPBSUDS_ZMM_ZMM_MEM,
+    VectorOp::DotS8U8,
+    VectorOp::SatAddS,
+    I32X16,
+    I32X8,
+    I8X64,
+    I32X4,
+    I8X16,
+    4,
+    0x166F
+);
+
 /// Returns all AVX-512 and opmask semantic providers.
 pub fn providers() -> Vec<Arc<dyn SemanticProvider>> {
     vec![
@@ -1501,6 +1980,31 @@ pub fn providers() -> Vec<Arc<dyn SemanticProvider>> {
         Arc::new(VpdpwssdsYmmYmmMem),
         Arc::new(VpdpwssdsZmmZmmZmm),
         Arc::new(VpdpwssdsZmmZmmMem),
+        // VNNI-INT8 dot-product accumulate (24)
+        Arc::new(VpdpbssdXmmXmmXmm),
+        Arc::new(VpdpbssdXmmXmmMem128),
+        Arc::new(VpdpbssdYmmYmmYmm),
+        Arc::new(VpdpbssdYmmYmmMem),
+        Arc::new(VpdpbssdZmmZmmZmm),
+        Arc::new(VpdpbssdZmmZmmMem),
+        Arc::new(VpdpbssdsXmmXmmXmm),
+        Arc::new(VpdpbssdsXmmXmmMem128),
+        Arc::new(VpdpbssdsYmmYmmYmm),
+        Arc::new(VpdpbssdsYmmYmmMem),
+        Arc::new(VpdpbssdsZmmZmmZmm),
+        Arc::new(VpdpbssdsZmmZmmMem),
+        Arc::new(VpdpbsudXmmXmmXmm),
+        Arc::new(VpdpbsudXmmXmmMem128),
+        Arc::new(VpdpbsudYmmYmmYmm),
+        Arc::new(VpdpbsudYmmYmmMem),
+        Arc::new(VpdpbsudZmmZmmZmm),
+        Arc::new(VpdpbsudZmmZmmMem),
+        Arc::new(VpdpbsudsXmmXmmXmm),
+        Arc::new(VpdpbsudsXmmXmmMem128),
+        Arc::new(VpdpbsudsYmmYmmYmm),
+        Arc::new(VpdpbsudsYmmYmmMem),
+        Arc::new(VpdpbsudsZmmZmmZmm),
+        Arc::new(VpdpbsudsZmmZmmMem),
     ]
 }
 

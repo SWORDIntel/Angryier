@@ -2506,6 +2506,92 @@ fn evaluate_primitive<R, M>(
             }
             return Ok(ConcreteValue::from_bytes_le(ty, &result));
         }
+        IrPrimitive::VecDotS8S8 => {
+            require_arity(operation, &resolved, 2)?;
+            // VPDPBSSD-style dot: for each i32 lane, sum 4 products of
+            // (i8)left[4i+j] * (i8)right[4i+j].
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 32 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let num_lanes = (width_bits / lane_bits) as usize;
+            let a = resolved[0].bytes_le();
+            let b = resolved[1].bytes_le();
+            let mut result = vec![0u8; (width_bits / 8) as usize];
+            for i in 0..num_lanes {
+                let mut acc: i32 = 0;
+                for j in 0..4usize {
+                    let idx = 4 * i + j;
+                    if idx >= a.len() || idx >= b.len() {
+                        return Err(ConcreteExecutionError::UnsupportedType(ty));
+                    }
+                    acc = acc.wrapping_add((a[idx] as i8 as i32) * (b[idx] as i8 as i32));
+                }
+                result[i * 4..i * 4 + 4].copy_from_slice(&acc.to_le_bytes());
+            }
+            return Ok(ConcreteValue::from_bytes_le(ty, &result));
+        }
+        IrPrimitive::VecDotS8U8 => {
+            require_arity(operation, &resolved, 2)?;
+            // VPDPBSUD-style dot: for each i32 lane, sum 4 products of
+            // (i8)left[4i+j] * (u8)right[4i+j].
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits != 32 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let num_lanes = (width_bits / lane_bits) as usize;
+            let a = resolved[0].bytes_le();
+            let b = resolved[1].bytes_le();
+            let mut result = vec![0u8; (width_bits / 8) as usize];
+            for i in 0..num_lanes {
+                let mut acc: i32 = 0;
+                for j in 0..4usize {
+                    let idx = 4 * i + j;
+                    if idx >= a.len() || idx >= b.len() {
+                        return Err(ConcreteExecutionError::UnsupportedType(ty));
+                    }
+                    acc = acc.wrapping_add((a[idx] as i8 as i32) * (b[idx] as i32));
+                }
+                result[i * 4..i * 4 + 4].copy_from_slice(&acc.to_le_bytes());
+            }
+            return Ok(ConcreteValue::from_bytes_le(ty, &result));
+        }
+        IrPrimitive::VecMaskMerge | IrPrimitive::VecMaskZero => {
+            require_arity(operation, &resolved, 3)?;
+            let (width_bits, lane_bits) = match ty {
+                IrType::Vector { width_bits, lane_bits } => (u32::from(width_bits), u32::from(lane_bits)),
+                _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
+            };
+            if lane_bits == 0 || lane_bits > 64 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            let lane_bytes = (lane_bits / 8) as usize;
+            let num_lanes = (width_bits / lane_bits) as usize;
+            let old_dst = resolved[0].bytes_le();
+            let new_val = resolved[1].bytes_le();
+            let mask = as_u128(resolved[2]) as u64;
+            let is_zero = matches!(operation, IrPrimitive::VecMaskZero);
+            let mut result = vec![0u8; (width_bits / 8) as usize];
+            for i in 0..num_lanes {
+                let off = i * lane_bytes;
+                if off + lane_bytes > old_dst.len() || off + lane_bytes > new_val.len() {
+                    return Err(ConcreteExecutionError::UnsupportedType(ty));
+                }
+                let lane_enabled = (mask >> i) & 1 != 0;
+                if lane_enabled {
+                    result[off..off + lane_bytes].copy_from_slice(&new_val[off..off + lane_bytes]);
+                } else if !is_zero {
+                    result[off..off + lane_bytes].copy_from_slice(&old_dst[off..off + lane_bytes]);
+                }
+            }
+            return Ok(ConcreteValue::from_bytes_le(ty, &result));
+        }
         IrPrimitive::VecLaneSatAddU | IrPrimitive::VecLaneSatSubU | IrPrimitive::VecLaneAvg => {
             require_arity(operation, &resolved, 2)?;
             let (width_bits, lane_bits) = match ty {

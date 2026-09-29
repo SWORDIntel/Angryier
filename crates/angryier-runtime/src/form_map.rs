@@ -1418,6 +1418,74 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(evex_forms::VPDPWSSDS_ZMM_ZMM_MEM),
             _ => None,
         },
+        iclass::XED_ICLASS_VPDPBSSD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] | [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => {
+                Some(evex_forms::VPDPBSSD_XMM_XMM_XMM)
+            }
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128] | [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] => {
+                Some(evex_forms::VPDPBSSD_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] | [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => {
+                Some(evex_forms::VPDPBSSD_YMM_YMM_YMM)
+            }
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] | [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] => {
+                Some(evex_forms::VPDPBSSD_YMM_YMM_MEM)
+            }
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(evex_forms::VPDPBSSD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(evex_forms::VPDPBSSD_ZMM_ZMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPDPBSSDS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] | [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => {
+                Some(evex_forms::VPDPBSSDS_XMM_XMM_XMM)
+            }
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128] | [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] => {
+                Some(evex_forms::VPDPBSSDS_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] | [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => {
+                Some(evex_forms::VPDPBSSDS_YMM_YMM_YMM)
+            }
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] | [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] => {
+                Some(evex_forms::VPDPBSSDS_YMM_YMM_MEM)
+            }
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(evex_forms::VPDPBSSDS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(evex_forms::VPDPBSSDS_ZMM_ZMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPDPBSUD => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] | [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => {
+                Some(evex_forms::VPDPBSUD_XMM_XMM_XMM)
+            }
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128] | [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] => {
+                Some(evex_forms::VPDPBSUD_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] | [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => {
+                Some(evex_forms::VPDPBSUD_YMM_YMM_YMM)
+            }
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] | [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] => {
+                Some(evex_forms::VPDPBSUD_YMM_YMM_MEM)
+            }
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(evex_forms::VPDPBSUD_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(evex_forms::VPDPBSUD_ZMM_ZMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_VPDPBSUDS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] | [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => {
+                Some(evex_forms::VPDPBSUDS_XMM_XMM_XMM)
+            }
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128] | [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] => {
+                Some(evex_forms::VPDPBSUDS_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Ymm, Shape::Ymm] | [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => {
+                Some(evex_forms::VPDPBSUDS_YMM_YMM_YMM)
+            }
+            [Shape::Ymm, Shape::Ymm, Shape::Mem] | [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] => {
+                Some(evex_forms::VPDPBSUDS_YMM_YMM_MEM)
+            }
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(evex_forms::VPDPBSUDS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(evex_forms::VPDPBSUDS_ZMM_ZMM_MEM),
+            _ => None,
+        },
         iclass::XED_ICLASS_VPBLENDD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm, Shape::Imm] => Some(forms::VPBLENDD_YMM_YMM_YMM_IMM8),
             [Shape::Ymm, Shape::Ymm, Shape::Mem, Shape::Imm] => Some(forms::VPBLENDD_YMM_YMM_MEM256_IMM8),
@@ -3152,6 +3220,42 @@ mod tests {
         assert_eq!(
             mapped(&[0x62, 0xF2, 0x75, 0x28, 0x53, 0xC2])?,
             Some(evex_forms::VPDPWSSDS_YMM_YMM_YMM)
+        );
+        // VNNI-INT8 forms (VEX-encoded: [dst, src1, src2])
+        // vpdpbssd %xmm2, %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x73, 0x50, 0xC2])?,
+            Some(evex_forms::VPDPBSSD_XMM_XMM_XMM)
+        );
+        // vpdpbssd (%rax), %xmm1, %xmm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x73, 0x50, 0x00])?,
+            Some(evex_forms::VPDPBSSD_XMM_XMM_MEM128)
+        );
+        // vpdpbssd %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x77, 0x50, 0xC2])?,
+            Some(evex_forms::VPDPBSSD_YMM_YMM_YMM)
+        );
+        // vpdpbssd (%rax), %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x77, 0x50, 0x00])?,
+            Some(evex_forms::VPDPBSSD_YMM_YMM_MEM)
+        );
+        // vpdpbssds %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x77, 0x51, 0xC2])?,
+            Some(evex_forms::VPDPBSSDS_YMM_YMM_YMM)
+        );
+        // vpdpbsud %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x76, 0x50, 0xC2])?,
+            Some(evex_forms::VPDPBSUD_YMM_YMM_YMM)
+        );
+        // vpdpbsuds %ymm2, %ymm1, %ymm0
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x76, 0x51, 0xC2])?,
+            Some(evex_forms::VPDPBSUDS_YMM_YMM_YMM)
         );
         Ok(())
     }

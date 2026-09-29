@@ -525,6 +525,8 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 VectorOp::Avg => out.byte(44),
                 VectorOp::DotU8S8 => out.byte(45),
                 VectorOp::SatAddS => out.byte(46),
+                VectorOp::DotS8S8 => out.byte(47),
+                VectorOp::DotS8U8 => out.byte(48),
             }
         }
         SemanticOp::Tile(op) => {

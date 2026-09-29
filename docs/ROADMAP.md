@@ -239,8 +239,8 @@ suites require system Z3/XED):
   FCOM C0/C2/C3, `FNSTSW AX` (DF E0) mapped and differential-tested,
   `FSTSW m16` and the full extended/transcendental families closed
   2026-09-28; deep `ld.so` emulation replaced by the static-hook approach;
-  AVX, AVX2, BMI1/BMI2, the AVX-512 first+scalar/opmask slices, and core
-  VNNI landed 2026-09-28 (VNNI-INT8/AVX10/AMX/CET/APX remain the open
+  AVX, AVX2, BMI1/BMI2, the AVX-512 first+scalar/opmask slices, core
+  VNNI, and VNNI-INT8 landed 2026-09-28/29 (AVX10/AMX/CET/APX remain the open
   expansion track).
 - The concolic fast path is faster than full symbolic (1.5–1.6× release,
   re-measured 2026-09-25) but far from the 5–10× target. Of the five
@@ -300,8 +300,8 @@ suites require system Z3/XED):
   dispatches rebuild the symbolic store from process memory, so an
   un-mirrored frame was lost and `ret` popped zero/stale slots); the
   runtime call arms no longer double-push rsp; `ret` restores rsp.
-  Remaining known bounds: EVEX masking (opmask operands are skipped, not
-  applied), VNNI-INT8/AVX10/AMX families.
+  EVEX masking (merging and zeroing) fully wired across all EVEX providers.
+  Remaining known bounds: AVX10/AMX/APX families.
 - Performance work is still measured on synthetic microbenchmarks plus a
   small set of real fixtures, not broad real execution traces.
 
@@ -617,8 +617,16 @@ verified end-to-end, `maps_avx512_scalar_and_opmask_forms`).
 **VNNI slice landed 2026-09-28** (84 providers total: VPDPBUSD/VPDPBUSDS/
 VPDPWSSD/VPDPWSSDS across XMM/YMM/ZMM, reg+mem — new `DotU8S8` and
 `SatAddS` vector ops wired through IR lowering and the concrete
-interpreter; `maps_vnni_forms` + `test_vnni_dot_products` pass;
-VNNI-INT8 (VPDPBSSD/SUD) remains).
+interpreter; `maps_vnni_forms` + `test_vnni_dot_products` pass).
+**VNNI-INT8 slice landed 2026-09-29** (108 providers total: VPDPBSSD/
+VPDPBSSDS/VPDPBSUD/VPDPBSUDS across XMM/YMM/ZMM, reg+mem — new `DotS8S8`
+and `DotS8U8` vector ops wired through IR lowering and the concrete
+interpreter; `test_vnni_int8_dot_products` and 17 `form_map` tests pass).
+**EVEX opmask semantics landed 2026-09-29** (full merging and zeroing masking
+extracted from XED modifiers and wired across all EVEX providers: packed float,
+packed double, scalar float, packed logic, and VNNI via `MaskMerge`/`MaskZero`
+primitives; verified by `test_evex_merging_masking` and `test_evex_zeroing_masking`;
+AMX tiles remain next in order).
 
 ### Phase 8 (solver reuse, slicing, preemption)
 **Status: slicing, exact reuse, UNSAT cores, incremental contexts, interrupt

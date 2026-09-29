@@ -402,13 +402,26 @@ unsafe fn extract_modifiers(xedd: *const xed_sys::xed_decoded_inst_t) -> XedInst
         None
     };
 
+    let zeroing = unsafe { xed_sys::xed_decoded_inst_zeroing(xedd) != 0 };
+    let mask_reg = unsafe { xed_sys::xed_decoded_inst_get_reg(xedd, xed_sys::XED_OPERAND_REG1) };
+    let predicate = if (crate::register::REG_K0 + 1..=crate::register::REG_K0 + 7).contains(&mask_reg) {
+        Some(angryier_decode_xed::metadata::XedPredicateMask {
+            register: angryier_decode_xed::metadata::XedRegisterRef::Opmask {
+                index: (mask_reg - crate::register::REG_K0) as u8,
+            },
+            zeroing,
+        })
+    } else {
+        None
+    };
+
     // Encoding detection: VEX/EVEX/REX2 detection is a future enhancement.
     // For now, all decoded instructions are reported as Legacy encoding.
     XedInstructionModifiers {
         encoding: XedEncoding::Legacy,
         lock,
         repetition,
-        predicate: None,
+        predicate,
         rounding: None,
         suppress_all_exceptions: false,
         no_flags: false,

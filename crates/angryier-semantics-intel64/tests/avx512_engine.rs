@@ -105,6 +105,18 @@ fn create_state(
     })
 }
 
+struct FullEngineCase<'a> {
+    code: &'a [u8],
+    provider: &'a dyn SemanticProvider,
+    zmm0: Option<&'a [u8; 64]>,
+    zmm1: Option<&'a [u8; 64]>,
+    zmm2: Option<&'a [u8; 64]>,
+    k1: Option<u64>,
+    k2: Option<u64>,
+    k3: Option<u64>,
+    mem_data: Option<&'a [u8; 64]>,
+}
+
 struct EngineCase<'a> {
     code: &'a [u8],
     provider: &'a dyn SemanticProvider,
@@ -115,7 +127,9 @@ struct EngineCase<'a> {
     mem_data: Option<&'a [u8; 64]>,
 }
 
-fn run_engine(case: EngineCase<'_>) -> Result<ExecutionState<PersistentRegisters, PersistentMemory>, BoxError> {
+fn run_engine_full(
+    case: FullEngineCase<'_>,
+) -> Result<ExecutionState<PersistentRegisters, PersistentMemory>, BoxError> {
     let decoder = XedDecoder::new();
     let decoded = decoder
         .decode(CODE_BASE, case.code)
@@ -136,6 +150,12 @@ fn run_engine(case: EngineCase<'_>) -> Result<ExecutionState<PersistentRegisters
             .write_in_place(RAX, &DATA_BASE.to_le_bytes())
             .map_err(|e| format!("{e:?}"))?;
     }
+    if let Some(seed0) = case.zmm0 {
+        state
+            .registers
+            .write_in_place(ZMM0, seed0)
+            .map_err(|e| format!("{e:?}"))?;
+    }
     if let Some(seed1) = case.zmm1 {
         state
             .registers
@@ -146,6 +166,12 @@ fn run_engine(case: EngineCase<'_>) -> Result<ExecutionState<PersistentRegisters
         state
             .registers
             .write_in_place(ZMM2, seed2)
+            .map_err(|e| format!("{e:?}"))?;
+    }
+    if let Some(val1) = case.k1 {
+        state
+            .registers
+            .write_in_place(K1, &val1.to_le_bytes())
             .map_err(|e| format!("{e:?}"))?;
     }
     if let Some(val2) = case.k2 {
@@ -188,6 +214,20 @@ fn run_engine(case: EngineCase<'_>) -> Result<ExecutionState<PersistentRegisters
     }
 
     Ok(final_state)
+}
+
+fn run_engine(case: EngineCase<'_>) -> Result<ExecutionState<PersistentRegisters, PersistentMemory>, BoxError> {
+    run_engine_full(FullEngineCase {
+        code: case.code,
+        provider: case.provider,
+        zmm0: None,
+        zmm1: case.zmm1,
+        zmm2: case.zmm2,
+        k1: None,
+        k2: case.k2,
+        k3: case.k3,
+        mem_data: case.mem_data,
+    })
 }
 
 fn read_zmm_bytes(
@@ -259,24 +299,374 @@ impl DecodedInstructionView for SyntheticDecoded {
     }
 }
 
+fn read_zmm_f32(
+    state: &ExecutionState<PersistentRegisters, PersistentMemory>,
+    reg: u32,
+) -> Result<[f32; 16], BoxError> {
+    let bytes = read_zmm_bytes(state, reg)?;
+    read_f32_lanes(&bytes)
+}
+
+fn read_zmm_f64(state: &ExecutionState<PersistentRegisters, PersistentMemory>, reg: u32) -> Result<[f64; 8], BoxError> {
+    let bytes = read_zmm_bytes(state, reg)?;
+    read_f64_lanes(&bytes)
+}
+
+#[test]
+fn test_evex_merging_masking() -> Result<(), BoxError> {
+    // 1. Packed single-precision float merging masking:
+    // vaddps %zmm2, %zmm1, %zmm0{%k2} — 62 f1 74 4a 58 c2
+    let mut zmm0_init = [0u8; 64];
+    let mut zmm1_init = [0u8; 64];
+    let mut zmm2_init = [0u8; 64];
+    for i in 0..16 {
+        let v0 = 100.0f32 + (i as f32);
+        let v1 = 1.0f32 + (i as f32);
+        let v2 = 10.0f32 * (1.0f32 + (i as f32));
+        zmm0_init[i * 4..(i + 1) * 4].copy_from_slice(&v0.to_le_bytes());
+        zmm1_init[i * 4..(i + 1) * 4].copy_from_slice(&v1.to_le_bytes());
+        zmm2_init[i * 4..(i + 1) * 4].copy_from_slice(&v2.to_le_bytes());
+    }
+
+    // k2 = 0xAAAA (odd lanes enabled, even lanes masked)
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x4a, 0x58, 0xc2],
+        provider: &avx512::VaddpsZmmZmmZmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&zmm1_init),
+        zmm2: Some(&zmm2_init),
+        k1: None,
+        k2: Some(0xAAAA),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_f32(&s, ZMM0)?;
+    for (i, &lane_val) in out.iter().enumerate() {
+        if i % 2 == 1 {
+            // Odd lane: computed sum
+            let exp = (1.0f32 + (i as f32)) + (10.0f32 * (1.0f32 + (i as f32)));
+            assert!((lane_val - exp).abs() < 1e-5, "odd lane {i} must be computed sum");
+        } else {
+            // Even lane: preserved from initial zmm0
+            let exp = 100.0f32 + (i as f32);
+            assert!(
+                (lane_val - exp).abs() < 1e-5,
+                "even lane {i} must preserve initial zmm0"
+            );
+        }
+    }
+
+    // 2. Packed double-precision float merging masking:
+    // vaddpd %zmm2, %zmm1, %zmm0{%k2} — 62 f1 fd 4a 58 c2
+    let mut zmm0_d = [0u8; 64];
+    let mut zmm1_d = [0u8; 64];
+    let mut zmm2_d = [0u8; 64];
+    for i in 0..8 {
+        let v0 = 1000.0f64 + (i as f64);
+        let v1 = 1.0f64 + (i as f64);
+        let v2 = 20.0f64 * (1.0f64 + (i as f64));
+        zmm0_d[i * 8..(i + 1) * 8].copy_from_slice(&v0.to_le_bytes());
+        zmm1_d[i * 8..(i + 1) * 8].copy_from_slice(&v1.to_le_bytes());
+        zmm2_d[i * 8..(i + 1) * 8].copy_from_slice(&v2.to_le_bytes());
+    }
+
+    // k2 = 0xAA (odd lanes enabled, even lanes masked)
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0xf5, 0x4a, 0x58, 0xc2],
+        provider: &avx512::VaddpdZmmZmmZmm,
+        zmm0: Some(&zmm0_d),
+        zmm1: Some(&zmm1_d),
+        zmm2: Some(&zmm2_d),
+        k1: None,
+        k2: Some(0xAA),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out_d = read_zmm_f64(&s, ZMM0)?;
+    for (i, &lane_val) in out_d.iter().enumerate() {
+        if i % 2 == 1 {
+            let exp = (1.0f64 + (i as f64)) + (20.0f64 * (1.0f64 + (i as f64)));
+            assert!(
+                (lane_val - exp).abs() < 1e-9,
+                "odd double lane {i} must be computed sum"
+            );
+        } else {
+            let exp = 1000.0f64 + (i as f64);
+            assert!(
+                (lane_val - exp).abs() < 1e-9,
+                "even double lane {i} must preserve initial zmm0"
+            );
+        }
+    }
+
+    // 3. Scalar single-precision float merging masking:
+    // vaddss %xmm2, %xmm1, %xmm0{%k2} — 62 f1 76 0a 58 c2
+    // With k2 = 0 (bit 0 = 0), lane 0 should retain xmm0[0], lanes 1..3 come from xmm1[1..3]
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x76, 0x0a, 0x58, 0xc2],
+        provider: &avx512::VaddssEvexXmmXmmXmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&zmm1_init),
+        zmm2: Some(&zmm2_init),
+        k1: None,
+        k2: Some(0),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_f32(&s, ZMM0)?;
+    assert!(
+        (out[0] - 100.0f32).abs() < 1e-5,
+        "scalar lane 0 with mask=0 must retain old dst"
+    );
+    assert!((out[1] - 2.0f32).abs() < 1e-5, "scalar lane 1 must come from src1");
+    assert!((out[2] - 3.0f32).abs() < 1e-5, "scalar lane 2 must come from src1");
+    assert!((out[3] - 4.0f32).abs() < 1e-5, "scalar lane 3 must come from src1");
+
+    // 4. Packed logic (VANDPS) merging masking:
+    // vandps %zmm2, %zmm1, %zmm0{%k2} — 62 f1 74 4a 54 c2
+    let zmm0_logic = [0x55u8; 64];
+    let zmm1_logic = [0xFFu8; 64];
+    let zmm2_logic = [0x0Fu8; 64];
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x4a, 0x54, 0xc2],
+        provider: &avx512::VandpsZmmZmmZmm,
+        zmm0: Some(&zmm0_logic),
+        zmm1: Some(&zmm1_logic),
+        zmm2: Some(&zmm2_logic),
+        k1: None,
+        k2: Some(0xAAAA),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for i in 0..16 {
+        let chunk = &out[i * 4..(i + 1) * 4];
+        if i % 2 == 1 {
+            assert_eq!(chunk, &[0x0f, 0x0f, 0x0f, 0x0f], "odd logic lane {i} computed AND");
+        } else {
+            assert_eq!(chunk, &[0x55, 0x55, 0x55, 0x55], "even logic lane {i} retained old dst");
+        }
+    }
+
+    // 5. VNNI (VPDPBUSD) merging masking:
+    // vpdpbusd %zmm2, %zmm1, %zmm0{%k2} — 62 f2 75 4a 50 c2
+    let mut zmm0_vnni = [0u8; 64];
+    let mut zmm1_vnni = [0u8; 64];
+    let mut zmm2_vnni = [0u8; 64];
+    for i in 0..16 {
+        let init_val = 1000i32 + (i as i32);
+        zmm0_vnni[i * 4..(i + 1) * 4].copy_from_slice(&init_val.to_le_bytes());
+        for b in 0..4 {
+            zmm1_vnni[i * 4 + b] = 2; // u8
+            zmm2_vnni[i * 4 + b] = 3; // i8
+        }
+    }
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf2, 0x75, 0x4a, 0x50, 0xc2],
+        provider: &avx512::VpdpbusdZmmZmmZmm,
+        zmm0: Some(&zmm0_vnni),
+        zmm1: Some(&zmm1_vnni),
+        zmm2: Some(&zmm2_vnni),
+        k1: None,
+        k2: Some(0x00FF),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for i in 0..16 {
+        let val = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        if i < 8 {
+            assert_eq!(val, 1024 + (i as i32), "vnni low lane {i} must be accumulated");
+        } else {
+            assert_eq!(val, 1000 + (i as i32), "vnni high lane {i} must retain old dst");
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_evex_zeroing_masking() -> Result<(), BoxError> {
+    // 1. Packed single-precision float zeroing masking:
+    // vaddps %zmm2, %zmm1, %zmm0{%k2}{z} — 62 f1 74 ca 58 c2
+    let mut zmm0_init = [0u8; 64];
+    let mut zmm1_init = [0u8; 64];
+    let mut zmm2_init = [0u8; 64];
+    for i in 0..16 {
+        let v0 = 100.0f32 + (i as f32);
+        let v1 = 1.0f32 + (i as f32);
+        let v2 = 10.0f32 * (1.0f32 + (i as f32));
+        zmm0_init[i * 4..(i + 1) * 4].copy_from_slice(&v0.to_le_bytes());
+        zmm1_init[i * 4..(i + 1) * 4].copy_from_slice(&v1.to_le_bytes());
+        zmm2_init[i * 4..(i + 1) * 4].copy_from_slice(&v2.to_le_bytes());
+    }
+
+    // k2 = 0x5555 (even lanes enabled, odd lanes zeroed)
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0xca, 0x58, 0xc2],
+        provider: &avx512::VaddpsZmmZmmZmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&zmm1_init),
+        zmm2: Some(&zmm2_init),
+        k1: None,
+        k2: Some(0x5555),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_f32(&s, ZMM0)?;
+    for (i, &lane_val) in out.iter().enumerate() {
+        if i % 2 == 0 {
+            // Even lane: computed sum
+            let exp = (1.0f32 + (i as f32)) + (10.0f32 * (1.0f32 + (i as f32)));
+            assert!((lane_val - exp).abs() < 1e-5, "even lane {i} must be computed sum");
+        } else {
+            // Odd lane: zeroed
+            assert_eq!(lane_val, 0.0f32, "odd lane {i} must be zeroed");
+        }
+    }
+
+    // 2. Packed double-precision float zeroing masking:
+    // vaddpd %zmm2, %zmm1, %zmm0{%k2}{z} — 62 f1 fd ca 58 c2
+    let mut zmm0_d = [0u8; 64];
+    let mut zmm1_d = [0u8; 64];
+    let mut zmm2_d = [0u8; 64];
+    for i in 0..8 {
+        let v0 = 1000.0f64 + (i as f64);
+        let v1 = 1.0f64 + (i as f64);
+        let v2 = 20.0f64 * (1.0f64 + (i as f64));
+        zmm0_d[i * 8..(i + 1) * 8].copy_from_slice(&v0.to_le_bytes());
+        zmm1_d[i * 8..(i + 1) * 8].copy_from_slice(&v1.to_le_bytes());
+        zmm2_d[i * 8..(i + 1) * 8].copy_from_slice(&v2.to_le_bytes());
+    }
+
+    // k2 = 0x55 (even lanes enabled, odd lanes zeroed)
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0xf5, 0xca, 0x58, 0xc2],
+        provider: &avx512::VaddpdZmmZmmZmm,
+        zmm0: Some(&zmm0_d),
+        zmm1: Some(&zmm1_d),
+        zmm2: Some(&zmm2_d),
+        k1: None,
+        k2: Some(0x55),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out_d = read_zmm_f64(&s, ZMM0)?;
+    for (i, &lane_val) in out_d.iter().enumerate() {
+        if i % 2 == 0 {
+            let exp = (1.0f64 + (i as f64)) + (20.0f64 * (1.0f64 + (i as f64)));
+            assert!(
+                (lane_val - exp).abs() < 1e-9,
+                "even double lane {i} must be computed sum"
+            );
+        } else {
+            assert_eq!(lane_val, 0.0f64, "odd double lane {i} must be zeroed");
+        }
+    }
+
+    // 3. Scalar single-precision float zeroing masking:
+    // vaddss %xmm2, %xmm1, %xmm0{%k2}{z} — 62 f1 76 8a 58 c2
+    // With k2 = 0 (bit 0 = 0), lane 0 should be zeroed, lanes 1..3 come from xmm1[1..3]
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x76, 0x8a, 0x58, 0xc2],
+        provider: &avx512::VaddssEvexXmmXmmXmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&zmm1_init),
+        zmm2: Some(&zmm2_init),
+        k1: None,
+        k2: Some(0),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_f32(&s, ZMM0)?;
+    assert_eq!(out[0], 0.0f32, "scalar lane 0 with zeroing mask=0 must be 0.0");
+    assert!((out[1] - 2.0f32).abs() < 1e-5, "scalar lane 1 must come from src1");
+    assert!((out[2] - 3.0f32).abs() < 1e-5, "scalar lane 2 must come from src1");
+    assert!((out[3] - 4.0f32).abs() < 1e-5, "scalar lane 3 must come from src1");
+
+    // 4. Packed logic (VANDPS) zeroing masking:
+    // vandps %zmm2, %zmm1, %zmm0{%k2}{z} — 62 f1 74 ca 54 c2
+    let zmm0_logic = [0x55u8; 64];
+    let zmm1_logic = [0xFFu8; 64];
+    let zmm2_logic = [0x0Fu8; 64];
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0xca, 0x54, 0xc2],
+        provider: &avx512::VandpsZmmZmmZmm,
+        zmm0: Some(&zmm0_logic),
+        zmm1: Some(&zmm1_logic),
+        zmm2: Some(&zmm2_logic),
+        k1: None,
+        k2: Some(0x5555),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for i in 0..16 {
+        let chunk = &out[i * 4..(i + 1) * 4];
+        if i % 2 == 0 {
+            // Even dword: 0xFF & 0x0F = 0x0F
+            assert_eq!(chunk, &[0x0f, 0x0f, 0x0f, 0x0f], "even logic lane {i} computed AND");
+        } else {
+            // Odd dword: zeroed
+            assert_eq!(chunk, &[0x00, 0x00, 0x00, 0x00], "odd logic lane {i} zeroed");
+        }
+    }
+
+    // 5. VNNI (VPDPBUSD) zeroing masking:
+    // vpdpbusd %zmm2, %zmm1, %zmm0{%k2}{z} — 62 f2 75 ca 50 c2
+    let mut zmm0_vnni = [0u8; 64];
+    let mut zmm1_vnni = [0u8; 64];
+    let mut zmm2_vnni = [0u8; 64];
+    for i in 0..16 {
+        let init_val = 1000i32 + (i as i32);
+        zmm0_vnni[i * 4..(i + 1) * 4].copy_from_slice(&init_val.to_le_bytes());
+        for b in 0..4 {
+            zmm1_vnni[i * 4 + b] = 2; // u8
+            zmm2_vnni[i * 4 + b] = 3; // i8
+        }
+    }
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf2, 0x75, 0xca, 0x50, 0xc2],
+        provider: &avx512::VpdpbusdZmmZmmZmm,
+        zmm0: Some(&zmm0_vnni),
+        zmm1: Some(&zmm1_vnni),
+        zmm2: Some(&zmm2_vnni),
+        k1: None,
+        k2: Some(0x00FF),
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for i in 0..16 {
+        let val = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        if i < 8 {
+            assert_eq!(val, 1024 + (i as i32), "vnni low lane {i} must be accumulated");
+        } else {
+            assert_eq!(val, 0, "vnni high lane {i} must be zeroed");
+        }
+    }
+
+    Ok(())
+}
+
 #[test]
 fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
     let providers = avx512::providers();
-    assert_eq!(providers.len(), 84, "expected 84 AVX-512 providers");
+    assert_eq!(providers.len(), 108, "expected 108 AVX-512/VNNI providers");
 
     let mut rule_ids = BTreeSet::new();
     for provider in &providers {
         let rid = provider.rule_id();
         assert!(
-            rid.0 >= 0x2600 && rid.0 <= 0x2660,
-            "rule id {:#x} outside assigned band 0x2600..0x2660",
+            rid.0 >= 0x2600 && rid.0 <= 0x2680,
+            "rule id {:#x} outside assigned band 0x2600..0x2680",
             rid.0
         );
         let inserted = rule_ids.insert(rid.0);
         assert!(inserted, "duplicate rule id {:#x}", rid.0);
     }
 
-    assert_eq!(rule_ids.len(), 84, "all 84 rule IDs must be unique");
+    assert_eq!(rule_ids.len(), 108, "all 108 rule IDs must be unique");
 
     // All form constants in forms module
     let all_forms = [
@@ -364,6 +754,30 @@ fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
         avx512::forms::VPDPWSSDS_YMM_YMM_MEM,
         avx512::forms::VPDPWSSDS_ZMM_ZMM_ZMM,
         avx512::forms::VPDPWSSDS_ZMM_ZMM_MEM,
+        avx512::forms::VPDPBSSD_XMM_XMM_XMM,
+        avx512::forms::VPDPBSSD_XMM_XMM_MEM128,
+        avx512::forms::VPDPBSSD_YMM_YMM_YMM,
+        avx512::forms::VPDPBSSD_YMM_YMM_MEM,
+        avx512::forms::VPDPBSSD_ZMM_ZMM_ZMM,
+        avx512::forms::VPDPBSSD_ZMM_ZMM_MEM,
+        avx512::forms::VPDPBSSDS_XMM_XMM_XMM,
+        avx512::forms::VPDPBSSDS_XMM_XMM_MEM128,
+        avx512::forms::VPDPBSSDS_YMM_YMM_YMM,
+        avx512::forms::VPDPBSSDS_YMM_YMM_MEM,
+        avx512::forms::VPDPBSSDS_ZMM_ZMM_ZMM,
+        avx512::forms::VPDPBSSDS_ZMM_ZMM_MEM,
+        avx512::forms::VPDPBSUD_XMM_XMM_XMM,
+        avx512::forms::VPDPBSUD_XMM_XMM_MEM128,
+        avx512::forms::VPDPBSUD_YMM_YMM_YMM,
+        avx512::forms::VPDPBSUD_YMM_YMM_MEM,
+        avx512::forms::VPDPBSUD_ZMM_ZMM_ZMM,
+        avx512::forms::VPDPBSUD_ZMM_ZMM_MEM,
+        avx512::forms::VPDPBSUDS_XMM_XMM_XMM,
+        avx512::forms::VPDPBSUDS_XMM_XMM_MEM128,
+        avx512::forms::VPDPBSUDS_YMM_YMM_YMM,
+        avx512::forms::VPDPBSUDS_YMM_YMM_MEM,
+        avx512::forms::VPDPBSUDS_ZMM_ZMM_ZMM,
+        avx512::forms::VPDPBSUDS_ZMM_ZMM_MEM,
     ];
 
     let mut form_set = BTreeSet::new();
@@ -1433,6 +1847,108 @@ fn test_vnni_dot_products() -> Result<(), BoxError> {
     for (i, &exp) in madd_exp.iter().enumerate() {
         let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
         assert_eq!(got, exp, "vpdpwssds ymm lane {i}");
+    }
+
+    Ok(())
+}
+
+fn vnni_s8s8_dot(a: &[u8; 64], b: &[u8; 64]) -> [i32; 8] {
+    let mut out = [0i32; 8];
+    for (i, lane) in out.iter_mut().enumerate() {
+        let mut acc = 0i32;
+        for j in 0..4 {
+            acc = acc.wrapping_add((a[4 * i + j] as i8 as i32) * (b[4 * i + j] as i8 as i32));
+        }
+        *lane = acc;
+    }
+    out
+}
+
+fn vnni_s8u8_dot(a: &[u8; 64], b: &[u8; 64]) -> [i32; 8] {
+    let mut out = [0i32; 8];
+    for (i, lane) in out.iter_mut().enumerate() {
+        let mut acc = 0i32;
+        for j in 0..4 {
+            acc = acc.wrapping_add((a[4 * i + j] as i8 as i32) * (b[4 * i + j] as i32));
+        }
+        *lane = acc;
+    }
+    out
+}
+
+#[test]
+fn test_vnni_int8_dot_products() -> Result<(), BoxError> {
+    let mut left = [0u8; 64];
+    let mut right = [0u8; 64];
+    for i in 0..32 {
+        left[i] = ((i * 7 + 3) & 0xFF) as u8;
+        right[i] = ((i * 13 + 91) & 0xFF) as u8;
+    }
+    let s8s8_exp = vnni_s8s8_dot(&left, &right);
+    let s8u8_exp = vnni_s8u8_dot(&left, &right);
+
+    // vpdpbssd %ymm2, %ymm1, %ymm0 — c4 e2 77 50 c2
+    let s = run_engine(EngineCase {
+        code: &[0xc4, 0xe2, 0x77, 0x50, 0xc2],
+        provider: &avx512::VpdpbssdYmmYmmYmm,
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for (i, &exp) in s8s8_exp.iter().enumerate() {
+        let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        assert_eq!(got, exp, "vpdpbssd ymm lane {i}");
+    }
+
+    // vpdpbssds %ymm2, %ymm1, %ymm0 — c4 e2 77 51 c2 (same value at zero dst)
+    let s = run_engine(EngineCase {
+        code: &[0xc4, 0xe2, 0x77, 0x51, 0xc2],
+        provider: &avx512::VpdpbssdsYmmYmmYmm,
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for (i, &exp) in s8s8_exp.iter().enumerate() {
+        let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        assert_eq!(got, exp, "vpdpbssds ymm lane {i}");
+    }
+
+    // vpdpbsud %ymm2, %ymm1, %ymm0 — c4 e2 76 50 c2
+    let s = run_engine(EngineCase {
+        code: &[0xc4, 0xe2, 0x76, 0x50, 0xc2],
+        provider: &avx512::VpdpbsudYmmYmmYmm,
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for (i, &exp) in s8u8_exp.iter().enumerate() {
+        let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        assert_eq!(got, exp, "vpdpbsud ymm lane {i}");
+    }
+
+    // vpdpbsuds %ymm2, %ymm1, %ymm0 — c4 e2 76 51 c2
+    let s = run_engine(EngineCase {
+        code: &[0xc4, 0xe2, 0x76, 0x51, 0xc2],
+        provider: &avx512::VpdpbsudsYmmYmmYmm,
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let out = read_zmm_bytes(&s, ZMM0)?;
+    for (i, &exp) in s8u8_exp.iter().enumerate() {
+        let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
+        assert_eq!(got, exp, "vpdpbsuds ymm lane {i}");
     }
 
     Ok(())
