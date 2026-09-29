@@ -1361,6 +1361,7 @@ impl Intel64CorpusRegistry {
         // scalar and opmask providers register here but only match once an
         // encoding-aware form-map tier lands (see form_map.rs ZMM arms).
         providers.extend(crate::avx512::providers());
+        providers.extend(crate::amx::providers());
 
         // Build form index from known form IDs. Each provider corresponds to
         // exactly one form. The ALL_FORMS array is hardcoded with unique entries
@@ -1451,7 +1452,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1428] = [
+const ALL_FORMS: [u32; 1441] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2893,6 +2894,20 @@ const ALL_FORMS: [u32; 1428] = [
     crate::avx512::forms::VPDPBSUDS_YMM_YMM_MEM,
     crate::avx512::forms::VPDPBSUDS_ZMM_ZMM_ZMM,
     crate::avx512::forms::VPDPBSUDS_ZMM_ZMM_MEM,
+    // AMX forms (13 forms: 0x1200..0x120C)
+    crate::amx::forms::LDTILECFG_MEM,
+    crate::amx::forms::STTILECFG_MEM,
+    crate::amx::forms::TILERELEASE,
+    crate::amx::forms::TILEZERO_TMM,
+    crate::amx::forms::TILELOADD_TMM_MEM,
+    crate::amx::forms::TILELOADDT1_TMM_MEM,
+    crate::amx::forms::TILESTORED_MEM_TMM,
+    crate::amx::forms::TDPBSSD_TMM_TMM_TMM,
+    crate::amx::forms::TDPBSUD_TMM_TMM_TMM,
+    crate::amx::forms::TDPBUSD_TMM_TMM_TMM,
+    crate::amx::forms::TDPBUUD_TMM_TMM_TMM,
+    crate::amx::forms::TDPBF16PS_TMM_TMM_TMM,
+    crate::amx::forms::TDPFP16PS_TMM_TMM_TMM,
 ];
 
 #[cfg(test)]

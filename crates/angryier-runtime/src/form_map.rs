@@ -18,7 +18,7 @@
 use angryier_arch::{DecodedInstruction, Operand, OperandKind, OperandVisibility};
 use angryier_arch_intel64::register_id;
 use angryier_arch_xed_ffi::iclass;
-use angryier_semantics_intel64::{evex_forms, forms};
+use angryier_semantics_intel64::{amx_forms, evex_forms, forms};
 
 /// Form id reported for instructions XED can decode but the corpus cannot
 /// execute exactly. No registered corpus form uses this id.
@@ -144,6 +144,8 @@ enum Shape {
     Ymm,
     /// 512-bit vector register (zmm).
     Zmm,
+    /// AMX tile register (TMM0..TMM7, 8192-bit view of a tile parent).
+    Tmm,
     Rel,
     Other,
 }
@@ -154,6 +156,12 @@ fn shape_of(operand: &Operand) -> Shape {
             if (register_id::X87_BASE..register_id::X87_BASE + 8).contains(&register.parent.0) =>
         {
             Shape::Stack
+        }
+        OperandKind::Register(register)
+            if (register_id::TILE_BASE..register_id::TILE_BASE + 8).contains(&register.parent.0)
+                || register.width_bits == 8192 =>
+        {
+            Shape::Tmm
         }
         OperandKind::Register(register) => match register.width_bits {
             512 => Shape::Zmm,
@@ -167,7 +175,7 @@ fn shape_of(operand: &Operand) -> Shape {
         },
         OperandKind::Immediate(_) => Shape::Imm,
         OperandKind::Memory(_) => match operand.width_bits {
-            256 | 512 => Shape::Mem,
+            256 | 512 | 0 => Shape::Mem,
             8 => Shape::Mem8,
             16 => Shape::Mem16,
             32 => Shape::Mem32,
@@ -1960,6 +1968,56 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Reg32, Shape::Reg32] => Some(forms::LZCNT_R32_R32),
             _ => None,
         },
+        // AMX tile management and matrix operations
+        iclass::XED_ICLASS_TILERELEASE => Some(amx_forms::TILERELEASE),
+        iclass::XED_ICLASS_TILEZERO => match shapes {
+            [Shape::Tmm] => Some(amx_forms::TILEZERO_TMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_LDTILECFG => match shapes {
+            [Shape::Mem] => Some(amx_forms::LDTILECFG_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_STTILECFG => match shapes {
+            [Shape::Mem] => Some(amx_forms::STTILECFG_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_TILELOADD => match shapes {
+            [Shape::Tmm, Shape::Mem] => Some(amx_forms::TILELOADD_TMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_TILELOADDT1 => match shapes {
+            [Shape::Tmm, Shape::Mem] => Some(amx_forms::TILELOADDT1_TMM_MEM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_TILESTORED => match shapes {
+            [Shape::Mem, Shape::Tmm] => Some(amx_forms::TILESTORED_MEM_TMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_TDPBSSD => match shapes {
+            [Shape::Tmm, Shape::Tmm, Shape::Tmm] => Some(amx_forms::TDPBSSD_TMM_TMM_TMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_TDPBSUD => match shapes {
+            [Shape::Tmm, Shape::Tmm, Shape::Tmm] => Some(amx_forms::TDPBSUD_TMM_TMM_TMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_TDPBUSD => match shapes {
+            [Shape::Tmm, Shape::Tmm, Shape::Tmm] => Some(amx_forms::TDPBUSD_TMM_TMM_TMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_TDPBUUD => match shapes {
+            [Shape::Tmm, Shape::Tmm, Shape::Tmm] => Some(amx_forms::TDPBUUD_TMM_TMM_TMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_TDPBF16PS => match shapes {
+            [Shape::Tmm, Shape::Tmm, Shape::Tmm] => Some(amx_forms::TDPBF16PS_TMM_TMM_TMM),
+            _ => None,
+        },
+        iclass::XED_ICLASS_TDPFP16PS => match shapes {
+            [Shape::Tmm, Shape::Tmm, Shape::Tmm] => Some(amx_forms::TDPFP16PS_TMM_TMM_TMM),
+            _ => None,
+        },
         iclass::XED_ICLASS_BSWAP => match shapes {
             [Shape::Reg64] => Some(forms::BSWAP_R64),
             [Shape::Reg32] => Some(forms::BSWAP_R32),
@@ -2708,6 +2766,59 @@ mod tests {
         let decoder = XedDecoder::new();
         let decoded = decoder.decode(0x401000, bytes)?;
         Ok(map_form(&decoded))
+    }
+
+    #[test]
+    fn maps_amx_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // tilerelease
+        assert_eq!(mapped(&[0xc4, 0xe2, 0x78, 0x49, 0xc0])?, Some(amx_forms::TILERELEASE));
+        // tilezero %tmm0
+        assert_eq!(mapped(&[0xc4, 0xe2, 0x7b, 0x49, 0xc0])?, Some(amx_forms::TILEZERO_TMM));
+        // ldtilecfg (%rax)
+        assert_eq!(mapped(&[0xc4, 0xe2, 0x78, 0x49, 0x00])?, Some(amx_forms::LDTILECFG_MEM));
+        // sttilecfg (%rax)
+        assert_eq!(mapped(&[0xc4, 0xe2, 0x79, 0x49, 0x00])?, Some(amx_forms::STTILECFG_MEM));
+        // tileloadd (%rax,%rcx,1), %tmm0
+        assert_eq!(
+            mapped(&[0xc4, 0xe2, 0x7b, 0x4b, 0x04, 0x08])?,
+            Some(amx_forms::TILELOADD_TMM_MEM)
+        );
+        // tilestored %tmm0, (%rax,%rcx,1)
+        assert_eq!(
+            mapped(&[0xc4, 0xe2, 0x7a, 0x4b, 0x04, 0x08])?,
+            Some(amx_forms::TILESTORED_MEM_TMM)
+        );
+        // tdpbssd %tmm2, %tmm1, %tmm0
+        assert_eq!(
+            mapped(&[0xc4, 0xe2, 0x6b, 0x5e, 0xc1])?,
+            Some(amx_forms::TDPBSSD_TMM_TMM_TMM)
+        );
+        // tdpbsud %tmm2, %tmm1, %tmm0
+        assert_eq!(
+            mapped(&[0xc4, 0xe2, 0x6a, 0x5e, 0xc1])?,
+            Some(amx_forms::TDPBSUD_TMM_TMM_TMM)
+        );
+        // tdpbusd %tmm2, %tmm1, %tmm0
+        assert_eq!(
+            mapped(&[0xc4, 0xe2, 0x69, 0x5e, 0xc1])?,
+            Some(amx_forms::TDPBUSD_TMM_TMM_TMM)
+        );
+        // tdpbuud %tmm2, %tmm1, %tmm0
+        assert_eq!(
+            mapped(&[0xc4, 0xe2, 0x68, 0x5e, 0xc1])?,
+            Some(amx_forms::TDPBUUD_TMM_TMM_TMM)
+        );
+        // tdpbf16ps %tmm2, %tmm1, %tmm0
+        assert_eq!(
+            mapped(&[0xc4, 0xe2, 0x6a, 0x5c, 0xc1])?,
+            Some(amx_forms::TDPBF16PS_TMM_TMM_TMM)
+        );
+        // tdpfp16ps %tmm2, %tmm1, %tmm0
+        assert_eq!(
+            mapped(&[0xc4, 0xe2, 0x6b, 0x5c, 0xc1])?,
+            Some(amx_forms::TDPFP16PS_TMM_TMM_TMM)
+        );
+        Ok(())
     }
 
     #[test]

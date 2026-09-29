@@ -155,6 +155,13 @@ pub enum IrPrimitive {
     VecShiftLeftBytes,
     VecShiftRightBytes,
     VecPermute32,
+    TileZero,
+    TileDotS8S8,
+    TileDotS8U8,
+    TileDotU8S8,
+    TileDotU8U8,
+    TileDotBf16,
+    TileDotFp16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -145,7 +145,7 @@ fn expected_bytes(ty: IrType) -> Option<usize> {
         IrType::Float32 => 32,
         IrType::Float64 => 64,
         IrType::Float80 => 80,
-        IrType::Tile => return None,
+        IrType::Tile => 8192,
     };
     bits.checked_add(7)?.checked_div(8)
 }

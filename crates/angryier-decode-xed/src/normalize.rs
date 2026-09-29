@@ -98,6 +98,7 @@ fn normalize_operand(operand: XedOperand) -> Result<Operand, XedAdapterError> {
     let width_bits = if operand.width_bits == 0 {
         match kind {
             OperandKind::AddressGeneration(memory) => memory.address_width_bits,
+            OperandKind::Memory(_) => 0,
             _ => {
                 return Err(XedAdapterError::InvalidOperandWidth {
                     operand: operand.index,

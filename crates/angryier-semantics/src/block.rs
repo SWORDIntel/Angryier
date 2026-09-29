@@ -295,6 +295,11 @@ fn semantic_type_bit_width(ty: SemanticType) -> Option<usize> {
         SemanticType::Vector { lanes, lane } if lanes > 0 => scalar_bits(lane)?.checked_mul(usize::from(lanes)),
         SemanticType::Vector { .. } | SemanticType::Opmask { lanes: 0 } => None,
         SemanticType::Opmask { lanes } => Some(usize::from(lanes)),
+        SemanticType::Tile {
+            rows, bytes_per_row, ..
+        } if rows > 0 && bytes_per_row > 0 => usize::from(rows)
+            .checked_mul(usize::from(bytes_per_row))
+            .and_then(|bytes| bytes.checked_mul(8)),
         SemanticType::Tile { .. } => None,
     }
 }
@@ -537,6 +542,11 @@ fn encode_op(out: &mut CanonicalWriter, op: SemanticOp) {
                 TileOp::Zero => 2,
                 TileOp::DotProduct => 3,
                 TileOp::Transform => 4,
+                TileOp::DotS8U8 => 5,
+                TileOp::DotU8S8 => 6,
+                TileOp::DotU8U8 => 7,
+                TileOp::DotBf16 => 8,
+                TileOp::DotFp16 => 9,
             });
         }
     }

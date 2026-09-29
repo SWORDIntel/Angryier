@@ -125,25 +125,42 @@ impl<R, M> Default for ConcreteInterpreter<R, M> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ConcreteStorage {
+    Inline { bytes: [u8; 64], len: u8 },
+    Heap(Box<[u8]>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ConcreteValue {
     ty: IrType,
-    bytes: [u8; 64],
-    len: u8,
+    storage: ConcreteStorage,
 }
 
 impl ConcreteValue {
     fn bytes_le(&self) -> &[u8] {
-        &self.bytes[..usize::from(self.len)]
+        match &self.storage {
+            ConcreteStorage::Inline { bytes, len } => &bytes[..usize::from(*len)],
+            ConcreteStorage::Heap(boxed) => boxed.as_ref(),
+        }
     }
 
     fn from_bytes_le(ty: IrType, bytes: &[u8]) -> Self {
-        let mut buf = [0u8; 64];
-        let len = bytes.len().min(64);
-        buf[..len].copy_from_slice(&bytes[..len]);
-        ConcreteValue {
-            ty,
-            bytes: buf,
-            len: u8::try_from(len).unwrap_or(64),
+        if bytes.len() <= 64 {
+            let mut buf = [0u8; 64];
+            let len = bytes.len();
+            buf[..len].copy_from_slice(bytes);
+            ConcreteValue {
+                ty,
+                storage: ConcreteStorage::Inline {
+                    bytes: buf,
+                    len: len as u8,
+                },
+            }
+        } else {
+            ConcreteValue {
+                ty,
+                storage: ConcreteStorage::Heap(bytes.to_vec().into_boxed_slice()),
+            }
         }
     }
 
@@ -153,8 +170,10 @@ impl ConcreteValue {
         buf[..len].copy_from_slice(&value.to_le_bytes()[..len]);
         ConcreteValue {
             ty,
-            bytes: buf,
-            len: u8::try_from(len).unwrap_or(64),
+            storage: ConcreteStorage::Inline {
+                bytes: buf,
+                len: len as u8,
+            },
         }
     }
 }
@@ -313,53 +332,73 @@ where
         IrOp::Load { address, ty } => {
             let address = value_address(get_value(values, *address)?)?;
             let width = type_bytes(*ty)?;
-            // Buffer-filling read: no `Vec<ByteValue>` allocation per load.
-            let mut buffer = [ByteValue::Concrete(0); 64];
-            state
-                .memory
-                .read_into(address, &mut buffer[..width])
-                .map_err(ConcreteExecutionError::Memory)?;
-            let mut concrete = [0u8; 64];
-            let mut len = 0usize;
-            for (offset, byte) in buffer[..width].iter().enumerate() {
-                match byte {
-                    ByteValue::Concrete(byte) => {
-                        if len < 64 {
-                            concrete[len] = *byte;
-                            len += 1;
+            let val = if width <= 64 {
+                let mut buffer = [ByteValue::Concrete(0); 64];
+                state
+                    .memory
+                    .read_into(address, &mut buffer[..width])
+                    .map_err(ConcreteExecutionError::Memory)?;
+                let mut concrete = [0u8; 64];
+                for (offset, byte) in buffer[..width].iter().enumerate() {
+                    match byte {
+                        ByteValue::Concrete(byte) => {
+                            concrete[offset] = *byte;
+                        }
+                        ByteValue::Symbolic(_) => {
+                            let offset = u64::try_from(offset).map_err(|_| ConcreteExecutionError::InvalidAddress)?;
+                            let symbolic_address = address
+                                .checked_add(offset)
+                                .ok_or(ConcreteExecutionError::InvalidAddress)?;
+                            return Err(ConcreteExecutionError::SymbolicMemory(symbolic_address));
                         }
                     }
-                    ByteValue::Symbolic(_) => {
-                        let offset = u64::try_from(offset).map_err(|_| ConcreteExecutionError::InvalidAddress)?;
-                        let symbolic_address = address
-                            .checked_add(offset)
-                            .ok_or(ConcreteExecutionError::InvalidAddress)?;
-                        return Err(ConcreteExecutionError::SymbolicMemory(symbolic_address));
+                }
+                ConcreteValue::from_bytes_le(*ty, &concrete[..width])
+            } else {
+                let mut buffer = vec![ByteValue::Concrete(0); width];
+                state
+                    .memory
+                    .read_into(address, &mut buffer)
+                    .map_err(ConcreteExecutionError::Memory)?;
+                let mut concrete = vec![0u8; width];
+                for (offset, byte) in buffer.iter().enumerate() {
+                    match byte {
+                        ByteValue::Concrete(byte) => {
+                            concrete[offset] = *byte;
+                        }
+                        ByteValue::Symbolic(_) => {
+                            let offset = u64::try_from(offset).map_err(|_| ConcreteExecutionError::InvalidAddress)?;
+                            let symbolic_address = address
+                                .checked_add(offset)
+                                .ok_or(ConcreteExecutionError::InvalidAddress)?;
+                            return Err(ConcreteExecutionError::SymbolicMemory(symbolic_address));
+                        }
                     }
                 }
-            }
-            Some(ConcreteValue {
-                ty: *ty,
-                bytes: concrete,
-                len: u8::try_from(len).unwrap_or(16),
-            })
+                ConcreteValue::from_bytes_le(*ty, &concrete)
+            };
+            Some(val)
         }
         IrOp::Store { address, value } => {
             let address = value_address(get_value(values, *address)?)?;
             let value = get_value(values, *value)?;
-            // The stored bytes fit in 64 (`type_bytes` rejects wider values),
-            // so build the `ByteValue` run in a stack buffer and write the
-            // memory field directly — no per-store `Vec` and no whole-state
-            // clone (`write_memory` clones everything for one field).
             let bytes = value.bytes_le();
-            let mut buffer = [ByteValue::Concrete(0); 64];
-            for (slot, byte) in buffer.iter_mut().zip(bytes.iter().copied()) {
-                *slot = ByteValue::Concrete(byte);
+            if bytes.len() <= 64 {
+                let mut buffer = [ByteValue::Concrete(0); 64];
+                for (slot, byte) in buffer.iter_mut().zip(bytes.iter().copied()) {
+                    *slot = ByteValue::Concrete(byte);
+                }
+                state.memory = state
+                    .memory
+                    .write(address, &buffer[..bytes.len()])
+                    .map_err(ConcreteExecutionError::Memory)?;
+            } else {
+                let buffer: Vec<ByteValue> = bytes.iter().copied().map(ByteValue::Concrete).collect();
+                state.memory = state
+                    .memory
+                    .write(address, &buffer)
+                    .map_err(ConcreteExecutionError::Memory)?;
             }
-            state.memory = state
-                .memory
-                .write(address, &buffer[..bytes.len()])
-                .map_err(ConcreteExecutionError::Memory)?;
             None
         }
         IrOp::Branch {
@@ -368,10 +407,10 @@ where
             not_taken,
         } => {
             let condition = get_value(values, *condition)?;
-            if condition.ty != IrType::Bits(1) || condition.len != 1 {
+            if condition.ty != IrType::Bits(1) || condition.bytes_le().len() != 1 {
                 return Err(ConcreteExecutionError::TypeMismatch);
             }
-            let next_pc = if condition.bytes[0] & 1 == 1 {
+            let next_pc = if condition.bytes_le()[0] & 1 == 1 {
                 *taken
             } else {
                 *not_taken
@@ -424,7 +463,7 @@ fn type_bytes<R, M>(ty: IrType) -> Result<usize, ConcreteExecutionError<R, M>> {
     usize::from(bits)
         .checked_add(7)
         .and_then(|bits| bits.checked_div(8))
-        .filter(|bytes| *bytes > 0 && *bytes <= 64)
+        .filter(|bytes| *bytes > 0 && *bytes <= 1024)
         .ok_or(ConcreteExecutionError::UnsupportedType(ty))
 }
 
@@ -2624,9 +2663,196 @@ fn evaluate_primitive<R, M>(
                 output_bits,
             ));
         }
+        IrPrimitive::TileZero => {
+            return Ok(ConcreteValue::from_bytes_le(ty, &[0u8; 1024]));
+        }
+        IrPrimitive::TileDotS8S8
+        | IrPrimitive::TileDotS8U8
+        | IrPrimitive::TileDotU8S8
+        | IrPrimitive::TileDotU8U8
+        | IrPrimitive::TileDotBf16
+        | IrPrimitive::TileDotFp16 => {
+            return evaluate_tile_dot(operation, ty, &resolved);
+        }
     };
 
     Ok(ConcreteValue::from_u128(ty, value & bit_mask(output_bits), output_bits))
+}
+
+fn fp16_to_f32(h: u16) -> f32 {
+    let sign = ((h >> 15) & 1) as u32;
+    let exp = ((h >> 10) & 0x1F) as u32;
+    let mant = (h & 0x3FF) as u32;
+
+    let f_bits = if exp == 0 {
+        if mant == 0 {
+            sign << 31
+        } else {
+            let mut m = mant;
+            let mut e = 113;
+            while (m & 0x400) == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            (sign << 31) | (e << 23) | ((m & 0x3FF) << 13)
+        }
+    } else if exp == 31 {
+        (sign << 31) | (0xFF << 23) | (mant << 13)
+    } else {
+        (sign << 31) | ((exp + (127 - 15)) << 23) | (mant << 13)
+    };
+    f32::from_bits(f_bits)
+}
+
+fn evaluate_tile_dot<R, M>(
+    operation: IrPrimitive,
+    ty: IrType,
+    resolved: &[&ConcreteValue],
+) -> Result<ConcreteValue, ConcreteExecutionError<R, M>> {
+    if resolved.len() < 3 {
+        return Err(ConcreteExecutionError::InvalidArity {
+            operation,
+            expected: 3,
+            actual: resolved.len(),
+        });
+    }
+    let mut c = [0u8; 1024];
+    let c_in = resolved[0].bytes_le();
+    c[..c_in.len().min(1024)].copy_from_slice(&c_in[..c_in.len().min(1024)]);
+
+    let mut a = [0u8; 1024];
+    let a_in = resolved[1].bytes_le();
+    a[..a_in.len().min(1024)].copy_from_slice(&a_in[..a_in.len().min(1024)]);
+
+    let mut b = [0u8; 1024];
+    let b_in = resolved[2].bytes_le();
+    b[..b_in.len().min(1024)].copy_from_slice(&b_in[..b_in.len().min(1024)]);
+
+    // Check optional TILECFG in resolved[3]
+    let (dst_rows, dst_colsb, src1_colsb) = if resolved.len() >= 4 && resolved[3].bytes_le().len() >= 64 {
+        let cfg = resolved[3].bytes_le();
+        let r = cfg[48];
+        let c_cols = u16::from_le_bytes([cfg[16], cfg[17]]);
+        let a_cols = u16::from_le_bytes([cfg[18], cfg[19]]);
+        let r = if r == 0 || r > 16 { 16 } else { r as usize };
+        let c_cols = if c_cols == 0 || c_cols > 64 {
+            64
+        } else {
+            c_cols as usize
+        };
+        let a_cols = if a_cols == 0 || a_cols > 64 {
+            64
+        } else {
+            a_cols as usize
+        };
+        (r, c_cols, a_cols)
+    } else {
+        (16, 64, 64)
+    };
+
+    match operation {
+        IrPrimitive::TileDotS8S8 | IrPrimitive::TileDotS8U8 | IrPrimitive::TileDotU8S8 | IrPrimitive::TileDotU8U8 => {
+            let k_max = src1_colsb / 4;
+            let n_max = dst_colsb / 4;
+            for m in 0..dst_rows {
+                for n in 0..n_max {
+                    let c_offset = m * 64 + n * 4;
+                    let mut accum =
+                        i32::from_le_bytes([c[c_offset], c[c_offset + 1], c[c_offset + 2], c[c_offset + 3]]);
+                    for k in 0..k_max {
+                        let a_offset = m * 64 + k * 4;
+                        let b_offset = k * 64 + n * 4;
+                        let dot = match operation {
+                            IrPrimitive::TileDotS8S8 => {
+                                let mut s = 0i32;
+                                for i in 0..4 {
+                                    s = s.wrapping_add((a[a_offset + i] as i8 as i32) * (b[b_offset + i] as i8 as i32));
+                                }
+                                s
+                            }
+                            IrPrimitive::TileDotS8U8 => {
+                                let mut s = 0i32;
+                                for i in 0..4 {
+                                    s = s.wrapping_add((a[a_offset + i] as i8 as i32) * (b[b_offset + i] as i32));
+                                }
+                                s
+                            }
+                            IrPrimitive::TileDotU8S8 => {
+                                let mut s = 0i32;
+                                for i in 0..4 {
+                                    s = s.wrapping_add((a[a_offset + i] as i32) * (b[b_offset + i] as i8 as i32));
+                                }
+                                s
+                            }
+                            IrPrimitive::TileDotU8U8 => {
+                                let mut s = 0u32;
+                                for i in 0..4 {
+                                    s = s.wrapping_add((a[a_offset + i] as u32) * (b[b_offset + i] as u32));
+                                }
+                                s as i32
+                            }
+                            _ => 0,
+                        };
+                        accum = accum.wrapping_add(dot);
+                    }
+                    c[c_offset..c_offset + 4].copy_from_slice(&accum.to_le_bytes());
+                }
+            }
+        }
+        IrPrimitive::TileDotBf16 => {
+            let k_max = src1_colsb / 4;
+            let n_max = dst_colsb / 4;
+            for m in 0..dst_rows {
+                for n in 0..n_max {
+                    let c_offset = m * 64 + n * 4;
+                    let mut accum =
+                        f32::from_le_bytes([c[c_offset], c[c_offset + 1], c[c_offset + 2], c[c_offset + 3]]);
+                    for k in 0..k_max {
+                        let a_offset = m * 64 + k * 4;
+                        let b_offset = k * 64 + n * 4;
+                        let a0 = u16::from_le_bytes([a[a_offset], a[a_offset + 1]]);
+                        let a1 = u16::from_le_bytes([a[a_offset + 2], a[a_offset + 3]]);
+                        let b0 = u16::from_le_bytes([b[b_offset], b[b_offset + 1]]);
+                        let b1 = u16::from_le_bytes([b[b_offset + 2], b[b_offset + 3]]);
+                        let fa0 = f32::from_bits((a0 as u32) << 16);
+                        let fa1 = f32::from_bits((a1 as u32) << 16);
+                        let fb0 = f32::from_bits((b0 as u32) << 16);
+                        let fb1 = f32::from_bits((b1 as u32) << 16);
+                        accum += fa0 * fb0 + fa1 * fb1;
+                    }
+                    c[c_offset..c_offset + 4].copy_from_slice(&accum.to_le_bytes());
+                }
+            }
+        }
+        IrPrimitive::TileDotFp16 => {
+            let k_max = src1_colsb / 4;
+            let n_max = dst_colsb / 4;
+            for m in 0..dst_rows {
+                for n in 0..n_max {
+                    let c_offset = m * 64 + n * 4;
+                    let mut accum =
+                        f32::from_le_bytes([c[c_offset], c[c_offset + 1], c[c_offset + 2], c[c_offset + 3]]);
+                    for k in 0..k_max {
+                        let a_offset = m * 64 + k * 4;
+                        let b_offset = k * 64 + n * 4;
+                        let a0 = u16::from_le_bytes([a[a_offset], a[a_offset + 1]]);
+                        let a1 = u16::from_le_bytes([a[a_offset + 2], a[a_offset + 3]]);
+                        let b0 = u16::from_le_bytes([b[b_offset], b[b_offset + 1]]);
+                        let b1 = u16::from_le_bytes([b[b_offset + 2], b[b_offset + 3]]);
+                        let fa0 = fp16_to_f32(a0);
+                        let fa1 = fp16_to_f32(a1);
+                        let fb0 = fp16_to_f32(b0);
+                        let fb1 = fp16_to_f32(b1);
+                        accum += fa0 * fb0 + fa1 * fb1;
+                    }
+                    c[c_offset..c_offset + 4].copy_from_slice(&accum.to_le_bytes());
+                }
+            }
+        }
+        _ => return Err(ConcreteExecutionError::UnsupportedOperation(operation)),
+    }
+
+    Ok(ConcreteValue::from_bytes_le(ty, &c))
 }
 
 fn scalar_bits<R, M>(ty: IrType) -> Result<u16, ConcreteExecutionError<R, M>> {
@@ -2639,6 +2865,7 @@ fn scalar_bits<R, M>(ty: IrType) -> Result<u16, ConcreteExecutionError<R, M>> {
         IrType::Float80 => Ok(80),
         IrType::Vector { width_bits, .. } if width_bits > 0 && width_bits <= 512 => Ok(width_bits),
         IrType::Opmask { width_bits } if width_bits > 0 && width_bits <= 512 => Ok(width_bits),
+        IrType::Tile => Ok(8192),
         _ => Err(ConcreteExecutionError::UnsupportedType(ty)),
     }
 }
@@ -2749,8 +2976,9 @@ fn require_types<R, M>(values: &[&ConcreteValue], expected: IrType) -> Result<()
 
 fn as_u128(value: &ConcreteValue) -> u128 {
     let mut buf = [0u8; 16];
-    let n = usize::from(value.len).min(16);
-    buf[..n].copy_from_slice(&value.bytes[..n]);
+    let bytes = value.bytes_le();
+    let n = bytes.len().min(16);
+    buf[..n].copy_from_slice(&bytes[..n]);
     u128::from_le_bytes(buf)
 }
 
@@ -3262,14 +3490,14 @@ mod tests {
     fn inline_value_stores_small_values() {
         let v8 = ConcreteValue::from_u128(IrType::Bits(8), 0xAB, 8);
         assert_eq!(v8.bytes_le(), &[0xAB]);
-        assert_eq!(v8.len, 1);
+        assert_eq!(v8.bytes_le().len(), 1);
 
         let v64 = ConcreteValue::from_u128(IrType::Bits(64), 0xDEADBEEF, 64);
         assert_eq!(v64.bytes_le(), &[0xEF, 0xBE, 0xAD, 0xDE, 0, 0, 0, 0]);
-        assert_eq!(v64.len, 8);
+        assert_eq!(v64.bytes_le().len(), 8);
 
         let v128 = ConcreteValue::from_u128(IrType::Bits(128), u128::MAX, 128);
-        assert_eq!(v128.len, 16);
+        assert_eq!(v128.bytes_le().len(), 16);
         assert!(v128.bytes_le().iter().all(|&b| b == 0xFF));
     }
 
@@ -3278,7 +3506,7 @@ mod tests {
         let bytes = [1u8, 2, 3, 4];
         let v = ConcreteValue::from_bytes_le(IrType::Bits(32), &bytes);
         assert_eq!(v.bytes_le(), &bytes);
-        assert_eq!(v.len, 4);
+        assert_eq!(v.bytes_le().len(), 4);
     }
 
     #[test]
@@ -3290,11 +3518,11 @@ mod tests {
     #[test]
     fn inline_value_width_is_correct() {
         let v1 = ConcreteValue::from_u128(IrType::Bits(1), 1, 1);
-        assert_eq!(v1.len, 1);
+        assert_eq!(v1.bytes_le().len(), 1);
         let v16 = ConcreteValue::from_u128(IrType::Bits(16), 0xFFFF, 16);
-        assert_eq!(v16.len, 2);
+        assert_eq!(v16.bytes_le().len(), 2);
         let v128 = ConcreteValue::from_u128(IrType::Bits(128), 0, 128);
-        assert_eq!(v128.len, 16);
+        assert_eq!(v128.bytes_le().len(), 16);
     }
 
     #[test]

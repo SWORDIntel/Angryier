@@ -11,11 +11,10 @@
 #![cfg(feature = "xed")]
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use angryier_expr::{ExprReader, ShardedExprArena};
+use angryier_expr::ShardedExprArena;
 use angryier_models::KernelPoolTracker;
-use angryier_runtime::{ExplorationPolicy, Runtime, SymbolicSession};
+use angryier_runtime::{Runtime, SymbolicSession};
 use angryier_types::{ExpressionNormalizationVersion, SemanticVersion, TargetProfileId};
 
 fn driver_image(name: &str) -> Option<Vec<u8>> {

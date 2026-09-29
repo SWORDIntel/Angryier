@@ -6,7 +6,7 @@ use angryier_semantic_contracts::SealedSemanticBlock;
 use angryier_semantics::{
     BlockValidityKey, DecodedInstructionView, FloatFormat, FloatingOp, MemoryBase, MemoryIndex, MemoryOperand,
     OperandKind, PrimitiveOp, RegisterWriteBehavior, SealedRichSemanticBlock, SemanticEffectDefinition,
-    SemanticLowerer, SemanticOp, SemanticType, SemanticValue, SemanticValueDefinition, ValueId, VectorOp,
+    SemanticLowerer, SemanticOp, SemanticType, SemanticValue, SemanticValueDefinition, TileOp, ValueId, VectorOp,
 };
 use angryier_types::{Address, ContentId};
 use std::collections::{BTreeMap, HashMap};
@@ -470,7 +470,7 @@ fn lower_operand_read(
                     .to_vec(),
             }))
         }
-        OperandKind::Memory(memory) if bit_width <= 512 => {
+        OperandKind::Memory(memory) if bit_width <= 8192 => {
             let address = lower_memory_address(decoded, &memory, emitter)?;
             Ok(OperandRead::Op(IrOp::Load { address, ty: ir_type }))
         }
@@ -522,7 +522,8 @@ fn lower_operand_write(
         });
         value_type = SemanticType::Scalar(angryier_semantics::ScalarType::BitVec(operand_bits));
     }
-    if scalar_bit_width(value_type) != Some(operand.width_bits) {
+    let is_unsized_memory = matches!(operand.kind, OperandKind::Memory(_)) && operand.width_bits == 0;
+    if !is_unsized_memory && scalar_bit_width(value_type) != Some(operand.width_bits) {
         return Err(IrLoweringError::OperandTypeMismatch(index));
     }
     match operand.kind {
@@ -593,6 +594,13 @@ fn scalar_bit_width(ty: SemanticType) -> Option<u16> {
                 .checked_mul(u32::from(lanes))
                 .and_then(|bits| u16::try_from(bits).ok())
         }
+        SemanticType::Tile {
+            rows, bytes_per_row, ..
+        } if rows > 0 && bytes_per_row > 0 => u32::from(rows)
+            .checked_mul(u32::from(bytes_per_row))
+            .and_then(|bytes| bytes.checked_mul(8))
+            .and_then(|bits| u16::try_from(bits).ok()),
+        SemanticType::Opmask { lanes } => Some(lanes),
         _ => None,
     }
 }
@@ -834,7 +842,16 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
             VectorOp::Avg => Ok(IrPrimitive::VecLaneAvg),
             _ => Err(IrLoweringError::UnsupportedValue("non-lane-wise vector operation")),
         },
-        SemanticOp::Tile(_) => Err(IrLoweringError::UnsupportedValue("non-primitive operation")),
+        SemanticOp::Tile(op) => match op {
+            TileOp::Zero => Ok(IrPrimitive::TileZero),
+            TileOp::DotProduct => Ok(IrPrimitive::TileDotS8S8),
+            TileOp::DotS8U8 => Ok(IrPrimitive::TileDotS8U8),
+            TileOp::DotU8S8 => Ok(IrPrimitive::TileDotU8S8),
+            TileOp::DotU8U8 => Ok(IrPrimitive::TileDotU8U8),
+            TileOp::DotBf16 => Ok(IrPrimitive::TileDotBf16),
+            TileOp::DotFp16 => Ok(IrPrimitive::TileDotFp16),
+            _ => Err(IrLoweringError::UnsupportedValue("unsupported tile operation")),
+        },
     }
 }
 

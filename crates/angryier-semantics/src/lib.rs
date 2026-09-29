@@ -220,6 +220,11 @@ pub enum TileOp {
     Zero,
     DotProduct,
     Transform,
+    DotS8U8,
+    DotU8S8,
+    DotU8U8,
+    DotBf16,
+    DotFp16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

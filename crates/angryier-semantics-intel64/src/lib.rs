@@ -14,6 +14,7 @@
 // paths valid in every context.
 extern crate self as angryier_semantics_intel64;
 
+mod amx;
 mod avx512;
 mod bmi;
 mod providers;
@@ -22,6 +23,7 @@ mod registry;
 mod x87;
 
 pub mod declarative;
+pub use amx::forms as amx_forms;
 pub use avx512::forms as evex_forms;
 pub use avx512::*;
 pub use bmi::*;
