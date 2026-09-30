@@ -21,10 +21,30 @@ struct CrateInfo {
 
 /// Static registry of every workspace crate the CLI reports on.
 ///
-/// 37 implemented crates with real logic plus 2 scaffolded contract boundaries
-/// (fail-closed) = 39 crates total.
+/// 41 implemented crates with real logic plus 2 scaffolded contract boundaries
+/// (fail-closed) = 43 crates total.
 static CRATES: &[CrateInfo] = &[
     // --- Implemented (real logic, not just contracts) ---
+    CrateInfo {
+        name: "angryier",
+        implemented: true,
+        desc: "Stable public API and stability harness",
+    },
+    CrateInfo {
+        name: "angryier-cfg",
+        implemented: true,
+        desc: "CFG recovery, dominance, and loop analysis",
+    },
+    CrateInfo {
+        name: "angryier-runtime",
+        implemented: true,
+        desc: "Dual-mode runtime and execution orchestration",
+    },
+    CrateInfo {
+        name: "angryier-solver-fuzzy",
+        implemented: true,
+        desc: "Fuzzy-SAT mutation solver tier",
+    },
     CrateInfo {
         name: "angryier-types",
         implemented: true,
@@ -68,7 +88,7 @@ static CRATES: &[CrateInfo] = &[
     CrateInfo {
         name: "angryier-semantics-intel64",
         implemented: true,
-        desc: "Handwritten Intel 64 corpus (93 forms)",
+        desc: "Handwritten Intel 64 semantic corpus",
     },
     CrateInfo {
         name: "angryier-ir",
@@ -223,8 +243,8 @@ static CRATES: &[CrateInfo] = &[
     },
 ];
 
-const TOTAL_CRATES: usize = 39;
-const IMPLEMENTED_CRATES: usize = 37;
+const TOTAL_CRATES: usize = 43;
+const IMPLEMENTED_CRATES: usize = 41;
 const SCAFFOLDED_CRATES: usize = 2;
 // Historical snapshot from the 2026-09 documentation pass, not maintained
 // per-change.
@@ -876,7 +896,7 @@ mod tests {
 
     #[test]
     fn status_output_contains_crate_count() {
-        assert!(status_output().contains("39 crates"));
+        assert!(status_output().contains("43 crates"));
     }
 
     #[test]
@@ -895,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn crates_output_contains_types_crate() {
+    fn crates_output_contains_all_previously_omitted_crates() {\n        let crates = crates_output();\n        for name in ["angryier", "angryier-cfg", "angryier-runtime", "angryier-solver-fuzzy"] {\n            assert!(crates.contains(name), "missing workspace crate {name}");\n        }\n    }\n\n    #[test]\n    fn crates_output_contains_types_crate() {
         assert!(crates_output().contains("angryier-types"));
     }
 
@@ -972,7 +992,7 @@ mod tests {
             .filter(|l| l.contains("Implemented") || l.contains("Scaffolded"))
             .count();
         assert_eq!(listed, TOTAL_CRATES);
-        assert!(status_output().contains("39 crates"));
+        assert!(status_output().contains("43 crates"));
     }
 
     #[test]
