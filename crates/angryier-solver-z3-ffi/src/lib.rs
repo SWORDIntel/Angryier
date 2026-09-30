@@ -448,7 +448,16 @@ impl Z3FfiBridge {
                             let success = Z3_model_eval(ctx, model, *ast, true, eval_result.as_mut_ptr());
                             if success {
                                 let eval_ast = eval_result.assume_init();
-                                if let Some(bytes) = numeral_to_bytes(ctx, eval_ast) {
+                                // Expected model-value size from the symbol's
+                                // sort: >128-bit symbols get full-width
+                                // little-endian values (the old u128 parse
+                                // silently dropped them); everything else
+                                // keeps the historical 16-byte form.
+                                let byte_width = match self.reader.read(*sym_id).map(|node| node.sort) {
+                                    Some(ExprSort::BitVec(w)) => Some(usize::from(w).div_ceil(8)),
+                                    _ => None,
+                                };
+                                if let Some(bytes) = numeral_to_bytes(ctx, eval_ast, byte_width) {
                                     extracted.push((u64::from(sym_id.0), bytes));
                                 }
                             }
@@ -569,7 +578,10 @@ impl Z3FfiBridge {
     ) -> Result<Z3_ast, Z3FfiError> {
         let ctx = self.context;
         let get = |child: ExprId| -> Result<Z3_ast, Z3FfiError> {
-            cache.get(&child).copied().ok_or(Z3FfiError::UnresolvedExpression(child))
+            cache
+                .get(&child)
+                .copied()
+                .ok_or(Z3FfiError::UnresolvedExpression(child))
         };
         match node.op {
             ExprOp::Constant => match node.sort {
@@ -581,12 +593,13 @@ impl Z3FfiBridge {
                         bytes.resize(byte_width, 0);
                     }
                     bytes.truncate(byte_width);
-                    // Convert little-endian bytes to a decimal string for Z3
-                    let mut value: u128 = 0;
-                    for (i, &b) in bytes.iter().enumerate() {
-                        value |= u128::from(b) << (i * 8);
-                    }
-                    let numeral_str = value.to_string();
+                    // Convert little-endian bytes to a decimal string for Z3.
+                    // Widths up to 128 bits take the historical u128 fold
+                    // (byte-identical strings); wider constants (256/512-bit
+                    // AVX workloads) are formatted exactly — folding them
+                    // through a u128 used to shift-overflow (panic in debug,
+                    // wrapped garbage in release).
+                    let numeral_str = le_bytes_to_decimal(&bytes);
                     let c_str =
                         std::ffi::CString::new(numeral_str.as_str()).map_err(|_| Z3FfiError::MalformedExpression)?;
                     let ast = unsafe { Z3_mk_numeral(ctx, c_str.as_ptr(), sort) }.ok_or(Z3FfiError::NullAst)?;
@@ -634,19 +647,26 @@ impl Z3FfiBridge {
                 }
                 let left = get(node.operands[0])?;
                 let right = get(node.operands[1])?;
+                // Bool-sorted And/Or are propositional conjunction and
+                // disjunction (path-constraint trees, region-bound
+                // disjunctions); BitVec-sorted are the bitwise ALU ops.
+                // A sort mismatch (one Bool, one BitVec operand) is
+                // malformed — Z3 would return a sort-error AST.
                 let ast = unsafe {
-                    match node.op {
-                        ExprOp::Add => Z3_mk_bvadd(ctx, left, right),
-                        ExprOp::Sub => Z3_mk_bvsub(ctx, left, right),
-                        ExprOp::Mul => Z3_mk_bvmul(ctx, left, right),
-                        ExprOp::UDiv => Z3_mk_bvudiv(ctx, left, right),
-                        ExprOp::SDiv => Z3_mk_bvsdiv(ctx, left, right),
-                        ExprOp::And => Z3_mk_bvand(ctx, left, right),
-                        ExprOp::Or => Z3_mk_bvor(ctx, left, right),
-                        ExprOp::Xor => Z3_mk_bvxor(ctx, left, right),
-                        ExprOp::Shl => Z3_mk_bvshl(ctx, left, right),
-                        ExprOp::LShr => Z3_mk_bvlshr(ctx, left, right),
-                        ExprOp::AShr => Z3_mk_bvashr(ctx, left, right),
+                    match (node.op, &node.sort) {
+                        (ExprOp::And, ExprSort::Bool) => Z3_mk_and(ctx, 2, [left, right].as_mut_ptr()),
+                        (ExprOp::Or, ExprSort::Bool) => Z3_mk_or(ctx, 2, [left, right].as_mut_ptr()),
+                        (ExprOp::Add, _) => Z3_mk_bvadd(ctx, left, right),
+                        (ExprOp::Sub, _) => Z3_mk_bvsub(ctx, left, right),
+                        (ExprOp::Mul, _) => Z3_mk_bvmul(ctx, left, right),
+                        (ExprOp::UDiv, _) => Z3_mk_bvudiv(ctx, left, right),
+                        (ExprOp::SDiv, _) => Z3_mk_bvsdiv(ctx, left, right),
+                        (ExprOp::And, _) => Z3_mk_bvand(ctx, left, right),
+                        (ExprOp::Or, _) => Z3_mk_bvor(ctx, left, right),
+                        (ExprOp::Xor, _) => Z3_mk_bvxor(ctx, left, right),
+                        (ExprOp::Shl, _) => Z3_mk_bvshl(ctx, left, right),
+                        (ExprOp::LShr, _) => Z3_mk_bvlshr(ctx, left, right),
+                        (ExprOp::AShr, _) => Z3_mk_bvashr(ctx, left, right),
                         _ => return Err(Z3FfiError::MalformedExpression),
                     }
                 }
@@ -684,11 +704,17 @@ impl Z3FfiBridge {
                 let ast = if count_node.op == ExprOp::Constant {
                     // Constant amount: the indexed rotate, with the count
                     // taken modulo the width (the op's defining semantics).
-                    let mut raw: u128 = 0;
-                    for (i, &b) in count_node.immediate.iter().enumerate().take(16) {
-                        raw |= u128::from(b) << (i * 8);
+                    // The count folds straight out of the little-endian
+                    // immediate with per-byte modular reduction (MSB first),
+                    // so a count constant wider than 128 bits — a 256-bit
+                    // constant count — stays exact instead of being truncated
+                    // to its low 16 bytes. Widths are u16, so every
+                    // intermediate fits comfortably in u64.
+                    let mut rem: u64 = 0;
+                    for &b in count_node.immediate.iter().rev() {
+                        rem = (rem * 256 + u64::from(b)) % u64::from(width);
                     }
-                    let amount = u32::try_from(raw % u128::from(width)).map_err(|_| Z3FfiError::MalformedExpression)?;
+                    let amount = u32::try_from(rem).map_err(|_| Z3FfiError::MalformedExpression)?;
                     unsafe {
                         if node.op == ExprOp::RotL {
                             Z3_mk_rotate_left(ctx, amount, value)
@@ -881,17 +907,101 @@ fn bytes_to_u64(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(buf)
 }
 
+/// Format a little-endian immediate as an exact decimal numeral for Z3.
+///
+/// Values that fit a `u128` (every width <= 128 bits) keep the historical
+/// fold-and-`to_string` path, so their numeral strings — and therefore the
+/// constructed ASTs — are identical to the pre-AVX behavior. Wider values
+/// use schoolbook long division by 10 over the little-endian bytes:
+/// O(decimal_digits * bytes), microseconds at 512 bits. Folding a 256-bit
+/// constant through a `u128`, as before, shifted by >= 128 bits — a panic
+/// under debug assertions and wrapped garbage in release.
+fn le_bytes_to_decimal(bytes: &[u8]) -> String {
+    if bytes.len() <= core::mem::size_of::<u128>() {
+        let mut value: u128 = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            value |= u128::from(b) << (i * 8);
+        }
+        return value.to_string();
+    }
+    let mut work = bytes.to_vec();
+    let mut digits_low_first: Vec<u8> = Vec::with_capacity(bytes.len() * 3);
+    while work.iter().any(|&b| b != 0) {
+        // One long-division pass by 10, most-significant byte first. The
+        // remainder is < 10 and every intermediate <= 2569, so u16 suffices.
+        let mut rem: u16 = 0;
+        for byte in work.iter_mut().rev() {
+            let cur = (rem << 8) | u16::from(*byte);
+            *byte = (cur / 10) as u8;
+            rem = cur % 10;
+        }
+        digits_low_first.push(rem as u8);
+    }
+    if digits_low_first.is_empty() {
+        return "0".to_owned();
+    }
+    let mut out = String::with_capacity(digits_low_first.len());
+    for d in digits_low_first.into_iter().rev() {
+        out.push((b'0' + d) as char);
+    }
+    out
+}
+
+/// Parse an exact decimal numeral into `byte_width` little-endian bytes,
+/// rejecting non-digit input and values that do not fit. Used for model
+/// values of sorts wider than a `u128` (the old `u128` parse silently
+/// dropped those symbols from extracted models).
+fn decimal_to_le_bytes(s: &str, byte_width: usize) -> Option<Vec<u8>> {
+    let mut bytes = vec![0u8; byte_width];
+    for d in s.bytes() {
+        let digit = u16::from(d.checked_sub(b'0')?);
+        if digit > 9 {
+            return None;
+        }
+        // Multiply the accumulator by 10 and add the digit, least
+        // significant byte first. The carry stays <= 10, so every
+        // intermediate fits in u16.
+        let mut carry = digit;
+        for byte in bytes.iter_mut() {
+            let cur = u16::from(*byte) * 10 + carry;
+            *byte = (cur & 0xff) as u8;
+            carry = cur >> 8;
+        }
+        if carry != 0 {
+            // Value does not fit byte_width — malformed for its sort.
+            return None;
+        }
+    }
+    Some(bytes)
+}
+
 /// Extract a numeral value from a Z3 AST as little-endian bytes.
-unsafe fn numeral_to_bytes(ctx: Z3_context, ast: Z3_ast) -> Option<Vec<u8>> {
+///
+/// `wide_byte_width` is the expected model-value size derived from the
+/// symbol's bitvector sort. Values that fit a `u128` keep the historical
+/// 16-byte little-endian form; a wider numeral (a >128-bit symbol, which
+/// the old `u128` parse silently dropped from the model) is converted
+/// exactly and zero-extended to the full width.
+unsafe fn numeral_to_bytes(ctx: Z3_context, ast: Z3_ast, wide_byte_width: Option<usize>) -> Option<Vec<u8>> {
     let str_ptr = unsafe { Z3_get_numeral_string(ctx, ast) };
     if str_ptr.is_null() {
         return None;
     }
     let c_str = unsafe { std::ffi::CStr::from_ptr(str_ptr) };
     let s = c_str.to_str().ok()?;
-    // Z3 returns decimal; parse as u128 and convert to bytes
-    let val: u128 = s.parse().ok()?;
-    Some(val.to_le_bytes().to_vec())
+    // Z3 returns decimal; numerals that fit a u128 keep the exact
+    // historical representation.
+    if let Ok(val) = s.parse::<u128>() {
+        return match wide_byte_width {
+            Some(w) if w > core::mem::size_of::<u128>() => {
+                let mut bytes = val.to_le_bytes().to_vec();
+                bytes.resize(w, 0);
+                Some(bytes)
+            }
+            _ => Some(val.to_le_bytes().to_vec()),
+        };
+    }
+    decimal_to_le_bytes(s, wide_byte_width?)
 }
 
 #[cfg(test)]
@@ -922,15 +1032,27 @@ mod tests {
 
     fn make_const(arena: &ShardedExprArena, width: u16, value: u128) -> ExprId {
         let byte_width = usize::from(width).div_ceil(8);
-        let immediate = value.to_le_bytes()[..byte_width].to_vec();
+        // Zero-extend the u128 into the full immediate width so widths above
+        // 128 bits work for small values (0, 1, ...) too.
+        let raw = value.to_le_bytes();
+        let mut immediate = vec![0u8; byte_width];
+        let len = raw.len().min(byte_width);
+        immediate[..len].copy_from_slice(&raw[..len]);
+        make_const_bytes(arena, width, &immediate)
+    }
+
+    /// Intern a constant from its exact little-endian immediate (the arena's
+    /// canonical form: exactly `ceil(width/8)` bytes). Unlike [`make_const`],
+    /// this supports values wider than a `u128`.
+    fn make_const_bytes(arena: &ShardedExprArena, width: u16, immediate: &[u8]) -> ExprId {
         arena
             .intern(ExprNode {
                 sort: ExprSort::BitVec(width),
                 op: ExprOp::Constant,
                 operands: Vec::new(),
-                immediate,
+                immediate: immediate.to_vec(),
             })
-            .unwrap_or(ExprId(0))
+            .unwrap()
     }
 
     fn make_binop(arena: &ShardedExprArena, op: ExprOp, width: u16, left: ExprId, right: ExprId) -> ExprId {
@@ -1192,7 +1314,314 @@ mod tests {
             buf[..len].copy_from_slice(&v[..len]);
             u128::from_le_bytes(buf)
         });
-        assert_eq!(x_val, Some(0), "model should assign x = 0 (ExprId={}), got {:?}", x_expr_id, result.model);
+        assert_eq!(
+            x_val,
+            Some(0),
+            "model should assign x = 0 (ExprId={}), got {:?}",
+            x_expr_id,
+            result.model
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Wide-constant lowering (128 / 256 / 512-bit)
+    //
+    // The historical constant path folded the little-endian immediate through
+    // a u128, so any constant above 128 bits shifted by >= 128 bits — a panic
+    // under debug assertions, wrapped garbage in release. The tests below pin
+    // the exact lowering at the AVX widths (256-bit ymm, 512-bit zmm) while
+    // proving the 128-bit path is byte-identical to the pre-AVX behavior.
+    // -----------------------------------------------------------------------
+
+    fn make_extract(arena: &ShardedExprArena, value: ExprId, start: u16, width: u16) -> ExprId {
+        let mut immediate = Vec::with_capacity(4);
+        immediate.extend_from_slice(&start.to_le_bytes());
+        immediate.extend_from_slice(&width.to_le_bytes());
+        arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(width),
+                op: ExprOp::Extract,
+                operands: vec![value],
+                immediate,
+            })
+            .unwrap()
+    }
+
+    fn make_rotate(arena: &ShardedExprArena, op: ExprOp, width: u16, value: ExprId, count: ExprId) -> ExprId {
+        arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(width),
+                op,
+                operands: vec![value, count],
+                immediate: Vec::new(),
+            })
+            .unwrap()
+    }
+
+    /// Constant power-of-two helper: a `width`-bit little-endian immediate
+    /// with bit `exponent` set (exponent must be < width).
+    fn make_const_pow2(arena: &ShardedExprArena, width: u16, exponent: usize) -> ExprId {
+        assert!(exponent < usize::from(width));
+        let mut immediate = vec![0u8; usize::from(width).div_ceil(8)];
+        immediate[exponent / 8] |= 1 << (exponent % 8);
+        make_const_bytes(arena, width, &immediate)
+    }
+
+    /// 128-bit constants must lower exactly as before the wide-constant work:
+    /// the u128 fast fold, the same decimal numeral strings, the same query
+    /// outcomes, and the historical 16-byte model-value form.
+    ///
+    /// All-constant subtrees fold inside the arena (widths <= 128 never reach
+    /// Z3), so the exact-value proof pins a 128-bit constant against a
+    /// symbol: with `x == c` as a path constraint, byte-granular extracts of
+    /// `x` must match the constant's little-endian immediate bytes — bits
+    /// [8k, 8k+8) are immediate byte k (the evaluator's Extract takes `start`
+    /// from the LSB).
+    #[test]
+    fn z3_128bit_constant_roundtrip_no_regression() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = make_arena();
+        // LE bytes: [AC 68 24 F0 BD 79 35 01 EF CD AB 89 67 45 23 01]
+        let c: u128 = 0x0123_4567_89AB_CDEF_0135_79BD_F024_68AC;
+        let c128 = make_const(&arena, 128, c);
+        let one = make_const(&arena, 128, 1);
+
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let mut bridge = Z3FfiBridge::new(reader)?;
+
+        // const == const → Sat (arena-folded; sanity that the query builds).
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_eq(&arena, c128, c128), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat
+        );
+        // const != const + 1 → Unsat.
+        let c_plus_1 = make_binop(&arena, ExprOp::Add, 128, c128, one);
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_eq(&arena, c128, c_plus_1), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Unsat
+        );
+
+        // Exact-value byte-order proof through the bridge: x == c, then two
+        // byte extracts must return the LE immediate's first and last bytes.
+        let x = make_symbol(&arena, 128, 11);
+        let eq_c = make_eq(&arena, x, c128);
+        let low_byte = make_eq(&arena, make_extract(&arena, x, 0, 8), make_const(&arena, 8, c & 0xFF));
+        let high_byte = make_eq(&arena, make_extract(&arena, x, 120, 8), make_const(&arena, 8, c >> 120));
+        let mid_byte = make_eq(
+            &arena,
+            make_extract(&arena, x, 64, 8),
+            make_const(&arena, 8, (c >> 64) & 0xFF),
+        );
+        for (name, pred) in [("low", low_byte), ("mid", mid_byte), ("high", high_byte)] {
+            let result = bridge.solve(&make_query(pred, &[(ConstraintId(1), eq_c)], &arena));
+            assert_eq!(
+                result.outcome,
+                SolverOutcomeKind::Sat,
+                "{name} byte of the 128-bit immediate must land at its little-endian bit span"
+            );
+        }
+
+        // Model regression: a 128-bit symbol's model value keeps the
+        // historical 16-byte little-endian form.
+        let y = make_symbol(&arena, 128, 9);
+        let big = make_const(&arena, 128, 1 << 120);
+        let pred = make_ult(&arena, one, y);
+        let bounded = make_ult(&arena, y, big);
+        let result = bridge.solve(&make_query(pred, &[(ConstraintId(1), bounded)], &arena));
+        assert_eq!(result.outcome, SolverOutcomeKind::Sat);
+        let entry = result.model.iter().find(|(sym, _)| *sym == u64::from(y.0));
+        let (_, bytes) = entry.expect("128-bit symbol must appear in the model");
+        assert_eq!(
+            bytes.len(),
+            16,
+            "historical model form for <= 128-bit symbols is 16 bytes"
+        );
+        Ok(())
+    }
+
+    /// A 256-bit constant (2^200) whose value is entirely above bit 128:
+    /// the old u128 fold produced 0 (debug: shift-overflow panic; release:
+    /// wrapped garbage), so the assertions below distinguish exact lowering
+    /// from truncation. Widths > 128 never fold in the arena, so every
+    /// comparison here runs through the bridge's numeral construction.
+    #[test]
+    fn z3_256bit_constant_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = make_arena();
+        let c256 = make_const_pow2(&arena, 256, 200);
+        let one = make_const(&arena, 256, 1);
+
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let mut bridge = Z3FfiBridge::new(reader)?;
+
+        // const == const → Sat.
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_eq(&arena, c256, c256), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat
+        );
+        // const != const + 1 → Unsat.
+        let c_plus_1 = make_binop(&arena, ExprOp::Add, 256, c256, one);
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_eq(&arena, c256, c_plus_1), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Unsat
+        );
+        // Truncation canaries: a folded-to-0 constant would flip all four of
+        // these (Unsat, Sat, Unsat, Unsat respectively).
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_ult(&arena, c256, one), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Unsat
+        );
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_ult(&arena, one, c256), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat
+        );
+        // Neighbor comparisons pin the exact exponent: 2^199 < 2^200 < 2^201.
+        let below = make_const_pow2(&arena, 256, 199);
+        let above = make_const_pow2(&arena, 256, 201);
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_ult(&arena, below, c256), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat
+        );
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_ult(&arena, c256, above), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat
+        );
+        Ok(())
+    }
+
+    /// Same shape at 512 bits (zmm width): 2^400 vs its neighbors and 1.
+    #[test]
+    fn z3_512bit_constant_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = make_arena();
+        let c512 = make_const_pow2(&arena, 512, 400);
+        let one = make_const(&arena, 512, 1);
+
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let mut bridge = Z3FfiBridge::new(reader)?;
+
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_eq(&arena, c512, c512), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat
+        );
+        let c_plus_1 = make_binop(&arena, ExprOp::Add, 512, c512, one);
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_eq(&arena, c512, c_plus_1), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Unsat
+        );
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_ult(&arena, c512, one), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Unsat
+        );
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_ult(&arena, one, c512), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat
+        );
+        let below = make_const_pow2(&arena, 512, 399);
+        let above = make_const_pow2(&arena, 512, 401);
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_ult(&arena, below, c512), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat
+        );
+        assert_eq!(
+            bridge
+                .solve(&make_query(make_ult(&arena, c512, above), &[], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat
+        );
+        Ok(())
+    }
+
+    /// A >128-bit symbol must appear in the extracted model with a
+    /// full-width little-endian value — the old u128 parse of Z3's decimal
+    /// numeral failed and silently dropped the symbol from the model.
+    #[test]
+    fn z3_256bit_symbol_model_full_width() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = make_arena();
+        let x = make_symbol(&arena, 256, 7);
+        let one = make_const(&arena, 256, 1);
+        let upper = make_const_pow2(&arena, 256, 200); // x < 2^200
+
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let mut bridge = Z3FfiBridge::new(reader)?;
+
+        let pred = make_ult(&arena, one, x);
+        let bounded = make_ult(&arena, x, upper);
+        let result = bridge.solve(&make_query(pred, &[(ConstraintId(1), bounded)], &arena));
+        assert_eq!(result.outcome, SolverOutcomeKind::Sat);
+        let entry = result.model.iter().find(|(sym, _)| *sym == u64::from(x.0));
+        let (_, bytes) = entry.expect("256-bit symbol must appear in the model");
+        assert_eq!(bytes.len(), 32, "model value must be full-width (32 bytes)");
+        assert!(
+            bytes[26..].iter().all(|&b| b == 0),
+            "x < 2^200 forces bytes 26..32 to zero"
+        );
+        assert!(bytes[25] <= 1, "x < 2^200 forces byte 25 into {{0, 1}}");
+        let is_zero = bytes.iter().all(|&b| b == 0);
+        let is_one = bytes[0] == 1 && bytes[1..].iter().all(|&b| b == 0);
+        assert!(!is_zero && !is_one, "1 < x must hold in the model");
+        Ok(())
+    }
+
+    /// The rotate lowering folds a constant count through the full
+    /// little-endian immediate: for a 96-bit rotate, count 2^200 is
+    /// congruent to 64 (mod 96), while the old u128 fold saw only the low 16
+    /// bytes (all zero) and rotated by 0. The value operand is pinned to 1
+    /// by a path constraint — with a free symbolic value, any two rotation
+    /// amounts agree on rotate-invariant values (0, all-ones), so the query
+    /// must constrain `x` for the amount to be observable. RotL(1, a) over
+    /// 96 bits is exactly 2^(a mod 96), making the amount uniquely visible.
+    #[test]
+    fn z3_rotate_wide_constant_count() -> Result<(), Box<dyn std::error::Error>> {
+        let arena = make_arena();
+        let x = make_symbol(&arena, 96, 3);
+        let count256 = make_const_pow2(&arena, 256, 200); // 2^200 ≡ 64 (mod 96)
+        let rot_by_wide = make_rotate(&arena, ExprOp::RotL, 96, x, count256);
+        let expect_64 = make_eq(&arena, rot_by_wide, make_const_pow2(&arena, 96, 64));
+        let expect_63 = make_eq(&arena, rot_by_wide, make_const_pow2(&arena, 96, 63));
+        let x_is_one = make_eq(&arena, x, make_const(&arena, 96, 1));
+
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let mut bridge = Z3FfiBridge::new(reader)?;
+
+        assert_eq!(
+            bridge
+                .solve(&make_query(expect_64, &[(ConstraintId(1), x_is_one)], &arena))
+                .outcome,
+            SolverOutcomeKind::Sat,
+            "2^200 mod 96 == 64: the wide constant count must rotate 1 into 2^64, not leave it (amount 0)"
+        );
+        assert_eq!(
+            bridge
+                .solve(&make_query(expect_63, &[(ConstraintId(1), x_is_one)], &arena))
+                .outcome,
+            SolverOutcomeKind::Unsat,
+            "the amount must be 64, not 63: rotating 1 by 63 gives 2^63, not 2^64"
+        );
         Ok(())
     }
 }
