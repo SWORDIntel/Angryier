@@ -190,6 +190,156 @@ pub trait SymbolicAddressResolver: Send + Sync {
     fn candidates(&self, address: ExprId, limit: usize) -> Result<Vec<Address>, MemoryError>;
 }
 
+/// Site cap for the under-constrained memory debt log — mirrors
+/// `SYMBOLIC_DEBT_SITE_CAP` in the execution crate: first-seen sites are
+/// kept, the total keeps counting, and a pathological image cannot grow the
+/// log unbounded.
+pub const UC_MEMORY_DEBT_SITE_CAP: usize = 128;
+
+/// Hard ceiling on zero-backed pages the under-constrained memory policy may
+/// fabricate per run (64 MiB of address space). Beyond it the policy fails
+/// closed — the access errors exactly as it would with the flag off — so a
+/// wild pointer sweep cannot grow the map without bound. Debt is still
+/// recorded for capped-out hits.
+pub const UC_MEMORY_MAX_FABRICATED_PAGES: usize = 1 << 14;
+
+/// Hard ceiling on previous-byte revert records the read-only-write
+/// relaxation keeps in the ledger. Each relaxed write to a mapped read-only
+/// page records the bytes it overwrote so the relaxation stays inspectable
+/// (and revertable in principle); a pathological image cannot grow the log
+/// without bound. The relaxed-write and site counters keep counting past the
+/// cap — only the revert log is truncated.
+pub const UC_MEMORY_RO_REVERT_CAP: usize = 4096;
+
+/// Which operation the under-constrained policy relaxed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UcMemoryOp {
+    Read,
+    Write,
+    /// A write into a mapped but read-only page whose current bytes are all
+    /// concrete image data (`uc_write_ro`, opt-in on top of `uc_memory`).
+    /// Executable pages are never relaxed.
+    WriteRO,
+}
+
+impl UcMemoryOp {
+    /// Stable lowercase name for reports and script surfaces.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::WriteRO => "write_ro",
+        }
+    }
+}
+
+/// One unmapped-access site the under-constrained memory policy papered
+/// over. Deduplicated per (operation, page): `address` is the first
+/// under-constrained address seen inside `page`, so a garbage-pointer sweep
+/// across one page produces a single site while `total` keeps counting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UcMemoryDebtSite {
+    pub op: UcMemoryOp,
+    /// First unmapped address observed for this site.
+    pub address: Address,
+    /// Base address of the page containing it (the dedup key).
+    pub page: Address,
+}
+
+/// One previous byte overwritten by a read-only-write relaxation
+/// (`uc_write_ro`): the address and the concrete byte the page held before
+/// the store. First-come, capped at [`UC_MEMORY_RO_REVERT_CAP`] entries —
+/// the relaxation stays inspectable (and revertable in principle) without
+/// letting a pathological image grow the log unbounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoWriteRevert {
+    pub address: Address,
+    /// The byte the page held immediately before the relaxed store.
+    pub previous: u8,
+}
+
+/// Shared, append-only ledger for the under-constrained memory policy.
+///
+/// Lives behind an `Arc<Mutex<..>>` inside every clone/fork of an armed
+/// [`PersistentMemory`], so all states of a run aggregate into one log —
+/// the run result reports run-wide debt, not per-state debt. Also owns the
+/// set of fabricated zero-backed pages: page *numbers* treated as mapped
+/// zero-filled RAM by the access checks without touching the region table
+/// (loader-visible mappings, IAT checks and `regions()` stay exact).
+#[derive(Debug, Default)]
+pub struct UcMemoryLedger {
+    total: u64,
+    sites: Vec<UcMemoryDebtSite>,
+    fabricated_pages: std::collections::BTreeSet<u64>,
+    /// Relaxed writes into mapped read-only pages (`uc_write_ro`), uncapped
+    /// — also counted in `total` with [`UcMemoryOp::WriteRO`] sites.
+    ro_write_total: u64,
+    /// Previous bytes overwritten by relaxed read-only writes, first-come,
+    /// capped at [`UC_MEMORY_RO_REVERT_CAP`].
+    ro_reverts: Vec<RoWriteRevert>,
+}
+
+impl UcMemoryLedger {
+    /// Total number of accesses resolved through the policy (uncapped).
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// First-seen sites, capped at [`UC_MEMORY_DEBT_SITE_CAP`].
+    pub fn sites(&self) -> &[UcMemoryDebtSite] {
+        &self.sites
+    }
+
+    /// Number of zero-backed pages fabricated so far.
+    pub fn fabricated_pages(&self) -> usize {
+        self.fabricated_pages.len()
+    }
+
+    /// Relaxed writes into mapped read-only pages (uncapped; also included
+    /// in [`Self::total`]).
+    pub fn ro_write_total(&self) -> u64 {
+        self.ro_write_total
+    }
+
+    /// Previous bytes overwritten by relaxed read-only writes (capped at
+    /// [`UC_MEMORY_RO_REVERT_CAP`]).
+    pub fn ro_reverts(&self) -> &[RoWriteRevert] {
+        &self.ro_reverts
+    }
+
+    /// Records one relaxed access and a deduplicated debt site for the page
+    /// it hit. `total` counts every relaxed access, not just new sites; the
+    /// site key is (operation, page) — the first address seen on the page is
+    /// kept.
+    fn record_hit(&mut self, op: UcMemoryOp, first_address: Address, first_page: Address) {
+        self.total = self.total.saturating_add(1);
+        if self.sites.len() < UC_MEMORY_DEBT_SITE_CAP
+            && !self
+                .sites
+                .iter()
+                .any(|existing| existing.op == op && existing.page == first_page)
+        {
+            self.sites.push(UcMemoryDebtSite {
+                op,
+                address: first_address,
+                page: first_page,
+            });
+        }
+    }
+
+    /// Records one relaxed read-only write: the hit (`WriteRO` site), the
+    /// `ro_write_total` counter, and the previous bytes it overwrote
+    /// (first-come, capped at [`UC_MEMORY_RO_REVERT_CAP`]).
+    fn record_ro_write(&mut self, first_address: Address, first_page: Address, reverts: &[RoWriteRevert]) {
+        self.record_hit(UcMemoryOp::WriteRO, first_address, first_page);
+        self.ro_write_total = self.ro_write_total.saturating_add(1);
+        if self.ro_reverts.len() < UC_MEMORY_RO_REVERT_CAP {
+            let room = UC_MEMORY_RO_REVERT_CAP - self.ro_reverts.len();
+            self.ro_reverts.extend_from_slice(&reverts[..room.min(reverts.len())]);
+        }
+    }
+}
+
 /// Size of one concrete-data line inside a [`MemoryPage`].
 const PAGE_LINE_BYTES: usize = 64;
 
@@ -218,8 +368,8 @@ impl MemoryPage {
     /// then the concrete line byte, then `Concrete(0)` for unwritten offsets.
     ///
     /// The bulk `read` path copies whole line slices for speed, so this is
-    /// the single-byte primitive (exercised by unit tests).
-    #[allow(dead_code)]
+    /// the single-byte primitive (used by the read-only-write relaxation's
+    /// revert records and exercised by unit tests).
     fn value(&self, offset: usize) -> ByteValue {
         if let Some(expression) = self.symbolic.get(&offset) {
             ByteValue::Symbolic(*expression)
@@ -317,6 +467,17 @@ pub struct PersistentMemory {
     region_index: Arc<BTreeMap<u64, usize>>,
     pages: Arc<BTreeMap<u64, Arc<MemoryPage>>>,
     code_versions: Arc<BTreeMap<CodePageId, CodePageVersion>>,
+    /// Under-constrained memory policy (`uc_memory`), `None` when off. When
+    /// armed, unmapped reads return zero bytes and unmapped writes allocate
+    /// zero-backed pages on demand, with every hit debt-recorded in the
+    /// shared ledger. Clones/forks share one ledger, so a whole run
+    /// aggregates into it.
+    uc: Option<Arc<std::sync::Mutex<UcMemoryLedger>>>,
+    /// Read-only-write relaxation (`uc_write_ro`), meaningful only while
+    /// `uc` is armed: a write into a mapped, non-executable page whose
+    /// current bytes are all concrete is allowed, debt-recorded, and its
+    /// previous bytes logged. Fail-closed default (`false`).
+    uc_write_ro: bool,
 }
 
 impl PersistentMemory {
@@ -360,6 +521,8 @@ impl PersistentMemory {
             region_index: Arc::new(region_index),
             pages: Arc::new(BTreeMap::new()),
             code_versions: Arc::new(code_versions),
+            uc: None,
+            uc_write_ro: false,
         })
     }
 
@@ -400,6 +563,113 @@ impl PersistentMemory {
             region_index: Arc::new(region_index),
             pages: self.pages.clone(),
             code_versions: Arc::new(code_versions),
+            uc: self.uc.clone(),
+            uc_write_ro: self.uc_write_ro,
+        })
+    }
+
+    /// Arms the under-constrained memory policy on this snapshot
+    /// (opt-in — the Lua `uc_memory` flag).
+    ///
+    /// With the policy armed:
+    /// - an unmapped READ returns zero bytes (the missing pages read as
+    ///   `Concrete(0)` exactly like mapped-but-unwritten bytes);
+    /// - an unmapped WRITE allocates the covering pages zero-backed on
+    ///   demand, so a later read-back observes the stored bytes;
+    /// - every relaxed access is debt-recorded in a ledger shared with every
+    ///   clone/fork of this snapshot (see [`UcMemoryLedger`]).
+    ///
+    /// Deliberately NOT relaxed: permissions (a mapped page that denies the
+    /// access still fails closed), execute accesses, and
+    /// [`PersistentMemory::load_concrete`] (loader/setup writes keep their
+    /// exact mapped-only contract). Fabrication is bounded by
+    /// [`UC_MEMORY_MAX_FABRICATED_PAGES`]; beyond the cap the access errors
+    /// exactly as it would with the flag off, with the debt still recorded.
+    pub fn with_uc_memory(self) -> Self {
+        Self {
+            uc: Some(Arc::new(std::sync::Mutex::new(UcMemoryLedger::default()))),
+            uc_write_ro: false,
+            ..self
+        }
+    }
+
+    /// Arms (or disarms) the read-only-write relaxation on top of an armed
+    /// under-constrained policy (opt-in — the Lua `uc_write_ro` flag).
+    ///
+    /// When enabled and `uc_memory` is armed, a WRITE into a mapped,
+    /// non-executable page whose current bytes are all concrete (image data
+    /// sections — never code, never symbolic cells) is allowed: the ledger
+    /// records the previous bytes ([`UcMemoryLedger::ro_reverts`], capped at
+    /// [`UC_MEMORY_RO_REVERT_CAP`]), the write proceeds, and the hit is
+    /// debt-recorded as [`UcMemoryOp::WriteRO`] (surfaced in
+    /// `unmapped_sites` with `op = "write_ro"` and counted in the parallel
+    /// `ro_write_total`). Writes into executable pages, spans touching
+    /// unmapped memory, and spans crossing symbolic cells still fail closed.
+    /// Without `uc_memory` this flag is inert — there is no ledger to record
+    /// the relaxation into, so the write keeps its exact permission error.
+    pub fn with_uc_write_ro(mut self, enabled: bool) -> Self {
+        self.uc_write_ro = enabled;
+        self
+    }
+
+    /// Whether the under-constrained memory policy is armed.
+    pub fn uc_memory_armed(&self) -> bool {
+        self.uc.is_some()
+    }
+
+    /// Whether the read-only-write relaxation is armed (meaningful only
+    /// together with [`Self::uc_memory_armed`]).
+    pub fn uc_write_ro_armed(&self) -> bool {
+        self.uc_write_ro
+    }
+
+    /// Locks the shared policy ledger. A poisoned lock still yields the
+    /// ledger — debt accounting must not turn a panicking state into
+    /// unusable memory.
+    fn uc_ledger(&self) -> std::sync::MutexGuard<'_, UcMemoryLedger> {
+        self.uc
+            .as_ref()
+            .expect("uc_ledger called with policy disarmed")
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Total accesses resolved through the under-constrained policy
+    /// (uncapped), or 0 when the policy is off.
+    pub fn uc_memory_total(&self) -> u64 {
+        self.uc.as_ref().map_or(0, |ledger| {
+            ledger.lock().unwrap_or_else(|p| p.into_inner()).total()
+        })
+    }
+
+    /// First-seen under-constrained access sites (capped, deduplicated per
+    /// operation + page), or empty when the policy is off.
+    pub fn uc_memory_sites(&self) -> Vec<UcMemoryDebtSite> {
+        self.uc.as_ref().map_or_else(Vec::new, |ledger| {
+            ledger.lock().unwrap_or_else(|p| p.into_inner()).sites().to_vec()
+        })
+    }
+
+    /// Number of zero-backed pages the policy has fabricated so far.
+    pub fn uc_memory_fabricated_pages(&self) -> usize {
+        self.uc.as_ref().map_or(0, |ledger| {
+            ledger.lock().unwrap_or_else(|p| p.into_inner()).fabricated_pages()
+        })
+    }
+
+    /// Relaxed writes into mapped read-only pages so far (uncapped), or 0
+    /// when the policy is off.
+    pub fn uc_memory_ro_write_total(&self) -> u64 {
+        self.uc.as_ref().map_or(0, |ledger| {
+            ledger.lock().unwrap_or_else(|p| p.into_inner()).ro_write_total()
+        })
+    }
+
+    /// Previous bytes overwritten by relaxed read-only writes (capped at
+    /// [`UC_MEMORY_RO_REVERT_CAP`]), or empty when the policy is off.
+    pub fn uc_memory_ro_reverts(&self) -> Vec<RoWriteRevert> {
+        self.uc.as_ref().map_or_else(Vec::new, |ledger| {
+            ledger.lock().unwrap_or_else(|p| p.into_inner()).ro_reverts().to_vec()
         })
     }
 
@@ -428,7 +698,17 @@ impl PersistentMemory {
         address: Address,
         len: usize,
     ) -> Result<Vec<CodeVersionGuard>, MemoryError> {
-        self.check_mapped_range(address, len)?;
+        // Instruction fetch and step-cache validation read through the same
+        // relaxed policy as data accesses: with `uc_memory` armed, an
+        // unmapped (garbage-transfer) pc resolves to zero-backed pages and
+        // its code guards come back empty, exactly like a data read would.
+        match self.check_mapped_range(address, len) {
+            Ok(()) => {}
+            Err(MemoryError::Unmapped(first)) if self.uc_memory_armed() => {
+                self.uc_resolve_unmapped(address, len.max(1), MemoryAccessKind::Read, first)?
+            }
+            Err(error) => return Err(error),
+        }
         if len == 0 {
             return Ok(Vec::new());
         }
@@ -507,6 +787,21 @@ impl PersistentMemory {
             return Ok(());
         }
 
+        match self.check_access_strict(address, len, access) {
+            Ok(()) => Ok(()),
+            // Under-constrained policy: an unmapped span resolves to
+            // zero-backed pages with debt recorded. Permission denials and
+            // execute accesses keep their exact strict errors.
+            Err(MemoryError::Unmapped(first)) if self.uc_memory_armed() => {
+                self.uc_resolve_unmapped(address, len, access, first)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The exact flag-off access check: every byte of the span must sit in a
+    /// mapped region that allows `access`.
+    fn check_access_strict(&self, address: Address, len: usize, access: MemoryAccessKind) -> Result<(), MemoryError> {
         let end = Self::inclusive_end(address, len)?;
         let mut cursor = address;
 
@@ -615,7 +910,200 @@ impl PersistentMemory {
             region_index: Arc::clone(&self.region_index),
             pages: Arc::new(pages),
             code_versions,
+            uc: self.uc.clone(),
+            uc_write_ro: self.uc_write_ro,
         })
+    }
+
+    /// Under-constrained policy resolution of an access whose span touched
+    /// unmapped memory: mapped parts of the span still enforce their
+    /// permission (fail closed), unmapped parts are recorded as debt and
+    /// their pages fabricated zero-backed — bounded by
+    /// [`UC_MEMORY_MAX_FABRICATED_PAGES`], beyond which the original
+    /// unmapped error is returned unchanged.
+    ///
+    /// `access` is never [`MemoryAccessKind::Execute`]: the callers refuse
+    /// to relax executable accesses (code pages never appear by accident).
+    fn uc_resolve_unmapped(
+        &self,
+        address: Address,
+        len: usize,
+        access: MemoryAccessKind,
+        first_unmapped: Address,
+    ) -> Result<(), MemoryError> {
+        let op = match access {
+            MemoryAccessKind::Read => UcMemoryOp::Read,
+            MemoryAccessKind::Write => UcMemoryOp::Write,
+            MemoryAccessKind::Execute => return Err(MemoryError::Unmapped(first_unmapped)),
+        };
+        let end = Self::inclusive_end(address, len)?;
+        let mut ledger = self.uc_ledger();
+        // One hit per relaxed access; sites deduplicate per (op, page).
+        ledger.record_hit(op, first_unmapped, Self::page_base(first_unmapped));
+
+        let mut new_pages: Vec<u64> = Vec::new();
+        let mut capped = false;
+        let mut cursor = address;
+        loop {
+            match self.region_containing(cursor) {
+                Some(region) => {
+                    // Mapped part: the permission check keeps its exact
+                    // strict semantics — mapping is relaxed, permissions
+                    // never are.
+                    let allowed = match access {
+                        MemoryAccessKind::Read => region.readable,
+                        MemoryAccessKind::Write => region.writable,
+                        MemoryAccessKind::Execute => region.executable,
+                    };
+                    if !allowed {
+                        return Err(MemoryError::PermissionDenied {
+                            address: cursor,
+                            access,
+                        });
+                    }
+                    let region_end = Self::region_end(region)?;
+                    if region_end > end {
+                        break;
+                    }
+                    cursor = region_end;
+                }
+                None => {
+                    // Unmapped gap: bounded by the next region's base or the
+                    // end of the access, whichever comes first.
+                    let gap_start = cursor;
+                    let gap_end = match self.region_index.range(cursor..).next() {
+                        Some((&base, _)) if base <= end => base - 1,
+                        _ => end,
+                    };
+                    let mut page = Self::page_number(gap_start);
+                    let last = Self::page_number(gap_end);
+                    loop {
+                        let fabricated = ledger.fabricated_pages.len() + new_pages.len();
+                        if fabricated >= UC_MEMORY_MAX_FABRICATED_PAGES {
+                            capped = true;
+                            break;
+                        }
+                        if !ledger.fabricated_pages.contains(&page) && !new_pages.contains(&page) {
+                            new_pages.push(page);
+                        }
+                        if page == last {
+                            break;
+                        }
+                        page += 1;
+                    }
+                    if gap_end == end {
+                        break;
+                    }
+                    cursor = gap_end + 1;
+                }
+            }
+        }
+        if capped {
+            // Fail closed exactly like the flag-off path (debt is still
+            // recorded above — the hit happened either way).
+            return Err(MemoryError::Unmapped(first_unmapped));
+        }
+        for page in new_pages {
+            ledger.fabricated_pages.insert(page);
+        }
+        Ok(())
+    }
+
+    /// Read-only-write relaxation (`uc_write_ro`) of a store that hit a
+    /// mapped, non-writable page: validates the span, records the debt and
+    /// the previous bytes, and returns so the caller performs the store.
+    ///
+    /// Validation is fail-closed — the store proceeds only when EVERY page
+    /// under the span is
+    /// 1. mapped (a span touching unmapped memory keeps the exact unmapped /
+    ///    permission error the strict path produced — the fabrication policy
+    ///    owns unmapped spans),
+    /// 2. NOT executable (image code is never relaxed, byte-identically to
+    ///    the flag-off path), and
+    /// 3. concrete under the span: no symbolic cell may be clobbered by a
+    ///    relaxation that cannot represent what it would overwrite.
+    /// On success the ledger records a [`UcMemoryOp::WriteRO`] hit, bumps
+    /// `ro_write_total`, and logs the previous byte of each span byte
+    /// (first-come, capped at [`UC_MEMORY_RO_REVERT_CAP`]).
+    fn uc_resolve_ro_write(&self, address: Address, bytes: &[ByteValue], denied: Address) -> Result<(), MemoryError> {
+        let fail = || MemoryError::PermissionDenied {
+            address: denied,
+            access: MemoryAccessKind::Write,
+        };
+        let len = bytes.len();
+        if len == 0 {
+            return Ok(());
+        }
+        let end = Self::inclusive_end(address, len)?;
+
+        // (1) + (2): every byte of the span sits in a mapped, non-executable
+        // region. The walk mirrors `check_access_strict`'s region hop so a
+        // span crossing a region boundary cannot dodge the check.
+        let mut cursor = address;
+        loop {
+            let region = self.region_containing(cursor).ok_or_else(fail)?;
+            if region.executable {
+                return Err(fail());
+            }
+            let region_end = Self::region_end(region)?;
+            let region_last = region_end - 1;
+            if region_last >= end {
+                break;
+            }
+            cursor = region_end;
+        }
+
+        // (2) + (3) per page window: executable pages never appear here (the
+        // region walk refused them), and a symbolic cell under the window
+        // fails closed.
+        let mut cursor = 0usize;
+        while cursor < len {
+            let current = address
+                .checked_add(u64::try_from(cursor).map_err(|_| MemoryError::AddressOverflow)?)
+                .ok_or_else(fail)?;
+            let page = Self::page_number(current);
+            let start_offset = Self::page_offset(current);
+            let span = (DEFAULT_PAGE_SIZE - start_offset).min(len - cursor);
+            if let Some(page_data) = self.pages.get(&page)
+                && page_data
+                    .symbolic
+                    .range(start_offset..start_offset + span)
+                    .next()
+                    .is_some()
+            {
+                return Err(fail());
+            }
+            cursor += span;
+        }
+
+        // The relaxation is accepted: record the hit, the parallel counter,
+        // and the previous bytes (the page model reads unwritten offsets as
+        // `Concrete(0)`, and (3) guarantees no symbolic cell shadows them).
+        let recorded = len.min(UC_MEMORY_RO_REVERT_CAP);
+        let mut reverts = Vec::with_capacity(recorded);
+        for index in 0..recorded {
+            let current = address
+                .checked_add(u64::try_from(index).map_err(|_| MemoryError::AddressOverflow)?)
+                .ok_or_else(fail)?;
+            let page_data = self.pages.get(&Self::page_number(current));
+            let previous = page_data.map_or(0, |page| match page.value(Self::page_offset(current)) {
+                ByteValue::Concrete(byte) => byte,
+                // Unreachable under (3); a symbolic cell stays unrelaxed.
+                ByteValue::Symbolic(_) => 0,
+            });
+            reverts.push(RoWriteRevert {
+                address: current,
+                previous,
+            });
+        }
+        let mut ledger = self.uc_ledger();
+        ledger.record_ro_write(denied, Self::page_base(denied), &reverts);
+        Ok(())
+    }
+
+    /// Base address of the 4 KiB page containing `address`.
+    fn page_base(address: Address) -> Address {
+        address - (address % DEFAULT_PAGE_SIZE as u64)
     }
 }
 
@@ -694,8 +1182,26 @@ impl LayeredMemory for PersistentMemory {
     }
 
     fn write(&self, address: Address, bytes: &[ByteValue]) -> Result<Self, Self::Error> {
-        self.check_access(address, bytes.len(), MemoryAccessKind::Write)?;
-        self.write_materialized(address, bytes, true)
+        // Dispatch on the exact strict check instead of `check_access` so the
+        // read-only-write relaxation can interpose on permission denials
+        // without touching the read path. Flag-off behavior is byte-identical:
+        // the unmapped arm re-issues exactly what `check_access` did, and the
+        // permission arm only exists under `uc_memory` + `uc_write_ro`.
+        match self.check_access_strict(address, bytes.len(), MemoryAccessKind::Write) {
+            Ok(()) => self.write_materialized(address, bytes, true),
+            Err(MemoryError::Unmapped(first)) if self.uc_memory_armed() => {
+                self.uc_resolve_unmapped(address, bytes.len(), MemoryAccessKind::Write, first)?;
+                self.write_materialized(address, bytes, true)
+            }
+            Err(MemoryError::PermissionDenied {
+                address: denied,
+                access: MemoryAccessKind::Write,
+            }) if self.uc_memory_armed() && self.uc_write_ro => {
+                self.uc_resolve_ro_write(address, bytes, denied)?;
+                self.write_materialized(address, bytes, true)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn fork(&self) -> Self {
@@ -2055,6 +2561,428 @@ mod tests {
         // Concrete over a symbolic cell evicts it.
         let overwritten = written.write(0x2000, &[ByteValue::Concrete(0x99)])?;
         assert_eq!(overwritten.read(0x2000, 1)?, vec![ByteValue::Concrete(0x99)]);
+        Ok(())
+    }
+
+    // --- Under-constrained memory policy (`uc_memory`) -------------------
+
+    #[test]
+    fn uc_read_unmapped_returns_zeros_and_records_debt() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])?.with_uc_memory();
+        assert!(memory.uc_memory_armed());
+
+        let read = memory.read(0x7000, 8)?;
+        assert_eq!(read, vec![ByteValue::Concrete(0); 8], "unmapped read is zero bytes");
+        assert_eq!(memory.uc_memory_total(), 1);
+        assert_eq!(
+            memory.uc_memory_sites(),
+            vec![UcMemoryDebtSite {
+                op: UcMemoryOp::Read,
+                address: 0x7000,
+                page: 0x7000,
+            }]
+        );
+        assert_eq!(memory.uc_memory_fabricated_pages(), 1);
+
+        // A repeat hit counts toward the total but deduplicates the site,
+        // and a different page becomes a new site.
+        let _ = memory.read(0x7004, 4)?;
+        let _ = memory.read(0x8000, 1)?;
+        assert_eq!(memory.uc_memory_total(), 3);
+        assert_eq!(memory.uc_memory_sites().len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_unmapped_allocates_zero_backed_and_records_debt() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])?.with_uc_memory();
+
+        let written = memory.write(0x5000, &[ByteValue::Concrete(0x42)])?;
+        assert_eq!(
+            written.read(0x5000, 1)?,
+            vec![ByteValue::Concrete(0x42)],
+            "unmapped write allocates the page so the store reads back"
+        );
+        // Unwritten bytes of the fabricated page read as zeros.
+        assert_eq!(written.read(0x5001, 1)?, vec![ByteValue::Concrete(0)]);
+        // Total counts every relaxed access: one write + two reads of the
+        // fabricated page. Sites deduplicate per (op, page): one Write site
+        // from the store, one Read site from the first read-back.
+        assert_eq!(written.uc_memory_total(), 3);
+        assert_eq!(
+            written.uc_memory_sites(),
+            vec![
+                UcMemoryDebtSite {
+                    op: UcMemoryOp::Write,
+                    address: 0x5000,
+                    page: 0x5000,
+                },
+                UcMemoryDebtSite {
+                    op: UcMemoryOp::Read,
+                    address: 0x5000,
+                    page: 0x5000,
+                },
+            ]
+        );
+        assert_eq!(written.uc_memory_fabricated_pages(), 1);
+
+        // A write spanning mapped and unmapped pages only fabricates the
+        // uncovered one, and the mapped part keeps its permission check.
+        let span = vec![ByteValue::Concrete(0x11); 8];
+        let straddling = written.write(0x1ffc, &span)?;
+        assert_eq!(straddling.uc_memory_fabricated_pages(), 2);
+        assert_eq!(straddling.read(0x2003, 1)?, vec![ByteValue::Concrete(0x11)]);
+        Ok(())
+    }
+
+    #[test]
+    fn uc_flag_off_keeps_exact_unmapped_errors() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])?;
+        assert!(!memory.uc_memory_armed());
+
+        assert!(matches!(memory.read(0x7000, 1), Err(MemoryError::Unmapped(0x7000))));
+        assert!(matches!(
+            memory.write(0x7000, &[ByteValue::Concrete(1)]),
+            Err(MemoryError::Unmapped(0x7000))
+        ));
+        assert_eq!(memory.uc_memory_total(), 0);
+        assert!(memory.uc_memory_sites().is_empty());
+        assert_eq!(memory.uc_memory_fabricated_pages(), 0);
+
+        // Permission denials fail closed even when armed (the test helper's
+        // regions are always readable, so writes exercise the denial).
+        let armed = PersistentMemory::new(vec![region(0x5000, 0x1000, false, true)])?.with_uc_memory();
+        assert!(matches!(
+            armed.write(0x5000, &[ByteValue::Concrete(1)]),
+            Err(MemoryError::PermissionDenied {
+                access: MemoryAccessKind::Write,
+                ..
+            })
+        ));
+        // ...and a span whose unmapped gap precedes a mapped but
+        // permission-denied page still fails closed on the permission.
+        let mixed = PersistentMemory::new(vec![
+            region(0x3000, 0x1000, true, false),
+            region(0x10000, 0x1000, false, false),
+        ])?
+        .with_uc_memory();
+        assert!(matches!(
+            mixed.write(0x4000, &vec![ByteValue::Concrete(1); 0xc001]),
+            Err(MemoryError::PermissionDenied {
+                access: MemoryAccessKind::Write,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn uc_fork_and_writes_share_one_ledger() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])?.with_uc_memory();
+        let fork = memory.fork();
+        let changed = memory.write(0x9000, &[ByteValue::Concrete(7)])?;
+
+        // Every lineage clone reports the shared run-wide ledger.
+        assert_eq!(fork.uc_memory_total(), 1);
+        assert_eq!(changed.uc_memory_total(), 1);
+        assert_eq!(fork.uc_memory_sites().len(), 1);
+        assert_eq!(changed.uc_memory_sites().len(), 1);
+        assert_eq!(fork.uc_memory_fabricated_pages(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn uc_relaxes_code_version_guards_for_fabricated_pages() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, true)])?.with_uc_memory();
+        // A wild transfer into unmapped memory: guards resolve (empty — the
+        // fabricated page carries no code versions) instead of faulting.
+        let guards = memory.code_version_guards_for_range(0x10000, 4)?;
+        assert!(guards.is_empty());
+        assert_eq!(memory.uc_memory_total(), 1);
+
+        // Flag off: the same range faults.
+        let strict = PersistentMemory::new(vec![region(0x1000, 0x1000, true, true)])?;
+        assert!(matches!(
+            strict.code_version_guards_for_range(0x10000, 4),
+            Err(MemoryError::Unmapped(0x10000))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn uc_load_concrete_stays_strict_when_armed() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])?.with_uc_memory();
+        assert!(matches!(
+            memory.load_concrete(0x7000, &[1, 2, 3]),
+            Err(MemoryError::Unmapped(0x7000))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn uc_fabrication_cap_fails_closed_but_records_debt() {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])
+            .expect("memory")
+            .with_uc_memory();
+        // One access spanning more distinct pages than the fabrication cap
+        // allows: the policy refuses (exact flag-off error) after recording.
+        let span_pages = UC_MEMORY_MAX_FABRICATED_PAGES + 2;
+        let address = 0x1_0000_0000u64;
+        let len = span_pages * DEFAULT_PAGE_SIZE;
+        let result = memory.read(address, len);
+        assert!(
+            matches!(result, Err(MemoryError::Unmapped(_))),
+            "a span beyond the fabrication cap must fail closed"
+        );
+        assert_eq!(memory.uc_memory_total(), 1);
+        assert_eq!(memory.uc_memory_fabricated_pages(), 0);
+    }
+
+    #[test]
+    fn uc_debt_site_cap_limits_the_log_not_the_total() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])?.with_uc_memory();
+        // Sweep pages well above the mapped region so every access is a hit.
+        let base = 0x10_0000u64;
+        for page in 0..(UC_MEMORY_DEBT_SITE_CAP as u64 + 8) {
+            let _ = memory.read(base + page * DEFAULT_PAGE_SIZE as u64, 1)?;
+        }
+        assert_eq!(memory.uc_memory_sites().len(), UC_MEMORY_DEBT_SITE_CAP);
+        assert_eq!(
+            memory.uc_memory_total(),
+            UC_MEMORY_DEBT_SITE_CAP as u64 + 8,
+            "the total keeps counting past the site cap"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uc_top_of_address_space_span_does_not_overflow() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])?.with_uc_memory();
+        // The span ends exactly at u64::MAX — the gap walk must terminate
+        // instead of overflowing.
+        let written = memory.write(0xfffffffffffffff8, &[ByteValue::Concrete(1); 8])?;
+        assert_eq!(written.uc_memory_total(), 1);
+        assert_eq!(written.uc_memory_fabricated_pages(), 1);
+        assert_eq!(written.read(0xffffffffffffffff, 1)?, vec![ByteValue::Concrete(1)]);
+        Ok(())
+    }
+
+    // --- Read-only-write relaxation (`uc_write_ro`) -----------------------
+
+    /// A read-only data page (image .rdata shape) holding distinct bytes.
+    fn ro_data_memory(policy: fn(PersistentMemory) -> PersistentMemory) -> Result<PersistentMemory, MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1404d0000, 0x2000, false, false)])?;
+        let memory = memory.load_concrete(0x1404d0000, &[0x11, 0x22, 0x33, 0x44])?;
+        Ok(policy(memory))
+    }
+
+    #[test]
+    fn uc_write_ro_relaxes_concrete_read_only_data_writes() -> Result<(), MemoryError> {
+        let memory = ro_data_memory(|m| m.with_uc_memory().with_uc_write_ro(true))?;
+        let written = memory.write(0x1404d0018, &[ByteValue::Concrete(0xaa), ByteValue::Concrete(0xbb)])?;
+
+        // The write lands and reads back.
+        assert_eq!(
+            written.read(0x1404d0018, 2)?,
+            vec![ByteValue::Concrete(0xaa), ByteValue::Concrete(0xbb)]
+        );
+        // Debt: one WriteRO hit, surfaced with the write_ro op name, plus
+        // the parallel ro counter.
+        assert_eq!(written.uc_memory_total(), 1);
+        assert_eq!(written.uc_memory_ro_write_total(), 1);
+        assert_eq!(
+            written.uc_memory_sites(),
+            vec![UcMemoryDebtSite {
+                op: UcMemoryOp::WriteRO,
+                address: 0x1404d0018,
+                page: 0x1404d0000,
+            }]
+        );
+        // The previous bytes are recorded for inspection/reversion.
+        assert_eq!(
+            written.uc_memory_ro_reverts(),
+            vec![
+                RoWriteRevert {
+                    address: 0x1404d0018,
+                    previous: 0x00
+                },
+                RoWriteRevert {
+                    address: 0x1404d0019,
+                    previous: 0x00
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_ro_records_the_previous_image_bytes() -> Result<(), MemoryError> {
+        let memory = ro_data_memory(|m| m.with_uc_memory().with_uc_write_ro(true))?;
+        let written = memory.write(0x1404d0000, &[ByteValue::Concrete(0xff)])?;
+        assert_eq!(
+            written.uc_memory_ro_reverts(),
+            vec![RoWriteRevert {
+                address: 0x1404d0000,
+                previous: 0x11
+            }]
+        );
+        // A second store over the (now rewritten) first byte records the
+        // byte it actually replaced — the revert log mirrors each hit.
+        let again = written.write(0x1404d0000, &[ByteValue::Concrete(0x77)])?;
+        assert_eq!(again.uc_memory_ro_write_total(), 2);
+        assert_eq!(
+            again.uc_memory_ro_reverts(),
+            vec![
+                RoWriteRevert {
+                    address: 0x1404d0000,
+                    previous: 0x11
+                },
+                RoWriteRevert {
+                    address: 0x1404d0000,
+                    previous: 0xff
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_ro_off_keeps_permission_denied() -> Result<(), MemoryError> {
+        // uc_memory alone (the exact prior flag surface): the write must
+        // fail closed with the same error as no policy at all.
+        let memory = ro_data_memory(|m| m.with_uc_memory())?;
+        let result = memory.write(0x1404d0018, &[ByteValue::Concrete(0xaa)]);
+        assert!(
+            matches!(
+                result,
+                Err(MemoryError::PermissionDenied {
+                    address: 0x1404d0018,
+                    access: MemoryAccessKind::Write
+                })
+            ),
+            "flag off must keep the exact permission denial"
+        );
+        // And the bare policy-off path errors identically.
+        let bare = ro_data_memory(|m| m)?;
+        assert!(matches!(
+            bare.write(0x1404d0018, &[ByteValue::Concrete(0xaa)]),
+            Err(MemoryError::PermissionDenied { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_ro_without_uc_memory_is_inert() -> Result<(), MemoryError> {
+        // The relaxation records into the shared ledger — without the policy
+        // there is no ledger, so the flag must not open any door.
+        let memory = ro_data_memory(|m| m.with_uc_write_ro(true))?;
+        assert!(!memory.uc_write_ro_armed() || memory.uc_write_ro_armed());
+        assert!(matches!(
+            memory.write(0x1404d0018, &[ByteValue::Concrete(0xaa)]),
+            Err(MemoryError::PermissionDenied { .. })
+        ));
+        assert_eq!(memory.uc_memory_total(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_ro_never_relaxes_executable_pages() -> Result<(), MemoryError> {
+        // An executable read-only page (image .text): denied even armed.
+        let memory = PersistentMemory::new(vec![region(0x140001000, 0x1000, false, true)])?
+            .load_concrete(0x140001000, &[0x90, 0xc3])?
+            .with_uc_memory()
+            .with_uc_write_ro(true);
+        assert!(matches!(
+            memory.write(0x140001000, &[ByteValue::Concrete(0x90)]),
+            Err(MemoryError::PermissionDenied { .. })
+        ));
+        assert_eq!(memory.uc_memory_total(), 0);
+        // A span straddling a read-only data page into an executable page:
+        // one executable page anywhere under the span denies the whole
+        // store.
+        let straddled = PersistentMemory::new(vec![
+            region(0x1404d0000, 0x10000, false, false),
+            region(0x1404e0000, 0x10000, false, true),
+        ])?
+        .with_uc_memory()
+        .with_uc_write_ro(true);
+        assert!(matches!(
+            straddled.write(0x1404dfffc, &[ByteValue::Concrete(1); 8]),
+            Err(MemoryError::PermissionDenied { .. })
+        ));
+        assert_eq!(straddled.uc_memory_total(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_ro_refuses_spans_over_symbolic_cells() -> Result<(), MemoryError> {
+        // A symbolic byte (the memory layer only carries the ExprId, no
+        // arena needed) planted into the read-only page through the
+        // relaxation itself: the plant is one WriteRO hit.
+        let symbol = ByteValue::Symbolic(ExprId(0x1234));
+        let memory = PersistentMemory::new(vec![region(0x1404d0000, 0x2000, false, false)])?
+            .load_concrete(0x1404d0000, &[0x11, 0x22, 0x33, 0x44])?
+            .with_uc_memory()
+            .with_uc_write_ro(true);
+        let planted = memory.write(0x1404d0020, &[symbol])?;
+        assert_eq!(planted.uc_memory_ro_write_total(), 1);
+        // A store covering the symbolic cell fails closed — the relaxation
+        // must not clobber symbolic state it cannot represent.
+        assert!(matches!(
+            planted.write(0x1404d0000, &[ByteValue::Concrete(1); 64]),
+            Err(MemoryError::PermissionDenied { .. })
+        ));
+        assert_eq!(planted.uc_memory_ro_write_total(), 1);
+        // ...but a store clear of the symbolic cell is relaxed as usual.
+        let cleared = planted.write(0x1404d0100, &[ByteValue::Concrete(9)])?;
+        assert_eq!(cleared.uc_memory_ro_write_total(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_ro_straddles_into_writable_pages() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![
+            region(0x1404d0000, 0x10000, false, false),
+            region(0x1404e0000, 0x10000, true, false),
+        ])?
+        .load_concrete(0x1404d0ffc, &[1, 2, 3, 4])?
+        .with_uc_memory()
+        .with_uc_write_ro(true);
+        let written = memory.write(0x1404d0ffe, &[ByteValue::Concrete(0xaa); 4])?;
+        // RO part relaxed, writable part written normally.
+        assert_eq!(
+            written.read(0x1404d0ffe, 4)?,
+            vec![ByteValue::Concrete(0xaa); 4]
+        );
+        assert_eq!(written.uc_memory_ro_write_total(), 1);
+        assert_eq!(written.uc_memory_sites().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_ro_revert_log_is_capped() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1404d0000, 0x20000, false, false)])?
+            .with_uc_memory()
+            .with_uc_write_ro(true);
+        // One span wider than the revert cap: the write relaxes, the log
+        // keeps the first UC_MEMORY_RO_REVERT_CAP previous bytes, counters
+        // are uncapped.
+        let len = UC_MEMORY_RO_REVERT_CAP + 512;
+        let written = memory.write(0x1404d0000, &vec![ByteValue::Concrete(1); len])?;
+        assert_eq!(written.uc_memory_ro_write_total(), 1);
+        assert_eq!(written.uc_memory_ro_reverts().len(), UC_MEMORY_RO_REVERT_CAP);
+        assert_eq!(written.uc_memory_ro_reverts()[0].address, 0x1404d0000);
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_ro_ledger_is_shared_with_forks() -> Result<(), MemoryError> {
+        let memory = ro_data_memory(|m| m.with_uc_memory().with_uc_write_ro(true))?;
+        let written = memory.write(0x1404d0018, &[ByteValue::Concrete(0xaa)])?;
+        // The original snapshot and any fork observe the same run-wide debt.
+        assert_eq!(memory.uc_memory_ro_write_total(), 1);
+        assert_eq!(written.fork().uc_memory_ro_write_total(), 1);
+        assert_eq!(written.fork().uc_memory_ro_reverts().len(), 1);
         Ok(())
     }
 }
