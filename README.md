@@ -10,7 +10,7 @@
 
 *When you are absolutely furious your symbolic execution is taking too long and you're not just angry—you're **Angryier**.*
 
-[![License: MIT/Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
+[![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 [![Security: forbid(unsafe_code)](https://img.shields.io/badge/unsafe_code-forbidden-success.svg)](#security--invariants)
 [![Forms: 1574](https://img.shields.io/badge/Intel_64_Semantics-1574_forms-brightgreen.svg)](#isa-coverage)
@@ -318,4 +318,4 @@ Comprehensive guides are available in the [`docs/`](docs/) directory:
 
 ## 📄 License
 
-Angryier is distributed under the terms of both the **MIT License** and the **Apache License (Version 2.0)**. See `LICENSE-MIT` and `LICENSE-APACHE` for details.
+Angryier is licensed under the **GNU Affero General Public License v3.0 or later** (`AGPL-3.0-or-later`). See [`LICENSE`](LICENSE) for the full license text.
