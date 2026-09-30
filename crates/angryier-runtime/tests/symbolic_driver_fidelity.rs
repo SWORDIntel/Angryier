@@ -11,8 +11,9 @@
 #![cfg(feature = "xed")]
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use angryier_expr::ShardedExprArena;
+use angryier_expr::{ExprReader, ShardedExprArena};
 use angryier_models::KernelPoolTracker;
 use angryier_runtime::{Runtime, SymbolicSession};
 use angryier_types::{ExpressionNormalizationVersion, SemanticVersion, TargetProfileId};
@@ -103,7 +104,7 @@ fn z3_backend_run_with_policy_terminates_cleanly() -> Result<(), Box<dyn std::er
 
     let reader: Arc<dyn ExprReader> = arena.clone();
     let mut backend = angryier_solver_z3::Z3Backend::native_ffi(reader)?;
-    let policy = ExplorationPolicy::default();
+    let policy = angryier_runtime::ExplorationPolicy::default();
 
     let report = session.run_with_policy(1000, 16, Some(&mut backend), Duration::from_secs(10), false, &policy)?;
 

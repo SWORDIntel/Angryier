@@ -1363,6 +1363,8 @@ impl Intel64CorpusRegistry {
         providers.extend(crate::avx512::providers());
         providers.extend(crate::amx::providers());
         providers.extend(crate::cet::providers());
+        // APX forms (2026-09-29).
+        providers.extend(crate::apx::providers());
 
         // Build form index from known form IDs. Each provider corresponds to
         // exactly one form. The ALL_FORMS array is hardcoded with unique entries
@@ -1453,7 +1455,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1453] = [
+const ALL_FORMS: [u32; 1514] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2922,6 +2924,68 @@ const ALL_FORMS: [u32; 1453] = [
     crate::forms::WRSSQ_MEM64_R64,
     crate::forms::WRUSSD_MEM32_R32,
     crate::forms::WRUSSQ_MEM64_R64,
+    // APX forms (61 forms: 0x0FA0..0x0FDC)
+    crate::forms::JMPABS_IMM64,
+    crate::forms::PUSH2_R64_R64,
+    crate::forms::PUSH2P_R64_R64,
+    crate::forms::POP2_R64_R64,
+    crate::forms::POP2P_R64_R64,
+    crate::forms::CCMPO_R64_R64,
+    crate::forms::CCMPNO_R64_R64,
+    crate::forms::CCMPB_R64_R64,
+    crate::forms::CCMPNB_R64_R64,
+    crate::forms::CCMPZ_R64_R64,
+    crate::forms::CCMPNZ_R64_R64,
+    crate::forms::CCMPBE_R64_R64,
+    crate::forms::CCMPNBE_R64_R64,
+    crate::forms::CCMPS_R64_R64,
+    crate::forms::CCMPNS_R64_R64,
+    crate::forms::CCMPT_R64_R64,
+    crate::forms::CCMPF_R64_R64,
+    crate::forms::CCMPL_R64_R64,
+    crate::forms::CCMPNL_R64_R64,
+    crate::forms::CCMPLE_R64_R64,
+    crate::forms::CCMPNLE_R64_R64,
+    crate::forms::CTESTO_R64_R64,
+    crate::forms::CTESTNO_R64_R64,
+    crate::forms::CTESTB_R64_R64,
+    crate::forms::CTESTNB_R64_R64,
+    crate::forms::CTESTZ_R64_R64,
+    crate::forms::CTESTNZ_R64_R64,
+    crate::forms::CTESTBE_R64_R64,
+    crate::forms::CTESTNBE_R64_R64,
+    crate::forms::CTESTS_R64_R64,
+    crate::forms::CTESTNS_R64_R64,
+    crate::forms::CTESTT_R64_R64,
+    crate::forms::CTESTF_R64_R64,
+    crate::forms::CTESTL_R64_R64,
+    crate::forms::CTESTNL_R64_R64,
+    crate::forms::CTESTLE_R64_R64,
+    crate::forms::CTESTNLE_R64_R64,
+    crate::forms::ADD_R64_R64_R64_NDD,
+    crate::forms::SUB_R64_R64_R64_NDD,
+    crate::forms::AND_R64_R64_R64_NDD,
+    crate::forms::OR_R64_R64_R64_NDD,
+    crate::forms::XOR_R64_R64_R64_NDD,
+    crate::forms::ADD_R32_R32_R32_NDD,
+    crate::forms::SUB_R32_R32_R32_NDD,
+    crate::forms::AND_R32_R32_R32_NDD,
+    crate::forms::OR_R32_R32_R32_NDD,
+    crate::forms::XOR_R32_R32_R32_NDD,
+    crate::forms::SHL_R64_R64_IMM8_NDD,
+    crate::forms::SHR_R64_R64_IMM8_NDD,
+    crate::forms::SAR_R64_R64_IMM8_NDD,
+    crate::forms::SHL_R32_R32_IMM8_NDD,
+    crate::forms::SHR_R32_R32_IMM8_NDD,
+    crate::forms::SAR_R32_R32_IMM8_NDD,
+    crate::forms::CFCMOVZ_R64_R64,
+    crate::forms::CFCMOVNZ_R64_R64,
+    crate::forms::CFCMOVB_R64_R64,
+    crate::forms::CFCMOVNB_R64_R64,
+    crate::forms::CFCMOVL_R64_R64,
+    crate::forms::CFCMOVNL_R64_R64,
+    crate::forms::CFCMOVLE_R64_R64,
+    crate::forms::CFCMOVNLE_R64_R64,
 ];
 
 #[cfg(test)]

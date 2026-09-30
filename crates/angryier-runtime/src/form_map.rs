@@ -211,6 +211,21 @@ fn is_cl(operand: &Operand) -> bool {
     )
 }
 
+/// Width of the suppressed stack-memory operand reported for the APX
+/// `PUSH2`/`PUSH2P`/`POP2`/`POP2P` register-pair encodings. Both members of a
+/// pair decode to the same `[Reg64, Reg64]` shape, so this width is the only
+/// decoder-visible distinction between the plain variants (64-bit stack
+/// slots) and the promoted `P` variants (128-bit stack slots).
+fn stack_pair_width(decoded: &DecodedInstruction) -> Option<u16> {
+    decoded
+        .operands
+        .iter()
+        .find(|operand| {
+            operand.visibility == OperandVisibility::Suppressed && matches!(operand.kind, OperandKind::Memory(_))
+        })
+        .map(|operand| operand.width_bits)
+}
+
 pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
     // Implicit operands join the shape (accumulator of `cmp eax, imm`), but a
     // suppressed operand never does. The implicit `CL` of variable-count
@@ -308,6 +323,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_ADD | iclass::XED_ICLASS_ADD_LOCK => match shapes {
+            // APX NDD three-destination encodings.
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::ADD_R64_R64_R64_NDD),
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::ADD_R32_R32_R32_NDD),
             [Shape::Mem32, Shape::Reg32] => Some(forms::ADD_MEM32_R32),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADD_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::ADD_MEM16_IMM8),
@@ -333,6 +351,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_SUB | iclass::XED_ICLASS_SUB_LOCK => match shapes {
+            // APX NDD three-destination encodings.
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::SUB_R64_R64_R64_NDD),
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::SUB_R32_R32_R32_NDD),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SUB_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::SUB_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::SUB_R64_R64),
@@ -388,6 +409,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_AND | iclass::XED_ICLASS_AND_LOCK => match shapes {
+            // APX NDD three-destination encodings.
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::AND_R64_R64_R64_NDD),
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::AND_R32_R32_R32_NDD),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::AND_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::AND_MEM16_IMM8),
             [Shape::Reg16, Shape::Reg16] => Some(forms::AND_R16_R16),
@@ -413,6 +437,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_OR | iclass::XED_ICLASS_OR_LOCK => match shapes {
+            // APX NDD three-destination encodings.
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::OR_R64_R64_R64_NDD),
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::OR_R32_R32_R32_NDD),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::OR_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::OR_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::OR_R64_R64),
@@ -438,6 +465,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_XOR | iclass::XED_ICLASS_XOR_LOCK => match shapes {
+            // APX NDD three-destination encodings.
+            [Shape::Reg64, Shape::Reg64, Shape::Reg64] => Some(forms::XOR_R64_R64_R64_NDD),
+            [Shape::Reg32, Shape::Reg32, Shape::Reg32] => Some(forms::XOR_R32_R32_R32_NDD),
             [Shape::Reg16, Shape::Imm] if immediate_width == Some(8) => Some(forms::XOR_R16_IMM8),
             [Shape::Mem16, Shape::Imm] if immediate_width == Some(8) => Some(forms::XOR_MEM16_IMM8),
             [Shape::Reg64, Shape::Reg64] => Some(forms::XOR_R64_R64),
@@ -481,6 +511,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_SHL => match shapes {
+            // APX NDD three-destination encodings.
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::SHL_R64_R64_IMM8_NDD),
+            [Shape::Reg32, Shape::Reg32, Shape::Imm] => Some(forms::SHL_R32_R32_IMM8_NDD),
             [Shape::Mem8, Shape::Imm] => Some(forms::SHL_MEM8_IMM8),
             [Shape::Mem8] if has_cl => Some(forms::SHL_MEM8_CL),
             [Shape::Reg8] if has_cl => Some(forms::SHL_R8_CL),
@@ -502,6 +535,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_SHR => match shapes {
+            // APX NDD three-destination encodings.
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::SHR_R64_R64_IMM8_NDD),
+            [Shape::Reg32, Shape::Reg32, Shape::Imm] => Some(forms::SHR_R32_R32_IMM8_NDD),
             [Shape::Mem8, Shape::Imm] => Some(forms::SHR_MEM8_IMM8),
             [Shape::Mem8] if has_cl => Some(forms::SHR_MEM8_CL),
             [Shape::Reg8] if has_cl => Some(forms::SHR_R8_CL),
@@ -522,6 +558,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_SAR => match shapes {
+            // APX NDD three-destination encodings.
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::SAR_R64_R64_IMM8_NDD),
+            [Shape::Reg32, Shape::Reg32, Shape::Imm] => Some(forms::SAR_R32_R32_IMM8_NDD),
             [Shape::Mem8, Shape::Imm] => Some(forms::SAR_MEM8_IMM8),
             [Shape::Mem8] if has_cl => Some(forms::SAR_MEM8_CL),
             [Shape::Reg8] if has_cl => Some(forms::SAR_R8_CL),
@@ -2061,6 +2100,196 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Mem64, Shape::Reg64] => Some(forms::WRUSSQ_MEM64_R64),
             _ => None,
         },
+        // APX (Advanced Performance Extensions) instructions
+        iclass::XED_ICLASS_JMPABS => match shapes {
+            // The absolute target decodes as a far-pointer operand.
+            [Shape::Other] => Some(forms::JMPABS_IMM64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_PUSH2 | iclass::XED_ICLASS_PUSH2P => match shapes {
+            // The register pair shape is identical for both variants; the
+            // suppressed stack-memory operand width (64 vs 128) discriminates.
+            [Shape::Reg64, Shape::Reg64] => match stack_pair_width(decoded) {
+                Some(64) => Some(forms::PUSH2_R64_R64),
+                Some(128) => Some(forms::PUSH2P_R64_R64),
+                _ => None,
+            },
+            _ => None,
+        },
+        iclass::XED_ICLASS_POP2 | iclass::XED_ICLASS_POP2P => match shapes {
+            [Shape::Reg64, Shape::Reg64] => match stack_pair_width(decoded) {
+                Some(64) => Some(forms::POP2_R64_R64),
+                Some(128) => Some(forms::POP2P_R64_R64),
+                _ => None,
+            },
+            _ => None,
+        },
+        // CCMPcc: conditional compare; the explicit third operand is the DFV
+        // (default-flags) immediate mask. Only the 64-bit forms are registered.
+        iclass::XED_ICLASS_CCMPO => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPO_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPNO => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPNO_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPB => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPB_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPNB => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPNB_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPZ => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPZ_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPNZ => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPNZ_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPBE => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPBE_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPNBE => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPNBE_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPS => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPS_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPNS => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPNS_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPT => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPT_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPF => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPF_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPL => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPL_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPNL => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPNL_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPLE => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPLE_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CCMPNLE => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CCMPNLE_R64_R64),
+            _ => None,
+        },
+        // CTESTcc: conditional test; same DFV immediate operand as CCMPcc.
+        iclass::XED_ICLASS_CTESTO => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTO_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTNO => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTNO_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTB => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTB_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTNB => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTNB_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTZ => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTZ_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTNZ => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTNZ_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTBE => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTBE_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTNBE => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTNBE_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTS => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTS_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTNS => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTNS_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTT => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTT_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTF => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTF_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTL => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTL_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTNL => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTNL_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTLE => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTLE_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CTESTNLE => match shapes {
+            [Shape::Reg64, Shape::Reg64, Shape::Imm] => Some(forms::CTESTNLE_R64_R64),
+            _ => None,
+        },
+        // CFCMOVcc: only the 8 conditions with landed corpus forms are mapped;
+        // the remaining 8 iclasses (CFCMOVO/NO/S/NS/BE/NBE/P/NP) fall through
+        // to the unmapped catch-all on purpose.
+        iclass::XED_ICLASS_CFCMOVZ => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CFCMOVZ_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CFCMOVNZ => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CFCMOVNZ_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CFCMOVB => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CFCMOVB_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CFCMOVNB => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CFCMOVNB_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CFCMOVL => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CFCMOVL_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CFCMOVNL => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CFCMOVNL_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CFCMOVLE => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CFCMOVLE_R64_R64),
+            _ => None,
+        },
+        iclass::XED_ICLASS_CFCMOVNLE => match shapes {
+            [Shape::Reg64, Shape::Reg64] => Some(forms::CFCMOVNLE_R64_R64),
+            _ => None,
+        },
         iclass::XED_ICLASS_BSWAP => match shapes {
             [Shape::Reg64] => Some(forms::BSWAP_R64),
             [Shape::Reg32] => Some(forms::BSWAP_R32),
@@ -2895,6 +3124,80 @@ mod tests {
             mapped(&[0x66, 0x48, 0x0f, 0x38, 0xf5, 0x01])?,
             Some(forms::WRUSSQ_MEM64_R64)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_apx_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // jmpabs 0x1122334455667788
+        assert_eq!(
+            mapped(&[0xd5, 0x00, 0xa1, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11])?,
+            Some(forms::JMPABS_IMM64)
+        );
+        // push2 %r15, %rcx (64-bit stack slots)
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0x04, 0x18, 0xff, 0xf1])?,
+            Some(forms::PUSH2_R64_R64)
+        );
+        // push2p %r15, %rcx (128-bit stack slots)
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0x84, 0x18, 0xff, 0xf1])?,
+            Some(forms::PUSH2P_R64_R64)
+        );
+        // pop2 %r15, %rcx
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0x04, 0x18, 0x8f, 0xc1])?,
+            Some(forms::POP2_R64_R64)
+        );
+        // pop2p %r15, %rcx
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0x84, 0x18, 0x8f, 0xc1])?,
+            Some(forms::POP2P_R64_R64)
+        );
+        // ccmpz %rcx, %rax, dfv=0 (cc nibble is byte[3]'s low nibble)
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0x84, 0x04, 0x39, 0xc8])?,
+            Some(forms::CCMPZ_R64_R64)
+        );
+        // ccmpb %rcx, %rax, dfv=0
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0x84, 0x02, 0x39, 0xc8])?,
+            Some(forms::CCMPB_R64_R64)
+        );
+        // ctestz %rcx, %rax, dfv=0 (same cc-nibble rule as ccmp)
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0x84, 0x04, 0x85, 0xc8])?,
+            Some(forms::CTESTZ_R64_R64)
+        );
+        // ctestb %rcx, %rax, dfv=0
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0x84, 0x02, 0x85, 0xc8])?,
+            Some(forms::CTESTB_R64_R64)
+        );
+        // cfcmovz %rdx, %rax
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0xfc, 0x08, 0x44, 0xd0])?,
+            Some(forms::CFCMOVZ_R64_R64)
+        );
+        // cfcmovb %rdx, %rax (cc=2: opcode 0x42, P2 bit 3 clear)
+        assert_eq!(
+            mapped(&[0x62, 0xf4, 0xfc, 0x08, 0x42, 0xd0])?,
+            Some(forms::CFCMOVB_R64_R64)
+        );
+        // add %r17, %r16, %r9 (NDD, NF)
+        assert_eq!(
+            mapped(&[0x62, 0x7c, 0xfc, 0x14, 0x01, 0xc9])?,
+            Some(forms::ADD_R64_R64_R64_NDD)
+        );
+        // shl %r17, %r16, 3 (NDD)
+        assert_eq!(
+            mapped(&[0x62, 0xfc, 0xfc, 0x10, 0xc1, 0xe1, 0x03])?,
+            Some(forms::SHL_R64_R64_IMM8_NDD)
+        );
+        // Non-collision guard: the legacy two-operand `add %ecx, %eax` keeps
+        // mapping to the legacy form, not the NDD three-destination form.
+        assert_eq!(mapped(&[0x01, 0xc8])?, Some(forms::ADD_R32_R32));
+        assert_ne!(mapped(&[0x01, 0xc8])?, Some(forms::ADD_R32_R32_R32_NDD));
         Ok(())
     }
 

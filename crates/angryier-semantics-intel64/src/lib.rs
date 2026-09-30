@@ -15,6 +15,7 @@
 extern crate self as angryier_semantics_intel64;
 
 mod amx;
+pub mod apx;
 mod avx512;
 mod bmi;
 pub mod cet;
@@ -1818,6 +1819,68 @@ pub mod forms {
     pub const WRSSQ_MEM64_R64: u32 = 0x0F99;
     pub const WRUSSD_MEM32_R32: u32 = 0x0F9A;
     pub const WRUSSQ_MEM64_R64: u32 = 0x0F9B;
+    // Advanced Performance Extensions (APX) forms (0x0FA0..0x0FDC)
+    pub const JMPABS_IMM64: u32 = 0x0FA0;
+    pub const PUSH2_R64_R64: u32 = 0x0FA1;
+    pub const PUSH2P_R64_R64: u32 = 0x0FA2;
+    pub const POP2_R64_R64: u32 = 0x0FA3;
+    pub const POP2P_R64_R64: u32 = 0x0FA4;
+    pub const CCMPO_R64_R64: u32 = 0x0FA5;
+    pub const CCMPNO_R64_R64: u32 = 0x0FA6;
+    pub const CCMPB_R64_R64: u32 = 0x0FA7;
+    pub const CCMPNB_R64_R64: u32 = 0x0FA8;
+    pub const CCMPZ_R64_R64: u32 = 0x0FA9;
+    pub const CCMPNZ_R64_R64: u32 = 0x0FAA;
+    pub const CCMPBE_R64_R64: u32 = 0x0FAB;
+    pub const CCMPNBE_R64_R64: u32 = 0x0FAC;
+    pub const CCMPS_R64_R64: u32 = 0x0FAD;
+    pub const CCMPNS_R64_R64: u32 = 0x0FAE;
+    pub const CCMPT_R64_R64: u32 = 0x0FAF;
+    pub const CCMPF_R64_R64: u32 = 0x0FB0;
+    pub const CCMPL_R64_R64: u32 = 0x0FB1;
+    pub const CCMPNL_R64_R64: u32 = 0x0FB2;
+    pub const CCMPLE_R64_R64: u32 = 0x0FB3;
+    pub const CCMPNLE_R64_R64: u32 = 0x0FB4;
+    pub const CTESTO_R64_R64: u32 = 0x0FB5;
+    pub const CTESTNO_R64_R64: u32 = 0x0FB6;
+    pub const CTESTB_R64_R64: u32 = 0x0FB7;
+    pub const CTESTNB_R64_R64: u32 = 0x0FB8;
+    pub const CTESTZ_R64_R64: u32 = 0x0FB9;
+    pub const CTESTNZ_R64_R64: u32 = 0x0FBA;
+    pub const CTESTBE_R64_R64: u32 = 0x0FBB;
+    pub const CTESTNBE_R64_R64: u32 = 0x0FBC;
+    pub const CTESTS_R64_R64: u32 = 0x0FBD;
+    pub const CTESTNS_R64_R64: u32 = 0x0FBE;
+    pub const CTESTT_R64_R64: u32 = 0x0FBF;
+    pub const CTESTF_R64_R64: u32 = 0x0FC0;
+    pub const CTESTL_R64_R64: u32 = 0x0FC1;
+    pub const CTESTNL_R64_R64: u32 = 0x0FC2;
+    pub const CTESTLE_R64_R64: u32 = 0x0FC3;
+    pub const CTESTNLE_R64_R64: u32 = 0x0FC4;
+    pub const ADD_R64_R64_R64_NDD: u32 = 0x0FC5;
+    pub const SUB_R64_R64_R64_NDD: u32 = 0x0FC6;
+    pub const AND_R64_R64_R64_NDD: u32 = 0x0FC7;
+    pub const OR_R64_R64_R64_NDD: u32 = 0x0FC8;
+    pub const XOR_R64_R64_R64_NDD: u32 = 0x0FC9;
+    pub const ADD_R32_R32_R32_NDD: u32 = 0x0FCA;
+    pub const SUB_R32_R32_R32_NDD: u32 = 0x0FCB;
+    pub const AND_R32_R32_R32_NDD: u32 = 0x0FCC;
+    pub const OR_R32_R32_R32_NDD: u32 = 0x0FCD;
+    pub const XOR_R32_R32_R32_NDD: u32 = 0x0FCE;
+    pub const SHL_R64_R64_IMM8_NDD: u32 = 0x0FCF;
+    pub const SHR_R64_R64_IMM8_NDD: u32 = 0x0FD0;
+    pub const SAR_R64_R64_IMM8_NDD: u32 = 0x0FD1;
+    pub const SHL_R32_R32_IMM8_NDD: u32 = 0x0FD2;
+    pub const SHR_R32_R32_IMM8_NDD: u32 = 0x0FD3;
+    pub const SAR_R32_R32_IMM8_NDD: u32 = 0x0FD4;
+    pub const CFCMOVZ_R64_R64: u32 = 0x0FD5;
+    pub const CFCMOVNZ_R64_R64: u32 = 0x0FD6;
+    pub const CFCMOVB_R64_R64: u32 = 0x0FD7;
+    pub const CFCMOVNB_R64_R64: u32 = 0x0FD8;
+    pub const CFCMOVL_R64_R64: u32 = 0x0FD9;
+    pub const CFCMOVNL_R64_R64: u32 = 0x0FDA;
+    pub const CFCMOVLE_R64_R64: u32 = 0x0FDB;
+    pub const CFCMOVNLE_R64_R64: u32 = 0x0FDC;
 }
 
 /// RFLAGS bit positions used by the corpus.

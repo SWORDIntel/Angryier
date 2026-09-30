@@ -135,6 +135,9 @@ pub enum PrimitiveOp {
     Sign,
     MulHighRS,
     Crc32,
+    /// Value-producing load from a computed address: the single input is a
+    /// 64-bit address value and the emitted value's type is the load width.
+    Load,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -278,6 +281,9 @@ pub trait DecodedInstructionView: Debug + Send + Sync {
     fn is_zeroing_mask(&self) -> bool {
         false
     }
+    fn is_no_flags(&self) -> bool {
+        false
+    }
 }
 
 impl DecodedInstructionView for DecodedInstruction {
@@ -306,6 +312,10 @@ impl DecodedInstructionView for DecodedInstruction {
             .predicate
             .map(|p| p.mode == angryier_arch::PredicateMode::Zero)
             .unwrap_or(false)
+    }
+
+    fn is_no_flags(&self) -> bool {
+        self.modifiers.no_flags
     }
 
     fn operand(&self, index: u8) -> Option<OperandDescriptor> {

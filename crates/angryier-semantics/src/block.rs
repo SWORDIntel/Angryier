@@ -593,6 +593,7 @@ fn primitive_tag(op: PrimitiveOp) -> u8 {
         PrimitiveOp::Sign => 36,
         PrimitiveOp::MulHighRS => 37,
         PrimitiveOp::Crc32 => 38,
+        PrimitiveOp::Load => 39,
     }
 }
 

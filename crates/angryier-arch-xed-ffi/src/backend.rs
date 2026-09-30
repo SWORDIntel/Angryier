@@ -199,6 +199,13 @@ unsafe fn operand_kind_for_name(
         XED_OPERAND_REG0 | XED_OPERAND_REG1 | XED_OPERAND_REG2 | XED_OPERAND_REG3 | XED_OPERAND_REG4
         | XED_OPERAND_REG5 | XED_OPERAND_REG6 | XED_OPERAND_REG7 | XED_OPERAND_REG8 | XED_OPERAND_REG9 => {
             let reg = xed_decoded_inst_get_reg(xedd, name);
+            if (xed_sys::XED_REG_DFV0..=xed_sys::XED_REG_DFV15).contains(&reg) {
+                let val = (reg - xed_sys::XED_REG_DFV0) as u64;
+                return Ok(Some(XedOperandKind::Immediate(XedImmediateOperand {
+                    value: val,
+                    signed: false,
+                })));
+            }
             Ok(map_register(reg).map(|mapped| XedOperandKind::Register(mapped.reference)))
         }
         XED_OPERAND_IMM0 | XED_OPERAND_IMM1 => Ok(Some(extract_immediate(xedd))),
@@ -373,7 +380,10 @@ unsafe fn operand_width_bits(
             let len = xed_decoded_inst_get_memory_operand_length(xedd, memory.memory_index as c_uint);
             (len as u16) * 8
         }
-        XedOperandKind::Immediate(_) => xed_decoded_inst_get_immediate_width_bits(xedd) as u16,
+        XedOperandKind::Immediate(_) => {
+            let width = xed_decoded_inst_get_immediate_width_bits(xedd) as u16;
+            if width == 0 { 8 } else { width }
+        }
         XedOperandKind::RelativeBranch(branch) => branch.displacement_width_bits as u16,
         XedOperandKind::FarPointer(pointer) => pointer.offset_width_bits,
     }
@@ -416,16 +426,31 @@ unsafe fn extract_modifiers(xedd: *const xed_sys::xed_decoded_inst_t) -> XedInst
         None
     };
 
-    // Encoding detection: VEX/EVEX/REX2 detection is a future enhancement.
-    // For now, all decoded instructions are reported as Legacy encoding.
+    let vexvalid = unsafe { xed_sys::xed3_operand_get_vexvalid(xedd) };
+    let rex2 = unsafe { xed_sys::xed3_operand_get_rex2(xedd) != 0 };
+    let encoding = if rex2 {
+        XedEncoding::Rex2
+    } else {
+        match vexvalid {
+            1 => XedEncoding::Vex,
+            2 => XedEncoding::Evex,
+            _ => XedEncoding::Legacy,
+        }
+    };
+
+    let no_flags = unsafe {
+        xed_sys::xed_decoded_inst_get_attribute(xedd, xed_sys::XED_ATTRIBUTE_APX_NF) != 0
+            || xed_sys::xed3_operand_get_nf(xedd) != 0
+    };
+
     XedInstructionModifiers {
-        encoding: XedEncoding::Legacy,
+        encoding,
         lock,
         repetition,
         predicate,
         rounding: None,
         suppress_all_exceptions: false,
-        no_flags: false,
+        no_flags,
         broadcast: None,
     }
 }

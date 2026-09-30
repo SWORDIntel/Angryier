@@ -380,7 +380,7 @@ pub(crate) fn zf_sf(
 
 /// PF shifted flag value: PF = 1 when the low byte of `result` has even
 /// parity (`pf = !lsb(result8 ^ result8>>4 ^ >>2 ^ >>1)`).
-fn pf_flag(out: &mut dyn SemanticBuilder, result: ValueId) -> Result<ValueId, SemanticError> {
+pub(crate) fn pf_flag(out: &mut dyn SemanticBuilder, result: ValueId) -> Result<ValueId, SemanticError> {
     let ff = const_u64(out, 0xff)?;
     let four = const_u64(out, 4)?;
     let two = const_u64(out, 2)?;
@@ -950,7 +950,7 @@ pub(crate) fn read_flag_set(out: &mut dyn SemanticBuilder, bit: u8) -> Result<Va
 }
 
 /// Extracts a flag bit from RFLAGS. Returns a 1-bit value: 1 if the flag is NOT set.
-fn read_flag_not_set(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, SemanticError> {
+pub(crate) fn read_flag_not_set(out: &mut dyn SemanticBuilder, bit: u8) -> Result<ValueId, SemanticError> {
     let rflags_val = out.read_register(register_id::RFLAGS, U64)?;
     let bit_val = const_u64(out, u64::from(bit))?;
     let shifted = out.emit(

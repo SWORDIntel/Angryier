@@ -240,8 +240,8 @@ suites require system Z3/XED):
   `FSTSW m16` and the full extended/transcendental families closed
   2026-09-28; deep `ld.so` emulation replaced by the static-hook approach;
   AVX, AVX2, BMI1/BMI2, the AVX-512 first+scalar/opmask/masking slices, core
-  VNNI, VNNI-INT8, and AMX landed 2026-09-28/29 (AVX10/CET/APX remain the open
-  expansion track).
+  VNNI, VNNI-INT8, AMX, CET, and APX landed 2026-09-28/29 (AVX10 remains the
+  open expansion track).
 - The concolic fast path is faster than full symbolic (1.5–1.6× release,
   re-measured 2026-09-25) but far from the 5–10× target. Of the five
   previously profiled costs, four are fixed (register-write BTreeMap
@@ -301,7 +301,8 @@ suites require system Z3/XED):
   un-mirrored frame was lost and `ret` popped zero/stale slots); the
   runtime call arms no longer double-push rsp; `ret` restores rsp.
   EVEX masking (merging and zeroing) fully wired across all EVEX providers.
-  Remaining known bounds: AVX10/AMX/APX families.
+  Remaining known bounds: AVX10 family; AMX/APX are exercised by engine
+  tests but not yet by real-driver traces.
 - Performance work is still measured on synthetic microbenchmarks plus a
   small set of real fixtures, not broad real execution traces.
 
@@ -634,6 +635,30 @@ TDPFP16PS; `ConcreteStorage` enum supporting boxed tile storage while preserving
 and matrix dot-product engine with IEEE-754 FP16/BF16 FMA; all 8 end-to-end interpreter
 tests passing in `amx_engine.rs`; corpus now **1,441 registered forms**; AVX10/CET/APX
 remain next in order).
+**CET slice landed 2026-09-29** (12 forms: RDSSP{D,Q}, INCSSP{D,Q}, SAVEPREVSSP,
+RSTORSSP, SETSSBSY, CLRSSBSY, WRSS{D,Q}, WRUSS{D,Q}; shadow-stack register
+modeled with token generation/inheritance on SAVEPREVSSP/RSTORSSP; tested in
+`cet_engine.rs`; corpus **1,453 registered forms**).
+**APX slice landed 2026-09-29** (`src/apx.rs`, 61 forms at 0x0FA0..0x0FDC,
+rule band 0x2A00..0x2A3C: JMPABS; PUSH2/PUSH2P/POP2/POP2P register-pair stack
+ops; CCMPcc and CTESTcc across all 16 condition codes with DFV-preserved flags
+on the false path; 8 CFCMOVcc forms as non-faulting Select approximations;
+10 EVEX NDD (non-destructive 3-operand) ALU forms and 6 NDD shift forms with
+NF (no-flags) suppression honored via the new `DecodedInstructionView::
+is_no_flags`). Enabling IR work: `PrimitiveOp::Load` (value-producing load
+from a computed address, canonical tag 39), 2-input `SideEffect::MemoryWrite`
+now lowers to a real `IrOp::Store` (hint-style empty-input side effects are
+unchanged — this turned CET WRSS/WRUSS from annotations into executing
+stores), and `FarPointer` operands now read as the 64-bit offset constant and
+resolve as absolute branch targets (JMPABS). Decoder side: DFV registers map
+to immediate operands, EVEX/REX2/VEX encoding detection in modifiers, NF via
+`XED_ATTRIBUTE_APX_NF`; canonical APX encodings pinned by an in-tree XED
+encoder harness (`tests/apx_encode.rs`, encode→decode round-trip asserted
+byte-exact). Form-map discriminator for PUSH2 vs PUSH2P / POP2 vs POP2P
+(identical explicit shapes) is the suppressed stack-operand width (64 vs
+128). 13 decode legs, `maps_apx_forms`, and 14 end-to-end engine tests
+(`apx_engine.rs`) passing; corpus now **1,514 registered forms**; AVX10
+remains next in order).
 
 ### Phase 8 (solver reuse, slicing, preemption)
 **Status: slicing, exact reuse, UNSAT cores, incremental contexts, interrupt
@@ -802,10 +827,10 @@ and reproducible correctness/performance reports.
 1. ELF64 + PE32+ loading — **done** (static, dynamic, PE32+).
 2. XED decoding with explicit semantic-support manifest — **done**.
 3. Production semantic coverage for declared families — **partial,
-   corpus-clean** (1,441 registered forms incl. x87 extended +
+   corpus-clean** (1,514 registered forms incl. x87 extended +
    transcendentals, AVX, AVX2, BMI1/BMI2, AVX-512 vector/scalar/opmask/masking,
-   VNNI/VNNI-INT8, and AMX executing end-to-end; AVX10/CET/APX remain the open
-   expansion track; oracle live).
+   VNNI/VNNI-INT8, AMX, CET, and APX executing end-to-end; AVX10 remains the
+   open expansion track; oracle live).
 4. Dual-mode execution — **done** (concolic + full symbolic, shared
    AngryIR, per-state promotion).
 5. COW state + sparse symbolic memory — **partial** (sparse maps +

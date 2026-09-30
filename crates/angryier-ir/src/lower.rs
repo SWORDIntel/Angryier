@@ -104,6 +104,27 @@ impl BasicSemanticLowerer {
                         OperandRead::Alias(id) => emitter.alias(value.id, id),
                     }
                 }
+                // A value-producing load from a computed address (for example
+                // the APX POP2 stack read) lowers directly to `IrOp::Load`:
+                // its single input is the address value and the semantic
+                // value's type is the load width.
+                SemanticValueDefinition::Operation {
+                    op: SemanticOp::Primitive(PrimitiveOp::Load),
+                    inputs,
+                } => {
+                    let [address] = inputs.as_slice() else {
+                        return Err(IrLoweringError::UnsupportedValue(
+                            "load requires exactly one address input",
+                        ));
+                    };
+                    emitter.bind(
+                        value.id,
+                        IrOp::Load {
+                            address: emitter.map(*address)?,
+                            ty: lower_type(value.ty)?,
+                        },
+                    );
+                }
                 definition => {
                     let op = match definition {
                         SemanticValueDefinition::Constant(bytes) => IrOp::Constant {
@@ -155,10 +176,24 @@ impl BasicSemanticLowerer {
                     effect: angryier_semantics::SideEffect::RaiseException(vector),
                     ref inputs,
                 } if inputs.is_empty() => emitter.effect(IrOp::Trap { vector }),
+                // A MemoryWrite side effect carrying an (address, value) pair
+                // is a real store (for example shadow-stack pushes); providers
+                // whose store is described by a decoded memory operand emit it
+                // through WriteOperand instead.
+                SemanticEffectDefinition::SideEffect {
+                    effect: angryier_semantics::SideEffect::MemoryWrite,
+                    ref inputs,
+                } if inputs.len() == 2 => {
+                    let address = emitter.map(inputs[0])?;
+                    let value = emitter.map(inputs[1])?;
+                    emitter.effect(IrOp::Store { address, value });
+                }
                 SemanticEffectDefinition::SideEffect { .. } => {
-                    // Non-exception side effects (e.g. MemoryRead hints) are
-                    // semantic annotations that do not affect concrete control
-                    // or data flow. Skip them during IR lowering.
+                    // Remaining side effects (MemoryRead hints, MemoryWrite
+                    // annotations without an address/value pair, ControlTransfer,
+                    // UpdateFlags, ...) are semantic annotations that do not
+                    // affect concrete control or data flow. Skip them during IR
+                    // lowering.
                 }
                 SemanticEffectDefinition::Jump { target } => {
                     let target = resolve_address_value(&value_index, decoded, target)?;
@@ -400,6 +435,9 @@ fn lower_operand_read(
     let is_narrow_immediate = matches!(operand.kind, OperandKind::Immediate(_)) && operand.width_bits <= bit_width;
     // A memory operand's width is the width of the loaded value.
     let is_memory = matches!(operand.kind, OperandKind::Memory(_));
+    // A far-pointer operand carries its target in the offset field, which may
+    // be decoded at a narrower width than the 64-bit value providers read.
+    let is_far_pointer = matches!(operand.kind, OperandKind::FarPointer(_));
     // A provider may read fewer bits than a decoded register view exposes;
     // the read is narrowed to the parent's low bits.
     let is_narrow_register_read = matches!(
@@ -410,6 +448,7 @@ fn lower_operand_read(
         && !is_narrow_immediate
         && !is_memory
         && !is_narrow_register_read
+        && !is_far_pointer
         && operand.width_bits != bit_width
     {
         return Err(IrLoweringError::OperandTypeMismatch(index));
@@ -479,6 +518,12 @@ fn lower_operand_read(
             let address = lower_memory_address(decoded, &memory, emitter)?;
             Ok(OperandRead::Alias(address))
         }
+        // A far-pointer operand's offset field holds the 64-bit linear target
+        // (for example `jmpabs`); the segment field is not part of the value.
+        OperandKind::FarPointer(far) if bit_width == 64 => Ok(OperandRead::Op(IrOp::Constant {
+            ty: ir_type,
+            bytes_le: far.offset.to_le_bytes().to_vec(),
+        })),
         OperandKind::Register(_) => Err(IrLoweringError::UnsupportedValue("partial register operand")),
         OperandKind::Memory(_) => Err(IrLoweringError::UnsupportedValue("wide memory operand")),
         OperandKind::AddressGeneration(_) => Err(IrLoweringError::UnsupportedValue("address-generation operand")),
@@ -632,6 +677,9 @@ fn resolve_address_value(
                     .address()
                     .wrapping_add(u64::from(decoded.length()))
                     .wrapping_add_signed(branch.displacement)),
+                // An absolute branch (JMPABS) carries its 64-bit target in a
+                // far-pointer operand's offset field.
+                OperandKind::FarPointer(far) => Ok(far.offset),
                 _ => Err(IrLoweringError::UnsupportedEffect(
                     "non-branch operand as control-flow target",
                 )),
@@ -739,6 +787,13 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                 ));
             }
             PrimitiveOp::Crc32 => IrPrimitive::Crc32,
+            // Loads never reach the primitive mapper; the value-definition
+            // loop lowers them directly to `IrOp::Load`.
+            PrimitiveOp::Load => {
+                return Err(IrLoweringError::UnsupportedValue(
+                    "value-producing load must be lowered directly to IrOp::Load",
+                ));
+            }
         }),
         SemanticOp::Float(op) => Ok(match op {
             FloatingOp::Add => IrPrimitive::FAdd,
@@ -961,8 +1016,8 @@ impl SemanticLowerer for CachedSemanticLowerer {
 mod tests {
     use super::*;
     use angryier_semantics::{
-        FeatureId, ImmediateOperand, OperandClass, OperandDescriptor, RegisterId, RegisterView, ScalarType,
-        SemanticBlockBuilder, SemanticBuilder, SemanticError,
+        FarPointerOperand, FeatureId, ImmediateOperand, OperandClass, OperandDescriptor, RegisterId, RegisterView,
+        ScalarType, SemanticBlockBuilder, SemanticBuilder, SemanticError, SideEffect,
     };
     use angryier_types::{
         BlockId, CodePageId, CodePageVersion, CodeVersionGuard, ContentIdentitySchemaVersion, ImageId,
@@ -1258,6 +1313,162 @@ mod tests {
 
         assert_eq!(block.instructions.len(), 2);
         assert!(matches!(block.instructions[1].op, IrOp::Jump { target: 0x402000 }));
+        Ok(())
+    }
+
+    #[test]
+    fn lowers_computed_load_and_two_input_memory_write() -> Result<(), String> {
+        let ty = SemanticType::Scalar(ScalarType::BitVec(64));
+        let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
+        let base = builder
+            .constant(ty, &0x5000_u64.to_le_bytes())
+            .map_err(|error| format!("{error:?}"))?;
+        let offset = builder
+            .constant(ty, &8_u64.to_le_bytes())
+            .map_err(|error| format!("{error:?}"))?;
+        let address = builder
+            .emit(SemanticOp::Primitive(PrimitiveOp::Add), ty, &[base, offset])
+            .map_err(|error| format!("{error:?}"))?;
+        let loaded = builder
+            .emit(SemanticOp::Primitive(PrimitiveOp::Load), ty, &[address])
+            .map_err(|error| format!("{error:?}"))?;
+        builder
+            .write_register(RegisterId(1), loaded)
+            .map_err(|error| format!("{error:?}"))?;
+        let stored = builder
+            .constant(ty, &0xfeed_u64.to_le_bytes())
+            .map_err(|error| format!("{error:?}"))?;
+        builder
+            .side_effect(SideEffect::MemoryWrite, &[address, stored])
+            .map_err(|error| format!("{error:?}"))?;
+        let rich = builder
+            .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+            .map_err(|error| format!("{error:?}"))?;
+
+        let block = BasicSemanticLowerer
+            .lower(&rich, &validity(1))
+            .map_err(|error| error.to_string())?;
+
+        // constant, constant, add, load, constant, register write, store
+        assert_eq!(block.instructions.len(), 7);
+        assert!(matches!(
+            block.instructions[2].op,
+            IrOp::Primitive {
+                op: IrPrimitive::Add,
+                ty: IrType::Bits(64),
+                ref inputs,
+            } if inputs == &[IrValueId(0), IrValueId(1)]
+        ));
+        // PrimitiveOp::Load lowers directly to IrOp::Load (no IrPrimitive::Load).
+        assert!(matches!(
+            block.instructions[3].op,
+            IrOp::Load {
+                address: IrValueId(2),
+                ty: IrType::Bits(64)
+            }
+        ));
+        assert!(matches!(
+            block.instructions[5].op,
+            IrOp::WriteRegister {
+                register: 1,
+                value: IrValueId(3),
+                kind: RegisterWriteKind::ReplaceParent
+            }
+        ));
+        // A 2-input MemoryWrite side effect lowers to a real store.
+        assert_eq!(block.instructions[6].result, None);
+        assert!(matches!(
+            block.instructions[6].op,
+            IrOp::Store {
+                address: IrValueId(2),
+                value: IrValueId(4)
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn memory_write_and_read_hints_without_inputs_stay_skipped() -> Result<(), String> {
+        let ty = SemanticType::Scalar(ScalarType::BitVec(64));
+        let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
+        let value = builder
+            .read_register(RegisterId(2), ty)
+            .map_err(|error| format!("{error:?}"))?;
+        builder
+            .side_effect(SideEffect::MemoryWrite, &[])
+            .map_err(|error| format!("{error:?}"))?;
+        builder
+            .side_effect(SideEffect::MemoryRead, &[value])
+            .map_err(|error| format!("{error:?}"))?;
+        builder
+            .write_register(RegisterId(2), value)
+            .map_err(|error| format!("{error:?}"))?;
+        let rich = builder
+            .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+            .map_err(|error| format!("{error:?}"))?;
+
+        let block = BasicSemanticLowerer
+            .lower(&rich, &validity(1))
+            .map_err(|error| error.to_string())?;
+
+        // Only the register read and write survive lowering; the side-effect
+        // hints produce no IR instructions.
+        assert_eq!(block.instructions.len(), 2);
+        assert!(matches!(
+            block.instructions[0].op,
+            IrOp::ReadRegister {
+                register: 2,
+                ty: IrType::Bits(64)
+            }
+        ));
+        assert!(matches!(
+            block.instructions[1].op,
+            IrOp::WriteRegister { register: 2, .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn far_pointer_operand_reads_the_offset_field() -> Result<(), String> {
+        let ty = SemanticType::Scalar(ScalarType::BitVec(64));
+        let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
+        let target = builder.read_operand(0, ty).map_err(|error| format!("{error:?}"))?;
+        builder.jump_indirect(target).map_err(|error| format!("{error:?}"))?;
+        let rich = builder
+            .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+            .map_err(|error| format!("{error:?}"))?;
+        let decoded = TestDecode {
+            address: 0x401000,
+            operands: vec![OperandDescriptor {
+                index: 0,
+                width_bits: 64,
+                read: true,
+                written: false,
+                class: OperandClass::FarPointer,
+                kind: OperandKind::FarPointer(FarPointerOperand {
+                    segment: 0x33,
+                    offset: 0x402000,
+                    offset_width_bits: 64,
+                }),
+            }],
+        };
+
+        let lowered = BasicSemanticLowerer
+            .lower_with_decode(&rich, &validity(1), &decoded)
+            .map_err(|error| error.to_string())?;
+
+        // The far pointer's offset field becomes the 64-bit target constant.
+        assert!(matches!(
+            lowered.instructions[0].op,
+            IrOp::Constant {
+                ty: IrType::Bits(64),
+                ref bytes_le
+            } if bytes_le == &0x402000_u64.to_le_bytes()
+        ));
+        assert!(matches!(
+            lowered.instructions[1].op,
+            IrOp::JumpIndirect { target: IrValueId(0) }
+        ));
         Ok(())
     }
 }

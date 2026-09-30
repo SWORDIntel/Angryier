@@ -261,6 +261,19 @@ fn test_cet_saveprevssp_and_rstorssp() -> Result<(), BoxError> {
     let ssp_val = u64::from_le_bytes(state.registers.read(SSP).map_err(|e| format!("{e:?}"))?[..8].try_into()?);
     assert_eq!(ssp_val, DATA_BASE + 0x100 - 8);
 
+    // The provider's two-input MemoryWrite side effect now lowers to a real
+    // store: the previous shadow-stack token (old_ssp | 1) lands at [ssp - 8].
+    let mut stored = [ByteValue::Concrete(0); 8];
+    state
+        .memory
+        .read_into(DATA_BASE + 0x100 - 8, &mut stored)
+        .map_err(|e| format!("{e:?}"))?;
+    let token_val = u64::from_le_bytes(stored.map(|b| match b {
+        ByteValue::Concrete(x) => x,
+        _ => 0,
+    }));
+    assert_eq!(token_val, (DATA_BASE + 0x100) | 1);
+
     // 2. rstorssp (%rax): SSP := token & ~7
     let mut mem = [0u8; 64];
     let token = 0x5000_1234_5678_9001u64; // bit 0 set (restore token)
