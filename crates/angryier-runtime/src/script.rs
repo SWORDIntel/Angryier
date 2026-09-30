@@ -278,6 +278,12 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         angryier_types::ExpressionNormalizationVersion(1),
     ));
     let mut session = crate::SymbolicSession::new(&runtime, arena.as_ref(), process);
+    // UC pin fallback rides the same opt as the memory policy: an address
+    // the solver cannot concretize in budget pins to a fabricated page
+    // instead of failing the state.
+    if uc_memory_armed {
+        session = session.with_uc_pin_fallback();
+    }
 
     // Symbolic register marks: `symbolic = { rdi = 64 }` or `{ "rdi" }`.
     // The width value is validated — only 64-bit GPR symbols are
@@ -375,9 +381,18 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     let steps = opts.get::<u64>("steps").unwrap_or(DEFAULT_STEPS);
     let max_states = opts.get::<usize>("states").unwrap_or(DEFAULT_MAX_STATES);
 
+    // exploration = "fork": branch folding trusts hard constants only, so
+    // symbolic-condition branches fork both directions (solver-checked) —
+    // path diversity over the concolic default's single determinized path.
+    // search = "dfs": step the newest (deepest) state first — reach-a-site
+    // dives instead of breadth-first.
+    let fork_on_symbolic = opts.get::<String>("exploration").ok().as_deref() == Some("fork");
+    let dfs = opts.get::<String>("search").ok().as_deref() == Some("dfs");
     let policy = crate::ExplorationPolicy {
         find,
         avoid,
+        fork_on_symbolic,
+        dfs,
         ..Default::default()
     };
     // The solver ALWAYS gates forks (`step_state_checked` prunes
@@ -385,10 +400,18 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // follows phantom paths — e.g. a NULL-check's impossible side — and
     // crashes deep in driver code that real execution could never reach.
     // `solve = true` only controls model extraction of found states.
-    let mut backend = Some(
-        angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>)
+    let mut backend = if opts.get::<String>("solver").ok().as_deref() == Some("off") {
+        // Diagnostic escape hatch: exploration without feasibility gates —
+        // forks are not pruned and addresses fall back to zero-page pins.
+        None
+    } else {
+        Some(
+            angryier_solver_z3::Z3Backend::native_ffi(
+                arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>,
+            )
             .map_err(|e| mlua::Error::external(format!("z3: {e:?}")))?,
-    );
+        )
+    };
     // Wall budget per run: `timeout_secs` (default 120) bounds the whole
     // exploration; the report's `timed_out` flag says when it fired.
     let timeout_secs = opts.get::<u64>("timeout_secs").unwrap_or(120);

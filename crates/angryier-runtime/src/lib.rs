@@ -5164,6 +5164,21 @@ pub struct SymbolicSession<'a, D: Decoder> {
     /// Total concretization attempts across the run (diagnostic, surfaced
     /// with the report).
     concretization_retries_total: u64,
+    /// Fork-aggressive fidelity (set from [`ExplorationPolicy::fork_on_symbolic`]
+    /// by `run_with_policy`): branch folding consults hard constants only.
+    fork_on_symbolic: bool,
+    /// Feasibility memo: (state id, direction ExprId) -> feasible. Loop
+    /// bodies re-ask identical conditions; hard solver queries deserve to
+    /// run once per distinct question.
+    feasibility_memo: std::collections::HashMap<(u64, ExprId), bool>,
+    /// UC address-pin fallback (armed with `uc_memory`): when the solver
+    /// cannot concretize a symbolic address within budget, pin it to a
+    /// fresh fabricated page instead of failing the state. Fabricated
+    /// pages are zero-backed and land in the memory ledger's debt when
+    /// written — the relaxation stays visible.
+    uc_pin_fallback: bool,
+    /// Next fabricated pin page (advances one page per fallback pin).
+    next_uc_pin_page: u64,
 }
 
 /// Default solver-assisted address-concretization attempts per step. The
@@ -5223,7 +5238,18 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             vector_debt_sites: Vec::new(),
             unresolved_retry_budget: UNRESOLVED_ADDRESS_RETRY_BUDGET,
             concretization_retries_total: 0,
+            fork_on_symbolic: false,
+            feasibility_memo: std::collections::HashMap::new(),
+            uc_pin_fallback: false,
+            next_uc_pin_page: 0x5000_0000_0000,
         }
+    }
+
+    /// Arms the UC address-pin fallback (see the field docs). Returns the
+    /// session for chaining.
+    pub fn with_uc_pin_fallback(mut self) -> Self {
+        self.uc_pin_fallback = true;
+        self
     }
 
     /// Overrides the per-step solver-assisted concretization retry budget
@@ -6167,6 +6193,14 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
 
         let (ir_block, _decoded) = self.runtime.lower_at(&mut self.states[index].process, pc, &decoded)?;
 
+        // Phase timers (ANGRYIER_DEBUG_STEPSTAT): where per-step time goes —
+        // the clone-restore/snapshot round-trip, evaluation, or the solver.
+        let stat = std::env::var_os("ANGRYIER_DEBUG_STEPSTAT").is_some();
+        let mut t_restore = std::time::Duration::ZERO;
+        let mut t_eval = std::time::Duration::ZERO;
+        let mut t_post = std::time::Duration::ZERO;
+        let t_step0 = std::time::Instant::now();
+
         // Block-local fresh-symbol ids: a solver-assisted concretization
         // retry pins a value for the failing address expression and re-runs
         // THE SAME block. The arena hash-conses expressions, so the pin can
@@ -6176,6 +6210,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         // advancing across retries. The first evaluation of the block is
         // unaffected (a fresh evaluator starts at 0 either way).
         let mut evaluator = SymbolicEvaluator::new(self.arena).with_block_local_symbols();
+        let t_r0 = std::time::Instant::now();
         {
             let state = &self.states[index];
             evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
@@ -6186,7 +6221,14 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 expr_concrete: state.expr_concrete.clone(),
             });
         }
+        if stat {
+            t_restore = t_r0.elapsed();
+        }
+        let t_e0 = std::time::Instant::now();
         let mut summary = evaluator.eval_block_with_memory(&ir_block, &mut self.states[index].memory);
+        if stat {
+            t_eval += t_e0.elapsed();
+        }
         // Solver-assisted address concretization: when an address expr
         // can't fold concretely, ask the solver for a satisfying value
         // under this state's constraints, pin it, and re-run the block.
@@ -6397,13 +6439,49 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 }
             }
         }
+        // UC address-pin fallback: the solver could not concretize the
+        // address within budget (hard query, or no solver at all). Rather
+        // than fail the state — which starves fork-aggressive exploration,
+        // where thousands of paths each hit the same unresolved write — pin
+        // the address to a fresh fabricated page. The page is zero-backed;
+        // any write through it lands in the memory ledger's unmapped-write
+        // debt, so the relaxation stays visible in provenance.
+        if self.uc_pin_fallback
+            && let Err(angryier_execution::SymbolicEvalError::UnresolvedAddress(expr)) = summary
+        {
+            let page = self.next_uc_pin_page;
+            self.next_uc_pin_page = page.wrapping_add(0x1000);
+            self.states[index].expr_concrete.insert(expr, page);
+            evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
+                registers: self.states[index].registers.clone(),
+                concrete_registers: self.states[index].concrete_registers.clone(),
+                constraints: self.states[index].constraints.clone(),
+                symbols: self.states[index].symbols.clone(),
+                expr_concrete: self.states[index].expr_concrete.clone(),
+            });
+            summary = evaluator.eval_block_with_memory(&ir_block, &mut self.states[index].memory);
+            if std::env::var_os("ANGRYIER_DEBUG_CONCRETIZE").is_some() {
+                eprintln!("[conc] uc-pin fallback expr={expr:?} -> page={page:#x} ok={}", summary.is_ok());
+            }
+        }
         // The per-step evaluator dies here — drain its vector-debt ledger
         // into the session aggregate before it does, whether or not the
         // block evaluated cleanly (also covers the solver-retry
         // re-evaluations above, which reuse this evaluator).
         self.record_vector_debt(evaluator.debt_total(), evaluator.debt_sites());
         let summary = summary.map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+        let t_p0 = std::time::Instant::now();
         let post = evaluator.snapshot();
+        if stat {
+            t_post = t_p0.elapsed();
+            eprintln!(
+                "[stepstat] restore={:?} eval={:?} post={:?} total={:?}",
+                t_restore,
+                t_eval,
+                t_post,
+                t_step0.elapsed()
+            );
+        }
         {
             let state = &mut self.states[index];
             state.registers = post.registers;
@@ -6466,6 +6544,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 })
                 .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
 
+            // Fold chain, concolic default: hard constants, then the
+            // state's concretization pins, then a resolved fold through
+            // those pins. Fork-aggressive mode trusts hard constants ONLY
+            // — pins describe one concretized world, and treating them as
+            // branch truth is exactly the single-path determinism the mode
+            // exists to lift; the solver feasibility check below decides
+            // both directions instead.
             let const_val = self
                 .arena
                 .get(condition)
@@ -6476,21 +6561,26 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         .get(branch.condition)
                         .filter(|n| n.op == angryier_expr::ExprOp::Constant)
                         .and_then(|n| n.immediate.first().copied().map(u64::from))
-                })
-                .or_else(|| self.states[index].expr_concrete.get(&condition).copied())
-                .or_else(|| self.states[index].expr_concrete.get(&branch.condition).copied())
-                .or_else(|| {
-                    angryier_execution::symbolic::constant_value_resolved(self.arena, condition, &|expr| {
-                        self.states[index].expr_concrete.get(&expr).copied()
-                    })
-                    .ok()
-                })
-                .or_else(|| {
-                    angryier_execution::symbolic::constant_value_resolved(self.arena, branch.condition, &|expr| {
-                        self.states[index].expr_concrete.get(&expr).copied()
-                    })
-                    .ok()
                 });
+            let const_val = if self.fork_on_symbolic {
+                const_val
+            } else {
+                const_val
+                    .or_else(|| self.states[index].expr_concrete.get(&condition).copied())
+                    .or_else(|| self.states[index].expr_concrete.get(&branch.condition).copied())
+                    .or_else(|| {
+                        angryier_execution::symbolic::constant_value_resolved(self.arena, condition, &|expr| {
+                            self.states[index].expr_concrete.get(&expr).copied()
+                        })
+                        .ok()
+                    })
+                    .or_else(|| {
+                        angryier_execution::symbolic::constant_value_resolved(self.arena, branch.condition, &|expr| {
+                            self.states[index].expr_concrete.get(&expr).copied()
+                        })
+                        .ok()
+                    })
+            };
 
             // Feasibility gates: taken under `condition`, not_taken under
             // `!condition` — each checked against the state's constraints.
@@ -6715,12 +6805,30 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     /// Queries `backend` whether `direction` is satisfiable under the
     /// state's accumulated path constraints.
     fn direction_feasible(
-        &self,
+        &mut self,
         index: usize,
         direction: ExprId,
         backend: &mut dyn SolverBackend,
         timeout: Duration,
     ) -> Result<bool, RuntimeError> {
+        // Per-query budget: hard bitvector queries can run for seconds and
+        // the caller's `timeout` is the whole-run wall budget — one hard
+        // query would eat it. Unknown (budget-exceeded) already reads as
+        // feasible at the call site, so a short cap trades pruning power
+        // for a walk that never stalls. ANGRYIER_QUERY_BUDGET_MS overrides.
+        let query_budget_ms: u64 = std::env::var("ANGRYIER_QUERY_BUDGET_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2000);
+        let timeout = timeout.min(Duration::from_millis(query_budget_ms));
+        // Feasibility memo: a state that loops re-asks the same condition
+        // (block-local symbol ids make repeat visits rebuild identical
+        // ExprIds); one hard query per distinct (state, direction) is
+        // enough. Bounded — a pathological walk clears instead of growing.
+        let memo_key = (self.states[index].id, direction);
+        if let Some(cached) = self.feasibility_memo.get(&memo_key) {
+            return Ok(*cached);
+        }
         let state = &self.states[index];
         let constraints: Vec<CanonicalConstraint> = state
             .constraints
@@ -6739,6 +6847,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .dependency_summary(direction)
             .map(|s| s.key)
             .ok_or_else(|| RuntimeError::Symbolic("missing direction summary".into()))?;
+        let t0 = std::time::Instant::now();
         let query = SolverQuery::canonical(
             SolverQueryId(index as u64),
             &constraints,
@@ -6749,8 +6858,32 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             timeout,
         )
         .map_err(|e| RuntimeError::Solver(format!("{e:?}")))?;
+        let build_elapsed = t0.elapsed();
+        let t1 = std::time::Instant::now();
         let result = backend.solve(&query);
-        Ok(!matches!(result.outcome, SolverOutcomeKind::Unsat))
+        let solve_elapsed = t1.elapsed();
+        if std::env::var_os("ANGRYIER_DEBUG_STEPSTAT").is_some() {
+            static BUILD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static SOLVE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            BUILD_NS.fetch_add(build_elapsed.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            SOLVE_NS.fetch_add(solve_elapsed.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let n = state.constraints.len();
+            eprintln!(
+                "[feasstat] calls={} build={:?} solve={:?} constraints={}",
+                CALLS.load(std::sync::atomic::Ordering::Relaxed),
+                build_elapsed,
+                solve_elapsed,
+                n
+            );
+        }
+        let feasible = !matches!(result.outcome, SolverOutcomeKind::Unsat);
+        if self.feasibility_memo.len() > 10_000 {
+            self.feasibility_memo.clear();
+        }
+        self.feasibility_memo.insert(memo_key, feasible);
+        Ok(feasible)
     }
 
     /// Merges every group of live states sharing the same pc via
@@ -6871,6 +7004,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         // execution/merging between queries, so the loop checks the deadline
         // every round and reports the truncation via `timed_out`.
         let deadline = std::time::Instant::now() + timeout;
+        self.fork_on_symbolic = policy.fork_on_symbolic;
         while steps < max_steps && !self.states.is_empty() {
             if std::time::Instant::now() >= deadline {
                 report.timed_out = true;
@@ -7005,7 +7139,16 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             // advances past the reconvergence point. Under
             // `prefer_new_coverage` the index is the state whose pc has been
             // visited least across the run.
-            let index = if policy.prefer_new_coverage {
+            let index = if policy.dfs {
+                // Depth-first: the newest state (fork children append) is
+                // the deepest path — step it while it makes progress, so a
+                // `find` target ahead of the frontier is reached before the
+                // breadth explodes. Held (merge-parked) states are skipped.
+                (0..self.states.len())
+                    .rev()
+                    .find(|i| !held.contains_key(i))
+                    .unwrap_or(self.states.len() - 1)
+            } else if policy.prefer_new_coverage {
                 self.states
                     .iter()
                     .enumerate()
@@ -7093,6 +7236,16 @@ pub struct ExplorationPolicy {
     /// When set, the round-robin picks the state whose PC is the least
     /// visited so far — coverage-novelty ordering.
     pub prefer_new_coverage: bool,
+    /// Fork-aggressive fidelity: branch conditions resolve from hard
+    /// constants only — concretization pins (`expr_concrete`) no longer
+    /// satisfy branch folding, so every symbolic-condition branch forks
+    /// both directions (solver-checked). The concolic default determinizes
+    /// a single deep path; this mode trades that for path diversity.
+    pub fork_on_symbolic: bool,
+    /// Depth-first state selection: step the newest state (fork children
+    /// are appended) instead of round-robin — dives toward `find` targets
+    /// instead of breadth-first exploration.
+    pub dfs: bool,
 }
 
 /// Aggregate report for [`SymbolicSession::run`].
@@ -7427,6 +7580,10 @@ where
                         vector_debt_sites: Vec::new(),
                         unresolved_retry_budget: UNRESOLVED_ADDRESS_RETRY_BUDGET,
                         concretization_retries_total: 0,
+                        fork_on_symbolic: false,
+                        feasibility_memo: std::collections::HashMap::new(),
+                        uc_pin_fallback: false,
+                        next_uc_pin_page: 0x5000_0000_0000,
                     };
                     let report = sub.run(max_steps, max_states, None, timeout, false)?;
                     Ok((report, sub.states, sub.dead, sub.vector_debt_total, sub.vector_debt_sites))
