@@ -5863,6 +5863,84 @@ hint_noop!(PrefetchntaMem8, forms::PREFETCHNTA_MEM8, 0x944);
 hint_noop!(Prefetcht0Mem8, forms::PREFETCHT0_MEM8, 0x945);
 hint_noop!(Prefetcht1Mem8, forms::PREFETCHT1_MEM8, 0x946);
 hint_noop!(Prefetcht2Mem8, forms::PREFETCHT2_MEM8, 0x947);
+hint_noop!(PrefetchwMem8, forms::PREFETCHW_MEM8, 0x948);
+
+/// Rule id for the unsupported-form fallback provider — outside the corpus
+/// rule space, so it is only ever seen when a runtime explicitly arms the
+/// fallback.
+const UNSUPPORTED_FALLBACK_RULE: u64 = 0xFFFF_0001;
+
+/// Opt-in catch-all: fall-through semantics for any instruction form the
+/// corpus does not model, with every hit debt-recorded as (pc, form)
+/// provenance. Armed per registry via
+/// [`Intel64CorpusRegistry::set_unsupported_fallback`] — never by default —
+/// so images dense in privileged hints (`CLI`, `STI`, RDMSR/WRMSR, `HLT`)
+/// stay explorable at the cost of recorded fidelity debt on those sites.
+#[derive(Debug)]
+pub struct UnsupportedFallthrough {
+    hits: std::sync::atomic::AtomicUsize,
+    sites: std::sync::Mutex<Vec<(u64, u32)>>,
+}
+
+impl UnsupportedFallthrough {
+    pub fn new() -> Self {
+        Self {
+            hits: std::sync::atomic::AtomicUsize::new(0),
+            sites: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `(total hits, first-seen (pc, form) sites)` — sites capped at 128
+    /// entries so a pathological image cannot grow the log unbounded.
+    pub fn snapshot(&self) -> (usize, Vec<(u64, u32)>) {
+        let sites = self
+            .sites
+            .lock()
+            .map(|sites| sites.clone())
+            .unwrap_or_default();
+        (
+            self.hits.load(std::sync::atomic::Ordering::Relaxed),
+            sites,
+        )
+    }
+}
+
+impl Default for UnsupportedFallthrough {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SemanticProvider for UnsupportedFallthrough {
+    fn rule_id(&self) -> SemanticRuleId {
+        rule_id(UNSUPPORTED_FALLBACK_RULE)
+    }
+
+    fn origin(&self) -> SemanticOrigin {
+        SemanticOrigin::HandwrittenOverride
+    }
+
+    fn matches(&self, _insn: &dyn DecodedInstructionView) -> bool {
+        true
+    }
+
+    fn emit(
+        &self,
+        context: &SemanticContext,
+        insn: &dyn DecodedInstructionView,
+        out: &mut dyn SemanticBuilder,
+    ) -> Result<SemanticReceipt, SemanticError> {
+        self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut sites) = self.sites.lock() {
+            let site = (insn.address(), insn.form_id());
+            if sites.len() < 128 && !sites.contains(&site) {
+                sites.push(site);
+            }
+        }
+        fall_through(out, insn)?;
+        Ok(receipt(UNSUPPORTED_FALLBACK_RULE, context))
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Cmov16Condition {

@@ -19,6 +19,7 @@ pub struct Intel64CorpusRegistry {
     providers: Vec<Arc<dyn angryier_semantics::SemanticProvider>>,
     form_index: BTreeMap<u32, usize>,
     semantic_version: SemanticVersion,
+    unsupported_fallback: Option<Arc<dyn angryier_semantics::SemanticProvider>>,
 }
 
 impl Intel64CorpusRegistry {
@@ -846,6 +847,7 @@ impl Intel64CorpusRegistry {
             Arc::new(Prefetcht0Mem8),
             Arc::new(Prefetcht1Mem8),
             Arc::new(Prefetcht2Mem8),
+            Arc::new(PrefetchwMem8),
             Arc::new(InAlDx),
             Arc::new(InAxDx),
             Arc::new(InEaxDx),
@@ -1380,6 +1382,7 @@ impl Intel64CorpusRegistry {
             providers,
             form_index,
             semantic_version,
+            unsupported_fallback: None,
         };
         registry.assert_unique_rule_ids();
         registry
@@ -1411,7 +1414,22 @@ impl Intel64CorpusRegistry {
     /// rule-id lookup: provider indices are positional, and a duplicated
     /// hand-picked rule offset would otherwise silently misroute the form.
     pub fn provider_for_form(&self, form_id: u32) -> Option<&Arc<dyn angryier_semantics::SemanticProvider>> {
-        self.form_index.get(&form_id).map(|&index| &self.providers[index])
+        self.form_index
+            .get(&form_id)
+            .map(|&index| &self.providers[index])
+            .or(self.unsupported_fallback.as_ref())
+    }
+
+    /// Arms the opt-in unsupported-form fallback: forms missing from the
+    /// corpus index resolve to `provider` (fall-through semantics, with the
+    /// provider itself debt-recording each hit) instead of failing the state.
+    /// Never armed by default — census and differential tests rely on exact
+    /// coverage.
+    pub fn set_unsupported_fallback(
+        &mut self,
+        provider: Arc<dyn angryier_semantics::SemanticProvider>,
+    ) {
+        self.unsupported_fallback = Some(provider);
     }
 
     fn assert_unique_rule_ids(&self) {
@@ -1438,11 +1456,19 @@ impl SemanticRegistry for Intel64CorpusRegistry {
             return Err(SemanticError::VersionMismatch);
         }
 
-        let index = self
-            .form_index
-            .get(&insn.form_id())
-            .copied()
-            .ok_or(SemanticError::UnsupportedForm(insn.form_id()))?;
+        let index = match self.form_index.get(&insn.form_id()).copied() {
+            Some(index) => index,
+            None => {
+                let Some(fallback) = &self.unsupported_fallback else {
+                    return Err(SemanticError::UnsupportedForm(insn.form_id()));
+                };
+                return Ok(SemanticResolution {
+                    kind: ResolutionKind::Override,
+                    rule_id: fallback.rule_id(),
+                    semantic_version: self.semantic_version,
+                });
+            }
+        };
 
         let provider = &self.providers[index];
         if !provider.matches(insn) {
@@ -1457,7 +1483,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1574] = [
+const ALL_FORMS: [u32; 1575] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2279,6 +2305,7 @@ const ALL_FORMS: [u32; 1574] = [
     crate::forms::PREFETCHT0_MEM8,
     crate::forms::PREFETCHT1_MEM8,
     crate::forms::PREFETCHT2_MEM8,
+    crate::forms::PREFETCHW_MEM8,
     crate::forms::IN_AL_DX,
     crate::forms::IN_AX_DX,
     crate::forms::IN_EAX_DX,

@@ -1438,6 +1438,7 @@ pub mod forms {
     pub const PREFETCHT0_MEM8: u32 = 0x0745;
     pub const PREFETCHT1_MEM8: u32 = 0x0746;
     pub const PREFETCHT2_MEM8: u32 = 0x0747;
+    pub const PREFETCHW_MEM8: u32 = 0x0748;
 
     // Control flow, stack frame, and flags batch (0x0600..0x06FF)
     pub const LOOP_REL8: u32 = 0x0600;
