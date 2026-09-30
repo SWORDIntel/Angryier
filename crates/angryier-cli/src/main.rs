@@ -915,7 +915,16 @@ mod tests {
     }
 
     #[test]
-    fn crates_output_contains_all_previously_omitted_crates() {\n        let crates = crates_output();\n        for name in ["angryier", "angryier-cfg", "angryier-runtime", "angryier-solver-fuzzy"] {\n            assert!(crates.contains(name), "missing workspace crate {name}");\n        }\n    }\n\n    #[test]\n    fn crates_output_contains_types_crate() {
+    #[test]
+    fn crates_output_contains_all_previously_omitted_crates() {
+        let crates = crates_output();
+        for name in ["angryier", "angryier-cfg", "angryier-runtime", "angryier-solver-fuzzy"] {
+            assert!(crates.contains(name), "missing workspace crate {name}");
+        }
+    }
+
+    #[test]
+    fn crates_output_contains_types_crate() {
         assert!(crates_output().contains("angryier-types"));
     }
 
