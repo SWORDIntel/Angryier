@@ -2,7 +2,9 @@
 
 <div align="center">
 
-![Angryier Logo](docs/Logo.png)
+<p align="center">
+  <img src="docs/Logo.png" alt="Angryier Logo" width="50%">
+</p>
 
 **The Native, Multicore Dual-Mode Symbolic & Concolic Binary Analysis Platform in Safe Rust**
 
