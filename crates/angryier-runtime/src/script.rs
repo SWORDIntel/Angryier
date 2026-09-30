@@ -15,6 +15,7 @@
 //! ```
 
 use angryier_expr::ExprArena;
+use angryier_loader::ImageLoader;
 use mlua::{Lua, Table, Value};
 
 /// Default instruction-step budget for `angry.run` (`opts.steps`). Shared
@@ -133,8 +134,23 @@ fn reg_by_name(name: &str) -> Option<u32> {
 
 fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     let bytes = std::fs::read(path).map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
-    let runtime =
+    let mut runtime =
         crate::Runtime::with_native_xed(angryier_types::SemanticVersion(1), angryier_types::TargetProfileId(1));
+    // Opt-in unsupported-form fallback: `unsupported = "fallthrough"` trades
+    // exactness on unmodeled forms (privileged hints like CLI/STI, RDMSR,
+    // HLT — dense in kernel images) for reachability, with every fallback
+    // hit reported back in the result table as fidelity debt.
+    let unsupported_fallback =
+        if opts.get::<String>("unsupported").ok().as_deref() == Some("fallthrough") {
+            let fallback =
+                std::sync::Arc::new(angryier_semantics_intel64::UnsupportedFallthrough::new());
+            runtime.registry.set_unsupported_fallback(std::sync::Arc::clone(
+                &fallback,
+            ) as std::sync::Arc<dyn angryier_semantics::SemanticProvider>);
+            Some(fallback)
+        } else {
+            None
+        };
     let use_dynamic = opts.get::<bool>("dynamic").unwrap_or(false);
     // Format dispatch: an MZ magic means PE32+, which loads in driver mode
     // (sections mapped, IAT resolved to import stubs, DriverEntry entry
@@ -161,10 +177,28 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             .load_elf(&bytes)
             .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?
     };
-    if let (Some(tracker), runtime_any) = (&kernel_pool, &runtime)
-        && let Err(e) = runtime_any.attach_kernel_pool_model(&mut process, tracker.clone())
-    {
-        return Err(mlua::Error::external(format!("attach_kernel_pool_model: {e:?}")));
+    if let (Some(tracker), runtime_any) = (&kernel_pool, &runtime) {
+        // Bind INTERNAL pool routines before attach: a kernel image calls
+        // its own ExAllocatePool*/ExFreePool* exports via direct calls, not
+        // imports — resolve the export table and hand the addresses to the
+        // tracker so attach installs per-address hooks. Export VAs are
+        // preferred-base VAs; driver-mode PE loads map at the preferred
+        // base (no relocations applied).
+        if let Ok(image) = angryier_loader::Pe32Loader::new().load(&bytes) {
+            for name in crate::KERNEL_POOL_ALLOC_NAMES {
+                if let Some(va) = image.export_address(name) {
+                    tracker.bind_internal_address(va, angryier_models::PoolRoutine::Alloc);
+                }
+            }
+            for name in crate::KERNEL_POOL_FREE_NAMES {
+                if let Some(va) = image.export_address(name) {
+                    tracker.bind_internal_address(va, angryier_models::PoolRoutine::Free);
+                }
+            }
+        }
+        if let Err(e) = runtime_any.attach_kernel_pool_model(&mut process, tracker.clone()) {
+            return Err(mlua::Error::external(format!("attach_kernel_pool_model: {e:?}")));
+        }
     }
 
     // Entry override: start execution at an arbitrary address instead of
@@ -204,6 +238,34 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     if opts.get::<bool>("zero_low_pages").unwrap_or(false) {
         let _ = process.state.memory.load_concrete(0, &vec![0u8; 0x1_0000]);
     }
+
+    // Opt-in under-constrained memory (`uc_memory = true`, default OFF —
+    // exact current behavior): unmapped reads return zero bytes and unmapped
+    // writes allocate the page zero-backed on demand, so reads/writes
+    // through under-constrained pointers (uninitialized caller frames,
+    // garbage RBP chains) stop killing the state. Every relaxed hit is
+    // debt-recorded (capped + deduplicated, shared across all forks) and
+    // surfaced in the result as `unmapped_total` / `unmapped_sites`; both
+    // the concrete interpreter and the symbolic byte store honor the policy
+    // through the memory layer they share. Mirrors `zero_low_pages` /
+    // `unsupported = "fallthrough"`: relaxation is a deliberate, reported
+    // fidelity debt, never silent.
+    //
+    // `uc_write_ro = true` (default OFF, only meaningful together with
+    // `uc_memory`) additionally relaxes writes into mapped read-only DATA
+    // pages whose current bytes are concrete: the previous bytes land in the
+    // ledger's revert log, the hit is surfaced with `op = "write_ro"` in
+    // `unmapped_sites` and counted in the parallel `ro_write_total`, and
+    // executable pages are never relaxed.
+    let uc_memory_armed = opts.get::<bool>("uc_memory").unwrap_or(false);
+    let uc_write_ro = opts.get::<bool>("uc_write_ro").unwrap_or(false);
+    if uc_memory_armed {
+        process.state.memory = process.state.memory.with_uc_memory().with_uc_write_ro(uc_write_ro);
+    }
+    // Every clone/fork of the armed memory shares one debt ledger, so this
+    // probe — cloned before the process moves into the session — reports the
+    // whole run's debt even if every state dies.
+    let uc_memory_probe = uc_memory_armed.then(|| process.state.memory.clone());
 
     // The Z3 backend needs a shared arena reader — keep the arena in Arc.
     let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
@@ -321,12 +383,15 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>)
             .map_err(|e| mlua::Error::external(format!("z3: {e:?}")))?,
     );
+    // Wall budget per run: `timeout_secs` (default 120) bounds the whole
+    // exploration; the report's `timed_out` flag says when it fired.
+    let timeout_secs = opts.get::<u64>("timeout_secs").unwrap_or(120);
     let report = session
         .run_with_policy(
             steps,
             max_states,
             backend.as_mut().map(|b| b as &mut dyn angryier_solver::SolverBackend),
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(timeout_secs),
             true,
             &policy,
         )
@@ -343,6 +408,11 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     }
     out.set("live_states", report.live_states)?;
     out.set("found", report.found.len())?;
+    out.set("timed_out", report.timed_out)?;
+    // Solver-assisted address-concretization attempts (each attempt solves
+    // one unresolved address, pins the model's value, and re-runs the
+    // block) — visible budget diagnostics for under-constrained runs.
+    out.set("concretization_retries", report.concretization_retries)?;
     // Executed-path trace: last PCs of the most relevant dead state (the
     // failed path), else the first live state. Diagnosis aid for model
     // iteration — every block address the state actually executed.
@@ -377,6 +447,67 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
         kernel.set("double_frees", dfs)?;
         out.set("kernel", kernel)?;
+    }
+    // Unsupported-form fallback debt: only present when the run armed the
+    // fallback — `unsupported_total` counts fall-through steps and
+    // `unsupported_sites` lists the first-seen (pc, form) pairs.
+    if let Some(fallback) = &unsupported_fallback {
+        let (total, sites) = fallback.snapshot();
+        out.set("unsupported_total", total)?;
+        let site_tbl = lua.create_table()?;
+        for (index, (pc, form)) in sites.iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("pc", *pc)?;
+            entry.set("form", *form)?;
+            site_tbl.set(index + 1, entry)?;
+        }
+        out.set("unsupported_sites", site_tbl)?;
+    }
+    // Under-constrained memory debt: only present when the run armed
+    // `uc_memory` — `unmapped_total` counts relaxed accesses (reads that
+    // returned fabricated zeros, writes that fabricated a page, and — under
+    // `uc_write_ro` — writes relaxed into read-only data pages, surfaced
+    // with `op = "write_ro"`), `unmapped_sites` lists the first-seen
+    // (op, address, page) sites, `ro_write_total` counts the read-only
+    // relaxations in parallel, and `ro_write_reverts` lists the previous
+    // bytes the relaxed writes overwrote (first-come, capped — the ledger
+    // owns the cap).
+    if let Some(probe) = &uc_memory_probe {
+        out.set("unmapped_total", probe.uc_memory_total())?;
+        let site_tbl = lua.create_table()?;
+        for (index, site) in probe.uc_memory_sites().iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("op", site.op.as_str())?;
+            entry.set("address", site.address)?;
+            entry.set("page", site.page)?;
+            site_tbl.set(index + 1, entry)?;
+        }
+        out.set("unmapped_sites", site_tbl)?;
+        out.set("ro_write_total", probe.uc_memory_ro_write_total())?;
+        let revert_tbl = lua.create_table()?;
+        for (index, revert) in probe.uc_memory_ro_reverts().iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("address", revert.address)?;
+            entry.set("previous", revert.previous)?;
+            revert_tbl.set(index + 1, entry)?;
+        }
+        out.set("ro_write_reverts", revert_tbl)?;
+    }
+    // Vector debt: per-step evaluators are locals of the symbolic stepper,
+    // so the session accumulates their ledger — `vector_debt_total` counts
+    // vector primitives replaced with under-constrained symbols and
+    // `vector_debt_sites` lists the first-seen (op, width, lane) sites.
+    out.set("vector_debt_total", session.vector_debt_total())?;
+    {
+        let vector_tbl = lua.create_table()?;
+        for (index, site) in session.vector_debt_sites().iter().enumerate() {
+            let entry = lua.create_table()?;
+            entry.set("op", format!("{:?}", site.op))?;
+            entry.set("width", site.width_bits)?;
+            entry.set("lane", site.lane_bits)?;
+            vector_tbl.set(index + 1, entry)?;
+        }
+        out.set("vector_debt_sites", vector_tbl)?;
     }
     // `solve = true`: solve each found state; `inputs` is an array of
     // per-state tables mapping symbol index → byte-string.

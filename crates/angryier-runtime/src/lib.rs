@@ -516,6 +516,20 @@ pub struct Runtime<D: Decoder> {
     pub context: SemanticContext,
 }
 
+/// Pool-allocation routines matched by exact export/import name — shared by
+/// the import-binding path and the internal-call binding path (kernel images
+/// call their own exports directly).
+pub const KERNEL_POOL_ALLOC_NAMES: [&str; 5] = [
+    "ExAllocatePool",
+    "ExAllocatePoolWithTag",
+    "ExAllocatePoolWithQuota",
+    "ExAllocatePoolWithTagPriority",
+    "ExAllocatePool2",
+];
+/// Pool-free routines matched by exact export/import name.
+pub const KERNEL_POOL_FREE_NAMES: [&str; 3] =
+    ["ExFreePool", "ExFreePoolWithTag", "ExFreePoolWithQuota"];
+
 impl<D: Decoder> Runtime<D> {
     /// Attaches the Windows kernel pool model to a PE-driver process:
     /// binds `ExAllocatePool*` imports to a fresh-pointer allocator and
@@ -532,14 +546,8 @@ impl<D: Decoder> Runtime<D> {
         process: &mut Process,
         tracker: std::sync::Arc<angryier_models::KernelPoolTracker>,
     ) -> Result<(), RuntimeError> {
-        const ALLOC_NAMES: [&str; 5] = [
-            "ExAllocatePool",
-            "ExAllocatePoolWithTag",
-            "ExAllocatePoolWithQuota",
-            "ExAllocatePoolWithTagPriority",
-            "ExAllocatePool2",
-        ];
-        const FREE_NAMES: [&str; 3] = ["ExFreePool", "ExFreePoolWithTag", "ExFreePoolWithQuota"];
+        const ALLOC_NAMES: [&str; 5] = KERNEL_POOL_ALLOC_NAMES;
+        const FREE_NAMES: [&str; 3] = KERNEL_POOL_FREE_NAMES;
         let alloc: Arc<dyn SimProcedure> = Arc::new(angryier_models::KernelAllocProcedure {
             tracker: tracker.clone(),
         });
@@ -646,6 +654,19 @@ impl<D: Decoder> Runtime<D> {
                     .simproc_instances
                     .insert(address, Arc::new(KernelReturnStub { value: 0 }));
             }
+        }
+        // INTERNAL pool routines: a kernel image calls its own ExAllocatePool*/
+        // ExFreePool* exports via direct `call`s, so bind the tracker's
+        // internal addresses to the same pool simprocs — per-address
+        // `simproc_instances` are checked before instruction fetch, and the
+        // recording pre-hook keys on the model name, so events attribute the
+        // true kernel-side caller (the return address pushed by the call).
+        for (address, routine) in tracker.internal_bindings() {
+            let model: Arc<dyn SimProcedure> = match routine {
+                angryier_models::PoolRoutine::Alloc => alloc.clone(),
+                angryier_models::PoolRoutine::Free => free.clone(),
+            };
+            process.simproc_instances.insert(address, model);
         }
         process.kernel_pool = Some(tracker);
         Ok(())
@@ -5123,7 +5144,34 @@ pub struct SymbolicSession<'a, D: Decoder> {
     /// Evidence counters: template applications and builds.
     function_summary_hits: u64,
     function_summary_builds: u64,
+    /// Aggregate vector-primitive debt across every per-step
+    /// [`SymbolicEvaluator`]. Per-step evaluators are locals of
+    /// `step_state_inner` (their debt dies with them), so each step drains
+    /// their ledger into the session — the run result surfaces it as
+    /// `vector_debt_total` / `vector_debt_sites`, exactly like the
+    /// unsupported-form fallthrough debt.
+    vector_debt_total: u64,
+    /// First-seen vector-debt sites (capped at
+    /// [`angryier_execution::SYMBOLIC_DEBT_SITE_CAP`], deduplicated).
+    vector_debt_sites: Vec<angryier_execution::SymbolicDebtSite>,
+    /// Solver-assisted address-concretization attempts per step
+    /// (`step_state_inner`'s retry loop). Each retry solves one unresolved
+    /// address, pins the model's value, and re-runs the block; with
+    /// block-local fresh symbols a pin converges the re-evaluation, so the
+    /// budget bounds DISTINCT unresolved addresses per step, not futile
+    /// attempts at the same one.
+    unresolved_retry_budget: u32,
+    /// Total concretization attempts across the run (diagnostic, surfaced
+    /// with the report).
+    concretization_retries_total: u64,
 }
+
+/// Default solver-assisted address-concretization attempts per step. The
+/// historical value was 4; the budget now bounds distinct unresolved
+/// addresses per block (each converged retry pins one), and deep
+/// under-constrained kernel paths legitimately pin more than 4 in a single
+/// block.
+pub const UNRESOLVED_ADDRESS_RETRY_BUDGET: u32 = 16;
 
 impl<'a, D: Decoder> SymbolicSession<'a, D> {
     /// Opens a session from `process` — its memory seeds every state's
@@ -5171,7 +5219,54 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             summary_cost_model: std::sync::Arc::new(function_summaries::DepthWidthCostModel::default()),
             function_summary_hits: 0,
             function_summary_builds: 0,
+            vector_debt_total: 0,
+            vector_debt_sites: Vec::new(),
+            unresolved_retry_budget: UNRESOLVED_ADDRESS_RETRY_BUDGET,
+            concretization_retries_total: 0,
         }
+    }
+
+    /// Overrides the per-step solver-assisted concretization retry budget
+    /// (default [`UNRESOLVED_ADDRESS_RETRY_BUDGET`]).
+    pub fn set_unresolved_retry_budget(&mut self, budget: u32) {
+        self.unresolved_retry_budget = budget;
+    }
+
+    /// The per-step solver-assisted concretization retry budget.
+    pub fn unresolved_retry_budget(&self) -> u32 {
+        self.unresolved_retry_budget
+    }
+
+    /// Total solver-assisted concretization attempts this run has made
+    /// (uncapped diagnostic counter).
+    pub fn concretization_retries_total(&self) -> u64 {
+        self.concretization_retries_total
+    }
+
+    /// Drains one per-step evaluator's vector-debt ledger into the session
+    /// aggregate: `total` is added uncapped, sites are deduplicated and
+    /// capped at [`angryier_execution::SYMBOLIC_DEBT_SITE_CAP`] — the same
+    /// first-seen rule the evaluators themselves apply.
+    fn record_vector_debt(&mut self, total: u64, sites: &[angryier_execution::SymbolicDebtSite]) {
+        self.vector_debt_total = self.vector_debt_total.saturating_add(total);
+        for site in sites {
+            if self.vector_debt_sites.len() < angryier_execution::SYMBOLIC_DEBT_SITE_CAP
+                && !self.vector_debt_sites.contains(site)
+            {
+                self.vector_debt_sites.push(*site);
+            }
+        }
+    }
+
+    /// Total vector-primitive fallbacks across every step of this session
+    /// (uncapped) — the fidelity-ledger signal.
+    pub fn vector_debt_total(&self) -> u64 {
+        self.vector_debt_total
+    }
+
+    /// First-seen vector-debt sites of this session (capped, deduplicated).
+    pub fn vector_debt_sites(&self) -> &[angryier_execution::SymbolicDebtSite] {
+        &self.vector_debt_sites
     }
 
     /// Emits a provenance event into the flight recorder.
@@ -6072,7 +6167,15 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
 
         let (ir_block, _decoded) = self.runtime.lower_at(&mut self.states[index].process, pc, &decoded)?;
 
-        let mut evaluator = SymbolicEvaluator::new(self.arena);
+        // Block-local fresh-symbol ids: a solver-assisted concretization
+        // retry pins a value for the failing address expression and re-runs
+        // THE SAME block. The arena hash-conses expressions, so the pin can
+        // only hit when the re-run rebuilds the very same `ExprId`s — which
+        // requires fresh symbols (vector/float debt, unsupported-register
+        // reads) to restart their counter per evaluation instead of
+        // advancing across retries. The first evaluation of the block is
+        // unaffected (a fresh evaluator starts at 0 either way).
+        let mut evaluator = SymbolicEvaluator::new(self.arena).with_block_local_symbols();
         {
             let state = &self.states[index];
             evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
@@ -6088,14 +6191,17 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         // can't fold concretely, ask the solver for a satisfying value
         // under this state's constraints, pin it, and re-run the block.
         if let Some((backend, timeout)) = solver.as_mut().map(|(b, t)| (&mut **b, *t)) {
-            let mut retries = 0;
+            let mut retries = 0u32;
             while let Err(angryier_execution::SymbolicEvalError::UnresolvedAddress(expr)) = summary {
                 retries += 1;
-                if retries > 4 {
+                if retries > self.unresolved_retry_budget {
                     break;
                 }
                 // expr == a fresh free variable, under the state's path
-                // constraints — the model gives a concrete address.
+                // constraints — the model gives a concrete address. The free
+                // var's node (Symbol with the u64::MAX immediate) is
+                // hash-consed, so EVERY retry reuses the same ExprId and the
+                // solver's incremental scopes stay reusable.
                 let free = self
                     .arena
                     .intern(angryier_expr::ExprNode {
@@ -6105,8 +6211,16 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         immediate: u64::MAX.to_le_bytes().to_vec(),
                     })
                     .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                // The concretized address must land inside a mapped region
-                // — disjoin `base <= free < base+size` over regions.
+                // Predicate: the concretized address equals the model's
+                // choice. A bare Eq — one plain comparison node — stays
+                // translatable by every backend. The region bounds are NOT
+                // folded into this predicate with Bool And/Or combinators:
+                // the flat `ExprOp` set has no Boolean And/Or lowering in
+                // the bitvector-oriented backends (a Bool-sorted And interns
+                // fine but translates to a sort-mismatched bitvector op and
+                // fails the whole query), so each bound rides as its own
+                // conjunctive path constraint instead — the constraints list
+                // is exactly the conjunction the solver asserts.
                 let eq = self
                     .arena
                     .intern(angryier_expr::ExprNode {
@@ -6116,92 +6230,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         immediate: Vec::new(),
                     })
                     .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                let mut region_pred = eq;
-                {
-                    let regions: Vec<(u64, u64)> = self.states[index]
-                        .process
-                        .state
-                        .memory
-                        .regions()
-                        .iter()
-                        .map(|r| (r.base, r.base.saturating_add(r.size)))
-                        .collect();
-                    let mut bounds = Vec::new();
-                    for (base, end) in regions {
-                        let lo = self
-                            .arena
-                            .intern(angryier_expr::ExprNode {
-                                sort: angryier_expr::ExprSort::BitVec(64),
-                                op: angryier_expr::ExprOp::Constant,
-                                operands: Vec::new(),
-                                immediate: base.to_le_bytes().to_vec(),
-                            })
-                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                        let hi = self
-                            .arena
-                            .intern(angryier_expr::ExprNode {
-                                sort: angryier_expr::ExprSort::BitVec(64),
-                                op: angryier_expr::ExprOp::Constant,
-                                operands: Vec::new(),
-                                immediate: end.to_le_bytes().to_vec(),
-                            })
-                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                        let ge = self
-                            .arena
-                            .intern(angryier_expr::ExprNode {
-                                sort: angryier_expr::ExprSort::Bool,
-                                op: angryier_expr::ExprOp::Ule,
-                                operands: vec![lo, free],
-                                immediate: Vec::new(),
-                            })
-                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                        let lt = self
-                            .arena
-                            .intern(angryier_expr::ExprNode {
-                                sort: angryier_expr::ExprSort::Bool,
-                                op: angryier_expr::ExprOp::Ult,
-                                operands: vec![free, hi],
-                                immediate: Vec::new(),
-                            })
-                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                        let band = self
-                            .arena
-                            .intern(angryier_expr::ExprNode {
-                                sort: angryier_expr::ExprSort::Bool,
-                                op: angryier_expr::ExprOp::And,
-                                operands: vec![ge, lt],
-                                immediate: Vec::new(),
-                            })
-                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                        bounds.push(band);
-                    }
-                    if !bounds.is_empty() {
-                        let mut disj = bounds[0];
-                        for b in &bounds[1..] {
-                            disj = self
-                                .arena
-                                .intern(angryier_expr::ExprNode {
-                                    sort: angryier_expr::ExprSort::Bool,
-                                    op: angryier_expr::ExprOp::Or,
-                                    operands: vec![disj, *b],
-                                    immediate: Vec::new(),
-                                })
-                                .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                        }
-                        region_pred = self
-                            .arena
-                            .intern(angryier_expr::ExprNode {
-                                sort: angryier_expr::ExprSort::Bool,
-                                op: angryier_expr::ExprOp::And,
-                                operands: vec![eq, disj],
-                                immediate: Vec::new(),
-                            })
-                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                    }
-                }
-                let eq = region_pred;
                 let state_ref = &self.states[index];
-                let constraints: Vec<CanonicalConstraint> = state_ref
+                let mut constraints: Vec<CanonicalConstraint> = state_ref
                     .constraints
                     .iter()
                     .enumerate()
@@ -6213,6 +6243,102 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         })
                     })
                     .collect();
+                // Region bounds as ONE disjunctive predicate conjuncted onto
+                // `eq`: `expr == free AND (base_1 <= free < end_1 OR ...)`.
+                // The bounds MUST be a disjunction — pushing every region's
+                // bounds as separate conjunctive path constraints forces
+                // `free` inside ALL regions at once, which is Unsat whenever
+                // two mapped regions are disjoint (driver mode maps six), so
+                // the query never yields a model and address concretization
+                // always gives up. Bool-sorted And/Or lower propositionally
+                // in the Z3 FFI (sort-dispatched), keeping every leaf a
+                // plain Ult/Ule comparison.
+                {
+                    let regions: Vec<(u64, u64)> = state_ref
+                        .process
+                        .state
+                        .memory
+                        .regions()
+                        .iter()
+                        .map(|r| (r.base, r.base.saturating_add(r.size)))
+                        .collect();
+                    let mut bounds: Option<ExprId> = None;
+                    for (base, end) in regions.iter() {
+                        let mk = |sort: angryier_expr::ExprSort,
+                                  op: angryier_expr::ExprOp,
+                                  operands: Vec<ExprId>,
+                                  immediate: Vec<u8>| {
+                            self.arena
+                                .intern(angryier_expr::ExprNode {
+                                    sort,
+                                    op,
+                                    operands,
+                                    immediate,
+                                })
+                                .map_err(|e| RuntimeError::Execution(format!("{e:?}")))
+                        };
+                        let lo = mk(
+                            angryier_expr::ExprSort::BitVec(64),
+                            angryier_expr::ExprOp::Constant,
+                            Vec::new(),
+                            base.to_le_bytes().to_vec(),
+                        )?;
+                        let hi = mk(
+                            angryier_expr::ExprSort::BitVec(64),
+                            angryier_expr::ExprOp::Constant,
+                            Vec::new(),
+                            end.to_le_bytes().to_vec(),
+                        )?;
+                        let ge = mk(
+                            angryier_expr::ExprSort::Bool,
+                            angryier_expr::ExprOp::Ule,
+                            vec![lo, free],
+                            Vec::new(),
+                        )?;
+                        let lt = mk(
+                            angryier_expr::ExprSort::Bool,
+                            angryier_expr::ExprOp::Ult,
+                            vec![free, hi],
+                            Vec::new(),
+                        )?;
+                        let band = mk(
+                            angryier_expr::ExprSort::Bool,
+                            angryier_expr::ExprOp::And,
+                            vec![ge, lt],
+                            Vec::new(),
+                        )?;
+                        bounds = Some(match bounds {
+                            None => band,
+                            Some(prev) => mk(
+                                angryier_expr::ExprSort::Bool,
+                                angryier_expr::ExprOp::Or,
+                                vec![prev, band],
+                                Vec::new(),
+                            )?,
+                        });
+                    }
+                    if let Some(bounds) = bounds {
+                        let conj = self
+                            .arena
+                            .intern(angryier_expr::ExprNode {
+                                sort: angryier_expr::ExprSort::Bool,
+                                op: angryier_expr::ExprOp::And,
+                                operands: vec![eq, bounds],
+                                immediate: Vec::new(),
+                            })
+                            .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                        // Without a dependency summary the conjunct cannot be
+                        // canonically keyed — drop it rather than send an
+                        // unkeyable constraint (same rule as the path list).
+                        if let Some(s) = self.arena.dependency_summary(conj) {
+                            constraints.push(CanonicalConstraint {
+                                id: ConstraintId(u64::MAX),
+                                key: s.key,
+                                expr: conj,
+                            });
+                        }
+                    }
+                }
                 let profile = state_ref.process.target_profile;
                 let key = self
                     .arena
@@ -6240,6 +6366,17 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         buf[..n].copy_from_slice(&b[..n]);
                         u64::from_le_bytes(buf)
                     });
+                self.concretization_retries_total += 1;
+                if std::env::var_os("ANGRYIER_DEBUG_CONCRETIZE").is_some() {
+                    eprintln!(
+                        "[conc] retry={} expr={:?} model_has_free={} value={:?} outcome={:?}",
+                        retries,
+                        expr,
+                        value.is_some(),
+                        value,
+                        result.outcome
+                    );
+                }
                 let Some(value) = value else { break };
                 self.states[index].expr_concrete.insert(expr, value);
                 evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
@@ -6250,8 +6387,21 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     expr_concrete: self.states[index].expr_concrete.clone(),
                 });
                 summary = evaluator.eval_block_with_memory(&ir_block, &mut self.states[index].memory);
+                if std::env::var_os("ANGRYIER_DEBUG_CONCRETIZE").is_some() {
+                    match &summary {
+                        Err(angryier_execution::SymbolicEvalError::UnresolvedAddress(new_expr)) => {
+                            eprintln!("[conc]   re-eval unresolved again: new_expr={:?}", new_expr);
+                        }
+                        other => eprintln!("[conc]   re-eval -> {:?}", other.is_ok()),
+                    }
+                }
             }
         }
+        // The per-step evaluator dies here — drain its vector-debt ledger
+        // into the session aggregate before it does, whether or not the
+        // block evaluated cleanly (also covers the solver-retry
+        // re-evaluations above, which reuse this evaluator).
+        self.record_vector_debt(evaluator.debt_total(), evaluator.debt_sites());
         let summary = summary.map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
         let post = evaluator.snapshot();
         {
@@ -6611,16 +6761,25 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     /// touched on only one side keep that side's binding (documented
     /// EXPLORE-level approximation for absent parents).
     pub fn merge_at(&mut self) -> Result<u64, RuntimeError> {
-        let mut by_pc: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-        for (index, state) in self.states.iter().enumerate() {
-            if let Ok(pc) = state.process.pc() {
-                by_pc.entry(pc).or_default().push(index);
-            }
-        }
         let mut merged = 0u64;
-        // Merge groups largest-first so indices stay valid when draining.
-        for (_pc, mut indices) in by_pc {
-            while indices.len() > 1 {
+        // One pair per regroup: removing two states and reinserting the
+        // merged one shifts every later index, so a pre-collected index list
+        // for a *different* pc goes stale mid-loop — the largest stale index
+        // lands exactly at `len` and makes `remove` panic. Regrouping after
+        // every merge keeps every index live-collected; merge rounds are
+        // rare (veritesting-lite), so the O(states) regroup is noise.
+        loop {
+            let mut by_pc: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+            for (index, state) in self.states.iter().enumerate() {
+                if let Ok(pc) = state.process.pc() {
+                    by_pc.entry(pc).or_default().push(index);
+                }
+            }
+            let Some((_pc, mut indices)) = by_pc.into_iter().find(|(_, group)| group.len() > 1)
+            else {
+                break;
+            };
+            {
                 let b = indices.pop().unwrap_or(0);
                 let a = indices.pop().unwrap_or(0);
                 // Keep `a` as the lower index; drain `b` first (larger index
@@ -6660,13 +6819,6 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 };
                 self.states.insert(a, merged_state);
                 merged += 1;
-                // Re-collect indices at this pc — `remove` shifted them.
-                indices = self
-                    .states
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, s)| s.process.pc().ok().filter(|p| *p == _pc).map(|_| i))
-                    .collect();
             }
         }
         Ok(merged)
@@ -6714,7 +6866,16 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         let mut report = SymbolicRunReport::default();
         let mut steps = 0u64;
         let mut pc_visits: BTreeMap<u64, u64> = BTreeMap::new();
+        // Wall deadline: `timeout` bounds the whole exploration, not just the
+        // individual solver queries. A per-query budget cannot see a spin in
+        // execution/merging between queries, so the loop checks the deadline
+        // every round and reports the truncation via `timed_out`.
+        let deadline = std::time::Instant::now() + timeout;
         while steps < max_steps && !self.states.is_empty() {
+            if std::time::Instant::now() >= deadline {
+                report.timed_out = true;
+                break;
+            }
             // Apply find/avoid before stepping.
             let mut i = 0;
             while i < self.states.len() {
@@ -6915,6 +7076,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         report.steps = steps;
         report.live_states = self.states.len() as u64;
         report.dead_states = self.dead.len() as u64;
+        report.concretization_retries = self.concretization_retries_total;
         Ok(report)
     }
 }
@@ -6957,6 +7119,12 @@ pub struct SymbolicRunReport {
     pub dead_states: u64,
     /// Peak live-state count.
     pub peak_states: u64,
+    /// The wall-clock deadline elapsed before the step budget ran out —
+    /// the report covers a truncated exploration, not a completed one.
+    pub timed_out: bool,
+    /// Solver-assisted address-concretization attempts made during the run
+    /// (each attempt solves one unresolved address and re-runs the block).
+    pub concretization_retries: u64,
     /// States that reached a `find` pc.
     pub found: Vec<SymbolicState>,
 }
@@ -7218,7 +7386,16 @@ where
         // single-threaded exploration path).
         let function_summaries = self.function_summaries.clone();
         let summary_cost_model = std::sync::Arc::clone(&self.summary_cost_model);
-        type ShardResult = Result<(SymbolicRunReport, Vec<SymbolicState>, Vec<SymbolicState>), RuntimeError>;
+        type ShardResult = Result<
+            (
+                SymbolicRunReport,
+                Vec<SymbolicState>,
+                Vec<SymbolicState>,
+                u64,
+                Vec<angryier_execution::SymbolicDebtSite>,
+            ),
+            RuntimeError,
+        >;
         let results: Vec<ShardResult> = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(workers);
             for shard in shards {
@@ -7246,9 +7423,13 @@ where
                         summary_cost_model,
                         function_summary_hits: 0,
                         function_summary_builds: 0,
+                        vector_debt_total: 0,
+                        vector_debt_sites: Vec::new(),
+                        unresolved_retry_budget: UNRESOLVED_ADDRESS_RETRY_BUDGET,
+                        concretization_retries_total: 0,
                     };
                     let report = sub.run(max_steps, max_states, None, timeout, false)?;
-                    Ok((report, sub.states, sub.dead))
+                    Ok((report, sub.states, sub.dead, sub.vector_debt_total, sub.vector_debt_sites))
                 }));
             }
             handles
@@ -7262,7 +7443,10 @@ where
 
         let mut reports = Vec::new();
         for result in results {
-            let (report, states, dead) = result?;
+            let (report, states, dead, debt_total, debt_sites) = result?;
+            // Shard vector debt folds into the parent session's ledger so a
+            // parallel run reports one aggregate, like the serial path.
+            self.record_vector_debt(debt_total, &debt_sites);
             self.states.extend(states);
             self.dead.extend(dead);
             reports.push(report);

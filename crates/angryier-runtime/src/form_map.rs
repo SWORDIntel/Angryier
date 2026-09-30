@@ -1813,6 +1813,7 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_PREFETCHT0 => Some(forms::PREFETCHT0_MEM8),
         iclass::XED_ICLASS_PREFETCHT1 => Some(forms::PREFETCHT1_MEM8),
         iclass::XED_ICLASS_PREFETCHT2 => Some(forms::PREFETCHT2_MEM8),
+        iclass::XED_ICLASS_PREFETCHW => Some(forms::PREFETCHW_MEM8),
         iclass::XED_ICLASS_MOVUPS => match shapes {
             [Shape::Mem128, Shape::Xmm] => Some(forms::MOVUPS_MEM_XMM),
             [Shape::Xmm, Shape::Mem128] => Some(forms::MOVUPS_XMM_MEM),
