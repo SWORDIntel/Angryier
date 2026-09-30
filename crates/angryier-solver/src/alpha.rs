@@ -33,11 +33,10 @@
 use crate::SolverQuery;
 use angryier_expr::{ExprOp, ExprReader, ExprSort};
 use angryier_types::{ConstraintId, ExprId};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 /// Alpha-normalized query fingerprint: equal keys mean the queries are
-/// structurally identical modulo consistent symbol renaming (up to SHA-256
+/// structurally identical modulo consistent symbol renaming (up to BLAKE3
 /// collision, which the confirmation tier is designed to catch).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AlphaKey(pub [u8; 32]);
@@ -115,13 +114,13 @@ pub fn alpha_key(reader: &dyn ExprReader, query: &SolverQuery) -> Option<AlphaKe
     }
     emit_alpha(reader, predicate, &mut symbols, &mut encoded)?;
 
-    let mut hasher = Sha256::new();
+    let mut hasher = blake3::Hasher::new();
     hasher.update(b"ANGRYIER\0ALPHA-QUERY\0");
-    hasher.update(query.canonicalization_version().0.to_le_bytes());
-    hasher.update(query.target_profile().0.to_le_bytes());
-    hasher.update((constraints.len() as u64).to_le_bytes());
+    hasher.update(&query.canonicalization_version().0.to_le_bytes());
+    hasher.update(&query.target_profile().0.to_le_bytes());
+    hasher.update(&(constraints.len() as u64).to_le_bytes());
     hasher.update(&encoded);
-    Some(AlphaKey(hasher.finalize().into()))
+    Some(AlphaKey(*hasher.finalize().as_bytes()))
 }
 
 /// Commutative operations whose operands are canonically ordered by digest.
@@ -216,23 +215,23 @@ fn shape_digest(reader: &dyn ExprReader, id: ExprId, memo: &mut HashMap<ExprId, 
     if is_commutative(node.op) {
         children.sort_unstable();
     }
-    let mut hasher = Sha256::new();
-    hasher.update([op_code(node.op)]);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[op_code(node.op)]);
     let mut sort_bytes = Vec::new();
     encode_sort(&node.sort, &mut sort_bytes);
-    hasher.update(sort_bytes);
+    hasher.update(&sort_bytes);
     if node.op != ExprOp::Symbol {
         // Symbol immediates are the names being abstracted away: all
         // same-sort symbols must digest identically, or commutative operand
         // ordering would depend on the very names normalization removes.
-        hasher.update((node.immediate.len() as u32).to_le_bytes());
+        hasher.update(&(node.immediate.len() as u32).to_le_bytes());
         hasher.update(&node.immediate);
     }
-    hasher.update((children.len() as u32).to_le_bytes());
+    hasher.update(&(children.len() as u32).to_le_bytes());
     for digest in children {
-        hasher.update(digest);
+        hasher.update(&digest);
     }
-    let digest: [u8; 32] = hasher.finalize().into();
+    let digest: [u8; 32] = *hasher.finalize().as_bytes();
     memo.insert(id, digest);
     Some(digest)
 }

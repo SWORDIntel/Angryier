@@ -6,9 +6,21 @@
 //! provides bounded priority-aware queuing with worker-local batching.
 //! The adaptive governor promotes or demotes events between tiers based on
 //! trace interest signals.
+//!
+//! [`RepetitionDetector`] and [`StructuralRepetitionSummarizer`] detect contiguous
+//! loop cycles and compact repetitive events, while [`Tier2Trigger`] predicates monitor
+//! execution signals (state fork bursts, solver budget escalations, novelty spikes)
+//! to capture high-fidelity diagnostic snapshots.
+
+pub mod repetition;
+pub mod triggers;
+
+pub use repetition::*;
+pub use triggers::*;
 
 use angryier_types::{ContentId, ProvenanceNodeId, ProvenanceSeq, ProvenanceTier, StateId};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -34,6 +46,8 @@ pub enum ProvenanceEventKind {
     StateMerge,
     StateTerminate,
     Syscall,
+    /// Compacted repetition summary representing repeated execution cycles.
+    RepetitionSummary,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,6 +141,13 @@ pub struct ProvenanceEvent {
     pub kind: ProvenanceEventKind,
     pub semantic_content: Option<ContentId>,
     pub parents: Vec<ProvenanceNodeId>,
+}
+
+impl ProvenanceEvent {
+    /// Extracts the structural equivalence key for this event.
+    pub fn structural_key(&self) -> repetition::StructuralEventKey {
+        repetition::StructuralEventKey::from_event(self)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +332,8 @@ pub struct AdaptiveTraceGovernor {
     tier1_threshold: f32,
     /// Priority threshold above which events are promoted to Tier-2.
     tier2_threshold: f32,
+    /// Number of subsequent events kept promoted to Tier-2 via trigger capture window.
+    capture_window: AtomicUsize,
 }
 
 impl AdaptiveTraceGovernor {
@@ -318,11 +341,29 @@ impl AdaptiveTraceGovernor {
         Self {
             tier1_threshold,
             tier2_threshold,
+            capture_window: AtomicUsize::new(0),
         }
     }
 
     pub fn default_governor() -> Self {
         Self::new(0.7, 0.3)
+    }
+
+    /// Notifies the governor that a Tier-2 trigger fired, opening a capture window.
+    pub fn notify_trigger(&self, decision: &TriggerDecision) {
+        if let TriggerDecision::Fire { capture_window, .. } = decision {
+            self.capture_window.fetch_max(*capture_window, Ordering::SeqCst);
+        }
+    }
+
+    /// Explicitly arms a Tier-2 capture window of `window_size` events.
+    pub fn arm_capture_window(&self, window_size: usize) {
+        self.capture_window.fetch_max(window_size, Ordering::SeqCst);
+    }
+
+    /// Number of events remaining in the active Tier-2 capture window.
+    pub fn remaining_capture_window(&self) -> usize {
+        self.capture_window.load(Ordering::SeqCst)
     }
 }
 
@@ -334,8 +375,21 @@ impl TraceGovernor for AdaptiveTraceGovernor {
             return ProvenanceTier::Tier1;
         }
         if priority >= self.tier1_threshold {
-            ProvenanceTier::Tier1
-        } else if priority >= self.tier2_threshold {
+            return ProvenanceTier::Tier1;
+        }
+
+        // Active trigger capture window forces promotion to Tier-2.
+        let active = self.capture_window.load(Ordering::SeqCst);
+        if active > 0 {
+            let _ = self.capture_window.fetch_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |w| Some(w.saturating_sub(1)),
+            );
+            return ProvenanceTier::Tier2;
+        }
+
+        if priority >= self.tier2_threshold {
             ProvenanceTier::Tier2
         } else {
             ProvenanceTier::Tier0
@@ -417,6 +471,162 @@ impl FlightRecorder {
     /// How many events were evicted under pressure, per droppable tier.
     pub fn dropped(&self) -> (u64, u64) {
         (self.dropped_tier0, self.dropped_tier2)
+    }
+
+    /// Takes an immutable snapshot of all events currently held in the ring buffer.
+    pub fn snapshot(&self) -> Vec<ProvenanceEvent> {
+        self.events.iter().cloned().collect()
+    }
+
+    /// Captures a Tier-2 diagnostic snapshot with reason and tier statistics.
+    pub fn capture_tier2_snapshot(&self, reason: impl Into<String>) -> Tier2Snapshot {
+        let events: Vec<_> = self.events.iter().cloned().collect();
+        let mut tier0_count = 0;
+        let mut tier1_count = 0;
+        let mut tier2_count = 0;
+        let mut last_seq = ProvenanceSeq(0);
+
+        for e in &events {
+            match e.tier {
+                ProvenanceTier::Tier0 => tier0_count += 1,
+                ProvenanceTier::Tier1 => tier1_count += 1,
+                ProvenanceTier::Tier2 => tier2_count += 1,
+            }
+            if e.sequence.0 > last_seq.0 {
+                last_seq = e.sequence;
+            }
+        }
+
+        Tier2Snapshot {
+            reason: reason.into(),
+            captured_at_sequence: last_seq,
+            total_events: events.len(),
+            tier0_count,
+            tier1_count,
+            tier2_count,
+            events,
+        }
+    }
+
+    /// Evaluates a trigger and, if fired, immediately captures a Tier-2 snapshot.
+    pub fn check_and_capture(
+        &self,
+        trigger: &mut dyn Tier2Trigger,
+        context: &TriggerContext,
+    ) -> Option<Tier2Snapshot> {
+        match trigger.evaluate(context) {
+            TriggerDecision::Fire { reason, .. } => Some(self.capture_tier2_snapshot(reason)),
+            TriggerDecision::Ignore => None,
+        }
+    }
+
+    /// Records an event through a [`StructuralRepetitionSummarizer`], compacting repeating cycles
+    /// and suppressing redundant Tier-2 events.
+    pub fn record_summarized(
+        &mut self,
+        event: ProvenanceEvent,
+        summarizer: &mut StructuralRepetitionSummarizer,
+    ) -> Result<Vec<RepetitionSummary>, ProvenanceError> {
+        let outputs = summarizer.feed(event);
+        let mut summaries = Vec::new();
+        for output in outputs {
+            match output {
+                SummarizerOutput::Event(e) => {
+                    self.record(e)?;
+                }
+                SummarizerOutput::Suppressed { .. } => {}
+                SummarizerOutput::Summary(summary) => {
+                    summaries.push(summary);
+                }
+            }
+        }
+        Ok(summaries)
+    }
+
+    /// Flushes any pending repeating cycle from the summarizer into the flight recorder.
+    pub fn flush_summarized(
+        &mut self,
+        summarizer: &mut StructuralRepetitionSummarizer,
+    ) -> Result<Vec<RepetitionSummary>, ProvenanceError> {
+        let outputs = summarizer.flush();
+        let mut summaries = Vec::new();
+        for output in outputs {
+            match output {
+                SummarizerOutput::Event(e) => {
+                    self.record(e)?;
+                }
+                SummarizerOutput::Suppressed { .. } => {}
+                SummarizerOutput::Summary(summary) => {
+                    summaries.push(summary);
+                }
+            }
+        }
+        Ok(summaries)
+    }
+}
+
+/// High-level flight recorder combining circular buffer recording, Tier-2 trigger
+/// predicates, and structural repetition summarization.
+pub struct TriggeredFlightRecorder {
+    pub recorder: FlightRecorder,
+    pub summarizer: StructuralRepetitionSummarizer,
+    pub triggers: Vec<Box<dyn Tier2Trigger>>,
+    pub context: TriggerContext,
+    pub captured_snapshots: Vec<Tier2Snapshot>,
+    active_capture_window: usize,
+}
+
+impl TriggeredFlightRecorder {
+    pub fn new(
+        capacity: usize,
+        config: RepetitionConfig,
+        triggers: Vec<Box<dyn Tier2Trigger>>,
+    ) -> Self {
+        Self {
+            recorder: FlightRecorder::new(capacity),
+            summarizer: StructuralRepetitionSummarizer::new(config),
+            triggers,
+            context: TriggerContext::new(),
+            captured_snapshots: Vec::new(),
+            active_capture_window: 0,
+        }
+    }
+
+    pub fn with_defaults(capacity: usize) -> Self {
+        Self::new(capacity, RepetitionConfig::default(), Vec::new())
+    }
+
+    /// Records an event, evaluating triggers and compacting repeating cycles.
+    pub fn record(&mut self, mut event: ProvenanceEvent) -> Result<Vec<RepetitionSummary>, ProvenanceError> {
+        self.context.observe_event(&event);
+
+        // Evaluate all triggers against the updated context.
+        for trigger in &mut self.triggers {
+            if let TriggerDecision::Fire { reason, capture_window } = trigger.evaluate(&self.context) {
+                let snapshot = self.recorder.capture_tier2_snapshot(reason);
+                self.captured_snapshots.push(snapshot);
+                self.active_capture_window = self.active_capture_window.max(capture_window);
+            }
+        }
+
+        // If in an active capture window, promote Tier-0 event to Tier-2.
+        if self.active_capture_window > 0 {
+            if event.tier == ProvenanceTier::Tier0 {
+                event.tier = ProvenanceTier::Tier2;
+            }
+            self.active_capture_window = self.active_capture_window.saturating_sub(1);
+        }
+
+        self.recorder.record_summarized(event, &mut self.summarizer)
+    }
+
+    /// Flushes any pending repetition cycles.
+    pub fn flush(&mut self) -> Result<Vec<RepetitionSummary>, ProvenanceError> {
+        self.recorder.flush_summarized(&mut self.summarizer)
+    }
+
+    pub fn snapshots(&self) -> &[Tier2Snapshot] {
+        &self.captured_snapshots
     }
 }
 
@@ -693,5 +903,395 @@ mod flight_recorder_tests {
         );
         let result = rec.record(event(ProvenanceTier::Tier1, ProvenanceEventKind::StateFork, 1));
         assert_eq!(result, Err(ProvenanceError::Full));
+    }
+}
+
+#[cfg(test)]
+mod repetition_tests {
+    use super::*;
+
+    fn branch_event(id: u64, seq: u64, target: u8, tier: ProvenanceTier) -> ProvenanceEvent {
+        ProvenanceEvent {
+            id: ProvenanceNodeId(id),
+            sequence: ProvenanceSeq(seq),
+            state: StateId(1),
+            tier,
+            kind: ProvenanceEventKind::Branch,
+            semantic_content: Some(ContentId([target; 32])),
+            parents: Vec::new(),
+        }
+    }
+
+    fn mem_event(id: u64, seq: u64, addr: u8, tier: ProvenanceTier) -> ProvenanceEvent {
+        ProvenanceEvent {
+            id: ProvenanceNodeId(id),
+            sequence: ProvenanceSeq(seq),
+            state: StateId(1),
+            tier,
+            kind: ProvenanceEventKind::MemoryEffect,
+            semantic_content: Some(ContentId([addr; 32])),
+            parents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn detects_single_event_tight_loop_and_suppresses_tier2() {
+        let config = RepetitionConfig {
+            max_period: 4,
+            min_repetitions: 2,
+            suppression_threshold: 2,
+            suppress_tier2: true,
+            suppress_tier0: true,
+        };
+        let mut summarizer = StructuralRepetitionSummarizer::new(config);
+
+        // Feed 5 identical Tier-2 branch events
+        let mut outputs = Vec::new();
+        for i in 1..=5 {
+            outputs.extend(summarizer.feed(branch_event(i, i, 0xAA, ProvenanceTier::Tier2)));
+        }
+
+        // Iteration 1 & 2: pass-through event.
+        // Iterations 3, 4, 5: suppressed redundant Tier-2 events.
+        let mut event_count = 0;
+        let mut suppressed_count = 0;
+        for out in &outputs {
+            match out {
+                SummarizerOutput::Event(_) => event_count += 1,
+                SummarizerOutput::Suppressed { .. } => suppressed_count += 1,
+                SummarizerOutput::Summary(_) => {}
+            }
+        }
+        assert_eq!(event_count, 2, "First two events passed through");
+        assert_eq!(suppressed_count, 3, "Subsequent three events suppressed");
+
+        // Breaking the loop emits the summary and the breaking event.
+        let breaking = branch_event(6, 6, 0xBB, ProvenanceTier::Tier2);
+        let break_outputs = summarizer.feed(breaking);
+        assert_eq!(break_outputs.len(), 2);
+
+        assert!(matches!(&break_outputs[0], SummarizerOutput::Summary(_)));
+        if let SummarizerOutput::Summary(summary) = &break_outputs[0] {
+            assert_eq!(summary.repetition_count, 5);
+            assert_eq!(summary.period, 1);
+            assert_eq!(summary.suppressed_tier2_count, 3);
+            assert_eq!(summary.start_sequence, ProvenanceSeq(1));
+            assert_eq!(summary.end_sequence, ProvenanceSeq(5));
+        }
+    }
+
+    #[test]
+    fn preserves_tier1_events_during_repetition() {
+        let config = RepetitionConfig {
+            max_period: 4,
+            min_repetitions: 2,
+            suppression_threshold: 2,
+            suppress_tier2: true,
+            suppress_tier0: true,
+        };
+        let mut summarizer = StructuralRepetitionSummarizer::new(config);
+
+        // Tier-1 events in a repeating cycle must never be suppressed.
+        let mut outputs = Vec::new();
+        for i in 1..=4 {
+            outputs.extend(summarizer.feed(branch_event(i, i, 0xAA, ProvenanceTier::Tier1)));
+        }
+
+        for out in &outputs {
+            assert!(
+                matches!(out, SummarizerOutput::Event(_)),
+                "Tier-1 structural events must never be suppressed"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_multi_event_period_cycle() {
+        let config = RepetitionConfig {
+            max_period: 4,
+            min_repetitions: 2,
+            suppression_threshold: 2,
+            suppress_tier2: true,
+            suppress_tier0: true,
+        };
+        let mut summarizer = StructuralRepetitionSummarizer::new(config);
+
+        // Cycle of period 2: [Branch 0x11, Memory 0x22] repeating 3 times
+        let mut seq = 1;
+        let mut node = 1;
+        for _ in 0..3 {
+            summarizer.feed(branch_event(node, seq, 0x11, ProvenanceTier::Tier2));
+            node += 1;
+            seq += 1;
+            summarizer.feed(mem_event(node, seq, 0x22, ProvenanceTier::Tier2));
+            node += 1;
+            seq += 1;
+        }
+
+        // Flush active cycle
+        let flushed = summarizer.flush();
+        assert_eq!(flushed.len(), 1);
+        assert!(matches!(&flushed[0], SummarizerOutput::Summary(_)));
+        if let SummarizerOutput::Summary(summary) = &flushed[0] {
+            assert_eq!(summary.period, 2);
+            assert_eq!(summary.repetition_count, 3);
+            assert_eq!(summary.pattern.len(), 2);
+            assert_eq!(summary.suppressed_tier2_count, 2); // 3rd repetition (2 events) suppressed
+        }
+    }
+
+    #[test]
+    fn batch_compaction_replaces_cycles() {
+        let config = RepetitionConfig::default();
+        let summarizer = StructuralRepetitionSummarizer::new(config);
+
+        let mut events = Vec::new();
+        // 1 non-repeating event
+        events.push(branch_event(1, 1, 0x01, ProvenanceTier::Tier1));
+        // 10 repeating branch events
+        for i in 2..=11 {
+            events.push(branch_event(i, i, 0xAA, ProvenanceTier::Tier2));
+        }
+        // 1 non-repeating trailing event
+        events.push(branch_event(12, 12, 0x02, ProvenanceTier::Tier1));
+
+        let compacted = summarizer.compact(&events);
+        assert_eq!(compacted.len(), 3, "1 event + 1 summary + 1 event");
+
+        assert!(matches!(&compacted[1], CompactedProvenance::Summary(_)));
+        if let CompactedProvenance::Summary(s) = &compacted[1] {
+            assert_eq!(s.repetition_count, 10);
+            assert_eq!(s.period, 1);
+            assert_eq!(s.start_sequence, ProvenanceSeq(2));
+            assert_eq!(s.end_sequence, ProvenanceSeq(11));
+        }
+
+        // Compact to synthetic ProvenanceEvents
+        let mut next_id = 1000;
+        let synthetic_events = summarizer.compact_to_events(&events, || {
+            let id = next_id;
+            next_id += 1;
+            ProvenanceNodeId(id)
+        });
+        assert_eq!(synthetic_events.len(), 3);
+        assert_eq!(synthetic_events[1].kind, ProvenanceEventKind::RepetitionSummary);
+        assert_eq!(synthetic_events[1].id, ProvenanceNodeId(1000));
+        assert_eq!(synthetic_events[1].sequence, ProvenanceSeq(11));
+    }
+
+    #[test]
+    fn flight_recorder_summarized_recording() {
+        let mut rec = FlightRecorder::new(10);
+        let mut summarizer = StructuralRepetitionSummarizer::new(RepetitionConfig {
+            max_period: 2,
+            min_repetitions: 2,
+            suppression_threshold: 2,
+            suppress_tier2: true,
+            suppress_tier0: true,
+        });
+
+        // Record 10 identical Tier-2 events.
+        for i in 1..=10 {
+            let _ = rec.record_summarized(branch_event(i, i, 0x99, ProvenanceTier::Tier2), &mut summarizer);
+        }
+
+        // Only the first 2 events should be in recorder; 8 should have been suppressed!
+        assert_eq!(rec.len(), 2);
+
+        // Flushed summary captures full count
+        let summaries = rec.flush_summarized(&mut summarizer).unwrap_or_default();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].repetition_count, 10);
+        assert_eq!(summaries[0].suppressed_tier2_count, 8);
+    }
+}
+
+#[cfg(test)]
+mod trigger_tests {
+    use super::*;
+
+    #[test]
+    fn fork_burst_trigger_fires_and_cooldown_works() {
+        let mut trigger = ForkBurstTrigger::new(3, 10, 5);
+        let mut context = TriggerContext::new();
+
+        // 2 forks: below threshold
+        context.record_fork();
+        context.record_fork();
+        assert_eq!(trigger.evaluate(&context), TriggerDecision::Ignore);
+
+        // 3rd fork: meets threshold
+        context.record_fork();
+        let decision = trigger.evaluate(&context);
+        assert!(decision.is_fired());
+        assert_eq!(decision.capture_window(), 10);
+
+        // Immediate next event during cooldown should ignore
+        context.event_count = 2; // within cooldown (5)
+        context.record_fork();
+        assert_eq!(trigger.evaluate(&context), TriggerDecision::Ignore);
+
+        // After cooldown expires
+        context.event_count = 10;
+        let decision2 = trigger.evaluate(&context);
+        assert!(decision2.is_fired());
+    }
+
+    #[test]
+    fn solver_escalation_trigger_fires_on_cost_and_budget_jump() {
+        let mut trigger = SolverEscalationTrigger::new(0.8, 2.0, 5000, 16, 5);
+        let mut context = TriggerContext::new();
+
+        // Baseline low query
+        context.record_solver_query(0.2, 1000);
+        assert_eq!(trigger.evaluate(&context), TriggerDecision::Ignore);
+
+        // Escalation: 0.2 -> 0.5 (2.5x jump >= 2.0)
+        context.record_solver_query(0.5, 2000);
+        let decision = trigger.evaluate(&context);
+        assert!(decision.is_fired());
+
+        // Cooldown reset
+        trigger.reset();
+
+        // Budget delta jump: 2000 -> 8000 (+6000 >= 5000)
+        context.record_solver_query(0.5, 8000);
+        let decision2 = trigger.evaluate(&context);
+        assert!(decision2.is_fired());
+    }
+
+    #[test]
+    fn novelty_spike_trigger_fires_on_high_novelty_and_delta() {
+        let mut trigger = NoveltySpikeTrigger::new(0.85, 0.40, 8, 3);
+        let mut context = TriggerContext::new();
+
+        // Baseline novelty around 0.1
+        for _ in 0..10 {
+            context.event_count += 1;
+            context.record_novelty(0.1);
+        }
+        assert_eq!(trigger.evaluate(&context), TriggerDecision::Ignore);
+
+        // Spike to 0.7 (delta is 0.7 - ~0.1 = ~0.6 >= 0.40)
+        context.event_count += 1;
+        context.record_novelty(0.7);
+        let decision = trigger.evaluate(&context);
+        assert!(decision.is_fired());
+    }
+
+    #[test]
+    fn composite_trigger_any_and_all() {
+        let t1 = Box::new(ForkBurstTrigger::new(2, 5, 0));
+        let t2 = Box::new(CrashProximityTrigger::new(0.9, 10, 0));
+
+        let mut comp_any = CompositeTrigger::any("AnyTrigger", vec![t1, t2]);
+        let mut context = TriggerContext::new();
+        context.record_fork();
+        context.record_fork(); // t1 satisfies
+        context.crash_proximity = 0.2; // t2 does not satisfy
+
+        assert!(comp_any.evaluate(&context).is_fired());
+
+        let t3 = Box::new(ForkBurstTrigger::new(2, 5, 0));
+        let t4 = Box::new(CrashProximityTrigger::new(0.9, 10, 0));
+        let mut comp_all = CompositeTrigger::all("AllTrigger", vec![t3, t4]);
+        assert_eq!(comp_all.evaluate(&context), TriggerDecision::Ignore);
+
+        context.crash_proximity = 0.95; // now both satisfy
+        assert!(comp_all.evaluate(&context).is_fired());
+    }
+
+    #[test]
+    fn flight_recorder_check_and_capture_snapshot() {
+        let mut rec = FlightRecorder::new(10);
+        assert!(rec.record(ProvenanceEvent {
+            id: ProvenanceNodeId(1),
+            sequence: ProvenanceSeq(1),
+            state: StateId(1),
+            tier: ProvenanceTier::Tier1,
+            kind: ProvenanceEventKind::StateFork,
+            semantic_content: None,
+            parents: Vec::new(),
+        }).is_ok());
+        assert!(rec.record(ProvenanceEvent {
+            id: ProvenanceNodeId(2),
+            sequence: ProvenanceSeq(2),
+            state: StateId(1),
+            tier: ProvenanceTier::Tier2,
+            kind: ProvenanceEventKind::Branch,
+            semantic_content: None,
+            parents: Vec::new(),
+        }).is_ok());
+
+        let mut trigger = ForkBurstTrigger::new(1, 4, 0);
+        let mut context = TriggerContext::new();
+        context.record_fork();
+
+        let snapshot = rec.check_and_capture(&mut trigger, &context);
+        assert!(snapshot.is_some());
+        if let Some(snap) = snapshot {
+        assert_eq!(snap.total_events, 2);
+        assert_eq!(snap.tier1_count, 1);
+        assert_eq!(snap.tier2_count, 1);
+        assert_eq!(snap.captured_at_sequence, ProvenanceSeq(2)); }
+    }
+
+    #[test]
+    fn governor_promotes_tier0_to_tier2_during_capture_window() {
+        let governor = AdaptiveTraceGovernor::default_governor();
+        let low = TraceInterest::low();
+
+        // Baseline: low interest produces Tier-0
+        assert_eq!(governor.choose_tier(low, ProvenanceTier::Tier0), ProvenanceTier::Tier0);
+
+        // Notify trigger with capture window = 2
+        governor.notify_trigger(&TriggerDecision::Fire {
+            reason: "Anomaly detected".into(),
+            capture_window: 2,
+        });
+        assert_eq!(governor.remaining_capture_window(), 2);
+
+        // Next 2 events promoted to Tier-2 despite low interest
+        assert_eq!(governor.choose_tier(low, ProvenanceTier::Tier0), ProvenanceTier::Tier2);
+        assert_eq!(governor.choose_tier(low, ProvenanceTier::Tier0), ProvenanceTier::Tier2);
+
+        // Window expired: returns to Tier-0
+        assert_eq!(governor.choose_tier(low, ProvenanceTier::Tier0), ProvenanceTier::Tier0);
+    }
+
+    #[test]
+    fn triggered_flight_recorder_end_to_end() {
+        let trigger = Box::new(ForkBurstTrigger::new(2, 5, 0));
+        let mut t_rec = TriggeredFlightRecorder::new(
+            20,
+            RepetitionConfig::default(),
+            vec![trigger],
+        );
+
+        // Record 2 StateFork events -> should trigger capture
+        let e1 = ProvenanceEvent {
+            id: ProvenanceNodeId(1),
+            sequence: ProvenanceSeq(1),
+            state: StateId(1),
+            tier: ProvenanceTier::Tier1,
+            kind: ProvenanceEventKind::StateFork,
+            semantic_content: None,
+            parents: Vec::new(),
+        };
+        let e2 = ProvenanceEvent {
+            id: ProvenanceNodeId(2),
+            sequence: ProvenanceSeq(2),
+            state: StateId(1),
+            tier: ProvenanceTier::Tier1,
+            kind: ProvenanceEventKind::StateFork,
+            semantic_content: None,
+            parents: Vec::new(),
+        };
+
+        assert!(t_rec.record(e1).is_ok());
+        assert!(t_rec.record(e2).is_ok());
+
+        assert_eq!(t_rec.snapshots().len(), 1);
+        assert!(t_rec.snapshots()[0].reason.contains("State fork burst detected"));
     }
 }

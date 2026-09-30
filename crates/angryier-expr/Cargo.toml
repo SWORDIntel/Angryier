@@ -8,6 +8,7 @@ description = "Hash-consed expression DAG contracts"
 [dependencies]
 angryier-types = { path = "../angryier-types" }
 sha2 = "0.10"
+blake3 = "1"
 
 [lints]
 workspace = true

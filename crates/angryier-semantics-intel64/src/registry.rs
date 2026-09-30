@@ -1365,6 +1365,8 @@ impl Intel64CorpusRegistry {
         providers.extend(crate::cet::providers());
         // APX forms (2026-09-29).
         providers.extend(crate::apx::providers());
+        // AVX10 EVEX providers.
+        providers.extend(crate::avx10::providers());
 
         // Build form index from known form IDs. Each provider corresponds to
         // exactly one form. The ALL_FORMS array is hardcoded with unique entries
@@ -1455,7 +1457,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1514] = [
+const ALL_FORMS: [u32; 1574] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2986,6 +2988,67 @@ const ALL_FORMS: [u32; 1514] = [
     crate::forms::CFCMOVNL_R64_R64,
     crate::forms::CFCMOVLE_R64_R64,
     crate::forms::CFCMOVNLE_R64_R64,
+    // AVX10 EVEX forms (60 forms: 0x1300..0x133B)
+    crate::avx10::forms::VPADDB_XMM_XMM_XMM,
+    crate::avx10::forms::VPADDB_YMM_YMM_YMM,
+    crate::avx10::forms::VPADDB_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPADDW_XMM_XMM_XMM,
+    crate::avx10::forms::VPADDW_YMM_YMM_YMM,
+    crate::avx10::forms::VPADDW_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPADDD_XMM_XMM_XMM,
+    crate::avx10::forms::VPADDD_YMM_YMM_YMM,
+    crate::avx10::forms::VPADDD_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPADDQ_XMM_XMM_XMM,
+    crate::avx10::forms::VPADDQ_YMM_YMM_YMM,
+    crate::avx10::forms::VPADDQ_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPSUBB_XMM_XMM_XMM,
+    crate::avx10::forms::VPSUBB_YMM_YMM_YMM,
+    crate::avx10::forms::VPSUBB_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPSUBW_XMM_XMM_XMM,
+    crate::avx10::forms::VPSUBW_YMM_YMM_YMM,
+    crate::avx10::forms::VPSUBW_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPSUBD_XMM_XMM_XMM,
+    crate::avx10::forms::VPSUBD_YMM_YMM_YMM,
+    crate::avx10::forms::VPSUBD_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPSUBQ_XMM_XMM_XMM,
+    crate::avx10::forms::VPSUBQ_YMM_YMM_YMM,
+    crate::avx10::forms::VPSUBQ_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPANDD_XMM_XMM_XMM,
+    crate::avx10::forms::VPANDD_YMM_YMM_YMM,
+    crate::avx10::forms::VPANDD_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPANDQ_XMM_XMM_XMM,
+    crate::avx10::forms::VPANDQ_YMM_YMM_YMM,
+    crate::avx10::forms::VPANDQ_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPANDND_XMM_XMM_XMM,
+    crate::avx10::forms::VPANDND_YMM_YMM_YMM,
+    crate::avx10::forms::VPANDND_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPANDNQ_XMM_XMM_XMM,
+    crate::avx10::forms::VPANDNQ_YMM_YMM_YMM,
+    crate::avx10::forms::VPANDNQ_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPORD_XMM_XMM_XMM,
+    crate::avx10::forms::VPORD_YMM_YMM_YMM,
+    crate::avx10::forms::VPORD_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPORQ_XMM_XMM_XMM,
+    crate::avx10::forms::VPORQ_YMM_YMM_YMM,
+    crate::avx10::forms::VPORQ_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPXORD_XMM_XMM_XMM,
+    crate::avx10::forms::VPXORD_YMM_YMM_YMM,
+    crate::avx10::forms::VPXORD_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPXORQ_XMM_XMM_XMM,
+    crate::avx10::forms::VPXORQ_YMM_YMM_YMM,
+    crate::avx10::forms::VPXORQ_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPMINSD_XMM_XMM_XMM,
+    crate::avx10::forms::VPMINSD_YMM_YMM_YMM,
+    crate::avx10::forms::VPMINSD_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPMINUD_XMM_XMM_XMM,
+    crate::avx10::forms::VPMINUD_YMM_YMM_YMM,
+    crate::avx10::forms::VPMINUD_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPMAXSD_XMM_XMM_XMM,
+    crate::avx10::forms::VPMAXSD_YMM_YMM_YMM,
+    crate::avx10::forms::VPMAXSD_ZMM_ZMM_ZMM,
+    crate::avx10::forms::VPMAXUD_XMM_XMM_XMM,
+    crate::avx10::forms::VPMAXUD_YMM_YMM_YMM,
+    crate::avx10::forms::VPMAXUD_ZMM_ZMM_ZMM,
 ];
 
 #[cfg(test)]

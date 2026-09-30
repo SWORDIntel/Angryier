@@ -11,7 +11,9 @@
 use angryier_types::{DependencyKey, EnvironmentModelId, EnvironmentModelVersion, FidelityProfile, SummaryId};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+pub use syscall::SyscallDispatchTable;
 
 // ---------------------------------------------------------------------------
 // Summary precision and model key
@@ -458,6 +460,31 @@ impl SimProcedureRegistry {
         self.register(Box::new(ExitProcedure));
     }
 
+    /// Creates a registry pre-populated with standard library stubs plus POSIX clock, futex, and thread models.
+    pub fn with_standard_library() -> Self {
+        let mut registry = Self::new();
+        registry.register_standard_library();
+        registry
+    }
+
+    /// Registers standard library stubs plus POSIX clock, futex, and thread creation models.
+    pub fn register_standard_library(&mut self) {
+        self.register_stubs();
+        let clock_tracker = Arc::new(DeterministicClockTracker::default());
+        let futex_tracker = Arc::new(FutexTracker::default());
+        let thread_tracker = Arc::new(ThreadTracker::default());
+
+        self.register(Box::new(ClockGettimeProcedure::new(clock_tracker.clone())));
+        self.register(Box::new(DeterministicClockProcedure::with_name(
+            clock_tracker,
+            "deterministic_clock",
+        )));
+        self.register(Box::new(FutexWaitProcedure::new(futex_tracker.clone())));
+        self.register(Box::new(FutexWakeProcedure::new(futex_tracker.clone())));
+        self.register(Box::new(FutexProcedure::new(futex_tracker)));
+        self.register(Box::new(PthreadCreateProcedure::new(thread_tracker)));
+    }
+
     /// Inserts a boxed procedure into the registry.
     pub fn register(&mut self, procedure: Box<dyn SimProcedure>) {
         self.procedures.insert(procedure.name(), procedure);
@@ -657,6 +684,637 @@ impl SimProcedure for ExitProcedure {
 
     fn apply(&self, _state: &SimState) -> SimResult {
         SimResult::Exit
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic clock model (clock_gettime)
+// ---------------------------------------------------------------------------
+
+/// POSIX clock IDs for `clock_gettime`.
+pub mod clock_id {
+    pub const CLOCK_REALTIME: u64 = 0;
+    pub const CLOCK_MONOTONIC: u64 = 1;
+    pub const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
+    pub const CLOCK_THREAD_CPUTIME_ID: u64 = 3;
+    pub const CLOCK_MONOTONIC_RAW: u64 = 4;
+    pub const CLOCK_REALTIME_COARSE: u64 = 5;
+    pub const CLOCK_MONOTONIC_COARSE: u64 = 6;
+    pub const CLOCK_BOOTTIME: u64 = 7;
+}
+
+/// Shared monotonic clock state providing deterministic time progression.
+#[derive(Debug)]
+pub struct DeterministicClockTracker {
+    current_ns: AtomicU64,
+    tick_ns: AtomicU64,
+}
+
+impl DeterministicClockTracker {
+    /// Default initial simulated time (1.0 second in nanoseconds).
+    pub const DEFAULT_INITIAL_NANOS: u64 = 1_000_000_000;
+    /// Default deterministic tick increment per call (1 millisecond in nanoseconds).
+    pub const DEFAULT_TICK_NANOS: u64 = 1_000_000;
+
+    /// Creates a new deterministic clock tracker with custom initial time and tick step.
+    pub fn new(initial_ns: u64, tick_ns: u64) -> Self {
+        Self {
+            current_ns: AtomicU64::new(initial_ns),
+            tick_ns: AtomicU64::new(tick_ns),
+        }
+    }
+
+    /// Advances simulated time monotonically by the configured tick increment and returns the new timestamp.
+    pub fn advance(&self) -> u64 {
+        let tick = self.tick_ns.load(Ordering::SeqCst);
+        self.current_ns
+            .fetch_add(tick, Ordering::SeqCst)
+            .wrapping_add(tick)
+    }
+
+    /// Reads the current simulated time in nanoseconds without advancing.
+    pub fn current_nanos(&self) -> u64 {
+        self.current_ns.load(Ordering::SeqCst)
+    }
+
+    /// Reads the current tick increment in nanoseconds.
+    pub fn tick_nanos(&self) -> u64 {
+        self.tick_ns.load(Ordering::SeqCst)
+    }
+
+    /// Configures the tick increment in nanoseconds.
+    pub fn set_tick(&self, tick_ns: u64) {
+        self.tick_ns.store(tick_ns, Ordering::SeqCst);
+    }
+
+    /// Resets the clock to the specified nanosecond timestamp.
+    pub fn reset(&self, initial_ns: u64) {
+        self.current_ns.store(initial_ns, Ordering::SeqCst);
+    }
+}
+
+impl Default for DeterministicClockTracker {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_INITIAL_NANOS, Self::DEFAULT_TICK_NANOS)
+    }
+}
+
+/// Simulated procedure for POSIX `clock_gettime(clock_id, &tp)`.
+///
+/// Advances simulated monotonic time deterministically per invocation and writes
+/// `struct timespec { time_t tv_sec; long tv_nsec; }` (16 bytes) into memory.
+pub struct ClockGettimeProcedure {
+    pub tracker: Arc<DeterministicClockTracker>,
+}
+
+impl ClockGettimeProcedure {
+    /// Creates a new `ClockGettimeProcedure` backed by `tracker`.
+    pub fn new(tracker: Arc<DeterministicClockTracker>) -> Self {
+        Self { tracker }
+    }
+}
+
+impl Default for ClockGettimeProcedure {
+    fn default() -> Self {
+        Self::new(Arc::new(DeterministicClockTracker::default()))
+    }
+}
+
+impl SimProcedure for ClockGettimeProcedure {
+    fn name(&self) -> &'static str {
+        "clock_gettime"
+    }
+
+    fn apply(&self, state: &SimState) -> SimResult {
+        let tp = state.get_arg(1);
+        if tp == 0 {
+            // NULL pointer: report -EFAULT
+            return SimResult::Return(0u64.wrapping_sub(14));
+        }
+
+        let time_ns = self.tracker.advance();
+        let sec = time_ns / 1_000_000_000;
+        let nsec = time_ns % 1_000_000_000;
+
+        let mut next = state.clone();
+        next.write_memory(tp, sec.to_le_bytes().to_vec());
+        next.write_memory(tp.wrapping_add(8), nsec.to_le_bytes().to_vec());
+        next.return_value = Some(0);
+        next.set_reg(0, 0);
+        SimResult::Continue(next)
+    }
+}
+
+/// Deterministic clock procedure with customizable procedure name.
+pub struct DeterministicClockProcedure {
+    pub tracker: Arc<DeterministicClockTracker>,
+    name: &'static str,
+}
+
+impl DeterministicClockProcedure {
+    /// Creates a new `DeterministicClockProcedure` with default name `"clock_gettime"`.
+    pub fn new(tracker: Arc<DeterministicClockTracker>) -> Self {
+        Self {
+            tracker,
+            name: "clock_gettime",
+        }
+    }
+
+    /// Creates a new `DeterministicClockProcedure` with a custom procedure name.
+    pub fn with_name(tracker: Arc<DeterministicClockTracker>, name: &'static str) -> Self {
+        Self { tracker, name }
+    }
+}
+
+impl Default for DeterministicClockProcedure {
+    fn default() -> Self {
+        Self::new(Arc::new(DeterministicClockTracker::default()))
+    }
+}
+
+impl SimProcedure for DeterministicClockProcedure {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn apply(&self, state: &SimState) -> SimResult {
+        let tp = state.get_arg(1);
+        if tp == 0 {
+            return SimResult::Return(0u64.wrapping_sub(14));
+        }
+
+        let time_ns = self.tracker.advance();
+        let sec = time_ns / 1_000_000_000;
+        let nsec = time_ns % 1_000_000_000;
+
+        let mut next = state.clone();
+        next.write_memory(tp, sec.to_le_bytes().to_vec());
+        next.write_memory(tp.wrapping_add(8), nsec.to_le_bytes().to_vec());
+        next.return_value = Some(0);
+        next.set_reg(0, 0);
+        SimResult::Continue(next)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linux Futex synchronization models (SYS_futex, futex_wait, futex_wake)
+// ---------------------------------------------------------------------------
+
+/// Futex operation codes.
+pub mod futex_op {
+    pub const FUTEX_WAIT: u64 = 0;
+    pub const FUTEX_WAKE: u64 = 1;
+    pub const FUTEX_FD: u64 = 2;
+    pub const FUTEX_REQUEUE: u64 = 3;
+    pub const FUTEX_CMP_REQUEUE: u64 = 4;
+    pub const FUTEX_WAKE_OP: u64 = 5;
+    pub const FUTEX_LOCK_PI: u64 = 6;
+    pub const FUTEX_UNLOCK_PI: u64 = 7;
+    pub const FUTEX_TRYLOCK_PI: u64 = 8;
+    pub const FUTEX_WAIT_BITSET: u64 = 9;
+    pub const FUTEX_WAKE_BITSET: u64 = 10;
+    pub const FUTEX_WAIT_REQUEUE_PI: u64 = 11;
+    pub const FUTEX_CMP_REQUEUE_PI: u64 = 12;
+
+    pub const FUTEX_PRIVATE_FLAG: u64 = 128;
+    pub const FUTEX_CLOCK_REALTIME: u64 = 256;
+    pub const FUTEX_CMD_MASK: u64 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+}
+
+/// A recorded futex waiter on a specific user-space word address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FutexWaiter {
+    pub tid: u64,
+    pub waiter_id: u64,
+}
+
+/// Snapshot of futex wait queues and activity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FutexReport {
+    pub total_waits: u64,
+    pub total_wakes: u64,
+    pub active_queues: usize,
+    pub total_waiters: usize,
+}
+
+#[derive(Default)]
+struct FutexState {
+    queues: BTreeMap<u64, Vec<FutexWaiter>>,
+    total_waits: u64,
+    total_wakes: u64,
+}
+
+/// Shared tracker for Linux futex wait-queues and wake notifications.
+pub struct FutexTracker {
+    next_waiter_id: AtomicU64,
+    state: Mutex<FutexState>,
+}
+
+impl FutexTracker {
+    /// Creates a new empty futex tracker.
+    pub fn new() -> Self {
+        Self {
+            next_waiter_id: AtomicU64::new(1),
+            state: Mutex::new(FutexState::default()),
+        }
+    }
+
+    /// Enqueues a waiter on the futex word at `uaddr`. Returns the allocated waiter ID.
+    pub fn wait(&self, uaddr: u64, tid: u64) -> u64 {
+        let waiter_id = self.next_waiter_id.fetch_add(1, Ordering::SeqCst);
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.total_waits += 1;
+        st.queues
+            .entry(uaddr)
+            .or_default()
+            .push(FutexWaiter { tid, waiter_id });
+        waiter_id
+    }
+
+    /// Wakes up to `count` waiters queued on `uaddr`. Returns the number of waiters woken.
+    pub fn wake(&self, uaddr: u64, count: u32) -> u32 {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let (to_wake, should_remove) = if let Some(queue) = st.queues.get_mut(&uaddr) {
+            let to_wake = (count as usize).min(queue.len());
+            queue.drain(0..to_wake);
+            (to_wake, queue.is_empty())
+        } else {
+            (0, false)
+        };
+        if to_wake > 0 {
+            st.total_wakes += to_wake as u64;
+        }
+        if should_remove {
+            st.queues.remove(&uaddr);
+        }
+        to_wake as u32
+    }
+
+    /// Returns the number of waiters currently queued at `uaddr`.
+    pub fn waiter_count(&self, uaddr: u64) -> usize {
+        let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.queues.get(&uaddr).map_or(0, |q| q.len())
+    }
+
+    /// Returns true if any waiters are currently waiting at `uaddr`.
+    pub fn has_waiters(&self, uaddr: u64) -> bool {
+        self.waiter_count(uaddr) > 0
+    }
+
+    /// Returns the total number of waiters across all futex queues.
+    pub fn total_waiters(&self) -> usize {
+        let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.queues.values().map(|q| q.len()).sum()
+    }
+
+    /// Returns a list of all waiters queued at `uaddr`.
+    pub fn waiters_at(&self, uaddr: u64) -> Vec<FutexWaiter> {
+        let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.queues.get(&uaddr).cloned().unwrap_or_default()
+    }
+
+    /// Returns a snapshot report of tracker activity.
+    pub fn report(&self) -> FutexReport {
+        let st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let total_waiters = st.queues.values().map(|q| q.len()).sum();
+        FutexReport {
+            total_waits: st.total_waits,
+            total_wakes: st.total_wakes,
+            active_queues: st.queues.len(),
+            total_waiters,
+        }
+    }
+
+    /// Resets all queues and counters.
+    pub fn reset(&self) {
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        st.queues.clear();
+        st.total_waits = 0;
+        st.total_wakes = 0;
+        self.next_waiter_id.store(1, Ordering::SeqCst);
+    }
+}
+
+impl Default for FutexTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Helper resolving expected word in futex_wait: supports both
+/// `futex_wait(uaddr, val)` (arg1=val) and `futex(uaddr, FUTEX_WAIT, val)` (arg1=0, arg2=val).
+fn resolve_expected_futex_word(state: &SimState, uaddr: u64) -> u32 {
+    let arg1 = state.get_arg(1);
+    let arg2 = state.get_arg(2);
+    if arg1 == futex_op::FUTEX_WAIT && arg2 != 0 {
+        let bytes = state.read_bytes(uaddr, 4);
+        let current = u32::from_le_bytes(bytes.try_into().unwrap_or([0; 4]));
+        if current == (arg2 as u32) {
+            return arg2 as u32;
+        }
+    }
+    arg1 as u32
+}
+
+/// Simulated procedure for `futex_wait(uaddr, val)`.
+///
+/// Verifies that `*uaddr == val` against simulated state memory. If the word matches,
+/// enqueues the caller into the futex wait-queue and returns 0. If the word does not
+/// match, returns `-EAGAIN` (`0u64.wrapping_sub(11)`) without enqueuing.
+pub struct FutexWaitProcedure {
+    pub tracker: Arc<FutexTracker>,
+}
+
+impl FutexWaitProcedure {
+    pub fn new(tracker: Arc<FutexTracker>) -> Self {
+        Self { tracker }
+    }
+}
+
+impl Default for FutexWaitProcedure {
+    fn default() -> Self {
+        Self::new(Arc::new(FutexTracker::default()))
+    }
+}
+
+impl SimProcedure for FutexWaitProcedure {
+    fn name(&self) -> &'static str {
+        "futex_wait"
+    }
+
+    fn apply(&self, state: &SimState) -> SimResult {
+        let uaddr = state.get_arg(0);
+        let expected = resolve_expected_futex_word(state, uaddr);
+        let bytes = state.read_bytes(uaddr, 4);
+        let current = u32::from_le_bytes(bytes.try_into().unwrap_or([0; 4]));
+
+        if current != expected {
+            // Word mismatch: Linux returns -EAGAIN
+            SimResult::Return(0u64.wrapping_sub(11))
+        } else {
+            let tid = if state.get_arg(5) != 0 {
+                state.get_arg(5)
+            } else {
+                1
+            };
+            self.tracker.wait(uaddr, tid);
+            SimResult::Return(0)
+        }
+    }
+}
+
+/// Simulated procedure for `futex_wake(uaddr, count)`.
+///
+/// Removes up to `count` waiting threads from the wait queue for `uaddr`
+/// and returns the number of woken waiters.
+pub struct FutexWakeProcedure {
+    pub tracker: Arc<FutexTracker>,
+}
+
+impl FutexWakeProcedure {
+    pub fn new(tracker: Arc<FutexTracker>) -> Self {
+        Self { tracker }
+    }
+}
+
+impl Default for FutexWakeProcedure {
+    fn default() -> Self {
+        Self::new(Arc::new(FutexTracker::default()))
+    }
+}
+
+impl SimProcedure for FutexWakeProcedure {
+    fn name(&self) -> &'static str {
+        "futex_wake"
+    }
+
+    fn apply(&self, state: &SimState) -> SimResult {
+        let uaddr = state.get_arg(0);
+        let arg1 = state.get_arg(1);
+        let arg2 = state.get_arg(2);
+        let count = if arg1 == futex_op::FUTEX_WAKE && arg2 != 0 {
+            arg2 as u32
+        } else if arg1 != 0 {
+            arg1 as u32
+        } else {
+            1
+        };
+
+        let woken = self.tracker.wake(uaddr, count);
+        SimResult::Return(woken as u64)
+    }
+}
+
+/// Simulated procedure for Linux `SYS_futex(uaddr, op, val, timeout, uaddr2, val3)`.
+pub struct FutexProcedure {
+    pub tracker: Arc<FutexTracker>,
+}
+
+impl FutexProcedure {
+    pub fn new(tracker: Arc<FutexTracker>) -> Self {
+        Self { tracker }
+    }
+}
+
+impl Default for FutexProcedure {
+    fn default() -> Self {
+        Self::new(Arc::new(FutexTracker::default()))
+    }
+}
+
+impl SimProcedure for FutexProcedure {
+    fn name(&self) -> &'static str {
+        "futex"
+    }
+
+    fn apply(&self, state: &SimState) -> SimResult {
+        let uaddr = state.get_arg(0);
+        let op = state.get_arg(1);
+        let cmd = op & futex_op::FUTEX_CMD_MASK;
+
+        match cmd {
+            futex_op::FUTEX_WAIT | futex_op::FUTEX_WAIT_BITSET => {
+                let expected = state.get_arg(2) as u32;
+                let bytes = state.read_bytes(uaddr, 4);
+                let current = u32::from_le_bytes(bytes.try_into().unwrap_or([0; 4]));
+                if current != expected {
+                    SimResult::Return(0u64.wrapping_sub(11)) // -EAGAIN
+                } else {
+                    let tid = if state.get_arg(5) != 0 { state.get_arg(5) } else { 1 };
+                    self.tracker.wait(uaddr, tid);
+                    SimResult::Return(0)
+                }
+            }
+            futex_op::FUTEX_WAKE | futex_op::FUTEX_WAKE_BITSET => {
+                let count = state.get_arg(2) as u32;
+                let woken = self.tracker.wake(uaddr, if count == 0 { 1 } else { count });
+                SimResult::Return(woken as u64)
+            }
+            _ => {
+                // Unsupported futex operation: -ENOSYS
+                SimResult::Return(0u64.wrapping_sub(38))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POSIX Threading primitives (pthread_create)
+// ---------------------------------------------------------------------------
+
+/// Allocated stack slot for a modeled thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadStackSlot {
+    /// Base address of the stack allocation.
+    pub base: u64,
+    /// Allocated size of the stack in bytes.
+    pub size: u64,
+    /// Initial stack pointer (top of stack on descending architectures like x86-64).
+    pub top: u64,
+}
+
+/// Recorded metadata for a simulated thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadDescriptor {
+    /// Deterministically seeded thread identifier.
+    pub tid: u64,
+    /// Function pointer address for the thread entry point.
+    pub entry_point: u64,
+    /// Caller argument passed to the start routine.
+    pub arg: u64,
+    /// Allocated stack memory slot.
+    pub stack: ThreadStackSlot,
+}
+
+/// Shared tracker for deterministic thread creation and stack allocation.
+pub struct ThreadTracker {
+    next_tid: AtomicU64,
+    next_stack_base: AtomicU64,
+    stack_size: u64,
+    threads: Mutex<Vec<ThreadDescriptor>>,
+}
+
+impl ThreadTracker {
+    /// Initial base thread ID handed out by the tracker.
+    pub const DEFAULT_TID_BASE: u64 = 1000;
+    /// Default starting address for thread stack allocations (0x7000_1000_0000).
+    pub const DEFAULT_STACK_BASE: u64 = 0x0000_7000_1000_0000;
+    /// Default stack size per thread (1 MB).
+    pub const DEFAULT_STACK_SIZE: u64 = 0x0010_0000;
+
+    /// Creates a new thread tracker with custom starting TID, stack base, and stack size.
+    pub fn new(initial_tid: u64, stack_base: u64, stack_size: u64) -> Self {
+        Self {
+            next_tid: AtomicU64::new(initial_tid),
+            next_stack_base: AtomicU64::new(stack_base),
+            stack_size,
+            threads: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Seeds a new deterministic thread, allocating a new stack slot and recording the entry point.
+    pub fn seed_thread(&self, entry_point: u64, arg: u64) -> ThreadDescriptor {
+        let tid = self.next_tid.fetch_add(1, Ordering::SeqCst);
+        let base = self.next_stack_base.fetch_add(self.stack_size, Ordering::SeqCst);
+        let top = base.wrapping_add(self.stack_size);
+        let desc = ThreadDescriptor {
+            tid,
+            entry_point,
+            arg,
+            stack: ThreadStackSlot {
+                base,
+                size: self.stack_size,
+                top,
+            },
+        };
+        let mut list = self.threads.lock().unwrap_or_else(|p| p.into_inner());
+        list.push(desc);
+        desc
+    }
+
+    /// Returns the number of threads created by this tracker.
+    pub fn thread_count(&self) -> usize {
+        let list = self.threads.lock().unwrap_or_else(|p| p.into_inner());
+        list.len()
+    }
+
+    /// Returns a snapshot of all recorded thread descriptors.
+    pub fn threads(&self) -> Vec<ThreadDescriptor> {
+        let list = self.threads.lock().unwrap_or_else(|p| p.into_inner());
+        list.clone()
+    }
+
+    /// Finds a thread descriptor by its TID.
+    pub fn get_thread(&self, tid: u64) -> Option<ThreadDescriptor> {
+        let list = self.threads.lock().unwrap_or_else(|p| p.into_inner());
+        list.iter().copied().find(|t| t.tid == tid)
+    }
+
+    /// Returns the most recently seeded thread descriptor.
+    pub fn latest_thread(&self) -> Option<ThreadDescriptor> {
+        let list = self.threads.lock().unwrap_or_else(|p| p.into_inner());
+        list.last().copied()
+    }
+
+    /// Resets thread records and resets TID and stack allocators.
+    pub fn reset(&self, initial_tid: u64, stack_base: u64) {
+        let mut list = self.threads.lock().unwrap_or_else(|p| p.into_inner());
+        list.clear();
+        self.next_tid.store(initial_tid, Ordering::SeqCst);
+        self.next_stack_base.store(stack_base, Ordering::SeqCst);
+    }
+}
+
+impl Default for ThreadTracker {
+    fn default() -> Self {
+        Self::new(
+            Self::DEFAULT_TID_BASE,
+            Self::DEFAULT_STACK_BASE,
+            Self::DEFAULT_STACK_SIZE,
+        )
+    }
+}
+
+/// Simulated procedure for `pthread_create(&thread, attr, start_routine, arg)`.
+///
+/// Seeds a deterministic thread ID, allocates a new thread stack slot, records the
+/// thread entry point, and writes the new thread ID to `*thread`.
+pub struct PthreadCreateProcedure {
+    pub tracker: Arc<ThreadTracker>,
+}
+
+impl PthreadCreateProcedure {
+    pub fn new(tracker: Arc<ThreadTracker>) -> Self {
+        Self { tracker }
+    }
+}
+
+impl Default for PthreadCreateProcedure {
+    fn default() -> Self {
+        Self::new(Arc::new(ThreadTracker::default()))
+    }
+}
+
+impl SimProcedure for PthreadCreateProcedure {
+    fn name(&self) -> &'static str {
+        "pthread_create"
+    }
+
+    fn apply(&self, state: &SimState) -> SimResult {
+        let p_thread = state.get_arg(0);
+        let _attr = state.get_arg(1);
+        let start_routine = state.get_arg(2);
+        let arg = state.get_arg(3);
+
+        let desc = self.tracker.seed_thread(start_routine, arg);
+
+        let mut next = state.clone();
+        if p_thread != 0 {
+            next.write_memory(p_thread, desc.tid.to_le_bytes().to_vec());
+        }
+        next.return_value = Some(0); // pthread_create returns 0 on success
+        next.set_reg(0, 0);
+        SimResult::Continue(next)
     }
 }
 
@@ -1191,7 +1849,9 @@ pub mod syscall {
     pub const GETEUID: u64 = 107;
     pub const GETGID: u64 = 104;
     pub const GETEGID: u64 = 108;
+    pub const CLONE: u64 = 56;
     pub const FUTEX: u64 = 202;
+    pub const CLOCK_GETTIME: u64 = 228;
 
     /// `arch_prctl` operation codes.
     pub mod arch_prctl_op {
@@ -1280,6 +1940,98 @@ pub mod syscall {
                 .clear();
             *self.exit_code.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
             self.invocations.store(0, Ordering::Relaxed);
+        }
+    }
+
+    use crate::{
+        ClockGettimeProcedure, DeterministicClockTracker, EnvironmentModelVersion, ExitProcedure,
+        FutexProcedure, FutexTracker, PthreadCreateProcedure, SimProcedure, SimResult, SimState,
+        ThreadTracker,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    /// Versioned Linux syscall dispatch table routing syscall numbers to SimProcedure models.
+    pub struct SyscallDispatchTable {
+        pub version: EnvironmentModelVersion,
+        handlers: BTreeMap<u64, Arc<dyn SimProcedure>>,
+    }
+
+    impl SyscallDispatchTable {
+        /// Creates an empty dispatch table for the given environment model version.
+        pub fn new(version: EnvironmentModelVersion) -> Self {
+            Self {
+                version,
+                handlers: BTreeMap::new(),
+            }
+        }
+
+        /// Pre-populates the dispatch table with standard Linux x86-64 syscall models:
+        /// `CLOCK_GETTIME` (228), `FUTEX` (202), `CLONE` (56), and `EXIT` (60).
+        pub fn with_standard_linux() -> Self {
+            let mut table = Self::new(EnvironmentModelVersion(1));
+            let clock_tracker = Arc::new(DeterministicClockTracker::default());
+            let futex_tracker = Arc::new(FutexTracker::default());
+            let thread_tracker = Arc::new(ThreadTracker::default());
+
+            table.register(
+                CLOCK_GETTIME,
+                Arc::new(ClockGettimeProcedure::new(clock_tracker)),
+            );
+            table.register(
+                FUTEX,
+                Arc::new(FutexProcedure::new(futex_tracker)),
+            );
+            table.register(
+                CLONE,
+                Arc::new(PthreadCreateProcedure::new(thread_tracker)),
+            );
+            table.register(
+                EXIT,
+                Arc::new(ExitProcedure),
+            );
+            table
+        }
+
+        /// Registers a procedure model for the specified syscall number.
+        pub fn register(&mut self, syscall_nr: u64, proc: Arc<dyn SimProcedure>) {
+            self.handlers.insert(syscall_nr, proc);
+        }
+
+        /// Dispatches a syscall by number to its modeled procedure, returning `None` if unmodeled.
+        pub fn dispatch(&self, syscall_nr: u64, state: &SimState) -> Option<SimResult> {
+            self.handlers.get(&syscall_nr).map(|proc| proc.apply(state))
+        }
+
+        /// Looks up a modeled procedure by syscall number.
+        pub fn lookup(&self, syscall_nr: u64) -> Option<&Arc<dyn SimProcedure>> {
+            self.handlers.get(&syscall_nr)
+        }
+
+        /// Returns true if the syscall number has a registered model.
+        pub fn contains(&self, syscall_nr: u64) -> bool {
+            self.handlers.contains_key(&syscall_nr)
+        }
+
+        /// Returns the number of registered syscall models.
+        pub fn len(&self) -> usize {
+            self.handlers.len()
+        }
+
+        /// Returns true if no syscall models are registered.
+        pub fn is_empty(&self) -> bool {
+            self.handlers.is_empty()
+        }
+
+        /// Returns the version tag for this syscall model table.
+        pub fn version(&self) -> EnvironmentModelVersion {
+            self.version
+        }
+    }
+
+    impl Default for SyscallDispatchTable {
+        fn default() -> Self {
+            Self::with_standard_linux()
         }
     }
 }
@@ -1807,5 +2559,256 @@ mod tests {
         assert_eq!(syscall::READ, 0);
         assert_eq!(syscall::WRITE, 1);
         assert_eq!(syscall::EXIT, 60);
+        assert_eq!(syscall::CLONE, 56);
+        assert_eq!(syscall::FUTEX, 202);
+        assert_eq!(syscall::CLOCK_GETTIME, 228);
+    }
+
+    #[test]
+    fn deterministic_clock_advances_monotonically() {
+        let tracker = Arc::new(DeterministicClockTracker::new(1_000_000_000, 1_000_000));
+        let proc = ClockGettimeProcedure::new(tracker.clone());
+
+        let mut state = SimState::new();
+        state.set_arg(0, clock_id::CLOCK_MONOTONIC);
+        state.set_arg(1, 0x5000);
+
+        // First invocation: time advances to 1.001s (1_001_000_000 ns)
+        let res1 = proc.apply(&state);
+        let s1 = match res1 {
+            SimResult::Continue(s) => s,
+            other => panic!("expected Continue, got {other:?}"),
+        };
+        assert_eq!(s1.return_value, Some(0));
+        assert_eq!(s1.get_reg(0), 0);
+        let sec1 = u64::from_le_bytes(s1.read_bytes(0x5000, 8).try_into().unwrap());
+        let nsec1 = u64::from_le_bytes(s1.read_bytes(0x5008, 8).try_into().unwrap());
+        assert_eq!(sec1, 1);
+        assert_eq!(nsec1, 1_000_000);
+
+        // Second invocation: time advances to 1.002s (1_002_000_000 ns)
+        let res2 = proc.apply(&s1);
+        let s2 = match res2 {
+            SimResult::Continue(s) => s,
+            other => panic!("expected Continue, got {other:?}"),
+        };
+        let sec2 = u64::from_le_bytes(s2.read_bytes(0x5000, 8).try_into().unwrap());
+        let nsec2 = u64::from_le_bytes(s2.read_bytes(0x5008, 8).try_into().unwrap());
+        assert_eq!(sec2, 1);
+        assert_eq!(nsec2, 2_000_000);
+
+        // Third invocation with DeterministicClockProcedure
+        let det_proc = DeterministicClockProcedure::with_name(tracker, "deterministic_clock");
+        assert_eq!(det_proc.name(), "deterministic_clock");
+        let res3 = det_proc.apply(&s2);
+        let s3 = match res3 {
+            SimResult::Continue(s) => s,
+            other => panic!("expected Continue, got {other:?}"),
+        };
+        let sec3 = u64::from_le_bytes(s3.read_bytes(0x5000, 8).try_into().unwrap());
+        let nsec3 = u64::from_le_bytes(s3.read_bytes(0x5008, 8).try_into().unwrap());
+        assert_eq!(sec3, 1);
+        assert_eq!(nsec3, 3_000_000);
+    }
+
+    #[test]
+    fn deterministic_clock_null_pointer_returns_efault() {
+        let proc = ClockGettimeProcedure::default();
+        let mut state = SimState::new();
+        state.set_arg(0, clock_id::CLOCK_MONOTONIC);
+        state.set_arg(1, 0); // NULL pointer
+
+        let res = proc.apply(&state);
+        assert_eq!(res, SimResult::Return(0u64.wrapping_sub(14)));
+    }
+
+    #[test]
+    fn futex_wait_word_verification_and_queue_tracking() {
+        let tracker = Arc::new(FutexTracker::default());
+        let wait_proc = FutexWaitProcedure::new(tracker.clone());
+
+        let mut state = SimState::new();
+        state.set_arg(0, 0x2000); // uaddr
+        state.set_arg(1, 0x42);   // expected val
+        state.write_memory(0x2000, 0x99u32.to_le_bytes().to_vec()); // actual val in memory = 0x99
+
+        // Word mismatch: memory has 0x99, expected 0x42
+        let mismatch_res = wait_proc.apply(&state);
+        assert_eq!(mismatch_res, SimResult::Return(0u64.wrapping_sub(11))); // -EAGAIN
+        assert_eq!(tracker.waiter_count(0x2000), 0);
+
+        // Correct word in memory: 0x42
+        state.write_memory(0x2000, 0x42u32.to_le_bytes().to_vec());
+        let match_res = wait_proc.apply(&state);
+        assert_eq!(match_res, SimResult::Return(0)); // success
+        assert_eq!(tracker.waiter_count(0x2000), 1);
+        assert!(tracker.has_waiters(0x2000));
+    }
+
+    #[test]
+    fn futex_wake_wakes_waiters_and_counts() {
+        let tracker = Arc::new(FutexTracker::default());
+        let wait_proc = FutexWaitProcedure::new(tracker.clone());
+        let wake_proc = FutexWakeProcedure::new(tracker.clone());
+
+        let mut state = SimState::new();
+        state.set_arg(0, 0x3000);
+        state.set_arg(1, 100);
+        state.write_memory(0x3000, 100u32.to_le_bytes().to_vec());
+
+        // Enqueue 3 waiters
+        wait_proc.apply(&state);
+        wait_proc.apply(&state);
+        wait_proc.apply(&state);
+        assert_eq!(tracker.waiter_count(0x3000), 3);
+
+        // Wake 1 waiter
+        let mut wake_state = SimState::new();
+        wake_state.set_arg(0, 0x3000);
+        wake_state.set_arg(1, 1);
+        let wake1 = wake_proc.apply(&wake_state);
+        assert_eq!(wake1, SimResult::Return(1));
+        assert_eq!(tracker.waiter_count(0x3000), 2);
+
+        // Wake 5 waiters (only 2 left)
+        wake_state.set_arg(1, 5);
+        let wake2 = wake_proc.apply(&wake_state);
+        assert_eq!(wake2, SimResult::Return(2));
+        assert_eq!(tracker.waiter_count(0x3000), 0);
+
+        // Wake on empty queue returns 0
+        let wake3 = wake_proc.apply(&wake_state);
+        assert_eq!(wake3, SimResult::Return(0));
+
+        let report = tracker.report();
+        assert_eq!(report.total_waits, 3);
+        assert_eq!(report.total_wakes, 3);
+        assert_eq!(report.total_waiters, 0);
+    }
+
+    #[test]
+    fn futex_procedure_syscall_multiplexing() {
+        let tracker = Arc::new(FutexTracker::default());
+        let futex_proc = FutexProcedure::new(tracker.clone());
+
+        let mut state = SimState::new();
+        state.set_arg(0, 0x4000); // uaddr
+        state.set_arg(1, futex_op::FUTEX_WAIT); // op
+        state.set_arg(2, 555); // val
+        state.write_memory(0x4000, 555u32.to_le_bytes().to_vec());
+
+        let wait_res = futex_proc.apply(&state);
+        assert_eq!(wait_res, SimResult::Return(0));
+        assert_eq!(tracker.waiter_count(0x4000), 1);
+
+        state.set_arg(1, futex_op::FUTEX_WAKE);
+        state.set_arg(2, 1);
+        let wake_res = futex_proc.apply(&state);
+        assert_eq!(wake_res, SimResult::Return(1));
+        assert_eq!(tracker.waiter_count(0x4000), 0);
+    }
+
+    #[test]
+    fn pthread_create_seeds_tid_and_allocates_stack() {
+        let tracker = Arc::new(ThreadTracker::default());
+        let proc = PthreadCreateProcedure::new(tracker.clone());
+
+        let mut state = SimState::new();
+        state.set_arg(0, 0x6000);   // pthread_t*
+        state.set_arg(1, 0);        // attr (NULL)
+        state.set_arg(2, 0x401000); // start_routine
+        state.set_arg(3, 0xDEADBEEF); // arg
+
+        let res = proc.apply(&state);
+        let next = match res {
+            SimResult::Continue(s) => s,
+            other => panic!("expected Continue, got {other:?}"),
+        };
+        assert_eq!(next.return_value, Some(0));
+
+        // Read thread ID written to *pthread_t
+        let tid = u64::from_le_bytes(next.read_bytes(0x6000, 8).try_into().unwrap());
+        assert_eq!(tid, 1000);
+        assert_eq!(tracker.thread_count(), 1);
+
+        let desc = tracker.get_thread(tid).expect("thread descriptor exists");
+        assert_eq!(desc.entry_point, 0x401000);
+        assert_eq!(desc.arg, 0xDEADBEEF);
+        assert_eq!(desc.stack.size, ThreadTracker::DEFAULT_STACK_SIZE);
+        assert_eq!(desc.stack.top, desc.stack.base + desc.stack.size);
+
+        // Seed a second thread
+        state.set_arg(0, 0x6008);
+        state.set_arg(2, 0x402000);
+        state.set_arg(3, 0x1234);
+        let res2 = proc.apply(&state);
+        let next2 = match res2 {
+            SimResult::Continue(s) => s,
+            other => panic!("expected Continue, got {other:?}"),
+        };
+        let tid2 = u64::from_le_bytes(next2.read_bytes(0x6008, 8).try_into().unwrap());
+        assert_eq!(tid2, 1001);
+        assert_eq!(tracker.thread_count(), 2);
+
+        let desc2 = tracker.get_thread(tid2).expect("second thread exists");
+        assert_eq!(desc2.entry_point, 0x402000);
+        assert_ne!(desc2.stack.base, desc.stack.base);
+    }
+
+    #[test]
+    fn sim_procedure_registry_with_standard_library() {
+        let registry = SimProcedureRegistry::with_standard_library();
+        assert_eq!(registry.len(), 14);
+        assert!(registry.contains("strlen"));
+        assert!(registry.contains("strcmp"));
+        assert!(registry.contains("malloc"));
+        assert!(registry.contains("free"));
+        assert!(registry.contains("memcpy"));
+        assert!(registry.contains("memset"));
+        assert!(registry.contains("puts"));
+        assert!(registry.contains("exit"));
+        assert!(registry.contains("clock_gettime"));
+        assert!(registry.contains("deterministic_clock"));
+        assert!(registry.contains("futex_wait"));
+        assert!(registry.contains("futex_wake"));
+        assert!(registry.contains("futex"));
+        assert!(registry.contains("pthread_create"));
+
+        // Dispatch clock_gettime via registry
+        let mut state = SimState::new();
+        state.set_arg(0, clock_id::CLOCK_MONOTONIC);
+        state.set_arg(1, 0x1000);
+        let clock_res = registry.apply_by_name("clock_gettime", &state);
+        assert!(matches!(clock_res, Some(SimResult::Continue(ref s)) if s.return_value == Some(0)));
+
+        // Dispatch pthread_create via registry
+        state.set_arg(0, 0x2000);
+        state.set_arg(2, 0x400000);
+        let pthread_res = registry.apply_by_name("pthread_create", &state);
+        assert!(matches!(pthread_res, Some(SimResult::Continue(ref s)) if s.return_value == Some(0)));
+    }
+
+    #[test]
+    fn syscall_dispatch_table_standard_linux() {
+        let table = SyscallDispatchTable::with_standard_linux();
+        assert_eq!(table.version(), EnvironmentModelVersion(1));
+        assert!(table.contains(syscall::CLOCK_GETTIME));
+        assert!(table.contains(syscall::FUTEX));
+        assert!(table.contains(syscall::CLONE));
+        assert!(table.contains(syscall::EXIT));
+        assert_eq!(table.len(), 4);
+
+        let mut state = SimState::new();
+        state.set_arg(0, 0x2000);
+        state.set_arg(1, 0x3000);
+
+        let clock_outcome = table.dispatch(syscall::CLOCK_GETTIME, &state);
+        assert!(matches!(clock_outcome, Some(SimResult::Continue(_))));
+
+        let exit_outcome = table.dispatch(syscall::EXIT, &state);
+        assert_eq!(exit_outcome, Some(SimResult::Exit));
+
+        let unknown = table.dispatch(999, &state);
+        assert_eq!(unknown, None);
     }
 }

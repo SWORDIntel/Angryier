@@ -282,7 +282,7 @@ impl Z3FfiBridge {
                         continue;
                     }
                     if let Some(n) = self.reader.read(id) {
-                        if let Err(e2) = self.translate_node(id, &n, &mut HashMap::new(), &mut HashMap::new()) {
+                        if let Err(e2) = self.translate_node(id, &n, &cache, &mut HashMap::new()) {
                             eprintln!(
                                 "  fail node {:?} {:?} sort={:?} ops={:?} -> {e2:?}",
                                 id, n.op, n.sort, n.operands
@@ -488,29 +488,89 @@ impl Z3FfiBridge {
         }
     }
 
+    /// Iterative post-order DAG translator.
+    ///
+    /// Replaces the formerly-recursive `translate` to avoid stack overflow on
+    /// deeply-nested symbolic expressions (documented in ROADMAP.md Known Gaps).
+    ///
+    /// Algorithm — explicit two-phase work stack:
+    ///
+    /// Each entry on the work stack is `(ExprId, /* children_pushed */ bool)`.
+    ///
+    /// * **First encounter** (`children_pushed == false`): re-push the node
+    ///   with `children_pushed = true`, then push all children with
+    ///   `children_pushed = false`.  This ensures children are processed
+    ///   (post-ordered) before the parent.
+    ///
+    /// * **Second encounter** (`children_pushed == true`): all operands are
+    ///   now guaranteed to be in `cache`, so call `translate_node` — which
+    ///   reads operand ASTs from `cache` instead of recursing — and store the
+    ///   result.
+    ///
+    /// Already-cached nodes (DAG sharing) are short-circuited at the top of
+    /// the first-encounter branch, so each `ExprId` is built at most once.
     fn translate(
         &self,
-        id: ExprId,
+        root: ExprId,
         cache: &mut HashMap<ExprId, Z3_ast>,
         symbols: &mut HashMap<ExprId, Z3_ast>,
     ) -> Result<Z3_ast, Z3FfiError> {
-        if let Some(&ast) = cache.get(&id) {
+        // Fast path: root already translated (e.g. shared sub-expression).
+        if let Some(&ast) = cache.get(&root) {
             return Ok(ast);
         }
-        let node = self.reader.read(id).ok_or(Z3FfiError::UnresolvedExpression(id))?;
-        let ast = self.translate_node(id, &node, cache, symbols)?;
-        cache.insert(id, ast);
-        Ok(ast)
+
+        // Work stack: (node_id, children_have_been_pushed_already)
+        let mut stack: Vec<(ExprId, bool)> = Vec::new();
+        stack.push((root, false));
+
+        while let Some((id, children_pushed)) = stack.pop() {
+            // Short-circuit for nodes already in cache (DAG sharing).
+            if cache.contains_key(&id) {
+                continue;
+            }
+
+            let node = self.reader.read(id).ok_or(Z3FfiError::UnresolvedExpression(id))?;
+
+            if !children_pushed {
+                // If all operands are already in cache (or leaf node with 0 operands),
+                // translate immediately without a second push/pop cycle.
+                if node.operands.iter().all(|child| cache.contains_key(child)) {
+                    let ast = self.translate_node(id, &node, cache, symbols)?;
+                    cache.insert(id, ast);
+                } else {
+                    // Phase 1: schedule this node for building after its children.
+                    stack.push((id, true));
+                    // Push children in reverse order so the leftmost child is
+                    // processed first (stack is LIFO).
+                    for &child in node.operands.iter().rev() {
+                        if !cache.contains_key(&child) {
+                            stack.push((child, false));
+                        }
+                    }
+                }
+            } else {
+                // Phase 2: all operands are guaranteed to be in `cache` now.
+                // `translate_node` reads them directly from `cache` — no recursion.
+                let ast = self.translate_node(id, &node, cache, symbols)?;
+                cache.insert(id, ast);
+            }
+        }
+
+        cache.get(&root).copied().ok_or(Z3FfiError::UnresolvedExpression(root))
     }
 
     fn translate_node(
         &self,
         id: ExprId,
         node: &ExprNode,
-        cache: &mut HashMap<ExprId, Z3_ast>,
+        cache: &HashMap<ExprId, Z3_ast>,
         symbols: &mut HashMap<ExprId, Z3_ast>,
     ) -> Result<Z3_ast, Z3FfiError> {
         let ctx = self.context;
+        let get = |child: ExprId| -> Result<Z3_ast, Z3FfiError> {
+            cache.get(&child).copied().ok_or(Z3FfiError::UnresolvedExpression(child))
+        };
         match node.op {
             ExprOp::Constant => match node.sort {
                 ExprSort::BitVec(width) => {
@@ -572,8 +632,8 @@ impl Z3FfiBridge {
                 if node.operands.len() != 2 {
                     return Err(Z3FfiError::MalformedExpression);
                 }
-                let left = self.translate(node.operands[0], cache, symbols)?;
-                let right = self.translate(node.operands[1], cache, symbols)?;
+                let left = get(node.operands[0])?;
+                let right = get(node.operands[1])?;
                 let ast = unsafe {
                     match node.op {
                         ExprOp::Add => Z3_mk_bvadd(ctx, left, right),
@@ -601,7 +661,7 @@ impl Z3FfiBridge {
                     ExprSort::BitVec(w) => w,
                     _ => return Err(Z3FfiError::UnsupportedSort),
                 };
-                let value = self.translate(node.operands[0], cache, symbols)?;
+                let value = get(node.operands[0])?;
                 let count_node = self
                     .reader
                     .read(node.operands[1])
@@ -610,7 +670,7 @@ impl Z3FfiBridge {
                     ExprSort::BitVec(w) => w,
                     _ => return Err(Z3FfiError::UnsupportedSort),
                 };
-                let count = self.translate(node.operands[1], cache, symbols)?;
+                let count = get(node.operands[1])?;
                 // Z3's rotate entry points require the amount at the value's
                 // own width: widen a narrower count (an 8-bit CL count is the
                 // machine shape), narrow a wider one to its low bits.
@@ -655,7 +715,7 @@ impl Z3FfiBridge {
                 if node.operands.len() != 1 {
                     return Err(Z3FfiError::MalformedExpression);
                 }
-                let operand = self.translate(node.operands[0], cache, symbols)?;
+                let operand = get(node.operands[0])?;
                 let ast = match node.sort {
                     ExprSort::Bool => unsafe { Z3_mk_not(ctx, operand) },
                     _ => unsafe { Z3_mk_bvnot(ctx, operand) },
@@ -667,8 +727,8 @@ impl Z3FfiBridge {
                 if node.operands.len() != 2 {
                     return Err(Z3FfiError::MalformedExpression);
                 }
-                let left = self.translate(node.operands[0], cache, symbols)?;
-                let right = self.translate(node.operands[1], cache, symbols)?;
+                let left = get(node.operands[0])?;
+                let right = get(node.operands[1])?;
                 let ast = unsafe {
                     match node.op {
                         ExprOp::Eq => Z3_mk_eq(ctx, left, right),
@@ -686,9 +746,9 @@ impl Z3FfiBridge {
                 if node.operands.len() != 3 {
                     return Err(Z3FfiError::MalformedExpression);
                 }
-                let cond = self.translate(node.operands[0], cache, symbols)?;
-                let then_val = self.translate(node.operands[1], cache, symbols)?;
-                let else_val = self.translate(node.operands[2], cache, symbols)?;
+                let cond = get(node.operands[0])?;
+                let then_val = get(node.operands[1])?;
+                let else_val = get(node.operands[2])?;
                 let ast = unsafe { Z3_mk_ite(ctx, cond, then_val, else_val) }.ok_or(Z3FfiError::NullAst)?;
                 Ok(ast)
             }
@@ -696,8 +756,8 @@ impl Z3FfiBridge {
                 if node.operands.len() != 2 {
                     return Err(Z3FfiError::MalformedExpression);
                 }
-                let low = self.translate(node.operands[0], cache, symbols)?;
-                let high = self.translate(node.operands[1], cache, symbols)?;
+                let low = get(node.operands[0])?;
+                let high = get(node.operands[1])?;
                 let ast = unsafe { Z3_mk_concat(ctx, high, low) }.ok_or(Z3FfiError::NullAst)?;
                 Ok(ast)
             }
@@ -724,7 +784,7 @@ impl Z3FfiBridge {
                     }
                     _ => return Err(Z3FfiError::MalformedExpression),
                 };
-                let operand = self.translate(operand_id, cache, symbols)?;
+                let operand = get(operand_id)?;
                 let width = match node.sort {
                     ExprSort::BitVec(w) => w,
                     _ => return Err(Z3FfiError::UnsupportedSort),
@@ -738,7 +798,7 @@ impl Z3FfiBridge {
                 if node.operands.len() != 1 {
                     return Err(Z3FfiError::MalformedExpression);
                 }
-                let operand = self.translate(node.operands[0], cache, symbols)?;
+                let operand = get(node.operands[0])?;
                 let operand_node = self
                     .reader
                     .read(node.operands[0])
@@ -1035,6 +1095,104 @@ mod tests {
         let reader: Arc<dyn ExprReader> = arena.clone();
         let bridge = Z3FfiBridge::new(reader)?;
         assert_eq!(bridge.name(), "z3-ffi");
+        Ok(())
+    }
+
+    /// Verifies that deeply nested expressions with DAG sharing (e.g. repeated
+    /// doubling) are translated iteratively without stack overflow and without
+    /// exponential node blowup (O(N) nodes translated thanks to AST caching).
+    #[test]
+    fn deep_expression_dag_sharing_no_stack_overflow() -> Result<(), Box<dyn std::error::Error>> {
+        const DEPTH: usize = 600;
+
+        let arena = make_arena();
+        let x = make_symbol(&arena, 64, 99);
+
+        // Build: x, (x + x), ((x + x) + (x + x)), ... to depth 600.
+        // Without DAG sharing cache, this would be 2^600 nodes.
+        let mut acc = x;
+        for _ in 0..DEPTH {
+            acc = make_binop(&arena, ExprOp::Add, 64, acc, acc);
+        }
+
+        let predicate = make_eq(&arena, acc, acc);
+
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let mut bridge = Z3FfiBridge::new(reader)?;
+
+        // Test direct translation with empty cache.
+        let mut cache = HashMap::new();
+        let mut symbols = HashMap::new();
+        let ast = bridge.translate(predicate, &mut cache, &mut symbols)?;
+        let _ = ast;
+        // Exactly DEPTH + 2 unique nodes in cache: x, 600 add nodes, and the eq predicate.
+        assert_eq!(cache.len(), DEPTH + 2);
+
+        // Also test solving the query.
+        let query = make_query(predicate, &[], &arena);
+        let result = bridge.solve(&query);
+        assert_eq!(
+            result.outcome,
+            SolverOutcomeKind::Sat,
+            "reflexive deep DAG equality should solve to SAT"
+        );
+        Ok(())
+    }
+
+    /// Verifies that the iterative translator handles a deeply-nested
+    /// expression DAG (depth > 500) without a stack overflow.
+    ///
+    /// Constructs:  x + 1 + 1 + … + 1  (DEPTH additions)
+    ///
+    /// The expected value of the sum (given x = 0) is `DEPTH`.  We then ask
+    /// Z3 whether the chain equals `DEPTH` — this must be SAT with x = 0
+    /// in the model.
+    ///
+    /// Prior to the iterative rewrite, the recursive translator overflowed
+    /// the test-thread stack well below 500 additions (~40 iterations for a
+    /// ~118-node-per-iteration symbolic loop accumulator).
+    #[test]
+    fn deep_expression_no_stack_overflow() -> Result<(), Box<dyn std::error::Error>> {
+        const DEPTH: u128 = 600;
+
+        let arena = make_arena();
+        // Symbolic variable x (64-bit).
+        let x = make_symbol(&arena, 64, 42);
+        let one = make_const(&arena, 64, 1);
+
+        // Build: x + 1 + 1 + … + 1  (DEPTH ones added left-linearly).
+        let mut acc = x;
+        for _ in 0..DEPTH {
+            acc = make_binop(&arena, ExprOp::Add, 64, acc, one);
+        }
+
+        // The sum equals DEPTH iff x = 0.
+        let expected = make_const(&arena, 64, DEPTH);
+        let predicate = make_eq(&arena, acc, expected);
+
+        let reader: Arc<dyn ExprReader> = arena.clone();
+        let mut bridge = Z3FfiBridge::new(reader)?;
+
+        let query = make_query(predicate, &[], &arena);
+        let result = bridge.solve(&query);
+
+        assert_eq!(
+            result.outcome,
+            SolverOutcomeKind::Sat,
+            "deep expression translate should succeed and be SAT"
+        );
+        // The model must assign x = 0.
+        // The model is keyed by ExprId (the arena-assigned integer for the
+        // symbol node), not the immediate/user-facing symbol id passed to
+        // `make_symbol`.  Use `x.0` (the interned ExprId) as the lookup key.
+        let x_expr_id = u64::from(x.0);
+        let x_val = result.model.iter().find(|(sym, _)| *sym == x_expr_id).map(|(_, v)| {
+            let mut buf = [0u8; 16];
+            let len = v.len().min(16);
+            buf[..len].copy_from_slice(&v[..len]);
+            u128::from_le_bytes(buf)
+        });
+        assert_eq!(x_val, Some(0), "model should assign x = 0 (ExprId={}), got {:?}", x_expr_id, result.model);
         Ok(())
     }
 }

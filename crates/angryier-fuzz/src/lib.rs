@@ -1,9 +1,24 @@
 #![forbid(unsafe_code)]
 
+pub mod corpus;
+pub mod mutator;
+pub mod rng;
+pub mod session;
+
 use std::fmt;
 use std::sync::Mutex;
 
 use angryier_types::{Address, DependencyKey, StateId};
+
+pub use corpus::{CorpusEntry, CorpusId, FuzzCorpus};
+pub use mutator::{
+    arith_u16, arith_u32, arith_u8, block_delete, block_insert, block_replace, flip_bit, flip_byte,
+    flip_four_bits, flip_four_bytes, flip_two_bits, flip_two_bytes, inject_token_insert,
+    inject_token_overwrite, insert_interest_u16, insert_interest_u32, insert_interest_u8, splice,
+    Endianness, Mutator, DEFAULT_MAX_INPUT_SIZE, INTERESTING_16, INTERESTING_32, INTERESTING_8,
+};
+pub use rng::FastRng;
+pub use session::FuzzSession;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FuzzIntegrationStage {
@@ -50,7 +65,9 @@ impl fmt::Display for FuzzError {
         match self {
             Self::Poisoned => f.write_str("fuzz bridge mutex is poisoned"),
             Self::EmptySeed => f.write_str("submitted seed is empty"),
-            Self::StageViolation => f.write_str("operation is not permitted in the current integration stage"),
+            Self::StageViolation => {
+                f.write_str("operation is not permitted in the current integration stage")
+            }
         }
     }
 }
@@ -92,11 +109,17 @@ impl InMemoryFuzzBridge {
     }
 
     pub fn coverage_block_count(&self) -> usize {
-        self.coverage_blocks.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.coverage_blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     pub fn coverage_edge_count(&self) -> usize {
-        self.coverage_edges.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.coverage_edges
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     pub fn hint_count(&self) -> usize {
@@ -121,8 +144,14 @@ impl FuzzBridge for InMemoryFuzzBridge {
         match self.stage {
             FuzzIntegrationStage::SeedsOnly => Err(FuzzError::StageViolation),
             FuzzIntegrationStage::SeedsAndCoverage | FuzzIntegrationStage::Bidirectional => {
-                let mut blocks = self.coverage_blocks.lock().unwrap_or_else(|e| e.into_inner());
-                let mut edges = self.coverage_edges.lock().unwrap_or_else(|e| e.into_inner());
+                let mut blocks = self
+                    .coverage_blocks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let mut edges = self
+                    .coverage_edges
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 blocks.extend(delta.blocks);
                 edges.extend(delta.edges);
                 Ok(())
@@ -132,7 +161,9 @@ impl FuzzBridge for InMemoryFuzzBridge {
 
     fn publish_hint(&self, hint: ConstraintHint) -> Result<(), Self::Error> {
         match self.stage {
-            FuzzIntegrationStage::SeedsOnly | FuzzIntegrationStage::SeedsAndCoverage => Err(FuzzError::StageViolation),
+            FuzzIntegrationStage::SeedsOnly | FuzzIntegrationStage::SeedsAndCoverage => {
+                Err(FuzzError::StageViolation)
+            }
             FuzzIntegrationStage::Bidirectional => {
                 let mut hints = self.hints.lock().unwrap_or_else(|e| e.into_inner());
                 hints.push(hint);
@@ -245,7 +276,10 @@ mod tests {
             bridge
                 .publish_coverage(CoverageDelta {
                     blocks: vec![0x4000],
-                    edges: vec![(0x4000, 0x5000), (0x5000, 0x6000)],
+                    edges: vec![
+                        (0x4000, 0x5000),
+                        (0x5000, 0x6000),
+                    ],
                 })
                 .is_ok()
         );
@@ -273,5 +307,36 @@ mod tests {
     fn default_stage_is_seeds_only() {
         let bridge = InMemoryFuzzBridge::default();
         assert_eq!(bridge.stage(), FuzzIntegrationStage::SeedsOnly);
+    }
+
+    #[test]
+    fn end_to_end_hybrid_fuzz_cycle() -> Result<(), String> {
+        let bridge = InMemoryFuzzBridge::new(FuzzIntegrationStage::Bidirectional);
+        let mut session = FuzzSession::new(bridge);
+
+        let s1 = sample_seed(b"seed_one");
+        let id1 = session.add_seed(s1).map_err(|e| e.to_string())?;
+        assert_eq!(id1, CorpusId(0));
+
+        let batch = session.generate_batch(10);
+        assert_eq!(batch.len(), 10);
+
+        let delta = CoverageDelta {
+            blocks: vec![0x8000],
+            edges: vec![(0x1000, 0x8000)],
+        };
+        let promo = session
+            .record_coverage_result(id1, batch[0].clone(), delta)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(promo, Some(CorpusId(1)));
+
+        let hint = ConstraintHint {
+            canonical_key: DependencyKey([0x55; 32]),
+            target: Some(0x9000),
+        };
+        let hint_id = session.ingest_hint(hint).map_err(|e| e.to_string())?;
+        assert_eq!(hint_id, CorpusId(2));
+        assert_eq!(session.corpus().len(), 3);
+        Ok(())
     }
 }

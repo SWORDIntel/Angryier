@@ -128,6 +128,20 @@ impl SemanticFingerprint {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DependencyKey(pub [u8; 32]);
 
+impl DependencyKey {
+    pub const ZERO: Self = Self([0u8; 32]);
+
+    #[inline]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    #[inline]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FidelityProfile {
     Prove,
@@ -204,8 +218,10 @@ pub struct AnalysisContext {
 /// hash equal). It is NOT collision-resistant: a crafted key stream can
 /// degrade a map to linear probing. Keys here derive from engine-internal
 /// node structure where a collision costs extra probes, never a wrong
-/// answer (`Eq` remains the arbiter), and identity/slicing digests stay on
-/// SHA-256 — never use this hasher where a digest is load-bearing.
+/// answer (`Eq` remains the arbiter), and content-addressed identity digests
+/// (`ContentId`, `SemanticFingerprint`) stay on SHA-256 for cross-boundary
+/// stability — never use this hasher where a digest is load-bearing.
+/// Expression `DependencyKey` derivation uses BLAKE3 (in `angryier-expr`).
 pub mod fx {
     use std::hash::{BuildHasherDefault, Hasher};
 
@@ -284,6 +300,13 @@ mod tests {
 
     use super::fx::FxHasher;
     use super::*;
+
+    #[test]
+    fn dependency_key_helpers() {
+        let key = DependencyKey::from_bytes([42u8; 32]);
+        assert_eq!(key.as_bytes(), &[42u8; 32]);
+        assert_eq!(DependencyKey::ZERO, DependencyKey([0u8; 32]));
+    }
 
     #[test]
     fn content_identity_is_deterministic_and_domain_separated() {

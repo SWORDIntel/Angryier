@@ -89,14 +89,32 @@ pub struct Cfg {
 impl Cfg {
     /// Returns the successors of `block` reachable via static edges.
     pub fn successors(&self, block: &BasicBlock) -> Vec<Address> {
-        let last = match block.instructions.last() {
-            Some(insn) => insn.address,
-            None => return Vec::new(),
-        };
+        let last = block.instructions.last().map(|insn| insn.address);
         self.edges
             .iter()
-            .filter_map(|edge| (edge.from == last).then_some(edge.to).flatten())
+            .filter_map(|edge| {
+                let matches = match last {
+                    Some(last_addr) => edge.from == last_addr || edge.from == block.start,
+                    None => edge.from == block.start,
+                };
+                matches.then_some(edge.to).flatten()
+            })
             .collect()
+    }
+
+    /// Returns the start address of the block containing the given instruction or block address.
+    pub fn block_of_insn(&self, insn: Address) -> Option<Address> {
+        if self.blocks.contains_key(&insn) {
+            return Some(insn);
+        }
+        self.blocks
+            .values()
+            .filter(|bl| {
+                (bl.start..bl.end).contains(&insn)
+                    || bl.instructions.iter().any(|i| i.address == insn)
+            })
+            .map(|bl| bl.start)
+            .max()
     }
 
     /// The nearest static address reachable from BOTH successors of a
@@ -160,22 +178,13 @@ impl Cfg {
             dom.insert(*b, all.clone());
         }
         dom.insert(entry, BTreeSet::from([entry]));
-        // Predecessors from edges (edge.from is the terminating insn addr —
+        // Predecessors from edges (edge.from is the terminating insn addr or block start —
         // map it back to its block).
-        // Overlapping blocks are possible (different entry seeds) — pick the
-        // innermost (highest start) block containing the insn.
-        let block_of_insn = |insn: Address| -> Option<Address> {
-            self.blocks
-                .values()
-                .filter(|bl| bl.instructions.iter().any(|i| i.address == insn))
-                .map(|bl| bl.start)
-                .max()
-        };
         let preds = |b: Address| -> Vec<Address> {
             self.edges
                 .iter()
                 .filter_map(|e| (e.to == Some(b)).then_some(e.from))
-                .filter_map(block_of_insn)
+                .filter_map(|insn| self.block_of_insn(insn))
                 .collect()
         };
         loop {
@@ -237,18 +246,10 @@ impl Cfg {
             }
             b == a
         };
-        let block_of_insn = |insn: Address| -> Option<Address> {
-            self.blocks
-                .values()
-                .filter(|bl| bl.instructions.iter().any(|i| i.address == insn))
-                .map(|bl| bl.start)
-                .max()
-        };
-
         let mut loops = Vec::new();
         let mut seen_edges = BTreeSet::new();
         for edge in &self.edges {
-            let (Some(a), Some(b)) = (block_of_insn(edge.from), edge.to) else {
+            let (Some(a), Some(b)) = (self.block_of_insn(edge.from), edge.to) else {
                 continue;
             };
             if !seen_edges.insert((a, b)) || !dominates(b, a) {
@@ -263,7 +264,7 @@ impl Cfg {
                 }
                 for e in &self.edges {
                     if e.to == Some(n)
-                        && let Some(p) = block_of_insn(e.from)
+                        && let Some(p) = self.block_of_insn(e.from)
                         && p != b
                     {
                         stack.push(p);
@@ -345,16 +346,296 @@ impl Cfg {
     }
 }
 
-/// A natural loop:  dominates ;  is every
+/// A natural loop: `header` dominates everything; `body` is every
 /// block that can reach the back-edge source without passing the header.
+///
+/// This type exposes rich analysis helpers (`exits`, `is_multi_exit`,
+/// `nesting_level`) and is the preferred spelling going forward.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Loop {
+pub struct NaturalLoop {
     /// Loop entry — the back-edge target.
     pub header: Address,
     /// The back edge (source block, header).
     pub back_edge: (Address, Address),
     /// All blocks inside the loop, including the header.
     pub body: Vec<Address>,
+}
+
+impl NaturalLoop {
+    /// All blocks inside `self.body` that have at least one static successor
+    /// **outside** the loop body. Returns the *exiting block* addresses
+    /// (not the landing-pad addresses), sorted ascending without duplicates.
+    pub fn exits(&self, cfg: &Cfg) -> Vec<Address> {
+        let body_set: BTreeSet<Address> = self.body.iter().copied().collect();
+        let mut exits = Vec::new();
+        for &addr in &self.body {
+            let Some(block) = cfg.blocks.get(&addr) else {
+                continue;
+            };
+            if cfg.successors(block).iter().any(|s| !body_set.contains(s)) {
+                exits.push(addr);
+            }
+        }
+        exits.sort_unstable();
+        exits.dedup();
+        exits
+    }
+
+    /// `true` when the loop has more than one exit block.
+    ///
+    /// Multi-exit loops require special handling during Veritesting merge and
+    /// loop-closed SSA construction.
+    pub fn is_multi_exit(&self, cfg: &Cfg) -> bool {
+        self.exits(cfg).len() > 1
+    }
+
+    /// Nesting depth of this loop inside `all_loops` (0 = top-level).
+    ///
+    /// A loop `P` *properly contains* `self` when `self.body ⊆ P.body` and
+    /// `|P.body| > |self.body|`. The depth is the count of such ancestors.
+    pub fn nesting_level(&self, all_loops: &[NaturalLoop]) -> usize {
+        let my_body: BTreeSet<Address> = self.body.iter().copied().collect();
+        all_loops
+            .iter()
+            .filter(|other| {
+                let other_body: BTreeSet<Address> = other.body.iter().copied().collect();
+                my_body.is_subset(&other_body) && other_body.len() > my_body.len()
+            })
+            .count()
+    }
+}
+
+/// Backward-compatible alias for [`NaturalLoop`].
+pub type Loop = NaturalLoop;
+
+// ── Dominator Tree ────────────────────────────────────────────────────────────
+
+/// Pre-computed dominator information for a [`Cfg`].
+///
+/// Constructed via [`Cfg::dominator_tree`]; wraps the `idom` map and exposes
+/// dominance-frontier queries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DominatorTree {
+    /// Immediate-dominator map: `idom[b]` = the unique block that strictly
+    /// dominates `b` and is dominated by all other strict dominators of `b`.
+    /// The entry block has no entry in this map.
+    pub idom: BTreeMap<Address, Address>,
+    /// Entry block of the associated CFG.
+    pub entry: Address,
+}
+
+impl DominatorTree {
+    /// Dominance-frontier set for every block in the CFG.
+    ///
+    /// Uses the classic Cytron et al. (1991) algorithm:
+    ///
+    /// ```text
+    /// for each join point y (block with ≥2 predecessors):
+    ///     for each predecessor p of y:
+    ///         runner = p
+    ///         while runner ≠ idom[y]:
+    ///             DF[runner] ∪= {y}
+    ///             runner = idom[runner]
+    /// ```
+    pub fn dominance_frontiers(&self, cfg: &Cfg) -> BTreeMap<Address, BTreeSet<Address>> {
+        // Predecessor map: block_addr → [pred block addrs].
+        let mut preds: BTreeMap<Address, Vec<Address>> = BTreeMap::new();
+        for addr in cfg.blocks.keys() {
+            preds.entry(*addr).or_default();
+        }
+        for edge in &cfg.edges {
+            let (Some(to), Some(from_block)) = (edge.to, cfg.block_of_insn(edge.from)) else {
+                continue;
+            };
+            if cfg.blocks.contains_key(&to) {
+                let p = preds.entry(to).or_default();
+                if !p.contains(&from_block) {
+                    p.push(from_block);
+                }
+            }
+        }
+
+        let mut df: BTreeMap<Address, BTreeSet<Address>> = BTreeMap::new();
+        for addr in cfg.blocks.keys() {
+            df.entry(*addr).or_default();
+        }
+
+        // Cytron algorithm — iterate over all join points.
+        for (&y, y_preds) in &preds {
+            if y_preds.len() < 2 {
+                continue;
+            }
+            let idom_y = self.idom.get(&y).copied();
+            for &p in y_preds {
+                let mut runner = p;
+                while Some(runner) != idom_y {
+                    df.entry(runner).or_default().insert(y);
+                    match self.idom.get(&runner).copied() {
+                        Some(parent) => runner = parent,
+                        None => break,
+                    }
+                }
+            }
+        }
+        df
+    }
+
+    /// Iterated dominance frontier of `starting_nodes` (DF⁺).
+    ///
+    /// Computes the least fixed point of repeatedly unioning dominance
+    /// frontiers until convergence — the set of blocks that need φ-functions
+    /// for any variable defined in `starting_nodes`.
+    pub fn iterated_dominance_frontier(
+        &self,
+        cfg: &Cfg,
+        starting_nodes: &BTreeSet<Address>,
+    ) -> BTreeSet<Address> {
+        let df = self.dominance_frontiers(cfg);
+        let mut result: BTreeSet<Address> = BTreeSet::new();
+        let mut worklist: Vec<Address> = starting_nodes.iter().copied().collect();
+        while let Some(node) = worklist.pop() {
+            if let Some(frontier) = df.get(&node) {
+                for &y in frontier {
+                    if result.insert(y) {
+                        worklist.push(y);
+                    }
+                }
+            }
+        }
+        result
+    }
+}
+
+// ── Cfg → DominatorTree & Loops ───────────────────────────────────────────────
+
+impl Cfg {
+    /// Build and return a [`DominatorTree`] for this CFG.
+    ///
+    /// This wraps [`Cfg::dominators`] and is the preferred entry point for
+    /// dominance-frontier and iterated-DF queries.
+    pub fn dominator_tree(&self) -> DominatorTree {
+        DominatorTree {
+            idom: self.dominators(),
+            entry: self.entry,
+        }
+    }
+
+    /// Dominance-frontier set for every block in the CFG.
+    pub fn dominance_frontiers(&self) -> BTreeMap<Address, BTreeSet<Address>> {
+        self.dominator_tree().dominance_frontiers(self)
+    }
+
+    /// Iterated dominance frontier of `starting_nodes` (DF⁺).
+    pub fn iterated_dominance_frontier(
+        &self,
+        starting_nodes: &BTreeSet<Address>,
+    ) -> BTreeSet<Address> {
+        self.dominator_tree().iterated_dominance_frontier(self, starting_nodes)
+    }
+
+    /// Build a [`LoopForest`] organizing all natural loops in this CFG into a hierarchy.
+    pub fn loop_forest(&self) -> LoopForest {
+        LoopForest::build(&self.loops())
+    }
+}
+
+// ── Loop Forest ───────────────────────────────────────────────────────────────
+
+/// A node in the [`LoopForest`] tree.
+///
+/// Each node corresponds to one [`NaturalLoop`] and carries its children
+/// (immediately nested loops) and its parent index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoopForestNode {
+    /// The natural loop at this node.
+    pub natural_loop: NaturalLoop,
+    /// Indices into [`LoopForest::nodes`] for immediately-nested child loops.
+    pub children: Vec<usize>,
+    /// Index of the parent node, or `None` for a top-level loop.
+    pub parent: Option<usize>,
+}
+
+/// A forest of natural loops ordered by containment.
+///
+/// Top-level loops (depth 0) are stored in [`LoopForest::roots`]; each node's
+/// `children` list holds the immediately-nested sub-loops.
+///
+/// # Construction
+///
+/// ```ignore
+/// let forest = LoopForest::build(&cfg.loops());
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoopForest {
+    /// All loop nodes in the forest, in discovery order.
+    pub nodes: Vec<LoopForestNode>,
+    /// Indices of top-level (depth-0) loops.
+    pub roots: Vec<usize>,
+}
+
+impl LoopForest {
+    /// Build a [`LoopForest`] from a slice of [`NaturalLoop`]s.
+    ///
+    /// For each loop, finds the tightest enclosing loop (smallest body that is a proper superset)
+    /// as the immediate parent.
+    pub fn build(loops: &[NaturalLoop]) -> Self {
+        if loops.is_empty() {
+            return Self::default();
+        }
+
+        let mut nodes: Vec<LoopForestNode> = loops
+            .iter()
+            .cloned()
+            .map(|natural_loop| LoopForestNode {
+                natural_loop,
+                children: Vec::new(),
+                parent: None,
+            })
+            .collect();
+        let mut roots = Vec::new();
+
+        for i in 0..loops.len() {
+            let my_body: BTreeSet<Address> = loops[i].body.iter().copied().collect();
+            let parent_idx = (0..loops.len())
+                .filter(|&j| {
+                    if j == i {
+                        return false;
+                    }
+                    let other_body: BTreeSet<Address> = loops[j].body.iter().copied().collect();
+                    my_body.is_subset(&other_body) && other_body.len() > my_body.len()
+                })
+                .min_by_key(|&j| loops[j].body.len());
+
+            nodes[i].parent = parent_idx;
+            match parent_idx {
+                Some(p) => nodes[p].children.push(i),
+                None => roots.push(i),
+            }
+        }
+
+        LoopForest { nodes, roots }
+    }
+
+    /// Nesting depth of node `idx` (0 = top-level root).
+    pub fn depth(&self, idx: usize) -> usize {
+        let mut depth = 0usize;
+        let mut cur = self.nodes.get(idx).and_then(|n| n.parent);
+        while let Some(p) = cur {
+            depth += 1;
+            cur = self.nodes.get(p).and_then(|n| n.parent);
+        }
+        depth
+    }
+
+    /// Number of loop nodes in the forest.
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// `true` if the forest contains no loops.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
 }
 
 /// A recovered function: an entry block plus the blocks it owns.
@@ -786,5 +1067,239 @@ mod tests {
         // Each block's idom is its unique predecessor.
         assert!(dom.values().all(|d| *d != 0x1000 || true));
         Ok(())
+    }
+
+    fn make_test_block(start: Address, end: Address, terminator: EdgeKind) -> BasicBlock {
+        BasicBlock {
+            start,
+            end,
+            instructions: Vec::new(),
+            terminator,
+        }
+    }
+
+    #[test]
+    fn dominance_frontiers_diamond() {
+        // Diamond graph:
+        //        A (0x1000)
+        //       / \
+        //      B   C (0x2000, 0x3000)
+        //       \ /
+        //        D (0x4000)
+        //        |
+        //        E (0x5000, exit)
+        let mut blocks = BTreeMap::new();
+        blocks.insert(0x1000, make_test_block(0x1000, 0x1005, EdgeKind::ConditionalTaken));
+        blocks.insert(0x2000, make_test_block(0x2000, 0x2005, EdgeKind::Unconditional));
+        blocks.insert(0x3000, make_test_block(0x3000, 0x3005, EdgeKind::Unconditional));
+        blocks.insert(0x4000, make_test_block(0x4000, 0x4005, EdgeKind::FallThrough));
+        blocks.insert(0x5000, make_test_block(0x5000, 0x5005, EdgeKind::Return));
+
+        let edges = vec![
+            CfgEdge { from: 0x1000, to: Some(0x2000), kind: EdgeKind::ConditionalTaken },
+            CfgEdge { from: 0x1000, to: Some(0x3000), kind: EdgeKind::FallThrough },
+            CfgEdge { from: 0x2000, to: Some(0x4000), kind: EdgeKind::Unconditional },
+            CfgEdge { from: 0x3000, to: Some(0x4000), kind: EdgeKind::Unconditional },
+            CfgEdge { from: 0x4000, to: Some(0x5000), kind: EdgeKind::FallThrough },
+            CfgEdge { from: 0x5000, to: None, kind: EdgeKind::Return },
+        ];
+
+        let cfg = Cfg {
+            entry: 0x1000,
+            blocks,
+            edges,
+        };
+
+        let df = cfg.dominance_frontiers();
+        assert_eq!(df.get(&0x1000), Some(&BTreeSet::new()));
+        assert_eq!(df.get(&0x2000), Some(&BTreeSet::from([0x4000])));
+        assert_eq!(df.get(&0x3000), Some(&BTreeSet::from([0x4000])));
+        assert_eq!(df.get(&0x4000), Some(&BTreeSet::new()));
+        assert_eq!(df.get(&0x5000), Some(&BTreeSet::new()));
+
+        // Iterated dominance frontier of {B}:
+        let idf_b = cfg.iterated_dominance_frontier(&BTreeSet::from([0x2000]));
+        assert_eq!(idf_b, BTreeSet::from([0x4000]));
+
+        // Iterated dominance frontier of {A}:
+        let idf_a = cfg.iterated_dominance_frontier(&BTreeSet::from([0x1000]));
+        assert_eq!(idf_a, BTreeSet::new());
+    }
+
+    #[test]
+    fn iterated_dominance_frontier_convergence() {
+        // Multi-level join graph:
+        // Entry (0x10) -> LoopHeader (0x20)
+        // 0x20 -> Left (0x30) and Right (0x40)
+        // 0x30 -> Join1 (0x50)
+        // 0x40 -> Join1 (0x50)
+        // 0x50 -> LoopHeader (0x20, back-edge) and Exit (0x60)
+        //
+        // Here:
+        // DF(0x30) = {0x50}
+        // DF(0x50) = {0x20}
+        // DF(0x20) = {0x20}
+        //
+        // For starting set {0x30}:
+        // Round 1: adds 0x50
+        // Round 2: adds 0x20
+        // Round 3: 0x20 has DF {0x20}, already present -> converges to {0x20, 0x50}.
+        let mut blocks = BTreeMap::new();
+        blocks.insert(0x10, make_test_block(0x10, 0x15, EdgeKind::FallThrough));
+        blocks.insert(0x20, make_test_block(0x20, 0x25, EdgeKind::ConditionalTaken));
+        blocks.insert(0x30, make_test_block(0x30, 0x35, EdgeKind::Unconditional));
+        blocks.insert(0x40, make_test_block(0x40, 0x45, EdgeKind::Unconditional));
+        blocks.insert(0x50, make_test_block(0x50, 0x55, EdgeKind::ConditionalTaken));
+        blocks.insert(0x60, make_test_block(0x60, 0x65, EdgeKind::Return));
+
+        let edges = vec![
+            CfgEdge { from: 0x10, to: Some(0x20), kind: EdgeKind::FallThrough },
+            CfgEdge { from: 0x20, to: Some(0x30), kind: EdgeKind::ConditionalTaken },
+            CfgEdge { from: 0x20, to: Some(0x40), kind: EdgeKind::FallThrough },
+            CfgEdge { from: 0x30, to: Some(0x50), kind: EdgeKind::Unconditional },
+            CfgEdge { from: 0x40, to: Some(0x50), kind: EdgeKind::Unconditional },
+            CfgEdge { from: 0x50, to: Some(0x20), kind: EdgeKind::ConditionalTaken },
+            CfgEdge { from: 0x50, to: Some(0x60), kind: EdgeKind::FallThrough },
+            CfgEdge { from: 0x60, to: None, kind: EdgeKind::Return },
+        ];
+
+        let cfg = Cfg {
+            entry: 0x10,
+            blocks,
+            edges,
+        };
+
+        let df = cfg.dominance_frontiers();
+        assert_eq!(df.get(&0x30), Some(&BTreeSet::from([0x50])));
+        assert_eq!(df.get(&0x40), Some(&BTreeSet::from([0x50])));
+        assert_eq!(df.get(&0x50), Some(&BTreeSet::from([0x20])));
+        assert_eq!(df.get(&0x20), Some(&BTreeSet::from([0x20])));
+
+        let idf = cfg.iterated_dominance_frontier(&BTreeSet::from([0x30]));
+        assert_eq!(idf, BTreeSet::from([0x20, 0x50]));
+    }
+
+    #[test]
+    fn multi_exit_loop_detection() {
+        // A loop with two exits:
+        // Header (0x10) -> Body1 (0x20) or Exit1 (0x40)
+        // Body1 (0x20) -> Body2 (0x30) or Exit2 (0x50)
+        // Body2 (0x30) -> Header (0x10, back edge)
+        let mut blocks = BTreeMap::new();
+        blocks.insert(0x10, make_test_block(0x10, 0x15, EdgeKind::ConditionalTaken));
+        blocks.insert(0x20, make_test_block(0x20, 0x25, EdgeKind::ConditionalTaken));
+        blocks.insert(0x30, make_test_block(0x30, 0x35, EdgeKind::Unconditional));
+        blocks.insert(0x40, make_test_block(0x40, 0x45, EdgeKind::Return));
+        blocks.insert(0x50, make_test_block(0x50, 0x55, EdgeKind::Return));
+
+        let edges = vec![
+            CfgEdge { from: 0x10, to: Some(0x20), kind: EdgeKind::FallThrough },
+            CfgEdge { from: 0x10, to: Some(0x40), kind: EdgeKind::ConditionalTaken },
+            CfgEdge { from: 0x20, to: Some(0x30), kind: EdgeKind::FallThrough },
+            CfgEdge { from: 0x20, to: Some(0x50), kind: EdgeKind::ConditionalTaken },
+            CfgEdge { from: 0x30, to: Some(0x10), kind: EdgeKind::Unconditional },
+            CfgEdge { from: 0x40, to: None, kind: EdgeKind::Return },
+            CfgEdge { from: 0x50, to: None, kind: EdgeKind::Return },
+        ];
+
+        let cfg = Cfg {
+            entry: 0x10,
+            blocks,
+            edges,
+        };
+
+        let loops = cfg.loops();
+        assert_eq!(loops.len(), 1);
+        let lp = &loops[0];
+        assert_eq!(lp.header, 0x10);
+        assert_eq!(lp.body.len(), 3);
+
+        let exits = lp.exits(&cfg);
+        assert_eq!(exits, vec![0x10, 0x20]);
+        assert!(lp.is_multi_exit(&cfg));
+
+        // Single-exit loop comparison:
+        let single_exit_lp = NaturalLoop {
+            header: 0x10,
+            back_edge: (0x30, 0x10),
+            body: vec![0x10, 0x20, 0x30],
+        };
+        let mut single_exit_edges = cfg.edges.clone();
+        single_exit_edges.retain(|e| !(e.from == 0x20 && e.to == Some(0x50)));
+        let cfg_single = Cfg {
+            entry: 0x10,
+            blocks: cfg.blocks.clone(),
+            edges: single_exit_edges,
+        };
+        assert_eq!(single_exit_lp.exits(&cfg_single), vec![0x10]);
+        assert!(!single_exit_lp.is_multi_exit(&cfg_single));
+    }
+
+    #[test]
+    fn nested_loop_loop_forest() {
+        // Three nested loops plus a disjoint sibling loop:
+        // L1 (outer): body = {0x10, 0x20, 0x30}
+        // L2 (middle): body = {0x20, 0x30}
+        // L3 (inner): body = {0x30}
+        // L4 (sibling): body = {0x50}
+        let l1 = NaturalLoop {
+            header: 0x10,
+            back_edge: (0x30, 0x10),
+            body: vec![0x10, 0x20, 0x30],
+        };
+        let l2 = NaturalLoop {
+            header: 0x20,
+            back_edge: (0x30, 0x20),
+            body: vec![0x20, 0x30],
+        };
+        let l3 = NaturalLoop {
+            header: 0x30,
+            back_edge: (0x30, 0x30),
+            body: vec![0x30],
+        };
+        let l4 = NaturalLoop {
+            header: 0x50,
+            back_edge: (0x50, 0x50),
+            body: vec![0x50],
+        };
+
+        let loops = vec![l1.clone(), l2.clone(), l3.clone(), l4.clone()];
+
+        // Check nesting_level directly:
+        assert_eq!(l1.nesting_level(&loops), 0);
+        assert_eq!(l2.nesting_level(&loops), 1);
+        assert_eq!(l3.nesting_level(&loops), 2);
+        assert_eq!(l4.nesting_level(&loops), 0);
+
+        // Build forest:
+        let forest = LoopForest::build(&loops);
+        assert_eq!(forest.len(), 4);
+        assert!(!forest.is_empty());
+
+        // Roots should be L1 (idx 0) and L4 (idx 3):
+        assert_eq!(forest.roots, vec![0, 3]);
+
+        // Parent-child relationships:
+        // Node 0 (L1): parent None, children [1]
+        assert_eq!(forest.nodes[0].parent, None);
+        assert_eq!(forest.nodes[0].children, vec![1]);
+
+        // Node 1 (L2): parent Some(0), children [2]
+        assert_eq!(forest.nodes[1].parent, Some(0));
+        assert_eq!(forest.nodes[1].children, vec![2]);
+
+        // Node 2 (L3): parent Some(1), children []
+        assert_eq!(forest.nodes[2].parent, Some(1));
+        assert_eq!(forest.nodes[2].children, Vec::<usize>::new());
+
+        // Node 3 (L4): parent None, children []
+        assert_eq!(forest.nodes[3].parent, None);
+        assert_eq!(forest.nodes[3].children, Vec::<usize>::new());
+
+        // Depths:
+        assert_eq!(forest.depth(0), 0);
+        assert_eq!(forest.depth(1), 1);
+        assert_eq!(forest.depth(2), 2);
+        assert_eq!(forest.depth(3), 0);
     }
 }

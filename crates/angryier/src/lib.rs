@@ -513,23 +513,36 @@ impl Session {
     pub fn run(&mut self, options: &RunOptions) -> Result<RunReport, ApiError> {
         let arena = self.arena.clone();
         let mut session = self.session();
-        apply_inputs(&mut session, options)?;
+        if let Err(e) = apply_inputs(&mut session, options) {
+            self.states = std::mem::take(&mut session.states);
+            return Err(e);
+        }
         let policy = ExplorationPolicy {
             find: options.find.clone(),
             avoid: options.avoid.clone(),
             ..ExplorationPolicy::default()
         };
-        let mut backend = Some(new_backend(arena)?);
-        let report = session
-            .run_with_policy(
-                options.steps,
-                options.max_states,
-                backend.as_mut().map(|b| b as &mut dyn angryier_solver::SolverBackend),
-                Duration::from_secs(30),
-                true,
-                &policy,
-            )
-            .map_err(|e| ApiError::Run(format!("run: {e:?}")))?;
+        let mut backend = match new_backend(arena) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                self.states = std::mem::take(&mut session.states);
+                return Err(e);
+            }
+        };
+        let report = match session.run_with_policy(
+            options.steps,
+            options.max_states,
+            backend.as_mut().map(|b| b as &mut dyn angryier_solver::SolverBackend),
+            Duration::from_secs(30),
+            true,
+            &policy,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                self.states = std::mem::take(&mut session.states);
+                return Err(ApiError::Run(format!("run: {e:?}")));
+            }
+        };
         let mut out = RunReport {
             steps: report.steps,
             forks: report.forks,
@@ -635,6 +648,7 @@ fn apply_inputs(
             .process
             .write_register(reg, *value)
             .map_err(|e| ApiError::Run(format!("regs[{name}]: {e:?}")))?;
+        session.states[0].concrete_registers.insert(reg, *value);
     }
     for (addr, value) in &options.poke {
         session.states[0].process.state.memory = session.states[0]
@@ -643,6 +657,16 @@ fn apply_inputs(
             .memory
             .load_concrete(*addr, &value.to_le_bytes())
             .map_err(|e| ApiError::Run(format!("poke: {e:?}")))?;
+        let byte_vals: Vec<_> = value
+            .to_le_bytes()
+            .iter()
+            .copied()
+            .map(angryier_memory::ByteValue::Concrete)
+            .collect();
+        session.states[0]
+            .memory
+            .write_bytes(*addr, &byte_vals)
+            .map_err(|e| ApiError::Run(format!("poke session: {e:?}")))?;
     }
     for (addr, len) in &options.symbolic_memory {
         session

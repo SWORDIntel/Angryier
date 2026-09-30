@@ -2,13 +2,9 @@
 
 use angryier_types::fx::FxHashMap;
 use angryier_types::{DependencyKey, ExprId, ExpressionNormalizationVersion};
-use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeSet,
-    sync::{
-        RwLock,
-        atomic::{AtomicU64, Ordering},
-    },
+use std::sync::{
+    RwLock,
+    atomic::{AtomicU64, Ordering},
 };
 
 const SHARD_BITS: u32 = 6;
@@ -186,6 +182,7 @@ struct ArenaShard {
 
 pub struct ShardedExprArena {
     version: ExpressionNormalizationVersion,
+    prefix: [u8; 22],
     shards: [RwLock<ArenaShard>; SHARD_COUNT],
     requests: AtomicU64,
     hits: AtomicU64,
@@ -194,8 +191,12 @@ pub struct ShardedExprArena {
 
 impl ShardedExprArena {
     pub fn new(version: ExpressionNormalizationVersion) -> Self {
+        let mut prefix = [0u8; 22];
+        prefix[..14].copy_from_slice(b"ANGRYIER\0EXPR\0");
+        prefix[14..22].copy_from_slice(&version.0.to_le_bytes());
         Self {
             version,
+            prefix,
             shards: std::array::from_fn(|_| RwLock::new(ArenaShard::default())),
             requests: AtomicU64::new(0),
             hits: AtomicU64::new(0),
@@ -234,47 +235,131 @@ impl ShardedExprArena {
     }
 
     fn build_dependency(&self, node: &ExprNode) -> Result<DependencySummary, ExprArenaError> {
-        let mut sources = BTreeSet::new();
-        let mut child_keys = Vec::with_capacity(node.operands.len());
-        let mut child_sorts = Vec::with_capacity(node.operands.len());
-        for operand in &node.operands {
-            // Visit one operand at a time so each shard lock is held only
-            // long enough to copy the key/sort and extend the source set —
-            // no record clone (two heap buffers per operand) is needed.
-            let (shard, local) = decode_id(*operand);
-            let shard = self.shards[shard].read().map_err(|_| ExprArenaError::LockPoisoned)?;
-            let record = shard
-                .records
-                .get(local)
-                .ok_or(ExprArenaError::UnknownOperand(*operand))?;
-            sources.extend(&record.dependency.symbolic_sources);
-            child_keys.push(record.dependency.key);
-            child_sorts.push(record.node.sort);
+        let op_count = node.operands.len();
+        if op_count > 3 {
+            return Err(ExprArenaError::InvalidArity {
+                op: node.op,
+                expected: 3,
+                actual: op_count,
+            });
         }
-        validate_sorts(node, &child_sorts)?;
-        if node.op == ExprOp::Symbol {
+
+        let mut child_keys_buf = [DependencyKey([0; 32]); 3];
+        let mut child_sorts_buf = [ExprSort::Bool; 3];
+        let child_keys = &mut child_keys_buf[..op_count];
+        let child_sorts = &mut child_sorts_buf[..op_count];
+
+        let mut child_sources_0 = Vec::new();
+        let mut child_sources_1 = Vec::new();
+        let mut child_sources_2 = Vec::new();
+
+        match op_count {
+            0 => {}
+            1 => {
+                let (shard_idx, local) = decode_id(node.operands[0]);
+                let shard = self.shards[shard_idx].read().map_err(|_| ExprArenaError::LockPoisoned)?;
+                let record = shard
+                    .records
+                    .get(local)
+                    .ok_or(ExprArenaError::UnknownOperand(node.operands[0]))?;
+                child_keys[0] = record.dependency.key;
+                child_sorts[0] = record.node.sort;
+                child_sources_0 = record.dependency.symbolic_sources.clone();
+            }
+            2 => {
+                let (s0, l0) = decode_id(node.operands[0]);
+                let (s1, l1) = decode_id(node.operands[1]);
+                if s0 == s1 {
+                    let shard = self.shards[s0].read().map_err(|_| ExprArenaError::LockPoisoned)?;
+                    let rec0 = shard
+                        .records
+                        .get(l0)
+                        .ok_or(ExprArenaError::UnknownOperand(node.operands[0]))?;
+                    child_keys[0] = rec0.dependency.key;
+                    child_sorts[0] = rec0.node.sort;
+                    child_sources_0 = rec0.dependency.symbolic_sources.clone();
+
+                    let rec1 = shard
+                        .records
+                        .get(l1)
+                        .ok_or(ExprArenaError::UnknownOperand(node.operands[1]))?;
+                    child_keys[1] = rec1.dependency.key;
+                    child_sorts[1] = rec1.node.sort;
+                    child_sources_1 = rec1.dependency.symbolic_sources.clone();
+                } else {
+                    {
+                        let shard0 = self.shards[s0].read().map_err(|_| ExprArenaError::LockPoisoned)?;
+                        let rec0 = shard0
+                            .records
+                            .get(l0)
+                            .ok_or(ExprArenaError::UnknownOperand(node.operands[0]))?;
+                        child_keys[0] = rec0.dependency.key;
+                        child_sorts[0] = rec0.node.sort;
+                        child_sources_0 = rec0.dependency.symbolic_sources.clone();
+                    }
+                    {
+                        let shard1 = self.shards[s1].read().map_err(|_| ExprArenaError::LockPoisoned)?;
+                        let rec1 = shard1
+                            .records
+                            .get(l1)
+                            .ok_or(ExprArenaError::UnknownOperand(node.operands[1]))?;
+                        child_keys[1] = rec1.dependency.key;
+                        child_sorts[1] = rec1.node.sort;
+                        child_sources_1 = rec1.dependency.symbolic_sources.clone();
+                    }
+                }
+            }
+            _ => {
+                for (i, &operand) in node.operands.iter().enumerate() {
+                    let (shard_idx, local) = decode_id(operand);
+                    let shard = self.shards[shard_idx].read().map_err(|_| ExprArenaError::LockPoisoned)?;
+                    let record = shard
+                        .records
+                        .get(local)
+                        .ok_or(ExprArenaError::UnknownOperand(operand))?;
+                    child_keys[i] = record.dependency.key;
+                    child_sorts[i] = record.node.sort;
+                    match i {
+                        0 => child_sources_0 = record.dependency.symbolic_sources.clone(),
+                        1 => child_sources_1 = record.dependency.symbolic_sources.clone(),
+                        _ => child_sources_2 = record.dependency.symbolic_sources.clone(),
+                    }
+                }
+            }
+        }
+
+        validate_sorts(node, child_sorts)?;
+
+        let symbolic_sources = if node.op == ExprOp::Symbol {
             let bytes: [u8; 8] = node
                 .immediate
                 .as_slice()
                 .try_into()
                 .map_err(|_| ExprArenaError::InvalidImmediate)?;
-            sources.insert(u64::from_le_bytes(bytes));
-        }
+            vec![u64::from_le_bytes(bytes)]
+        } else {
+            match op_count {
+                0 => Vec::new(),
+                1 => child_sources_0,
+                2 => merge_sorted_sources(&child_sources_0, &child_sources_1),
+                _ => {
+                    let m01 = merge_sorted_sources(&child_sources_0, &child_sources_1);
+                    merge_sorted_sources(&m01, &child_sources_2)
+                }
+            }
+        };
 
-        let mut hasher = Sha256::new();
-        hasher.update(b"ANGRYIER\0EXPR\0");
-        hasher.update(self.version.0.to_le_bytes());
-        encode_sort(&mut hasher, node.sort);
-        hasher.update([op_tag(node.op)]);
-        hasher.update((node.immediate.len() as u64).to_le_bytes());
-        hasher.update(&node.immediate);
-        hasher.update((child_keys.len() as u64).to_le_bytes());
-        for key in child_keys {
-            hasher.update(key.0);
-        }
+        let key = compute_dependency_key(
+            &self.prefix,
+            node.sort,
+            node.op,
+            &node.immediate,
+            child_keys,
+        );
+
         Ok(DependencySummary {
-            key: DependencyKey(hasher.finalize().into()),
-            symbolic_sources: sources.into_iter().collect(),
+            key,
+            symbolic_sources,
         })
     }
 
@@ -889,38 +974,133 @@ fn is_commutative(op: ExprOp) -> bool {
     )
 }
 
-fn encode_sort(hasher: &mut Sha256, sort: ExprSort) {
+#[inline]
+fn encode_sort_into(buf: &mut [u8], sort: ExprSort) -> usize {
     match sort {
         ExprSort::BitVec(bits) => {
-            hasher.update([0]);
-            hasher.update(bits.to_le_bytes());
+            buf[0] = 0;
+            buf[1..3].copy_from_slice(&bits.to_le_bytes());
+            3
         }
         ExprSort::Float {
             exponent_bits,
             significand_bits,
         } => {
-            hasher.update([1, exponent_bits, significand_bits]);
+            buf[0] = 1;
+            buf[1] = exponent_bits;
+            buf[2] = significand_bits;
+            3
         }
-        ExprSort::Bool => hasher.update([2]),
+        ExprSort::Bool => {
+            buf[0] = 2;
+            1
+        }
         ExprSort::Vector { lanes, lane_bits } => {
-            hasher.update([3]);
-            hasher.update(lanes.to_le_bytes());
-            hasher.update(lane_bits.to_le_bytes());
+            buf[0] = 3;
+            buf[1..3].copy_from_slice(&lanes.to_le_bytes());
+            buf[3..5].copy_from_slice(&lane_bits.to_le_bytes());
+            5
         }
         ExprSort::Opmask(bits) => {
-            hasher.update([4]);
-            hasher.update(bits.to_le_bytes());
+            buf[0] = 4;
+            buf[1..3].copy_from_slice(&bits.to_le_bytes());
+            3
         }
         ExprSort::Tile {
             rows,
             bytes_per_row,
             element_bits,
         } => {
-            hasher.update([5, rows]);
-            hasher.update(bytes_per_row.to_le_bytes());
-            hasher.update(element_bits.to_le_bytes());
+            buf[0] = 5;
+            buf[1] = rows;
+            buf[2..4].copy_from_slice(&bytes_per_row.to_le_bytes());
+            buf[4..6].copy_from_slice(&element_bits.to_le_bytes());
+            6
         }
     }
+}
+
+#[inline]
+fn compute_dependency_key(
+    prefix: &[u8; 22],
+    sort: ExprSort,
+    op: ExprOp,
+    immediate: &[u8],
+    child_keys: &[DependencyKey],
+) -> DependencyKey {
+    let imm_len = immediate.len();
+    let child_count = child_keys.len();
+    let total_len = 22 + 6 + 1 + 8 + imm_len + 8 + child_count * 32;
+    if total_len <= 256 {
+        let mut buf = [0u8; 256];
+        buf[..22].copy_from_slice(prefix);
+        let mut cursor = 22;
+        cursor += encode_sort_into(&mut buf[cursor..], sort);
+        buf[cursor] = op as u8;
+        cursor += 1;
+        buf[cursor..cursor + 8].copy_from_slice(&(imm_len as u64).to_le_bytes());
+        cursor += 8;
+        buf[cursor..cursor + imm_len].copy_from_slice(immediate);
+        cursor += imm_len;
+        buf[cursor..cursor + 8].copy_from_slice(&(child_count as u64).to_le_bytes());
+        cursor += 8;
+        for key in child_keys {
+            buf[cursor..cursor + 32].copy_from_slice(&key.0);
+            cursor += 32;
+        }
+        let hash = blake3::hash(&buf[..cursor]);
+        DependencyKey(*hash.as_bytes())
+    } else {
+        let mut bytes = Vec::with_capacity(total_len);
+        bytes.extend_from_slice(prefix);
+        let mut sort_buf = [0u8; 8];
+        let sort_len = encode_sort_into(&mut sort_buf, sort);
+        bytes.extend_from_slice(&sort_buf[..sort_len]);
+        bytes.push(op as u8);
+        bytes.extend_from_slice(&(imm_len as u64).to_le_bytes());
+        bytes.extend_from_slice(immediate);
+        bytes.extend_from_slice(&(child_count as u64).to_le_bytes());
+        for key in child_keys {
+            bytes.extend_from_slice(&key.0);
+        }
+        let hash = blake3::hash(&bytes);
+        DependencyKey(*hash.as_bytes())
+    }
+}
+
+#[inline]
+fn merge_sorted_sources(s0: &[u64], s1: &[u64]) -> Vec<u64> {
+    if s0.is_empty() {
+        return s1.to_vec();
+    }
+    if s1.is_empty() {
+        return s0.to_vec();
+    }
+    if s0 == s1 {
+        return s0.to_vec();
+    }
+    let mut merged = Vec::with_capacity(s0.len() + s1.len());
+    let (mut i, mut j) = (0, 0);
+    while i < s0.len() && j < s1.len() {
+        match s0[i].cmp(&s1[j]) {
+            std::cmp::Ordering::Less => {
+                merged.push(s0[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(s1[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                merged.push(s0[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&s0[i..]);
+    merged.extend_from_slice(&s1[j..]);
+    merged
 }
 
 fn op_tag(op: ExprOp) -> u8 {
@@ -1585,54 +1765,56 @@ mod tests {
 
     /// Independent re-derivation of the dependency-key recipe. The arena's
     /// `DependencyKey` value feeds canonical solver-query identity, so the
-    /// exact byte stream handed to SHA-256 is pinned here: any change to when
+    /// exact byte stream handed to BLAKE3 is pinned here: any change to when
     /// or how the key is computed must keep these bytes identical.
     fn expected_key(version: u64, node: &ExprNode, child_keys: &[DependencyKey]) -> DependencyKey {
-        fn encode_sort(hasher: &mut Sha256, sort: ExprSort) {
+        fn encode_sort(hasher: &mut blake3::Hasher, sort: ExprSort) {
             match sort {
                 ExprSort::BitVec(bits) => {
-                    hasher.update([0]);
-                    hasher.update(bits.to_le_bytes());
+                    hasher.update(&[0]);
+                    hasher.update(&bits.to_le_bytes());
                 }
                 ExprSort::Float {
                     exponent_bits,
                     significand_bits,
                 } => {
-                    hasher.update([1, exponent_bits, significand_bits]);
+                    hasher.update(&[1, exponent_bits, significand_bits]);
                 }
-                ExprSort::Bool => hasher.update([2]),
+                ExprSort::Bool => {
+                    hasher.update(&[2]);
+                }
                 ExprSort::Vector { lanes, lane_bits } => {
-                    hasher.update([3]);
-                    hasher.update(lanes.to_le_bytes());
-                    hasher.update(lane_bits.to_le_bytes());
+                    hasher.update(&[3]);
+                    hasher.update(&lanes.to_le_bytes());
+                    hasher.update(&lane_bits.to_le_bytes());
                 }
                 ExprSort::Opmask(bits) => {
-                    hasher.update([4]);
-                    hasher.update(bits.to_le_bytes());
+                    hasher.update(&[4]);
+                    hasher.update(&bits.to_le_bytes());
                 }
                 ExprSort::Tile {
                     rows,
                     bytes_per_row,
                     element_bits,
                 } => {
-                    hasher.update([5, rows]);
-                    hasher.update(bytes_per_row.to_le_bytes());
-                    hasher.update(element_bits.to_le_bytes());
+                    hasher.update(&[5, rows]);
+                    hasher.update(&bytes_per_row.to_le_bytes());
+                    hasher.update(&element_bits.to_le_bytes());
                 }
             }
         }
-        let mut hasher = Sha256::new();
+        let mut hasher = blake3::Hasher::new();
         hasher.update(b"ANGRYIER\0EXPR\0");
-        hasher.update(version.to_le_bytes());
+        hasher.update(&version.to_le_bytes());
         encode_sort(&mut hasher, node.sort);
-        hasher.update([node.op as u8]);
-        hasher.update((node.immediate.len() as u64).to_le_bytes());
+        hasher.update(&[node.op as u8]);
+        hasher.update(&(node.immediate.len() as u64).to_le_bytes());
         hasher.update(&node.immediate);
-        hasher.update((child_keys.len() as u64).to_le_bytes());
+        hasher.update(&(child_keys.len() as u64).to_le_bytes());
         for key in child_keys {
-            hasher.update(key.0);
+            hasher.update(&key.0);
         }
-        DependencyKey(hasher.finalize().into())
+        DependencyKey(*hasher.finalize().as_bytes())
     }
 
     #[test]

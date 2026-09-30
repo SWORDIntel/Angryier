@@ -61,6 +61,10 @@ pub mod form_map;
 pub mod script;
 
 pub mod function_summaries;
+pub mod pipeline_speculation;
+pub mod speculative_summary;
+pub mod speculative_fork;
+pub mod speculative_concolic;
 
 /// Default stack size in bytes (64 KiB).
 const STACK_SIZE: u64 = 0x1_0000;

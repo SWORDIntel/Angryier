@@ -47,5 +47,9 @@ angryier-solver-fuzzy = { path = "../angryier-solver-fuzzy" }
 name = "concolic_prof"
 required-features = ["xed"]
 
+[[test]]
+name = "string_io_runtime"
+required-features = ["xed"]
+
 [lints]
 workspace = true

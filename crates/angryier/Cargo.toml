@@ -7,6 +7,7 @@ description = "Stable public library API for the Angryier dual-mode analysis eng
 
 [dependencies]
 angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
+angryier-memory = { path = "../angryier-memory" }
 angryier-arch-xed-ffi = { path = "../angryier-arch-xed-ffi" }
 angryier-expr = { path = "../angryier-expr" }
 angryier-ir = { path = "../angryier-ir" }

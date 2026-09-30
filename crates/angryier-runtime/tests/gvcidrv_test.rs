@@ -1,3 +1,4 @@
+#![cfg(feature = "xed")]
 // Quick test: load a real signed driver with actual kernel imports
 // and see how far execution gets
 #[test]

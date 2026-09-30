@@ -1,15 +1,21 @@
 #![forbid(unsafe_code)]
 
 pub mod alpha;
+pub mod speculative_batch;
 
 pub use alpha::{AlphaKey, AlphaReuseConfig, AlphaReuseStats, alpha_key};
+pub use speculative_batch::{
+    BatchCoordinatorConfig, BatchPartition, BatchSolvePlan, BranchId, BranchWaiter,
+    SpeculativeAssertion, SpeculativeBatchCoordinator, SpeculativeBatchMetrics,
+    SpeculativeConstraintBatch,
+};
+pub type SolverPortfolio = BatchSolver;
 use angryier_expr::ExprReader;
 pub use angryier_types::SolverOutcomeKind;
 use angryier_types::{
     ConstraintCanonicalizationVersion, ConstraintId, DependencyKey, ExprId, SolverQueryId, TargetProfileId,
 };
 use core::time::Duration;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{
@@ -640,16 +646,16 @@ fn derive_query_key(
     normalized_constraints.sort_unstable();
     normalized_constraints.dedup();
 
-    let mut hasher = Sha256::new();
+    let mut hasher = blake3::Hasher::new();
     hasher.update(b"ANGRYIER\0SOLVER-QUERY\0");
-    hasher.update(version.0.to_le_bytes());
-    hasher.update(target_profile.0.to_le_bytes());
-    hasher.update((normalized_constraints.len() as u64).to_le_bytes());
+    hasher.update(&version.0.to_le_bytes());
+    hasher.update(&target_profile.0.to_le_bytes());
+    hasher.update(&(normalized_constraints.len() as u64).to_le_bytes());
     for key in normalized_constraints {
-        hasher.update(key.0);
+        hasher.update(&key.0);
     }
-    hasher.update(predicate_key.0);
-    DependencyKey(hasher.finalize().into())
+    hasher.update(&predicate_key.0);
+    DependencyKey(*hasher.finalize().as_bytes())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -780,12 +786,12 @@ impl CrossCheckPolicy {
         if self.sample_rate >= 1.0 {
             return true;
         }
-        let mut hasher = Sha256::new();
+        let mut hasher = blake3::Hasher::new();
         hasher.update(b"ANGRYIER\0CROSS-CHECK\0");
-        hasher.update(query.canonical_key().0);
-        hasher.update(query.id().0.to_le_bytes());
+        hasher.update(&query.canonical_key().0);
+        hasher.update(&query.id().0.to_le_bytes());
         let digest = hasher.finalize();
-        let val = u32::from_le_bytes([digest[0], digest[1], digest[2], digest[3]]);
+        let val = u32::from_le_bytes([digest.as_bytes()[0], digest.as_bytes()[1], digest.as_bytes()[2], digest.as_bytes()[3]]);
         let fraction = f64::from(val) / f64::from(u32::MAX);
         fraction < self.sample_rate
     }
@@ -2075,9 +2081,7 @@ mod tests {
             }
             // Full-width constraint keys (a repeated byte gives only 256
             // distinct canonical keys — not enough for a 44-key shard).
-            let mut hasher = Sha256::new();
-            hasher.update(seed.to_le_bytes());
-            let key: [u8; 32] = hasher.finalize().into();
+            let key: [u8; 32] = *blake3::hash(&seed.to_le_bytes()).as_bytes();
             let varied = CanonicalConstraint {
                 id: ConstraintId(seed),
                 key: DependencyKey(key),
@@ -2605,7 +2609,12 @@ mod tests {
         );
 
         let base = template_query(&arena, 0, 3)?;
-        let renamed = template_query(&arena, 9, 3)?;
+        let mut renamed_offset = 1;
+        let mut renamed = template_query(&arena, renamed_offset, 3)?;
+        while renamed.canonical_key().0[31].is_multiple_of(2) == base.canonical_key().0[31].is_multiple_of(2) {
+            renamed_offset += 1;
+            renamed = template_query(&arena, renamed_offset, 3)?;
+        }
         let base_outcome = backend.solve(&base).outcome;
         let renamed_outcome = backend.solve(&renamed).outcome;
         assert_eq!(calls.load(Ordering::Relaxed), 2, "both queries solved exactly");

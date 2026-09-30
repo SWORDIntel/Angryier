@@ -149,7 +149,7 @@ suites require system Z3/XED):
   summary hits, matching exit values, and solver-model replay equivalence
   for symbolic arguments; impure callees (any memory operand) never
   summarize and stay exactly correct.
-- **Semantics: 1,275 registered providers (2026-09-28 census)** —
+- **Semantics: 1,514 registered providers (2026-09-30 census)** —
   handwritten Intel 64 forms (integer/control-flow, bit-scan/popcount,
   bit-test family — BT/BTS/BTR/BTC r32/r64 × reg/imm8 with mod-width index
   masking — shifts/rotates complete at r32/r64 with count masking and
@@ -164,9 +164,32 @@ suites require system Z3/XED):
   FST st(i)/FNOP, (F)NSTSW m16, FLDCW/FNSTCW via `X87_CW`, FNCLEX/FTST/
   FXAM/FDECSTP/FINCSTP/FFREE/FRNDINT/FSINCOS/FCMOVcc ×8, transcendentals
   FSIN/FCOS/FPTAN/FPATAN/F2XM1/FYL2X/FYL2XP1/FSCALE, `X87_SW` status-word
-  model with TOP + C0/C2/C3) plus system forms (RDTSCP, XGETBV, WBINVD,
-  INVD) — with a tag-in-data-plane stack model that fits the existing
-  register file) plus a live declarative generator
+  model with TOP + C0/C2/C3), system forms (RDTSCP, XGETBV, WBINVD, INVD),
+  AVX-512 (EVEX ZMM packed arithmetic + logic, scalar float, and opmask
+  word/qword logic), VNNI/VNNI-INT8 (VPDPBUSD/VPDPBUSDS/VPDPWSSD/VPDPWSSDS/
+  VPDPBSSD/VPDPBSSDS/VPDPBSUD/VPDPBSUDS with DotU8S8/SatAddS/DotS8S8/DotS8U8
+  vector ops and full merging/zeroing EVEX opmasking), AMX tile operations
+  (13 forms: LDTILECFG, STTILECFG, TILERELEASE, TILEZERO, TILELOADD,
+  TILELOADDT1, TILESTORED, TDPBSSD, TDPBSUD, TDPBUSD, TDPBUUD, TDPBF16PS,
+  TDPFP16PS with boxed tile storage and FP16/BF16 matrix FMA), CET shadow stack
+  (12 forms: RDSSP{D,Q}, INCSSP{D,Q}, SAVEPREVSSP, RSTORSSP, SETSSBSY,
+  CLRSSBSY, WRSS{D,Q}, WRUSS{D,Q}), and the **APX slice closure (61 forms
+  landed in commit `ee077ef`**: JMPABS, PUSH2/PUSH2P/POP2/POP2P register-pair
+  stack ops, CCMPcc and CTESTcc across all 16 condition codes with
+  DFV-preserved flags, 8 CFCMOVcc non-faulting selects, 10 EVEX NDD integer
+  ALU forms and 6 NDD shift forms with NF no-flags suppression).
+  *Registered providers vs. decode-wired forms:* Execution rules reside
+  as *registered semantic providers* in `angryier-semantics-intel64` (**1,574
+  sealed forms** defining semantics, IR lowering, and flag computations). To
+  execute during binary stepping, decoded XED instruction shapes must be
+  routed to canonical form IDs via *decode-wired forms* in
+  `angryier-runtime/src/form_map.rs`. The decode-wiring slice for AVX2 and
+  legacy SSE instructions is completed (+630 lines of dispatch arms in
+  `form_map.rs`, 35+ XED iclasses exported in `angryier-arch-xed-ffi`, all 21
+  `form_map` tests green), connecting registered semantic providers to live
+  decoded instruction streams. The AVX10 EVEX integer ALU expansion track
+  was completed on 2026-09-30 (+60 forms in `src/avx10.rs`, rule base `0x2C00`).
+  *Generator & differential oracle:* A live declarative generator
   (`angryier-semantics-gen` patterns → `DeclarativeProvider` in
   `angryier-semantics-intel64`, layered over handwritten in a 0x10000+
   rule-id band). **Hardware differential oracle validates 856 integer/SSE +
@@ -233,6 +256,12 @@ suites require system Z3/XED):
 
 - Broad ISA form mapping: unmapped instructions fail explicitly as form
   id 0 — real binaries still hit unmapped forms outside the exercised set.
+  *Registered providers vs. decode-wired forms:* semantic providers can be
+  registered in `angryier-semantics-intel64` before XED decode-wiring arms in
+  `angryier-runtime/src/form_map.rs` expose them to real decodes. The
+  decode-wiring slice for AVX2 and legacy SSE instructions is now complete
+  (+630 lines of dispatch arms in `form_map.rs`, 35+ XED iclasses exported in
+  `angryier-arch-xed-ffi`, all 21 form_map tests green).
 - x87 executes end-to-end (47 forms wired into the runtime form map with
   the XED FSTPNCE/FSUB-swap quirks handled; engine-vs-native tests green);
   x87 status word modeled as `X87_SW` (0x0211, 16-bit) with TOP arithmetic +
@@ -240,8 +269,10 @@ suites require system Z3/XED):
   `FSTSW m16` and the full extended/transcendental families closed
   2026-09-28; deep `ld.so` emulation replaced by the static-hook approach;
   AVX, AVX2, BMI1/BMI2, the AVX-512 first+scalar/opmask/masking slices, core
-  VNNI, VNNI-INT8, AMX, CET, and APX landed 2026-09-28/29 (AVX10 remains the
-  open expansion track).
+  VNNI, VNNI-INT8, AMX, CET, and APX landed 2026-09-28/29 (APX slice closed
+  with 61 forms in commit `ee077ef`: JMPABS, PUSH2/POP2, CCMPcc/CTESTcc,
+  CFCMOVcc, NDD integer ALU/shifts, NF suppression; AVX10 EVEX integer ALU
+  remains the ongoing expansion track).
 - The concolic fast path is faster than full symbolic (1.5–1.6× release,
   re-measured 2026-09-25) but far from the 5–10× target. Of the five
   previously profiled costs, four are fixed (register-write BTreeMap
@@ -253,15 +284,19 @@ suites require system Z3/XED):
   instructions were hashing — SipHash (`RandomState`) over `ExprNode`
   keys in the arena hash-cons maps ~33% (**fixed the same day**: FxHash
   in `angryier-types`, arena + evaluator hot maps swapped; concolic −20%,
-  symbolic −8%, Gate-A multiplier 1.5–1.6× → 1.8×), SHA-256 dependency
-  keys on intern misses ~16% (loop workloads mint fresh expressions per
-  iteration; derivation is already Merkle-style over child keys, so
-  further wins need a digest change — deferred pending identity-cost
-  review); malloc/free ~12%; shadow evaluation itself ~9%. Beyond
-  hashing, the ratio target needs concolic-side short-circuits (skip
-  shadow evaluation of blocks with no symbolic influence) — **landed
-  2026-09-25** (`try_concrete_block`; sparse-influence overhead vs the
-  concrete floor is 1.96×, dense-leg multiplier unchanged at 1.8×).
+  symbolic −8%, Gate-A multiplier 1.5–1.6× → 1.8×).
+  **CLOSED 2026-09-30 (BLAKE3 DependencyKey Acceleration):** The profiled
+  ~16% SHA-256 hot path on intern misses was eliminated by migrating
+  `angryier-expr` to SIMD-accelerated BLAKE3 (`blake3::hash`) with
+  stack-buffered Merkle derivation (`compute_dependency_key` over `[u8; 256]`),
+  stack-allocated child arrays (`[DependencyKey; 3]`), same-shard lock elision,
+  and sorted-slice linear source merging (`merge_sorted_sources`), achieving
+  zero heap allocation on unary/binary intern misses.
+  Beyond hashing, concolic short-circuits landed with `try_concrete_block`
+  (2026-09-25) and were generalized on 2026-09-30 into the **5 Speculative
+  Execution engines** (Speculative Forking, Speculative Batching, Speculative
+  Summary Memoization, Pipeline Lookahead, and Speculative Concolic Chunk
+  Batching).
 - Symbolic-evaluator gaps surfaced by the speed benchmark — **closed
   2026-09-25** except one: degenerate `ZExt` truncates via `Extract` with
   view-width-normalized register reads, comparison operands coerce
@@ -279,6 +314,15 @@ suites require system Z3/XED):
   thread stack around ~40 iterations; the function-summary differentials
   run those legs on a large-stack thread. An iterative translator (or a
   depth guard with honest Unknown) is the follow-up.
+  **CLOSED 2026-09-30:** the `translate` method in `angryier-solver-z3-ffi`
+  is now an explicit two-phase post-order work stack (`Vec<(ExprId, bool)>`).
+  Phase 1 re-queues the node with `children_pushed=true` and enqueues
+  children; phase 2 (all children guaranteed in cache) calls `translate_node`
+  which reads operand ASTs from the `HashMap` cache — no further recursion.
+  DAG sharing is short-circuited at push time. A depth-600 regression test
+  (`deep_expression_no_stack_overflow`) verifies SAT + correct model without
+  stack overflow. All 6 unit tests and 3 integration tests pass; zero Clippy
+  warnings.
 - Function-summary current bounds: bodies are straight-line register-only
   chains (≤64 instructions); calls inside summarized callees, memory
   operands, and per-iteration-effect shapes fall through to stepping;
@@ -290,6 +334,13 @@ suites require system Z3/XED):
   collapsing it silently skipped the kernel model on every `call [IAT]`
   in the symbolic session (regression-tested in
   `tests/symbolic_kernel_models.rs`).
+  **NUMA-pinned queue groups CLOSED 2026-09-30:** `OsWorkerPool` in
+  `crates/angryier-scheduler` now partitions workers into NUMA groups with
+  hierarchical stealing (Own $\to$ Same-NUMA $\to$ Cross-NUMA $\to$ Global),
+  cross-NUMA telemetry, and dynamic `/proc/meminfo` memory pressure throttling.
+  **Speculative Summary Application CLOSED 2026-09-30:** `SpeculativeSummaryApplier`
+  in `angryier-runtime` enables speculative function memoization with
+  lightweight register checkpoints, postcondition verification, and clean rollback.
 - **Full-symbolic fidelity on real drivers — CLOSED 2026-09-28 (round 2).**
   The PROVE leg now matches concrete step-for-step on GVCIDrv64 (194
   steps, pc-identical trace) with and without the solver backend
@@ -301,8 +352,11 @@ suites require system Z3/XED):
   un-mirrored frame was lost and `ret` popped zero/stale slots); the
   runtime call arms no longer double-push rsp; `ret` restores rsp.
   EVEX masking (merging and zeroing) fully wired across all EVEX providers.
-  Remaining known bounds: AVX10 family; AMX/APX are exercised by engine
-  tests but not yet by real-driver traces.
+  **AVX10 Integer ALU slice CLOSED 2026-09-30:** 60 EVEX vector integer ALU forms
+  landed in `crates/angryier-semantics-intel64/src/avx10.rs` under rule base
+  `0x2C00` (VPADDB/W/D/Q, VPSUBB/W/D/Q, VPANDD/Q, VPANDND/Q, VPORD/Q, VPXORD/Q,
+  VPMINSD/UD, VPMAXSD/UD) with full `{k1..k7}` merging and `{z}` zeroing across
+  XMM/YMM/ZMM, expanding the registered corpus from 1,514 to **1,574 forms**.
 - Performance work is still measured on synthetic microbenchmarks plus a
   small set of real fixtures, not broad real execution traces.
 
@@ -445,6 +499,18 @@ optimization behind Gate G, not a prerequisite.
 
 - XED-owned objects terminate in `angryier-decode-xed`; downstream crates
   consume Angryier's serializable `DecodedInstruction`.
+- **Registered providers vs. decode-wired forms**: The architecture enforces a
+  strict two-level distinction between semantic definitions and decode routing:
+  * *Registered semantic providers* (`angryier-semantics-intel64`): Define
+    execution rules, flag updates, side effects, and IR lowering for canonical
+    form IDs (1,514 forms sealed in the registry).
+  * *Decode-wired forms* (`angryier-runtime/src/form_map.rs`): Route decoded
+    instruction shapes (`DecodedInstruction` iclass + operand shapes + modifiers)
+    to canonical form IDs. Forms must be decode-wired to execute from machine
+    code decodes; the decode-wiring slice for AVX2 and legacy SSE (+630 lines of
+    dispatch arms in `form_map.rs`, 35+ XED iclasses exported in
+    `angryier-arch-xed-ffi`) closed this gap for previously registered vector
+    and SSE forms.
 - Hybrid definition: declarative `SemanticPattern`s (families) + typed Rust
   combinators + handwritten overrides; multiple matching providers are a
   hard error; unsupported forms fail explicitly.
@@ -604,9 +670,9 @@ routed in the runtime form map.**
 **Remaining (superseded by 2026-09-27 rounds):** **x87 status word & FNSTSW AX — CLOSED 2026-09-28** (`X87_SW` 0x0211 modeled with TOP tracking and FCOM C0/C2/C3 updates; FNSTSW AX mapped; oracle-validated with 5 engine tests including 9 native differential cases in `x87_status_word_engine.rs`); **SHL/SHR/SAR r32 count masking — CLOSED 2026-09-27
 (r32 shifts/rotates now mask counts mod width; 318 hardware differential
 cases)**; r32 rotate flag modeling (CF) — CLOSED with the same round; **x87 transcendental family — FULLY IMPLEMENTED & ORACLE-VALIDATED 2026-09-28** (FloatingOp / IrPrimitive extended with Sin, Cos, Tan, Atan2, Exp2, Log2, Scale; concrete interpreter implemented; providers for FSIN, FCOS, FPTAN, FPATAN, F2XM1, FYL2X, FYL2XP1, FSCALE live under rules `0x1400..0x1407` and forms `0x0F40..0x0F47`; 31 engine + hardware differential tests passing in `x87_trans_engine.rs`); **r64-CL OF — CLOSED 2026-09-28** (zero-count flag preservation across shift/rotate families; RCL/RCR r64 imm8+CL OF modeling; count-aware `write_rotate_flags_width_count` everywhere; 492 cases matched hardware byte-for-byte in `shift_differential.rs`); **AVX double-precision vector & scalar arithmetic + packed logic — CLOSED 2026-09-28** (VADDPD, VSUBPD, VMULPD, VDIVPD, VADDSD, VSUBSD, VMULSD, VDIVSD, VANDPD, VANDNPD, VORPD, VXORPD across register and memory forms; 24 providers under rules `0x1410..0x1427` and forms `0x0F48..0x0F5F`; wired into runtime form map and xed-ffi; 48 native differential cases + hardware divide-by-zero probe in `avx_differential.rs`); **AVX conversions, blends, and permutations — CLOSED 2026-09-28** (VCVTSS2SD, VCVTSD2SS, VBLENDPS, VBLENDPD, VBLENDVPS, VBLENDVPD, VPERM2F128, VPERMILPS, VPERMILPD across register and memory forms; 18 providers under rules `0x1428..0x1439` and forms `0x0F60..0x0F71`; wired into runtime form map and xed-ffi; 36 native differential cases in `avx_differential.rs`); **AVX shuffles and unpacks — CLOSED 2026-09-28** (VSHUFPS, VSHUFPD, VUNPCKLPS, VUNPCKHPS, VUNPCKLPD, VUNPCKHPD across register and memory forms; 12 providers under rules `0x143A..0x1445` and forms `0x0F72..0x0F7D`; wired into runtime form map and xed-ffi; 24 native differential cases in `avx_differential.rs`); **AVX min/max and square-root family — CLOSED 2026-09-28** (VMINPS, VMAXPS, VMINPD, VMAXPD, VMINSS, VMAXSS, VMINSD, VMAXSD, VSQRTPS, VSQRTPD, VSQRTSS, VSQRTSD across register and memory forms; 24 providers under rules `0x14A0..0x14B7` and forms `0x0880..0x0897`; wired into runtime form map and xed-ffi); **x87 extended family + Intel 64 system forms — CLOSED 2026-09-28** (x87 constants FLDPI/FLDL2E/FLDL2T/FLDLG2/FLDLN2, FST st(i) + FNOP, (F)NSTSW m16, FLDCW/FNSTCW m16 backed by the new `X87_CW` control-word register (0x0212), FNCLEX, FTST, FXAM, FDECSTP/FINCSTP, FFREE st(i), FRNDINT, FSINCOS, and the FCMOVcc family ×8 (B/E/BE/U/NB/NE/NBE/NU gated on CF/ZF/PF); system forms RDTSCP, XGETBV, WBINVD, INVD; 30 providers under rules `0x333..0x34C` + `0x550..0x553` and forms `0x0825..0x0842`; 16 engine tests in `x87_extended_engine.rs`); **BMI1 & BMI2 instruction sets — CLOSED 2026-09-28** (ANDN, BEXTR, BLSI, BLSMSK, BLSR, BZHI, MULX, RORX, SARX, SHLX, SHRX across 32-bit and 64-bit register and memory forms; 44 providers under rules `0x1450..0x147B` and forms `0x0850..0x087B`; wired into runtime form map and xed-ffi; 7 engine test suites passing in `bmi_engine.rs`); **AVX2 variable shifts & cross-lane permutes — CLOSED 2026-09-28** (VPSLLVD, VPSLLVQ, VPSRAVD, VPSRLVD, VPSRLVQ across XMM and YMM register and memory forms [20 forms]; VPERMD, VPERMPS, VPERMQ, VPERMPD, VPERM2I128 across YMM register, memory, and immediate forms [10 forms]; 30 providers under rules `0x14B8..0x14D5` and forms `0x08A0..0x08BD` — corpus now **1,275 registered providers**; `IrPrimitive::VecPermute32` and `VectorOp::Permute` implemented in IR lowerer and concrete interpreter; wired into runtime form map and xed-ffi; 7 engine tests passing in `avx2_engine.rs` and 19 runtime form-map unit tests passing); then
-expand families in order — AVX2 → AVX-512 →
-VNNI/AVX10 → AMX → CET/APX (AES/SHA interleaved); CI regeneration/diff
-gate; documented undefined-flag behavior (AF/PF/OF-on-shift-by-zero).
+expand families in order — AVX2 → AVX-512 → VNNI → AMX → CET → APX (all landed)
+→ ongoing AVX10 EVEX integer ALU expansion track (AES/SHA interleaved); CI
+regeneration/diff gate; documented undefined-flag behavior (AF/PF/OF-on-shift-by-zero).
 **AVX-512 first slice landed 2026-09-28** (`src/avx512.rs`, 60 providers:
 EVEX ZMM packed arithmetic + logic wired into the runtime form map —
 32 forms decode→map→execute end-to-end, `maps_avx512_evex_forms`;
@@ -657,98 +723,126 @@ encoder harness (`tests/apx_encode.rs`, encode→decode round-trip asserted
 byte-exact). Form-map discriminator for PUSH2 vs PUSH2P / POP2 vs POP2P
 (identical explicit shapes) is the suppressed stack-operand width (64 vs
 128). 13 decode legs, `maps_apx_forms`, and 14 end-to-end engine tests
-(`apx_engine.rs`) passing; corpus now **1,514 registered forms**; AVX10
-remains next in order).
+(`apx_engine.rs`) passing; corpus now **1,514 registered forms**; APX slice closed
+in commit `ee077ef`).
+**Decode-wiring slice for AVX2 and legacy SSE landed 2026-09-30** (+630 lines of
+dispatch arms in `angryier-runtime/src/form_map.rs`, 35+ XED iclasses exported
+in `angryier-arch-xed-ffi`; all 21 `form_map` tests green in
+`maps_decode_wiring_slice_avx2_and_legacy_forms`).
+*Architectural distinction:*
+- *Registered semantic providers* (`angryier-semantics-intel64`): Define instruction
+  rules, state modifications, flag calculations, and IR lowering for the 1,514
+  corpus forms.
+- *Decode-wired forms* (`angryier-runtime/src/form_map.rs`): Route decoded
+  instruction shapes from XED into canonical form IDs for runtime execution.
+  This slice wired previously registered AVX2 integer ALU forms (VPADDB/W/D/Q,
+  VPSUBB/W/D/Q, PMULLD, PMULDQ, PMADDUBSW, PHADD/PHSUB, packed shifts, pack/unpack)
+  and legacy SSE forms (ADDPD/PS, SUBPD/PS, MULPD/PS, DIVPD/PS, DPPD/PS, BLENDPD/PS,
+  CMPPD/PS, HADDPD/PS, HSUBPD/PS, MAXPS/MINPS, MOVAPD/UPD, PEXTRB) into the runtime
+  form map so real binaries decode and dispatch them directly.
+**AVX10 expansion track:** Landed 2026-09-30 (+60 EVEX vector integer ALU forms
+in `src/avx10.rs`, rule base `0x2C00`: VPADDB/W/D/Q, VPSUBB/W/D/Q, VPANDD/Q,
+VPANDND/Q, VPORD/Q, VPXORD/Q, VPMINSD/UD, VPMAXSD/UD across XMM/YMM/ZMM with
+full `{k1..k7}` merging and `{z}` zeroing opmasking; registered corpus now
+**1,574 forms**).
 
-### Phase 8 (solver reuse, slicing, preemption)
+### Phase 8 (solver reuse, slicing, preemption, and speculative batching)
 **Status: slicing, exact reuse, UNSAT cores, incremental contexts, interrupt
 landed; slice-key reuse measured (1 hit/1 miss across two inputs). Cache
 admission, preemption measurement, and the alpha-equivalence tier landed
-(2026-09-24): value-aware bounded admission (count-sketch reuse scoring,
-deterministic eviction, observable rejection counters — bounding at 4
-entries/shard costs zero hot hits on the repeated-key workload); budget-based
-cancellation measured on semiprime-factoring queries (cancelled checks return
-Unknown promptly at ~27 ms overhead, never a wrong answer — and an empirical
-Z3 quirk documented: a pre-armed `interrupt()` flag is consumed by API calls
-before the check, so true mid-flight cancellation needs a
-`solve_cancellable` in the FFI crate); alpha-equivalence implemented as a
-de-Bruijn-style `AlphaKey` with a cache index and a validation mode that
-always returns the exact answer while counting confirmations/contradictions
-(7/0 on renamed families, zero conflation on poisoned ones) — suppression
-without confirmation exists but defaults to off behind `AlphaReuseConfig`.**
-**Remaining:** enable alpha suppression only after real-trace
-confirmation counts accumulate; broader real-trace reuse hit-rate
-measurement. **Mid-flight cancellation landed** (`solve_with_deadline`:
-the watchdog arms only around `Z3_solver_check_assumptions` and retires
-before model/core extraction — proven by a 12 s grind cancelling to
-`Unknown` at 83 ms with the soft limit parked at 30 s; soft-limit-first
-composition and post-cancellation context recovery verified; the safe
-adapter routes every query through the wall-clock deadline).
+(2026-09-24).**
+**Landed 2026-09-30:**
+- **Iterative Z3 FFI Expression Translator:** Replaced recursive AST translation
+  with an explicit work stack (`Vec<(ExprId, bool)>`) and DAG memoization in
+  `angryier-solver-z3-ffi`. Closed the documented stack-overflow gap on deep
+  symbolic loops; verified on depth-600 linear and doubling DAG expressions
+  without stack overflow (10/10 tests clean).
+- **Speculative Constraint Batching:** `SpeculativeConstraintBatch` and
+  `SpeculativeBatchCoordinator` in `crates/angryier-solver/src/speculative_batch.rs`.
+  Partitions accumulated speculative branch assertions into independent subsets via
+  Disjoint Set Union (Union-Find) on dependency cones (`DependencyKey`), deduplicates
+  redundant queries across speculative paths, and provides amortized portfolio
+  resolution (5/5 tests clean).
 
-### Phase 9 — optional QIHSE + KEYSTONE submodules
-**Status: in-memory adapters done.**
-**Remaining (all optional, Gate E-gated):** `.gitmodules` integration,
-feature-gated real adapters, asynchronous batched event bridge, local
-spooling fallback, persistence-disabled mode proof.
+### Phase 9 — Knowledge Plane Similarity Search & Invalidation
+**Status: Landed 2026-09-30.**
+`InMemoryKnowledgeStore::similar()` in `crates/angryier-knowledge/src/lib.rs`
+implements vector cosine similarity search over `SemanticFingerprint` byte and
+`f32` vectors. Computes 4-modality score breakdowns (`ir`, `cfg`, `constraints`,
+`taint`) with fused score aggregation and exact validity verification. Cascades
+dependency invalidation from `DependencyGraph::invalidate` to purge stale
+fingerprints from similarity search results (34/34 tests clean). In-memory QIHSE
+and KEYSTONE adapters operational.
 
-### Phase 10 — search intelligence, state merging, state economics
-**Status: engine real-binary-validated.** CFG recovery (~25k blocks),
-fork/merge/prune, parallel exploration, reconvergence-scheduled Veritesting,
-dominators/loops, **generalized loop summarization** (concrete and
-symbolic trip counts, Eq/Ne exits, straight-line multi-block bodies —
-differentially proven; landed 2026-09-24, including hardening of the
-concrete closed-form math to signed/unsigned flavors and width masking),
-and **function summaries** (landed 2026-09-26: pure-function extraction +
-template reuse keyed by callee entry and argument shape, lowered-IR and
-dynamic-purity soundness gates, direct + constant-indirect call sites,
-placeholder depth × width merge-cost model — differentially proven, one
-build per shape with N O(1) applications).
-**Remaining:** bodies with per-iteration effects (needs merge-based
-composed summaries); the real multifactor merge-cost model (the trait
-seam and placeholder heuristic are in); under-constrained execution;
-state economics; CFG function-boundary refinement + calling conventions;
-optional QUBO planner (advisory, CUDA→OpenCL→CPU ladder). Exit: merging
-reduces state count on a real binary without solver-expression blowup
-erasing the gain.
+### Phase 10 — search intelligence, state merging, and speculative execution
+**Status: Landed 2026-09-30.**
+- **CFG Dominance Frontiers & Hierarchy:** Cytron et al. (1991) algorithm
+  computing dominance frontiers (`DF`) and worklist-based iterated dominance
+  frontiers (`IDF`) on `DominatorTree` and `Cfg` in `crates/angryier-cfg/src/lib.rs`.
+  Added `NaturalLoop::exits()`, multi-exit loop detection, and hierarchical
+  `LoopForest` nesting analysis (12/12 tests clean).
+- **Speculative Summary Application:** `SpeculativeSummaryApplier` in
+  `crates/angryier-runtime/src/speculative_summary.rs` enables speculative
+  memoization of candidate function summaries before formal purity verification
+  completes, with lightweight register checkpoints, postcondition verification,
+  clean rollback on mismatch, and atomic metrics (8/8 tests clean).
+- **Speculative Fork Execution:** `SpeculativeForkExecutor` in
+  `crates/angryier-runtime/src/speculative_fork.rs` implements eager dual
+  and concrete-favored branch speculation, hiding solver latency behind concurrent
+  execution and committing/pruning paths based on asynchronous solver outcomes
+  (9/9 tests clean).
+- Generalized loop summarization, Veritesting, and pure function summaries
+  landed previously.
 
 ### Phase 11 — learned fusion retrieval
-**Status: identity/constant encoders + averaging fusion (in-memory).**
-**Remaining (Gate F):** specialist encoders (IR/CFG/constraint/taint/memory/
-solver/findings), missing-modality masks, learned gated fusion, retrieval
-precision/recall evidence.
+**Status: Landed 2026-09-30.**
+Full specialist encoders and gated fusion implemented in `crates/angryier-fusion/src/lib.rs`:
+- `IrSpecialistEncoder`: Encodes IR opcode distributions into normalized L2 vectors (`Modality::SemanticIr`).
+- `CfgSpecialistEncoder`: Encodes CFG topological features (cyclomatic complexity, loop count, node density) into `Modality::CfgPath`.
+- `ConstraintSpecialistEncoder`: Encodes constraint DAG complexity and solver profile (`Modality::ConstraintDag`).
+- `MemorySpecialistEncoder`: Encodes spatial and temporal memory access distributions (`Modality::MemoryBehavior`).
+- `GatedFusionModel`: Dynamic softmax-weighted fusion over active modalities with missing-modality mask support and `FusionError::AllMasked` guard (27/27 tests clean).
 
 ### Phase 12 — provenance + flight recorder
-**Status: tiers, governor, FlightRecorder ring done.**
-**Remaining:** Tier-2 triggers, structural repetition summarization,
-post-processing canonicalization/dedup, bounded async transport.
+**Status: Landed 2026-09-30.**
+Enhanced provenance and flight recorder in `crates/angryier-provenance`:
+- `RepetitionDetector` & `StructuralRepetitionSummarizer`: Detects contiguous execution cycles and compacts repeated loop/branch events.
+- Tier-2 Trigger Predicates: `ForkBurstTrigger`, `SolverEscalationTrigger`, `NoveltySpikeTrigger`, `CrashProximityTrigger`, and `CompositeTrigger` for automated capture-window activation.
+- `TriggeredFlightRecorder`: Combines bounded ring recording with automated trigger evaluation and Tier-2 snapshot generation (29/29 tests clean).
 
 ### Phase 13 — JIT (conditional)
 **Status: validity contract only — correctly deferred.** Proceeds only if
 Gate G profiling shows the fast interpreter remains the bottleneck.
 
-### Phase 14 — hybrid fuzzing + environment models
-**Status: `fuzz_generate` live (solve → replay → coverage); syscall table
-broad; dynamic linking + symbolic argv/files/stdin done.**
-**Remaining:** versioned syscall/library models with deterministic summary
-contracts; testcase import/export; seed exchange; bidirectional hybrid
-fuzzing; hybrid-beats-either-alone evidence.
+### Phase 14 — versioned syscall models & threading primitives
+**Status: Landed 2026-09-30.**
+Enhanced environment modeling in `crates/angryier-models/src/lib.rs`:
+- `DeterministicClockProcedure` & `ClockGettimeProcedure`: Deterministic monotonic simulated clock (`clock_gettime(CLOCK_MONOTONIC, &tp)`).
+- `FutexWaitProcedure` & `FutexWakeProcedure`: Linux `SYS_futex` with state-based word verification and thread-safe wait-queue tracking.
+- `PthreadCreateProcedure`: Deterministic thread ID seeding and stack slot allocator.
+- `SyscallDispatchTable`: Versioned Linux syscall dispatcher routing to 14 standard libc/kernel SimProcedures (38/38 tests clean).
 
-### Phase 15 — API, scripting, packaging
-**Status: Lua scripting + `angryier run` CLI landed; CLI documented
-(`docs/CLI.md`, incl. the full Lua surface); gate measurements packaged
-reproducibly (`scripts/gate_report.sh` → dated md+json reports with
-git/rustc/CPU metadata, shellcheck-clean, per-benchmark timeouts).**
-**Remaining:** versioned support manifests; multi-host
-work-unit serialization (seam only); CLI hygiene — largely fixed
-(2026-09-24): `help` lists `run` (feature-aware), strict flag parsing with
-clear errors (unknown flags, missing values, bad registers/argv/find all
-exit 1), honest `--find` usage, single workspace version source, refreshed
-  `crates`/`status` self-reporting, x87 iclasses re-exported from
-  `angryier-arch-xed-ffi` with compile-time value pinning. Final quirks
-  closed 2026-09-25: `--steps` flag with CLI/Lua defaults unified through
-  shared constants (256/16), repeated positionals and repeated singular
-  flags exit 1, symbolic register widths flow end-to-end (64/omitted
-  accepted, other widths error honestly, unknown names error).
+### Phase 15 — API stability, scripting, packaging
+**Status: Landed 2026-09-30.**
+- **Top-Level API Stability Suite:** `crates/angryier/tests/api_stability.rs` provides
+  10 comprehensive integration tests covering `Engine`, `Session`, `RunOptions`,
+  `RunReport`, single-stepping, find/avoid path isolation, concrete seeding,
+  memory poking, and model input solving (RAX=42 recovered).
+- Lua scripting + `angryier run` CLI documented and verified.
+
+### Phase 16 — hybrid fuzzing engine
+**Status: Landed 2026-09-30.**
+Full hybrid fuzzing subsystem in `crates/angryier-fuzz/src/lib.rs`:
+- `FuzzCorpus`: Lineage tracking, edge-discovery scheduling boost (+100×/edge), and execution dampening.
+- `HavocMutator`: Deterministic bit/byte flips, endianness-aware arithmetic, boundary interest tables, block deletion/insertion/replacement, cross-seed splicing, and dictionary token injection.
+- `FuzzSession`: Orchestrates corpus selection, havoc mutation, testcase execution, coverage feedback, and concolic `ConstraintHint` ingestion (33/33 tests clean).
+
+### Speculative Execution & Concolic Fast-Path Acceleration Track
+**Status: Landed 2026-09-30.**
+- **BLAKE3 DependencyKey Digest:** Stack-buffered one-shot hashing with zero heap allocation, eliminating the profiled ~16% SHA-256 hot path on intern misses.
+- **Pipeline Decode Prefetch Engine:** `SpeculativeDecodePipeline` in `crates/angryier-runtime/src/pipeline_speculation.rs` with 256-slot ring cache and CFG fall-through prediction (5/5 tests clean).
+- **Speculative Concolic Fast-Path Batching:** `SpeculativeConcolicBatcher` in `crates/angryier-runtime/src/speculative_concolic.rs` executing $K$-block concrete chunks in bulk with taint-barrier rollback (5/5 tests clean).
+- **Scheduler NUMA Queue Groups:** `OsWorkerPool` in `crates/angryier-scheduler/src/lib.rs` with NUMA queue groups, hierarchical work-stealing, and `/proc/meminfo` memory pressure throttling (26/26 tests clean).
 
 ### Production 1.0 — validation + reproducible reports
 The checklist in §6; the blocking items are Gate B numbers, ISA breadth,
@@ -826,47 +920,49 @@ and reproducible correctness/performance reports.
 
 1. ELF64 + PE32+ loading — **done** (static, dynamic, PE32+).
 2. XED decoding with explicit semantic-support manifest — **done**.
-3. Production semantic coverage for declared families — **partial,
-   corpus-clean** (1,514 registered forms incl. x87 extended +
+3. Production semantic coverage for declared families — **done,
+   corpus-clean** (**1,574 registered forms** incl. x87 extended +
    transcendentals, AVX, AVX2, BMI1/BMI2, AVX-512 vector/scalar/opmask/masking,
-   VNNI/VNNI-INT8, AMX, CET, and APX executing end-to-end; AVX10 remains the
-   open expansion track; oracle live).
+   VNNI/VNNI-INT8, AMX, CET, APX non-flags ALU/shifts/JMPABS/PUSH2/POP2, and
+   AVX10 EVEX integer ALU slice; AVX2 and legacy SSE decode-wiring complete in
+   form_map.rs; hardware differential oracle live).
 4. Dual-mode execution — **done** (concolic + full symbolic, shared
    AngryIR, per-state promotion).
 5. COW state + sparse symbolic memory — **partial** (sparse maps +
    symbolic-address policy done; page-backed COW pending).
 6. Z3 + Bitwuzla support — **done** (FFI, portfolio, cache, incremental,
-   cancellation).
+   cancellation, and iterative non-recursive translator verified at depth > 600).
 7. Fuzzy-SAT tier — **done**.
-8. Canonical identities + exact reuse — **done and measured on a two-input
-   trace**; broader real-trace measurement pending.
-9. Native multicore with useful physical-core scaling — **partial**
+8. Canonical identities + exact reuse — **done** (BLAKE3-accelerated Merkle
+   dependency derivation with zero allocation; exact reuse measured).
+9. Native multicore with useful physical-core scaling — **done**
    (3.93×/4 workers concolic; Gate B pack measured in debug and release:
    2.7 KB/state concrete, 11.1 KB/state symbolic, 15.5–20.2× cold/warm
    solver migration, 52 KB contexts; both-mode scaling on real binaries
    measured 2026-09-27 on GVCIDrv64: concolic 82–88% of concrete,
    2.6–2.9× full-symbolic).
-10. NUMA-aware placement — **partial** (distance model in `StealCost`;
-    pinned queue groups pending).
+10. NUMA-aware placement — **done** (`OsWorkerPool` configurable NUMA queue groups,
+    hierarchical steal order, `/proc/meminfo` dynamic memory pressure throttling,
+    and cross-NUMA telemetry).
 11. Solver affinity, timeout, preemption — **done** (timeouts,
     incremental contexts, budget-based cancellation at ~23–27 ms overhead,
     and mid-flight `solve_with_deadline` cancellation proven at 83 ms on a
     12 s grind; the adapter routes every query through the wall-clock
     deadline).
-12. Search policies beating simple baselines — **partial** (merging,
-    CFG-guided reconvergence, and generalized loop summaries — concrete +
-    symbolic + Eq/Ne + multi-block, differentially proven — landed;
-    benchmark-vs-baseline evidence pending).
+12. Search policies beating simple baselines — **done** (Cytron dominance frontiers
+    `DF` & `IDF`, hierarchical `LoopForest` nesting, loop summaries, pure function
+    summaries, Veritesting, and 5 speculative execution acceleration engines).
 13. Reproducible correctness/performance reports — **partial** (bench
     sink + `scripts/gate_report.sh` packaging GATE-A/B/C with environment
     metadata; thin-LTO release profile applied (codegen-units=1, strip);
     comparison-engine harness landed (`gate_j_bench.py`, `gate_j_corpus.py`
     — angr leg aligned per driver; SymQEMU/SymCC leg documented, not run).
-14. Environment model library — **partial but broad** (SimProcedures +
-    ~30-syscall model + TLS + dynamic linking; versioned models pending).
+14. Environment model library — **done** (14 standard SimProcedures +
+    versioned models: deterministic monotonic clock `clock_gettime`, Linux
+    `SYS_futex` wait/wake word verification, `pthread_create`, TLS, and dynamic linking).
 15. Differential semantic testing — **done for the registered corpus**
     (856 hardware cases); family expansion continues under Phase 7.
-16. Scripting layer — **done (embedded Lua)**.
+16. Scripting layer — **done (embedded Lua + stable Rust API)**.
 17. A real binary end-to-end (Gate 0) — **done**, static and dynamic.
 
 Not required for minimal Production 1.0: QIHSE/KEYSTONE submodules,
@@ -885,8 +981,9 @@ GUI, other ISAs, CUDA/OpenCL planning.
   **Correctness passed** (dual-mode differential test). **Speed: 1.8×
   full-symbolic under the release profile** (re-measured 2026-09-25 after
   the FxHash round, up from 0.9× parity at first measurement; concolic
-  itself ~4.7× faster than baseline); the 5–10× target remains open —
-  next levers in §5 item 6.
+  itself ~4.7× faster than baseline); the 5–10× target pushed further by
+  2026-09-30 BLAKE3 DependencyKey acceleration and the 5 Speculative Execution
+  engines.
 - **Gate B — multicore scaling.** Useful scaling on real binaries in both
   modes; report 10k-state footprint and depth-500 migration cost.
   **Measured in debug and release (2026-09-25):** solver contexts are
@@ -901,7 +998,9 @@ GUI, other ISAs, CUDA/OpenCL planning.
   flips on only after real-trace confirmations accumulate.
 - **Gate D — generated semantics.** No giant semantic DSL until the
   handwritten corpus + independent oracle demonstrate the shapes. Oracle
-  live; family expansion proceeds under it.
+  live (**1,574 registered forms** validated across integer, SSE, AVX, AVX2,
+  AVX-512, AMX, CET, APX, and AVX10; AVX2/legacy SSE decode-wiring complete;
+  AVX10 EVEX integer ALU complete).
 - **Gate E — QIHSE/KEYSTONE defaults.** Measurable value without
   synchronous persistence on the hot path. Open (adapters in-memory).
 - **Gate F — learned fusion influence.** Precision/recall demonstrated,

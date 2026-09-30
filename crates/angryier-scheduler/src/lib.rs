@@ -575,14 +575,62 @@ impl Default for InMemoryScheduler {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
-// ---------------------
+// Memory-pressure monitor
 // ---------------------------------------------------------------------------
-// OS-thread worker pool
+
+/// Reads system memory availability.
+///
+/// On Linux, this parses `/proc/meminfo` to obtain `MemAvailable`. On all
+/// other platforms it returns `None` (no-op sentinel), which causes callers
+/// to skip pressure-throttling entirely.
+pub struct MemoryPressureMonitor;
+
+impl MemoryPressureMonitor {
+    /// Returns the number of bytes currently available to user-space, or
+    /// `None` if the information cannot be obtained (non-Linux, parse error,
+    /// or I/O failure).
+    pub fn available_bytes() -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::fs;
+            let content = fs::read_to_string("/proc/meminfo").ok()?;
+            for line in content.lines() {
+                // Lines look like: "MemAvailable:   12345678 kB"
+                if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                    let rest = rest.trim();
+                    // strip optional " kB" suffix
+                    let kb_str = rest.strip_suffix(" kB").unwrap_or(rest).trim();
+                    let kb: u64 = kb_str.parse().ok()?;
+                    return kb.checked_mul(1024);
+                }
+            }
+            None
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    /// Returns `true` when available memory is below `threshold_bytes`.
+    /// On non-Linux platforms this always returns `false` (never throttle).
+    pub fn is_under_pressure(threshold_bytes: u64) -> bool {
+        match Self::available_bytes() {
+            Some(avail) => avail < threshold_bytes,
+            None => false,
+        }
+    }
+}
+
+/// Default memory-pressure threshold: 512 MiB.
+pub const DEFAULT_PRESSURE_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// OS-thread worker pool with NUMA groups and memory-pressure stealing
 // ---------------------------------------------------------------------------
 
 /// Statistics reported when an [`OsWorkerPool`] run finishes.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PoolStats {
     /// Work units ever enqueued (seed units plus children pushed by handlers).
     pub produced: u64,
@@ -592,15 +640,32 @@ pub struct PoolStats {
     pub per_worker_completed: Vec<u64>,
     /// Wall time of the parallel run.
     pub elapsed: Duration,
+    /// Steals from a peer in the same NUMA group.
+    pub same_numa_steals: u64,
+    /// Steals from a peer in a different NUMA group.
+    pub cross_numa_steals: u64,
+    /// Number of times a worker paused/yielded before stealing due to memory pressure.
+    pub pressure_throttle_events: u64,
 }
 
-/// A pool of OS threads over worker-local deques with work stealing.
+/// Backwards compatibility alias for [`PoolStats`].
+pub type NumaPoolStats = PoolStats;
+
+/// A pool of OS threads over worker-local deques with NUMA-group-aware work
+/// stealing and memory-pressure throttling.
 ///
-/// Each worker pops from its own deque first; when empty it steals from the
-/// most-loaded peer, then from a global overflow queue. Termination is
-/// tracked by an in-flight counter: a unit is in-flight from pop until its
-/// handler returns, so a run finishes exactly when every produced unit has
-/// completed and no worker holds an in-flight unit.
+/// ### Steal order
+/// 1. Own deque (LIFO).
+/// 2. Most-loaded peer in the **same** NUMA group (FIFO steal).
+/// 3. Most-loaded peer in a **different** NUMA group (FIFO steal, counted as
+///    cross-NUMA steal; yields before stealing when under memory pressure).
+/// 4. Global overflow queue.
+///
+/// ### NUMA groups
+/// Workers are partitioned into groups by the `numa_groups` parameter.
+/// Each element of the outer `Vec` is a NUMA group; each element of the inner
+/// `Vec` is a worker index belonging to that group. Workers not listed in any
+/// group are implicitly placed into group 0 (the default group).
 pub struct OsWorkerPool<T: Send> {
     queues: Vec<Mutex<VecDeque<T>>>,
     global: Mutex<VecDeque<T>>,
@@ -609,18 +674,88 @@ pub struct OsWorkerPool<T: Send> {
     inflight: AtomicU64,
     per_worker: Vec<AtomicU64>,
     worker_count: u32,
+    /// `group_of[worker_index]` = NUMA group index for that worker.
+    group_of: Vec<usize>,
+    /// `group_members[group_index]` = sorted list of worker indices in that group.
+    group_members: Vec<Vec<usize>>,
+    same_numa_steals: AtomicU64,
+    cross_numa_steals: AtomicU64,
+    pressure_throttle_events: AtomicU64,
+    pressure_threshold: u64,
 }
 
 impl<T: Send> OsWorkerPool<T> {
-    /// Creates a pool with `worker_count` worker deques.
+    /// Creates a pool with `worker_count` worker deques in a single NUMA group
+    /// and default memory-pressure threshold (512 MiB).
     pub fn new(worker_count: u32) -> Self {
         let count = worker_count.max(1) as usize;
+        let all: Vec<usize> = (0..count).collect();
+        Self::with_options(worker_count, vec![all], DEFAULT_PRESSURE_THRESHOLD_BYTES)
+    }
+
+    /// Convenience constructor: all workers in one group, default pressure threshold.
+    pub fn single_group(worker_count: u32) -> Self {
+        Self::new(worker_count)
+    }
+
+    /// Creates a pool with configurable NUMA groups and default memory-pressure threshold.
+    pub fn with_numa_groups(worker_count: u32, numa_groups: Vec<Vec<usize>>) -> Self {
+        Self::with_options(worker_count, numa_groups, DEFAULT_PRESSURE_THRESHOLD_BYTES)
+    }
+
+    /// Creates a NUMA-aware pool with configurable NUMA groups and memory-pressure threshold.
+    ///
+    /// # Parameters
+    /// - `worker_count`: total number of workers.
+    /// - `numa_groups`: partition of worker indices by NUMA group. Workers
+    ///   missing from the partition are placed in group 0.
+    /// - `pressure_threshold`: available-memory threshold in bytes below which
+    ///   cross-group stealing is throttled. Use
+    ///   [`DEFAULT_PRESSURE_THRESHOLD_BYTES`] for the default 512 MiB.
+    pub fn with_options(
+        worker_count: u32,
+        numa_groups: Vec<Vec<usize>>,
+        pressure_threshold: u64,
+    ) -> Self {
+        let count = worker_count.max(1) as usize;
+
+        let mut group_of = vec![0usize; count];
+        let mut assigned = vec![false; count];
+        let mut group_members: Vec<Vec<usize>> = if numa_groups.is_empty() {
+            vec![(0..count).collect()]
+        } else {
+            let mut members: Vec<Vec<usize>> = (0..numa_groups.len()).map(|_| vec![]).collect();
+            for (gidx, workers) in numa_groups.iter().enumerate() {
+                for &w in workers {
+                    if w < count && !assigned[w] {
+                        group_of[w] = gidx;
+                        members[gidx].push(w);
+                        assigned[w] = true;
+                    }
+                }
+            }
+            // Workers not mentioned in any group fall into group 0.
+            for w in 0..count {
+                if !assigned[w] {
+                    group_of[w] = 0;
+                    members[0].push(w);
+                    assigned[w] = true;
+                }
+            }
+            members
+        };
+
+        for g in &mut group_members {
+            g.sort_unstable();
+        }
+
         let mut queues = Vec::with_capacity(count);
         let mut per_worker = Vec::with_capacity(count);
         for _ in 0..count {
             queues.push(Mutex::new(VecDeque::new()));
             per_worker.push(AtomicU64::new(0));
         }
+
         Self {
             queues,
             global: Mutex::new(VecDeque::new()),
@@ -629,7 +764,28 @@ impl<T: Send> OsWorkerPool<T> {
             inflight: AtomicU64::new(0),
             per_worker,
             worker_count: worker_count.max(1),
+            group_of,
+            group_members,
+            same_numa_steals: AtomicU64::new(0),
+            cross_numa_steals: AtomicU64::new(0),
+            pressure_throttle_events: AtomicU64::new(0),
+            pressure_threshold,
         }
+    }
+
+    /// Returns the NUMA group index for the given worker.
+    pub fn group_of(&self, worker: usize) -> usize {
+        self.group_of.get(worker).copied().unwrap_or(0)
+    }
+
+    /// Returns a slice of all members in `group`.
+    pub fn group_members(&self, group: usize) -> &[usize] {
+        self.group_members.get(group).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Number of NUMA groups.
+    pub fn group_count(&self) -> usize {
+        self.group_members.len()
     }
 
     /// Enqueues a unit on `worker`'s deque (or the global overflow queue when
@@ -644,44 +800,90 @@ impl<T: Send> OsWorkerPool<T> {
         self.produced.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Pops the next unit for `worker`: own deque (LIFO), then the
-    /// most-loaded peer (steal), then the global queue.
-    fn next(&self, worker: u32) -> Option<T> {
-        let index = usize::try_from(worker).unwrap_or(0) % self.queues.len();
-        if let Ok(mut queue) = self.queues[index].lock()
-            && let Some(item) = queue.pop_back()
-        {
-            self.inflight.fetch_add(1, Ordering::Relaxed);
-            return Some(item);
-        }
-        // Steal from the most-loaded peer.
-        let mut best = None;
+    fn peek_load(&self, peer: usize) -> usize {
+        self.queues
+            .get(peer)
+            .and_then(|q| q.lock().ok())
+            .map(|g| g.len())
+            .unwrap_or(0)
+    }
+
+    fn steal_from(&self, peer: usize) -> Option<T> {
+        let mut guard = self.queues.get(peer)?.lock().ok()?;
+        guard.pop_front()
+    }
+
+    fn most_loaded_in(&self, candidates: &[usize], self_idx: usize) -> Option<usize> {
+        let mut best: Option<usize> = None;
         let mut best_load = 0usize;
-        for (peer, queue) in self.queues.iter().enumerate() {
-            if peer == index {
+        for &peer in candidates {
+            if peer == self_idx {
                 continue;
             }
-            if let Ok(guard) = queue.lock() {
-                let load = guard.len();
-                if load > best_load {
-                    best_load = load;
-                    best = Some(peer);
-                }
+            let load = self.peek_load(peer);
+            if load > best_load {
+                best_load = load;
+                best = Some(peer);
             }
         }
-        if let Some(peer) = best
-            && let Ok(mut queue) = self.queues[peer].lock()
-            && let Some(item) = queue.pop_front()
+        if best_load == 0 { None } else { best }
+    }
+
+    /// Pops the next unit for `worker`:
+    /// 1. Own deque (LIFO).
+    /// 2. Most-loaded peer in the same NUMA group (FIFO steal).
+    /// 3. Most-loaded peer in another NUMA group (FIFO steal; yields if under memory pressure).
+    /// 4. Global overflow queue.
+    pub fn next(&self, worker: u32) -> Option<T> {
+        let idx = usize::try_from(worker).unwrap_or(0) % self.queues.len();
+
+        // 1. Own deque (LIFO).
+        if let Ok(mut q) = self.queues[idx].lock()
+            && let Some(item) = q.pop_back()
         {
             self.inflight.fetch_add(1, Ordering::Relaxed);
             return Some(item);
         }
+
+        let my_group = self.group_of.get(idx).copied().unwrap_or(0);
+
+        // 2. Same-NUMA-group peer (FIFO steal).
+        let same_group = self.group_members.get(my_group).map(|v| v.as_slice()).unwrap_or(&[]);
+        if let Some(peer) = self.most_loaded_in(same_group, idx)
+            && let Some(item) = self.steal_from(peer)
+        {
+            self.same_numa_steals.fetch_add(1, Ordering::Relaxed);
+            self.inflight.fetch_add(1, Ordering::Relaxed);
+            return Some(item);
+        }
+
+        // 3. Cross-NUMA-group peer — throttle under memory pressure.
+        let cross_candidates: Vec<usize> = (0..self.queues.len())
+            .filter(|&w| self.group_of.get(w).copied().unwrap_or(0) != my_group)
+            .collect();
+
+        if !cross_candidates.is_empty()
+            && let Some(peer) = self.most_loaded_in(&cross_candidates, idx)
+        {
+            if MemoryPressureMonitor::is_under_pressure(self.pressure_threshold) {
+                self.pressure_throttle_events.fetch_add(1, Ordering::Relaxed);
+                std::thread::yield_now();
+            }
+            if let Some(item) = self.steal_from(peer) {
+                self.cross_numa_steals.fetch_add(1, Ordering::Relaxed);
+                self.inflight.fetch_add(1, Ordering::Relaxed);
+                return Some(item);
+            }
+        }
+
+        // 4. Global overflow queue.
         if let Ok(mut global) = self.global.lock()
             && let Some(item) = global.pop_front()
         {
             self.inflight.fetch_add(1, Ordering::Relaxed);
             return Some(item);
         }
+
         None
     }
 
@@ -695,6 +897,15 @@ impl<T: Send> OsWorkerPool<T> {
     /// Number of workers in this pool.
     pub fn worker_count(&self) -> u32 {
         self.worker_count
+    }
+
+    /// Snapshot of steal counters: `(same_numa_steals, cross_numa_steals, pressure_throttle_events)`.
+    pub fn steal_counts(&self) -> (u64, u64, u64) {
+        (
+            self.same_numa_steals.load(Ordering::Relaxed),
+            self.cross_numa_steals.load(Ordering::Relaxed),
+            self.pressure_throttle_events.load(Ordering::Relaxed),
+        )
     }
 }
 
@@ -712,23 +923,22 @@ impl<T: Send + 'static> OsWorkerPool<T> {
             for worker in 0..self.worker_count {
                 let pool = Arc::clone(&pool);
                 let handler = &handler;
-                scope.spawn(move || {
-                    loop {
-                        match pool.next(worker) {
-                            Some(item) => {
-                                let pool2 = Arc::clone(&pool);
-                                let enqueue = move |child: T| pool2.push(worker, child);
-                                handler(worker, item, &enqueue);
-                                pool.completed.fetch_add(1, Ordering::Relaxed);
-                                pool.per_worker[usize::try_from(worker).unwrap_or(0)].fetch_add(1, Ordering::Relaxed);
-                                pool.inflight.fetch_sub(1, Ordering::Relaxed);
+                scope.spawn(move || loop {
+                    match pool.next(worker) {
+                        Some(item) => {
+                            let pool2 = Arc::clone(&pool);
+                            let enqueue = move |child: T| pool2.push(worker, child);
+                            handler(worker, item, &enqueue);
+                            pool.completed.fetch_add(1, Ordering::Relaxed);
+                            pool.per_worker[usize::try_from(worker).unwrap_or(0)]
+                                .fetch_add(1, Ordering::Relaxed);
+                            pool.inflight.fetch_sub(1, Ordering::Relaxed);
+                        }
+                        None => {
+                            if pool.finished() {
+                                return;
                             }
-                            None => {
-                                if pool.finished() {
-                                    return;
-                                }
-                                std::thread::yield_now();
-                            }
+                            std::thread::yield_now();
                         }
                     }
                 });
@@ -743,9 +953,15 @@ impl<T: Send + 'static> OsWorkerPool<T> {
                 .map(|counter| counter.load(Ordering::Relaxed))
                 .collect(),
             elapsed: started.elapsed(),
+            same_numa_steals: self.same_numa_steals.load(Ordering::Relaxed),
+            cross_numa_steals: self.cross_numa_steals.load(Ordering::Relaxed),
+            pressure_throttle_events: self.pressure_throttle_events.load(Ordering::Relaxed),
         }
     }
 }
+
+/// Backwards compatibility alias for [`OsWorkerPool`].
+pub type NumaOsWorkerPool<T> = OsWorkerPool<T>;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1005,5 +1221,222 @@ mod tests {
         let zero = GreedyScore::compose(0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
         // solver_cost=1.0 means (1 - solver_cost)=0, so all signals are 0.
         assert_eq!(GreedyScore::priority(&zero), 0.0);
+    }
+
+        // -----------------------------------------------------------------------
+    // OsWorkerPool: group assignment tests
+    // -----------------------------------------------------------------------
+
+    /// Verify that `group_of` and `group_members` reflect the supplied partition.
+    #[test]
+    fn numa_group_assignment_two_groups() {
+        // 4 workers split 0-1 into group 0 and 2-3 into group 1.
+        let pool: OsWorkerPool<u32> = OsWorkerPool::with_options(
+            4,
+            vec![vec![0, 1], vec![2, 3]],
+            DEFAULT_PRESSURE_THRESHOLD_BYTES,
+        );
+
+        assert_eq!(pool.group_count(), 2);
+
+        // group_of checks
+        assert_eq!(pool.group_of(0), 0);
+        assert_eq!(pool.group_of(1), 0);
+        assert_eq!(pool.group_of(2), 1);
+        assert_eq!(pool.group_of(3), 1);
+
+        // group_members checks (sorted)
+        assert_eq!(pool.group_members(0), &[0usize, 1]);
+        assert_eq!(pool.group_members(1), &[2usize, 3]);
+    }
+
+    /// Workers not listed in any group fall into group 0.
+    #[test]
+    fn numa_group_unmentioned_workers_fall_into_group_zero() {
+        // Explicitly list workers 1 and 3 in group 1; workers 0 and 2 are not
+        // mentioned and must land in group 0.
+        let pool: OsWorkerPool<u32> = OsWorkerPool::with_options(
+            4,
+            vec![vec![], vec![1, 3]],
+            DEFAULT_PRESSURE_THRESHOLD_BYTES,
+        );
+
+        assert_eq!(pool.group_of(0), 0, "worker 0 should fall into group 0");
+        assert_eq!(pool.group_of(1), 1);
+        assert_eq!(pool.group_of(2), 0, "worker 2 should fall into group 0");
+        assert_eq!(pool.group_of(3), 1);
+
+        // group 0 should contain workers 0 and 2
+        let mut g0: Vec<usize> = pool.group_members(0).to_vec();
+        g0.sort_unstable();
+        assert_eq!(g0, vec![0usize, 2]);
+    }
+
+    /// Single-group convenience constructor puts all workers in group 0.
+    #[test]
+    fn numa_single_group_constructor() {
+        let pool: OsWorkerPool<u32> = OsWorkerPool::single_group(4);
+        assert_eq!(pool.group_count(), 1);
+        for w in 0..4 {
+            assert_eq!(pool.group_of(w), 0);
+        }
+        // All 4 workers are in group 0.
+        let mut members = pool.group_members(0).to_vec();
+        members.sort_unstable();
+        assert_eq!(members, vec![0usize, 1, 2, 3]);
+    }
+
+    // -----------------------------------------------------------------------
+    // OsWorkerPool: steal-counter tests
+    // -----------------------------------------------------------------------
+
+    /// Force a same-NUMA steal by pre-loading a peer in the same group and
+    /// draining the stealing worker's own queue.
+    #[test]
+    fn same_numa_steal_counter_increments() {
+        // 2 workers, both in group 0 — same NUMA.
+        let pool = Arc::new(OsWorkerPool::<u32>::with_options(
+            2,
+            vec![vec![0, 1]],
+            DEFAULT_PRESSURE_THRESHOLD_BYTES,
+        ));
+
+        // Load work only onto worker 1.
+        pool.push(1, 100u32);
+        pool.push(1, 101u32);
+        pool.push(1, 102u32);
+
+        // Worker 0 has an empty local queue -> will steal from worker 1 (same group).
+        let stats = pool.run(|_worker, _item, _push| {});
+
+        assert!(
+            stats.same_numa_steals >= 1,
+            "expected >=1 same-NUMA steal, got {}",
+            stats.same_numa_steals
+        );
+        assert_eq!(
+            stats.cross_numa_steals, 0,
+            "no cross-NUMA steals expected in a single-group pool"
+        );
+        assert_eq!(stats.completed, stats.produced, "all work must complete");
+    }
+
+    /// Force a cross-NUMA steal by putting the donor in a different group.
+    ///
+    /// We call `next(0)` directly (rather than `run`) so worker 0 is the sole
+    /// consumer. Worker 0 has an empty local queue, no same-group peers, and
+    /// therefore must steal cross-NUMA from worker 1.
+    #[test]
+    fn cross_numa_steal_counter_increments() {
+        // Worker 0 in group 0, worker 1 in group 1 — different NUMA nodes.
+        // pressure_threshold = 0 -> is_under_pressure(0) is always false.
+        let pool = OsWorkerPool::<u32>::with_options(
+            2,
+            vec![vec![0], vec![1]],
+            0,
+        );
+
+        // Load work only onto worker 1 (group 1).
+        pool.push(1, 200u32);
+        pool.push(1, 201u32);
+        pool.push(1, 202u32);
+
+        // Drain via worker 0 only — it has no local items and no same-group peers,
+        // so every successful pop is a cross-NUMA steal.
+        let mut popped = 0u32;
+        while pool.next(0).is_some() {
+            popped += 1;
+        }
+
+        let (same, cross, _throttle) = pool.steal_counts();
+        assert!(popped >= 1, "worker 0 should have stolen at least one item");
+        assert!(
+            cross >= 1,
+            "expected >=1 cross-NUMA steal, got {cross}"
+        );
+        assert_eq!(same, 0, "no same-NUMA steals expected");
+    }
+
+    /// Under memory pressure, cross-NUMA stealing records a throttle event.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_pressure_throttling_increments_counter() {
+        // Worker 0 in group 0, worker 1 in group 1.
+        // Set threshold to u64::MAX so is_under_pressure is guaranteed true on Linux.
+        let pool = OsWorkerPool::<u32>::with_options(
+            2,
+            vec![vec![0], vec![1]],
+            u64::MAX,
+        );
+
+        pool.push(1, 300u32);
+
+        // Worker 0 steals cross-NUMA from worker 1 under pressure.
+        let item = pool.next(0);
+        assert_eq!(item, Some(300u32));
+
+        let (_same, cross, throttle) = pool.steal_counts();
+        assert_eq!(cross, 1);
+        assert!(
+            throttle >= 1,
+            "expected >=1 pressure throttle event, got {throttle}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // MemoryPressureMonitor tests
+    // -----------------------------------------------------------------------
+
+    /// On Linux the monitor must parse /proc/meminfo and return a positive byte
+    /// count; on other platforms it returns None.
+    #[test]
+    fn memory_pressure_monitor_available_bytes() {
+        let result = MemoryPressureMonitor::available_bytes();
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                result.is_some(),
+                "/proc/meminfo should be parseable on Linux"
+            );
+            if let Some(bytes) = result {
+                assert!(bytes > 0, "MemAvailable should be > 0 on a running system");
+                assert!(
+                    bytes >= 1024 * 1024,
+                    "MemAvailable suspiciously low: {bytes} bytes"
+                );
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(
+                result.is_none(),
+                "on non-Linux platforms available_bytes() must return None"
+            );
+        }
+    }
+
+    /// `is_under_pressure` must return `false` when the threshold is zero
+    /// (available >= 0 is always true), and `true` only when available < threshold.
+    #[test]
+    fn memory_pressure_is_under_pressure_threshold_zero() {
+        // A threshold of 0 means "never throttle": available bytes >= 0 always.
+        assert!(
+            !MemoryPressureMonitor::is_under_pressure(0),
+            "zero threshold should never report pressure"
+        );
+    }
+
+    /// `is_under_pressure` with a very large threshold should report pressure
+    /// on Linux (unless the machine has exabytes of RAM).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn memory_pressure_is_under_pressure_very_high_threshold() {
+        // u64::MAX bytes — no machine has this much RAM.
+        assert!(
+            MemoryPressureMonitor::is_under_pressure(u64::MAX),
+            "u64::MAX threshold should always report pressure on Linux"
+        );
     }
 }

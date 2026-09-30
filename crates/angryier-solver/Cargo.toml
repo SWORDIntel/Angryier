@@ -8,7 +8,7 @@ description = "Solver-neutral query and portfolio contracts"
 [dependencies]
 angryier-types = { path = "../angryier-types" }
 angryier-expr = { path = "../angryier-expr" }
-sha2 = "0.10"
+blake3 = "1"
 
 [features]
 ffi = []
