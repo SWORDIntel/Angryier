@@ -51,6 +51,239 @@ impl std::fmt::Display for SymbolicEvalError {
 
 impl std::error::Error for SymbolicEvalError {}
 
+/// Site cap for the evaluators' debt logs — mirrors
+/// `UnsupportedFallthrough::snapshot` in the semantics layer: first-seen
+/// sites are kept, the total keeps counting, and a pathological image cannot
+/// grow the log unbounded.
+pub const SYMBOLIC_DEBT_SITE_CAP: usize = 128;
+
+/// One operation the shadow could not express and replaced with a fresh
+/// under-constrained symbol. Recorded, never silent: callers surface these
+/// sites as fidelity debt exactly like unsupported-form fallthroughs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SymbolicDebtSite {
+    /// The primitive that was replaced.
+    pub op: IrPrimitive,
+    /// Output width in bits.
+    pub width_bits: u16,
+    /// Lane width when the output type is a vector, else 0.
+    pub lane_bits: u16,
+}
+
+/// The vector-family primitives the flat expression language cannot express:
+/// lane-wise arithmetic, shuffles, packs, blends, dot products and tile ops
+/// need per-lane decomposition the `ExprOp` set (scalar bitvector ops only)
+/// has no vocabulary for. The shadow replaces each result with a fresh
+/// under-constrained symbol of the output width and records a
+/// [`SymbolicDebtSite`] — sound (never a wrong value), visible (always
+/// counted), and strictly more reachable than refusing the block.
+///
+/// Everything else about vectors is exact: whole-vector moves, loads, stores
+/// and register traffic lower through the existing Concat/Extract/ZExt
+/// machinery over a flat `BitVec(width_bits)` (the engine's `ExprOp::Concat`
+/// is binary little-endian, operands[0] = low bits, and `Extract` immediates
+/// encode `[start:u16 LE, width:u16 LE]`), and scalar bitvector primitives
+/// applied to whole-vector values stay exact flat 128-bit arithmetic.
+fn is_vector_debt_primitive(op: IrPrimitive) -> bool {
+    use IrPrimitive as P;
+    matches!(
+        op,
+        P::VecLaneAdd
+            | P::VecLaneSub
+            | P::VecLaneMul
+            | P::VecLaneAnd
+            | P::VecLaneOr
+            | P::VecLaneXor
+            | P::VecLaneFAdd
+            | P::VecLaneFSub
+            | P::VecLaneFMul
+            | P::VecLaneFDiv
+            | P::VecLaneFSqrt
+            | P::VecLaneShl
+            | P::VecLaneLShr
+            | P::VecLaneAShr
+            | P::VecLaneMaskEq
+            | P::VecLaneMaskSgt
+            | P::VecLaneMaxU
+            | P::VecLaneMinU
+            | P::VecLaneMaxS
+            | P::VecLaneMinS
+            | P::VecLaneMulHiS
+            | P::VecLaneMulHiU
+            | P::VecLaneAbs
+            | P::VecLaneSign
+            | P::VecLaneMulHiRS
+            | P::VecHAddS
+            | P::VecHSubS
+            | P::VecLaneMulDq
+            | P::VecBlendV
+            | P::VecShuffleBytes
+            | P::VecInterleaveLow
+            | P::VecInterleaveHigh
+            | P::VecPackSaturate
+            | P::VecPackSaturateU
+            | P::VecMadd16
+            | P::VecSad8
+            | P::VecShuffle32
+            | P::VecShuffle16
+            | P::VecMaddubs
+            | P::VecShiftRegL
+            | P::VecShiftRegR
+            | P::VecShiftRegRA
+            | P::VecHAdd
+            | P::VecHSub
+            | P::VecLaneSignExtend
+            | P::VecLaneZeroExtend
+            | P::VecLaneSatAddU
+            | P::VecLaneSatSubU
+            | P::VecLaneSatAddS
+            | P::VecDotU8S8
+            | P::VecDotS8S8
+            | P::VecDotS8U8
+            | P::VecLaneAvg
+            | P::VecBlendImm
+            | P::VecMaskMerge
+            | P::VecMaskZero
+            | P::VecDotF
+            | P::VecFRound
+            | P::VecTest
+            | P::VecCmpF
+            | P::VecFMin
+            | P::VecFMax
+            | P::VecMovMask
+            | P::VecHFAdd
+            | P::VecHFSub
+            | P::VecMpsadbw
+            | P::VecHMinUW
+            | P::VecShiftLeftBytes
+            | P::VecShiftRightBytes
+            | P::VecPermute32
+            | P::TileZero
+            | P::TileDotS8S8
+            | P::TileDotS8U8
+            | P::TileDotU8S8
+            | P::TileDotU8U8
+            | P::TileDotBf16
+            | P::TileDotFp16
+    )
+}
+
+/// The scalar float primitives the flat expression language cannot express:
+/// the `ExprOp` set has bitvector operators only (the arena's `ExprSort`
+/// carries a Float sort, but no FP operator exists to build on it, so no
+/// well-sorted FP node can be interned). Each of these either computes its
+/// exact concrete result when every operand resolves to a concrete value
+/// (mirroring the concrete interpreter bit-for-bit), or — when an operand is
+/// genuinely symbolic — becomes a fresh under-constrained symbol with a
+/// recorded debt site, exactly like the vector family. Ill-sorted FP nodes
+/// are never emitted.
+fn is_float_debt_primitive(op: IrPrimitive) -> bool {
+    use IrPrimitive as P;
+    matches!(op, P::FAdd | P::FSub | P::FMul | P::FDiv | P::FCompareFlags)
+}
+
+/// Width of a scalar float IR type, for float-primitive result symbols.
+fn float_width(ty: IrType) -> Option<u16> {
+    match ty {
+        IrType::Float32 | IrType::Bits(32) => Some(32),
+        IrType::Float64 | IrType::Bits(64) => Some(64),
+        _ => None,
+    }
+}
+
+/// Decodes a raw bit pattern as an f64 the way the concrete interpreter's
+/// `read_float` does — `Float32` widens through `f32`, `Float64` decodes
+/// directly; any other declared type refuses (mirroring the interpreter,
+/// which errors rather than guessing).
+fn decode_float(ty: IrType, raw: u64) -> Option<f64> {
+    match ty {
+        IrType::Float32 => Some(f64::from(f32::from_le_bytes(raw.to_le_bytes()[..4].try_into().ok()?))),
+        IrType::Float64 => Some(f64::from_le_bytes(raw.to_le_bytes())),
+        _ => None,
+    }
+}
+
+/// Encodes an f64 result back into the operation's declared float type the
+/// way the concrete interpreter's `write_float` does.
+fn encode_float(ty: IrType, value: f64) -> Option<u64> {
+    match ty {
+        IrType::Float32 => Some(u64::from((value as f32).to_bits())),
+        IrType::Float64 | IrType::Bits(_) => Some(value.to_bits()),
+        _ => None,
+    }
+}
+
+/// [`SymbolicEvaluator::exact_float_result`] for the concolic walk's
+/// `(expression, concrete tag, type)` inputs: computes the exact result
+/// when every operand carries a concrete tag, `None` otherwise.
+fn exact_float_concolic(op: IrPrimitive, ty: IrType, inputs: &[(ExprId, Option<u128>, IrType)]) -> Option<u64> {
+    let raws: Option<Vec<u64>> = inputs
+        .iter()
+        .map(|(_, concrete, _)| concrete.map(|value| value as u64))
+        .collect();
+    let operands = raws?;
+    let result = match op {
+        IrPrimitive::FAdd | IrPrimitive::FSub | IrPrimitive::FMul | IrPrimitive::FDiv => {
+            let left_raw = *operands.first()?;
+            let right_raw = *operands.get(1)?;
+            let left = decode_float(ty, left_raw)?;
+            let right = decode_float(ty, right_raw)?;
+            let value = match op {
+                IrPrimitive::FAdd => left + right,
+                IrPrimitive::FSub => left - right,
+                IrPrimitive::FMul => left * right,
+                IrPrimitive::FDiv => left / right,
+                _ => unreachable!(),
+            };
+            encode_float(ty, value)
+        }
+        IrPrimitive::FCompareFlags => {
+            let left_raw = *operands.first()?;
+            let right_raw = *operands.get(1)?;
+            let left = decode_float(inputs.first()?.2, left_raw)?;
+            let right = decode_float(inputs.get(1)?.2, right_raw)?;
+            // RFLAGS bit positions: CF=0, PF=2, ZF=6 — the exact layout the
+            // concrete interpreter encodes (NaN yields the ZF|PF|CF triple).
+            let mut flags: u64 = 0;
+            if left.is_nan() || right.is_nan() {
+                flags |= 1u64 << 6;
+                flags |= 1u64 << 0;
+                flags |= 1u64 << 2;
+            } else if left > right {
+            } else if left < right {
+                flags |= 1u64 << 0;
+            } else {
+                flags |= 1u64 << 6;
+            }
+            Some(flags)
+        }
+        _ => None,
+    };
+    result
+}
+
+/// Architectural width of a parent register for `PreserveParent` splices,
+/// by register id. Mirrors the stable identifier ranges of
+/// `angryier-arch-intel64::register_id` (persistence ids, documented as
+/// never renumbered); mirrored here so the execution contracts crate keeps
+/// its dependency graph free of an arch-crate edge. Only used when the
+/// shadow holds no wider tracked binding for the register.
+fn arch_parent_bits(register: u32) -> u16 {
+    const ZMM_BASE: u32 = 0x0100;
+    const OPMASK_BASE: u32 = 0x0140;
+    const X87_BASE: u32 = 0x0180;
+    const TILE_BASE: u32 = 0x0200;
+    const TILE_END: u32 = 0x0208; // TILE_BASE + 8 tile registers.
+    match register {
+        ZMM_BASE..OPMASK_BASE => 512,
+        OPMASK_BASE..X87_BASE => 64,
+        X87_BASE..TILE_BASE => 80,
+        TILE_BASE..TILE_END => 8192,
+        // GPRs, RIP/RFLAGS/FS/GS/SSP, TILECFG, MXCSR, x87 control/status.
+        _ => 64,
+    }
+}
+
 /// A symbolic variable created for a register read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SymbolBinding {
@@ -95,6 +328,21 @@ pub struct SymbolicEvaluator<'a> {
     expr_concrete: BTreeMap<ExprId, u64>,
     symbols: Vec<SymbolBinding>,
     next_symbol: u64,
+    /// First-seen vector-primitive fallback sites (capped at
+    /// [`SYMBOLIC_DEBT_SITE_CAP`]); the total keeps counting in
+    /// `debt_total`.
+    debt_sites: Vec<SymbolicDebtSite>,
+    debt_total: u64,
+    /// When set, every [`Self::eval_block_with_memory`] call restarts the
+    /// fresh-symbol counter at 0, so re-evaluating the same block interns
+    /// byte-identical expressions (the arena hash-conses them to the same
+    /// `ExprId`s). Solver-assisted address concretization needs this: it
+    /// pins a value for the failing address expression and re-runs the
+    /// block, and a pin keyed by `ExprId` can only hit when the re-run
+    /// rebuilds the very same `ExprId` — with a monotonically advancing
+    /// counter, every retry re-materializes the address under a NEW fresh
+    /// symbol and the retries can never converge.
+    block_local_symbols: bool,
 }
 
 impl<'a> SymbolicEvaluator<'a> {
@@ -107,12 +355,70 @@ impl<'a> SymbolicEvaluator<'a> {
             expr_concrete: BTreeMap::new(),
             symbols: Vec::new(),
             next_symbol: 0,
+            debt_sites: Vec::new(),
+            debt_total: 0,
+            block_local_symbols: false,
         }
+    }
+
+    /// Opts into block-local fresh-symbol ids (see the field's docs). The
+    /// first evaluation of a block is unaffected — a fresh evaluator starts
+    /// at 0 regardless — so this only changes re-evaluation behavior, which
+    /// is exactly the retry-pinning surface.
+    pub fn with_block_local_symbols(mut self) -> Self {
+        self.block_local_symbols = true;
+        self
     }
 
     /// Symbols created so far, in creation order.
     pub fn symbols(&self) -> &[SymbolBinding] {
         &self.symbols
+    }
+
+    /// First-seen sites where a vector-family primitive was replaced with an
+    /// under-constrained symbol (capped; see [`SYMBOLIC_DEBT_SITE_CAP`]).
+    pub fn debt_sites(&self) -> &[SymbolicDebtSite] {
+        &self.debt_sites
+    }
+
+    /// Total count of vector-primitive fallbacks, uncapped — the fidelity
+    /// ledger signal. Never silent: a caller that ignores this is running
+    /// under-constrained on every listed site.
+    pub fn debt_total(&self) -> u64 {
+        self.debt_total
+    }
+
+    /// Interns a fresh free symbol of `width` bits and advances the symbol
+    /// counter. Debt symbols deliberately stay out of [`Self::symbols`]:
+    /// they have no architectural input source, and a solver model keyed on
+    /// one must not be mapped back onto a register as an input assignment.
+    fn fresh_symbol(&mut self, width: u16) -> Result<ExprId, SymbolicEvalError> {
+        let symbol_id = self.next_symbol;
+        self.next_symbol = symbol_id
+            .checked_add(1)
+            .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("symbol id overflow".into()))?;
+        self.intern(
+            ExprSort::BitVec(width),
+            ExprOp::Symbol,
+            Vec::new(),
+            symbol_id.to_le_bytes().to_vec(),
+        )
+    }
+
+    /// Records a vector-primitive fallback site (deduplicated, capped).
+    fn record_debt(&mut self, op: IrPrimitive, ty: IrType) {
+        self.debt_total += 1;
+        let site = SymbolicDebtSite {
+            op,
+            width_bits: bit_width(ty).unwrap_or(0),
+            lane_bits: match ty {
+                IrType::Vector { lane_bits, .. } => lane_bits,
+                _ => 0,
+            },
+        };
+        if self.debt_sites.len() < SYMBOLIC_DEBT_SITE_CAP && !self.debt_sites.contains(&site) {
+            self.debt_sites.push(site);
+        }
     }
 
     /// Resolves a memory address expression: constants evaluate directly;
@@ -154,16 +460,7 @@ impl<'a> SymbolicEvaluator<'a> {
     /// Seeds `register` as a fresh input symbol of `ty`.
     pub fn mark_register(&mut self, register: u32, ty: IrType) -> Result<ExprId, SymbolicEvalError> {
         let width = bit_width(ty)?;
-        let symbol_id = self.next_symbol;
-        self.next_symbol = symbol_id
-            .checked_add(1)
-            .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("symbol id overflow".into()))?;
-        let expression = self.intern(
-            ExprSort::BitVec(width),
-            ExprOp::Symbol,
-            Vec::new(),
-            symbol_id.to_le_bytes().to_vec(),
-        )?;
+        let expression = self.fresh_symbol(width)?;
         self.registers.insert(register, (expression, ty));
         self.symbols.push(SymbolBinding {
             register,
@@ -215,6 +512,14 @@ impl<'a> SymbolicEvaluator<'a> {
         block: &IrBlock,
         memory: &mut SymbolicSessionMemory,
     ) -> Result<SymbolicBlockSummary, SymbolicEvalError> {
+        // Block-local fresh-symbol ids: re-evaluations rebuild identical
+        // expressions (see `block_local_symbols`). Fresh symbols stay
+        // distinct WITHIN one evaluation — the counter still advances — so
+        // no two under-constrained values created by the same block ever
+        // alias.
+        if self.block_local_symbols {
+            self.next_symbol = 0;
+        }
         let mut values: Vec<Option<(ExprId, IrType)>> = Vec::new();
         let mut written_registers = Vec::new();
         let mut branch = None;
@@ -251,8 +556,87 @@ impl<'a> SymbolicEvaluator<'a> {
                                 (widened, target_ty)
                             }
                         }
-                        RegisterWriteKind::PreserveParent { .. } => {
-                            return Err(SymbolicEvalError::UnsupportedOperation("partial register write".into()));
+                        RegisterWriteKind::PreserveParent { bit_offset, width_bits } => {
+                            // Symbolic splice of the concrete interpreter's
+                            // byte-granular merge: result = concat(parent
+                            // high bits, value, parent low bits). The parent
+                            // view comes from the shadow when the register is
+                            // tracked, else from the concrete snapshot (GPR-
+                            // sized values only) or a fresh under-constrained
+                            // symbol via read_register. The parent width is
+                            // the tracked binding's width when it covers the
+                            // write, else the register family's architectural
+                            // width — 512 for zmm parents (an xmm write
+                            // preserves bits 128..512), 80 for x87, 64 for
+                            // GPRs.
+                            let (lo, w) = (*bit_offset, *width_bits);
+                            let span = lo.saturating_add(w);
+                            if lo % 8 != 0 || w % 8 != 0 || w == 0 || bit_width(ty)? != w {
+                                return Err(SymbolicEvalError::UnsupportedOperation(
+                                    "partial register write".into(),
+                                ));
+                            }
+                            let tracked_width = self
+                                .registers
+                                .get(register)
+                                .and_then(|(_, tracked_ty)| bit_width(*tracked_ty).ok());
+                            let parent_width = match tracked_width {
+                                Some(tracked) if tracked >= span => tracked,
+                                _ => arch_parent_bits(*register).max(span),
+                            };
+                            if lo == 0 && w == parent_width {
+                                (expression, ty)
+                            } else {
+                                let parent = self.read_register(*register, IrType::Bits(parent_width))?;
+                                let mut spliced = None;
+                                let mut spliced_width = 0u16;
+                                for part in [
+                                    (lo > 0).then(|| {
+                                        let mut imm = Vec::with_capacity(4);
+                                        imm.extend_from_slice(&0u16.to_le_bytes());
+                                        imm.extend_from_slice(&lo.to_le_bytes());
+                                        Ok((
+                                            self.intern(ExprSort::BitVec(lo), ExprOp::Extract, vec![parent], imm)?,
+                                            lo,
+                                        ))
+                                    }),
+                                    Some(Ok((expression, w))),
+                                    (span < parent_width).then(|| {
+                                        let high_width = parent_width - span;
+                                        let mut imm = Vec::with_capacity(4);
+                                        imm.extend_from_slice(&span.to_le_bytes());
+                                        imm.extend_from_slice(&high_width.to_le_bytes());
+                                        Ok((
+                                            self.intern(
+                                                ExprSort::BitVec(high_width),
+                                                ExprOp::Extract,
+                                                vec![parent],
+                                                imm,
+                                            )?,
+                                            high_width,
+                                        ))
+                                    }),
+                                ]
+                                .into_iter()
+                                .flatten()
+                                {
+                                    let (part, part_width) = part?;
+                                    spliced = Some(match spliced {
+                                        None => part,
+                                        Some(prev) => self.intern(
+                                            ExprSort::BitVec(spliced_width + part_width),
+                                            ExprOp::Concat,
+                                            vec![prev, part],
+                                            Vec::new(),
+                                        )?,
+                                    });
+                                    spliced_width += part_width;
+                                }
+                                let result = spliced.ok_or_else(|| {
+                                    SymbolicEvalError::UnsupportedOperation("partial register write".into())
+                                })?;
+                                (result, IrType::Bits(parent_width))
+                            }
                         }
                     };
                     self.registers.insert(*register, (expression, ty));
@@ -292,8 +676,12 @@ impl<'a> SymbolicEvaluator<'a> {
                     let expr = memory.read(self.arena, addr, width)?;
                     // Record the load's concrete value so pointer-chasing
                     // addresses (loaded pointers feeding later loads)
-                    // resolve through this map.
-                    if let Ok(bytes) = memory.read_bytes(addr, usize::from(width).div_ceil(8)) {
+                    // resolve through this map. The map's carrier is u64, so
+                    // only address-sized (≤64-bit) loads qualify — a wider
+                    // (vector) load must not masquerade as a known u64.
+                    if width <= 64
+                        && let Ok(bytes) = memory.read_bytes(addr, usize::from(width).div_ceil(8))
+                    {
                         let mut concrete = 0u64;
                         let mut all_concrete = true;
                         for (i, byte) in bytes.iter().enumerate().take(8) {
@@ -358,10 +746,11 @@ impl<'a> SymbolicEvaluator<'a> {
         if let Some((expression, _)) = self.registers.get(&register) {
             // Normalize the stored expression to the requested view width —
             // the register file may hold the parent-width expression (a
-            // 64-bit-tracked rcx read as CL) or a narrowed sub-view write.
-            // Without this, operations that do not self-coerce (comparisons)
-            // intern ill-sorted nodes; a wider read zero-extends, matching
-            // the ZeroExtendParent semantics of 32-bit x86-64 writes.
+            // 64-bit-tracked rcx read as CL, a 512-bit-tracked zmm read as
+            // its xmm view) or a narrowed sub-view write. Without this,
+            // operations that do not self-coerce (comparisons) intern
+            // ill-sorted nodes; a wider read zero-extends, matching the
+            // ZeroExtendParent semantics of 32-bit x86-64 writes.
             let stored = *expression;
             let requested = bit_width(ty)?;
             let coerced = coerce_width(self.arena, stored, requested)?;
@@ -370,8 +759,13 @@ impl<'a> SymbolicEvaluator<'a> {
         let width = bit_width(ty)?;
         // Concrete fallback: untouched registers read their concrete value
         // from the state's snapshot instead of materializing a free symbol —
-        // keeps stack pointers and startup registers concrete.
-        if let Some(&value) = self.concrete_registers.get(&register) {
+        // keeps stack pointers and startup registers concrete. The snapshot
+        // carries u64 values only, so it cannot answer wider (vector) reads;
+        // those fall through to a fresh under-constrained symbol rather than
+        // pretending the unknown high bytes are zero.
+        if width <= 64
+            && let Some(&value) = self.concrete_registers.get(&register)
+        {
             let byte_len = usize::from(width).div_ceil(8);
             let mut bytes = value.to_le_bytes().to_vec();
             bytes.truncate(byte_len.clamp(1, 8));
@@ -379,22 +773,19 @@ impl<'a> SymbolicEvaluator<'a> {
             self.registers.insert(register, (expression, ty));
             return Ok(expression);
         }
-        let symbol_id = self.next_symbol;
-        self.next_symbol = symbol_id
-            .checked_add(1)
-            .ok_or_else(|| SymbolicEvalError::UnsupportedOperation("symbol id overflow".into()))?;
-        let expression = self.intern(
-            ExprSort::BitVec(width),
-            ExprOp::Symbol,
-            Vec::new(),
-            symbol_id.to_le_bytes().to_vec(),
-        )?;
+        let expression = self.fresh_symbol(width)?;
         self.registers.insert(register, (expression, ty));
-        self.symbols.push(SymbolBinding {
-            register,
-            width,
-            expression,
-        });
+        // Wide (vector-file) symbols stay out of the input-symbol list: the
+        // session maps solver models back onto registers through that list,
+        // and a 512-bit free variable has no u64 input slot to assign. The
+        // expression still flows into queries as an unconstrained leaf.
+        if width <= 64 {
+            self.symbols.push(SymbolBinding {
+                register,
+                width,
+                expression,
+            });
+        }
         Ok(expression)
     }
 
@@ -404,7 +795,135 @@ impl<'a> SymbolicEvaluator<'a> {
         ty: IrType,
         inputs: &[(ExprId, IrType)],
     ) -> Result<(ExprId, IrType), SymbolicEvalError> {
+        // Vector-family lane primitives have no flat-expression lowering:
+        // concretize-with-debt — the result becomes a fresh under-constrained
+        // symbol and the site is recorded (see [`is_vector_debt_primitive`]).
+        // Declared before the arena walk so the inputs stay untouched.
+        if is_vector_debt_primitive(op) {
+            let width = bit_width(ty)?;
+            let expression = self.fresh_symbol(width)?;
+            self.record_debt(op, ty);
+            return Ok((expression, ty));
+        }
+        // Scalar float primitives: no FP operator exists in the expression
+        // language (see [`is_float_debt_primitive`]). When every operand
+        // resolves to a concrete value the result is computed exactly,
+        // mirroring the concrete interpreter; otherwise the result
+        // concretizes with debt like the vector family. All derived flag
+        // sites in the block read from the ONE value a compare produces, so
+        // consistency within the block holds either way.
+        if is_float_debt_primitive(op) {
+            return self.float_primitive(op, ty, inputs);
+        }
         primitive_expr(self.arena, op, ty, inputs)
+    }
+
+    /// Scalar float primitive: exact concrete mirroring when every operand
+    /// resolves, otherwise a fresh under-constrained symbol + debt site.
+    fn float_primitive(
+        &mut self,
+        op: IrPrimitive,
+        ty: IrType,
+        inputs: &[(ExprId, IrType)],
+    ) -> Result<(ExprId, IrType), SymbolicEvalError> {
+        if let Some(exact) = self.exact_float_result(op, ty, inputs)? {
+            return Ok((exact, ty));
+        }
+        let width = float_width(ty).or_else(|| bit_width(ty).ok()).ok_or_else(|| {
+            SymbolicEvalError::UnsupportedType(format!("float primitive result {ty:?}"))
+        })?;
+        let expression = self.fresh_symbol(width)?;
+        self.record_debt(op, ty);
+        Ok((expression, ty))
+    }
+
+    /// Computes a float primitive's exact result when every operand carries
+    /// a concrete value — the same decode/compute/encode the concrete
+    /// interpreter performs (`read_float`, the IEEE arithmetic, the
+    /// RFLAGS-shaped compare layout with CF=0/PF=2/ZF=6 and the unordered
+    /// NaN triple). `None` means any operand stayed symbolic.
+    fn exact_float_result(
+        &self,
+        op: IrPrimitive,
+        ty: IrType,
+        inputs: &[(ExprId, IrType)],
+    ) -> Result<Option<ExprId>, SymbolicEvalError> {
+        let resolved: Option<Vec<u64>> = inputs
+            .iter()
+            .map(|(expression, _)| {
+                constant_value(self.arena, *expression)
+                    .ok()
+                    .or_else(|| self.expr_concrete.get(expression).copied())
+            })
+            .collect();
+        let Some(operands) = resolved else {
+            return Ok(None);
+        };
+        let result: Option<u64> = match op {
+            IrPrimitive::FAdd | IrPrimitive::FSub | IrPrimitive::FMul | IrPrimitive::FDiv => {
+                let (Some(left_raw), Some(right_raw)) = (operands.first().copied(), operands.get(1).copied()) else {
+                    return Ok(None);
+                };
+                let (Some(left), Some(right)) = (decode_float(ty, left_raw), decode_float(ty, right_raw)) else {
+                    return Ok(None);
+                };
+                let value = match op {
+                    // Rust's f64 arithmetic yields the IEEE-754 bit patterns
+                    // the concrete interpreter relies on (x/0 is +-Inf).
+                    IrPrimitive::FAdd => left + right,
+                    IrPrimitive::FSub => left - right,
+                    IrPrimitive::FMul => left * right,
+                    IrPrimitive::FDiv => left / right,
+                    _ => unreachable!(),
+                };
+                encode_float(ty, value)
+            }
+            IrPrimitive::FCompareFlags => {
+                let (Some(left_raw), Some(right_raw)) = (operands.first().copied(), operands.get(1).copied()) else {
+                    return Ok(None);
+                };
+                let (Some(left), Some(right)) = (
+                    inputs
+                        .first()
+                        .and_then(|(_, input_ty)| decode_float(*input_ty, left_raw)),
+                    inputs
+                        .get(1)
+                        .and_then(|(_, input_ty)| decode_float(*input_ty, right_raw)),
+                ) else {
+                    return Ok(None);
+                };
+                // RFLAGS bit positions: CF=0, PF=2, ZF=6 — the exact layout
+                // the concrete interpreter encodes.
+                let mut flags: u64 = 0;
+                if left.is_nan() || right.is_nan() {
+                    flags |= 1u64 << 6; // ZF
+                    flags |= 1u64 << 0; // CF
+                    flags |= 1u64 << 2; // PF
+                } else if left > right {
+                    // ZF=0, CF=0, PF=0
+                } else if left < right {
+                    flags |= 1u64 << 0; // CF
+                } else {
+                    flags |= 1u64 << 6; // ZF
+                }
+                Some(flags)
+            }
+            _ => None,
+        };
+        let Some(value) = result else {
+            return Ok(None);
+        };
+        let width = float_width(ty).or_else(|| bit_width(ty).ok()).ok_or_else(|| {
+            SymbolicEvalError::UnsupportedType(format!("float primitive result {ty:?}"))
+        })?;
+        let byte_width = usize::from(width).div_ceil(8);
+        let expression = self.intern(
+            ExprSort::BitVec(width),
+            ExprOp::Constant,
+            Vec::new(),
+            value.to_le_bytes()[..byte_width].to_vec(),
+        )?;
+        Ok(Some(expression))
     }
 
     fn intern(
@@ -681,6 +1200,14 @@ fn fold_node(
                 _ => return Err(FoldFail::Absolute),
             };
             let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+            // The carrier is the operand's low 64 bits; an extract window
+            // starting at or above 64 lies entirely outside it. Wide
+            // (128/256/512-bit) constants fold approximately through this
+            // u64 view throughout — return 0 rather than shift-overflow
+            // (a debug panic, a silent wrap in release).
+            if u32::from(start) >= 64 {
+                return Ok(0);
+            }
             Ok((child!(node.operands.first())? >> start) & mask)
         }
         ExprOp::RotL | ExprOp::RotR => {
@@ -829,6 +1356,177 @@ pub fn constant_value_resolved(
 /// Builds the expression for an IR primitive. Shared by the fully symbolic
 /// evaluator and the concolic shadow. Widths resolve through the arena's
 /// `sort_of` probe (no node clones, no memo to maintain).
+/// Interns a `width`-bit constant expression from a `u64` value.
+fn bv_constant(arena: &SymbolicArena, width: u16, value: u64) -> Result<ExprId, SymbolicEvalError> {
+    let byte_width = usize::from(width).div_ceil(8);
+    intern(
+        arena,
+        ExprSort::BitVec(width),
+        ExprOp::Constant,
+        Vec::new(),
+        value.to_le_bytes()[..byte_width].to_vec(),
+    )
+}
+
+/// One binary bitvector operation over already-width-coerced operands.
+fn bv_binop(
+    arena: &SymbolicArena,
+    op: ExprOp,
+    width: u16,
+    left: ExprId,
+    right: ExprId,
+) -> Result<ExprId, SymbolicEvalError> {
+    intern(arena, ExprSort::BitVec(width), op, vec![left, right], Vec::new())
+}
+
+/// The popcount masks for the supported operand widths, plus the final
+/// result mask (a popcount of `width` bits needs `ceil(log2(width + 1))`
+/// bits: 64 → 0x7f, 32 → 0x3f, 16 → 0x1f, 8 → 0x0f).
+fn popcount_masks(width: u16) -> Option<(u64, u64, u64, u64, u64)> {
+    match width {
+        8 => Some((0x55, 0x33, 0x0f, 0, 0x0f)),
+        16 => Some((0x5555, 0x3333, 0x0f0f, 0, 0x1f)),
+        32 => Some((0x5555_5555, 0x3333_3333, 0x0f0f_0f0f, 0, 0x3f)),
+        64 => Some((
+            0x5555_5555_5555_5555,
+            0x3333_3333_3333_3333,
+            0x0f0f_0f0f_0f0f_0f0f,
+            0,
+            0x7f,
+        )),
+        _ => None,
+    }
+}
+
+/// Bit-precise symbolic popcount over the flat bitvec — the classic SWAR
+/// decomposition (subtract-mask, pairwise sums, nibble fold, then the
+/// byte/half/word folds), which is exact for every input and needs only
+/// And/LShr/Sub/Add over constants. Concrete inputs fold to constants in
+/// the arena bottom-up, so the all-concrete case stays cheap and hash-
+/// consed.
+fn lower_popcount(arena: &SymbolicArena, input: ExprId, width: u16) -> Result<ExprId, SymbolicEvalError> {
+    let Some((m1, m2, m4, _, final_mask)) = popcount_masks(width) else {
+        return Err(SymbolicEvalError::UnsupportedOperation(format!("popcount width {width}")));
+    };
+    let c = |value: u64| bv_constant(arena, width, value);
+    let x = input;
+    // x = x - ((x >> 1) & m1): each 2-bit field now holds its bit count.
+    let x = bv_binop(
+        arena,
+        ExprOp::Sub,
+        width,
+        x,
+        bv_binop(arena, ExprOp::And, width, bv_binop(arena, ExprOp::LShr, width, x, c(1)?)?, c(m1)?)?,
+    )?;
+    // x = (x & m2) + ((x >> 2) & m2): each 4-bit field holds its bit count.
+    let low = bv_binop(arena, ExprOp::And, width, x, c(m2)?)?;
+    let high = bv_binop(arena, ExprOp::And, width, bv_binop(arena, ExprOp::LShr, width, x, c(2)?)?, c(m2)?)?;
+    let x = bv_binop(arena, ExprOp::Add, width, low, high)?;
+    // Nibble fold: (x + (x >> 4)) & m4 — each byte holds its bit count.
+    let x = bv_binop(
+        arena,
+        ExprOp::And,
+        width,
+        bv_binop(arena, ExprOp::Add, width, x, bv_binop(arena, ExprOp::LShr, width, x, c(4)?)?)?,
+        c(m4)?,
+    )?;
+    // Cumulative folds so the low byte/half/word accumulates the full
+    // count, then the final result mask.
+    let mut x = x;
+    for shift in [8u64, 16, 32] {
+        if shift < u64::from(width) {
+            x = bv_binop(arena, ExprOp::Add, width, x, bv_binop(arena, ExprOp::LShr, width, x, c(shift)?)?)?;
+        }
+    }
+    bv_binop(arena, ExprOp::And, width, x, c(final_mask)?)
+}
+
+/// Bit-precise symbolic count-leading-zeros. Smearing the highest set bit
+/// down (`y |= y >> s` for s = 1,2,4,... below the width) yields a value
+/// whose popcount is `position_of_highest_set_bit + 1`, and `width - that`
+/// is the leading-zero count — including `x = 0`, where the smear stays 0
+/// and the result is `width` (the concrete interpreter's convention).
+fn lower_clz(arena: &SymbolicArena, input: ExprId, width: u16) -> Result<ExprId, SymbolicEvalError> {
+    if popcount_masks(width).is_none() {
+        return Err(SymbolicEvalError::UnsupportedOperation(format!("clz width {width}")));
+    }
+    let c = |value: u64| bv_constant(arena, width, value);
+    let mut y = input;
+    for shift in [1u64, 2, 4, 8, 16, 32] {
+        if shift < u64::from(width) {
+            let shifted = bv_binop(arena, ExprOp::LShr, width, y, c(shift)?)?;
+            y = bv_binop(arena, ExprOp::Or, width, y, shifted)?;
+        }
+    }
+    let counted = lower_popcount(arena, y, width)?;
+    bv_binop(arena, ExprOp::Sub, width, c(u64::from(width))?, counted)
+}
+
+/// Bit-precise symbolic count-trailing-zeros. Isolating the lowest set bit
+/// (`x & -x`) and subtracting one leaves exactly `ctz` low ones set; for
+/// `x = 0` the isolate is 0 and `0 - 1` wraps to all ones, so the popcount
+/// is `width` (the concrete interpreter's convention for zero).
+fn lower_ctz(arena: &SymbolicArena, input: ExprId, width: u16) -> Result<ExprId, SymbolicEvalError> {
+    if popcount_masks(width).is_none() {
+        return Err(SymbolicEvalError::UnsupportedOperation(format!("ctz width {width}")));
+    }
+    let c = |value: u64| bv_constant(arena, width, value);
+    let negated = bv_binop(arena, ExprOp::Sub, width, c(0)?, input)?;
+    let isolated = bv_binop(arena, ExprOp::And, width, input, negated)?;
+    let minus_one = bv_binop(arena, ExprOp::Sub, width, isolated, c(1)?)?;
+    lower_popcount(arena, minus_one, width)
+}
+
+/// Bit-precise symbolic CRC-32C (SSE4.2 `crc32`): the bitwise round loop
+/// the concrete interpreter runs, expressed with Extract/ZExt/Xor over the
+/// flat bitvec. One feedback round is `crc = (crc >> 1) ^ (POLY & (0 - lsb))`
+/// — the `(0 - lsb)` mask trick replaces the branch, since `0 - 1` is the
+/// all-ones mask and `0 - 0` is zero. Concrete inputs fold bottom-up into a
+/// single constant.
+fn lower_crc32(
+    arena: &SymbolicArena,
+    crc_input: ExprId,
+    data: ExprId,
+    data_bits: u16,
+    output_width: u16,
+) -> Result<ExprId, SymbolicEvalError> {
+    const POLY: u32 = 0x82F63B78;
+    if data_bits % 8 != 0 || data_bits == 0 || data_bits > 64 {
+        return Err(SymbolicEvalError::UnsupportedOperation(format!("crc32 input width {data_bits}")));
+    }
+    let poly = bv_constant(arena, 32, u64::from(POLY))?;
+    let zero = bv_constant(arena, 32, 0)?;
+    let one = bv_constant(arena, 32, 1)?;
+    // The running CRC state is 32-bit regardless of the destination
+    // register width (the interpreter casts the accumulator to u32).
+    let mut crc = coerce_width(arena, crc_input, 32)?;
+    for byte_index in 0..(data_bits / 8) {
+        // Extract immediate = [start:u16][width:u16] — byte `i` lives at
+        // bit offset `i * 8` (little-endian, matching the interpreter's
+        // `(data >> byte_idx * 8) & 0xFF`).
+        let mut imm = Vec::with_capacity(4);
+        imm.extend_from_slice(&(byte_index * 8).to_le_bytes());
+        imm.extend_from_slice(&8u16.to_le_bytes());
+        let byte = intern(arena, ExprSort::BitVec(8), ExprOp::Extract, vec![data], imm)?;
+        let byte32 = intern(arena, ExprSort::BitVec(32), ExprOp::ZExt, vec![byte], Vec::new())?;
+        crc = bv_binop(arena, ExprOp::Xor, 32, crc, byte32)?;
+        for _ in 0..8 {
+            // Extract immediate = [start:u16][width:u16] — the low bit.
+            let mut start_imm = Vec::with_capacity(4);
+            start_imm.extend_from_slice(&0u16.to_le_bytes());
+            start_imm.extend_from_slice(&1u16.to_le_bytes());
+            let lsb = intern(arena, ExprSort::BitVec(1), ExprOp::Extract, vec![crc], start_imm)?;
+            let lsb32 = intern(arena, ExprSort::BitVec(32), ExprOp::ZExt, vec![lsb], Vec::new())?;
+            // (0 - lsb): 0x00000000 or 0xFFFFFFFF — the branchless feedback.
+            let mask = bv_binop(arena, ExprOp::Sub, 32, zero, lsb32)?;
+            let feedback = bv_binop(arena, ExprOp::And, 32, poly, mask)?;
+            let shifted = bv_binop(arena, ExprOp::LShr, 32, crc, one)?;
+            crc = bv_binop(arena, ExprOp::Xor, 32, shifted, feedback)?;
+        }
+    }
+    coerce_width(arena, crc, output_width)
+}
+
 fn primitive_expr(
     arena: &SymbolicArena,
     op: IrPrimitive,
@@ -1045,6 +1743,32 @@ fn primitive_expr(
             )?;
             Ok((value, ty))
         }
+        IrPrimitive::Popcnt => {
+            // Input coerced to the declared output width first (shadow
+            // widths can drift from the declared IR types), then the exact
+            // SWAR decomposition.
+            let operand = coerce_width(arena, operands[0], output_width)?;
+            let value = lower_popcount(arena, operand, output_width)?;
+            Ok((value, ty))
+        }
+        IrPrimitive::Clz => {
+            let operand = coerce_width(arena, operands[0], output_width)?;
+            let value = lower_clz(arena, operand, output_width)?;
+            Ok((value, ty))
+        }
+        IrPrimitive::Ctz => {
+            let operand = coerce_width(arena, operands[0], output_width)?;
+            let value = lower_ctz(arena, operand, output_width)?;
+            Ok((value, ty))
+        }
+        IrPrimitive::Crc32 => {
+            if inputs.len() != 2 {
+                return Err(SymbolicEvalError::UnsupportedOperation("crc32 arity".into()));
+            }
+            let data_bits = bit_width(inputs[1].1)?;
+            let value = lower_crc32(arena, operands[0], operands[1], data_bits, output_width)?;
+            Ok((value, ty))
+        }
         _ => Err(SymbolicEvalError::UnsupportedOperation(format!("{op:?}"))),
     }
 }
@@ -1141,9 +1865,14 @@ pub struct ConcolicEvaluator<'a> {
     constants: FxHashMap<(u16, u128), ExprId>,
     /// Negative fold memo: expressions proven non-constant by
     /// [`constant_value`]. Arena nodes are immutable, so a failure is valid
-    /// forever; without it every symbolic register write would re-walk the
-    /// top of a value chain that grows one node per iteration.
+    /// forever; without it every register write would re-walk the top of a
+    /// value chain that grows one node per iteration.
     non_constants: FxHashSet<ExprId>,
+    /// First-seen vector-primitive fallback sites (capped at
+    /// [`SYMBOLIC_DEBT_SITE_CAP`]); the total keeps counting in
+    /// `debt_total`.
+    debt_sites: Vec<SymbolicDebtSite>,
+    debt_total: u64,
     /// Scratch value table reused across block evaluations: the shadow
     /// evaluates one block per step, and regrowing this table from empty
     /// each time costs several reallocations per step.
@@ -1162,6 +1891,8 @@ impl<'a> ConcolicEvaluator<'a> {
             next_symbol: 0,
             constants: FxHashMap::default(),
             non_constants: FxHashSet::default(),
+            debt_sites: Vec::new(),
+            debt_total: 0,
             values_scratch: Vec::new(),
         }
     }
@@ -1184,6 +1915,35 @@ impl<'a> ConcolicEvaluator<'a> {
 
     pub fn bindings(&self) -> &[ConcolicBinding] {
         &self.bindings
+    }
+
+    /// First-seen sites where a vector-family primitive was replaced with an
+    /// under-constrained symbol (capped; see [`SYMBOLIC_DEBT_SITE_CAP`]).
+    pub fn debt_sites(&self) -> &[SymbolicDebtSite] {
+        &self.debt_sites
+    }
+
+    /// Total count of vector-primitive fallbacks, uncapped — the fidelity
+    /// ledger signal. Never silent: a caller that ignores this is running
+    /// under-constrained on every listed site.
+    pub fn debt_total(&self) -> u64 {
+        self.debt_total
+    }
+
+    /// Records a vector-primitive fallback site (deduplicated, capped).
+    fn record_debt(&mut self, op: IrPrimitive, ty: IrType) {
+        self.debt_total += 1;
+        let site = SymbolicDebtSite {
+            op,
+            width_bits: bit_width(ty).unwrap_or(0),
+            lane_bits: match ty {
+                IrType::Vector { lane_bits, .. } => lane_bits,
+                _ => 0,
+            },
+        };
+        if self.debt_sites.len() < SYMBOLIC_DEBT_SITE_CAP && !self.debt_sites.contains(&site) {
+            self.debt_sites.push(site);
+        }
     }
 
     /// Current shadow value of a register, if divergent from concrete.
@@ -1272,12 +2032,19 @@ impl<'a> ConcolicEvaluator<'a> {
         for instruction in &block.instructions {
             let produced = match &instruction.op {
                 IrOp::Constant { ty, bytes_le } => {
-                    let concrete = bytes_le
-                        .iter()
-                        .enumerate()
-                        .take(16)
-                        .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)));
-                    Some((self.constant(*ty, bytes_le)?, Some(concrete), *ty))
+                    // The concrete tag's carrier is u128 — wider (256/512-bit
+                    // vector) constants keep the exact expression but no tag,
+                    // so downstream fast paths never mistake a truncated
+                    // prefix for the whole value.
+                    let width = bit_width(*ty)?;
+                    let concrete = (width <= 128).then(|| {
+                        bytes_le
+                            .iter()
+                            .enumerate()
+                            .take(16)
+                            .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)))
+                    });
+                    Some((self.constant(*ty, bytes_le)?, concrete, *ty))
                 }
                 IrOp::ExprRef { expression, ty } => Some((*expression, None, *ty)),
                 IrOp::ReadRegister { register, ty } => {
@@ -1342,7 +2109,10 @@ impl<'a> ConcolicEvaluator<'a> {
                         }
                     };
                     // Fold the stored value when its expression is a constant.
-                    if concrete.is_none() {
+                    // The tag carrier is u128 — wider (vector-file) writes
+                    // keep the exact constant expression but no truncated
+                    // tag.
+                    if concrete.is_none() && bit_width(ty)? <= 128 {
                         concrete = self.constant_value_memo(expression).map(u128::from);
                     }
                     self.registers.insert(*register, (expression, ty));
@@ -1690,6 +2460,33 @@ impl<'a> ConcolicEvaluator<'a> {
         const MAX_INLINE: usize = 4;
         let output_width = bit_width(ty)?;
 
+        // Vector-family lane primitives: concretize-with-debt before any
+        // folding — the concrete folder has no lane semantics and the flat
+        // expression language has no lane ops. The result is a fresh
+        // under-constrained symbol with no concrete tag, and the site lands
+        // in the debt log (visible, never silent).
+        if is_vector_debt_primitive(op) {
+            let expression = self.fresh_symbol(output_width)?;
+            self.record_debt(op, ty);
+            return Ok((expression, None));
+        }
+
+        // Scalar float primitives: no FP operator exists in the expression
+        // language (see [`is_float_debt_primitive`]). Exact when every
+        // operand carries a concrete tag — the same decode/compute/encode
+        // the concrete interpreter performs — otherwise a fresh
+        // under-constrained symbol with no concrete tag.
+        if is_float_debt_primitive(op) {
+            if let Some(value) = exact_float_concolic(op, ty, inputs) {
+                let byte_width = usize::from(output_width).div_ceil(8);
+                let expression = self.constant(ty, &value.to_le_bytes()[..byte_width])?;
+                return Ok((expression, Some(u128::from(value))));
+            }
+            let width = float_width(ty).unwrap_or(output_width);
+            let expression = self.fresh_symbol(width)?;
+            return Ok((expression, None));
+        }
+
         // Constant folding: every input concrete and every width foldable.
         if inputs.len() <= MAX_INLINE
             && output_width <= 128
@@ -1844,12 +2641,19 @@ impl<'a> ConcolicEvaluator<'a> {
         }
         let expression = self.constant(ty, &bytes[..byte_width])?;
         self.registers.insert(register, (expression, ty));
-        let concrete = bytes[..byte_width.min(16)]
-            .iter()
-            .enumerate()
-            .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)));
-        self.register_concretes.insert(register, Some(concrete));
-        Ok((expression, Some(concrete)))
+        // The concrete tag's carrier is u128: only register widths that fit
+        // it exactly (≤128 bits) get a tag. A 512-bit zmm parent read keeps
+        // its exact expression but no tag, so width normalization and the
+        // concrete-first walk never treat a truncated low-128 prefix as the
+        // whole register's value.
+        let concrete = (byte_width <= 16).then(|| {
+            bytes[..byte_width.min(16)]
+                .iter()
+                .enumerate()
+                .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)))
+        });
+        self.register_concretes.insert(register, concrete);
+        Ok((expression, concrete))
     }
 
     /// The declared width of a register: the shadowed type when tracked, else
@@ -1945,12 +2749,16 @@ impl<'a> ConcolicEvaluator<'a> {
                     .collect();
                 &owned_data[..]
             };
-            let concrete = data
-                .iter()
-                .enumerate()
-                .take(16)
-                .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)));
-            return Ok((self.constant(ty, data)?, Some(concrete)));
+            // The tag carrier is u128: only loads up to 128 bits are tagged;
+            // wider (256/512-bit) all-concrete loads keep the exact constant
+            // expression but no truncated tag.
+            let concrete = (width <= 128).then(|| {
+                data.iter()
+                    .enumerate()
+                    .take(16)
+                    .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)))
+            });
+            return Ok((self.constant(ty, data)?, concrete));
         }
 
         // Little-endian: byte 0 is the least significant. Concatenate from
@@ -2066,6 +2874,19 @@ impl<'a> ConcolicEvaluator<'a> {
 fn bit_width(ty: IrType) -> Result<u16, SymbolicEvalError> {
     match ty {
         IrType::Bits(bits) if bits > 0 => Ok(bits),
+        // Scalar floats live in the shadow as flat bitvectors of their IEEE
+        // encoding width (the float primitives concretize-with-debt; see
+        // [`is_float_debt_primitive`]) — no Float-sorted expression node can
+        // be interned, so the flat width is the only representation.
+        IrType::Float32 => Ok(32),
+        IrType::Float64 => Ok(64),
+        // Vectors and opmasks live in the shadow as flat bitvectors of their
+        // full width (see the module-level vector representation notes on
+        // [`is_vector_debt_primitive`]): lane structure only matters to the
+        // lane-primitive family, which concretizes with debt instead of
+        // lowering. The lane count is therefore irrelevant here.
+        IrType::Vector { width_bits, .. } if width_bits > 0 => Ok(width_bits),
+        IrType::Opmask { width_bits } if width_bits > 0 => Ok(width_bits),
         other => Err(SymbolicEvalError::UnsupportedType(format!("{other:?}"))),
     }
 }
@@ -2481,7 +3302,20 @@ pub fn merge_snapshots(
                 if right_expr == left_expr {
                     registers.insert(register, (left_expr, left_ty));
                 } else {
-                    if right_ty != left_ty {
+                    // Types must agree on the flat width — the Ite sort is
+                    // derived from it and every Bits/Vector/Opmask binding
+                    // lives as a flat BitVec of that width. A Bits(128)
+                    // binding and a Vector{128,8} binding for the same
+                    // register (movq's zero-extended write vs a whole-vector
+                    // move) are the same sort and merge cleanly under the
+                    // left side's type.
+                    let same_width =
+                        match (bit_width(left_ty), bit_width(right_ty)) {
+                            (Ok(left_width), Ok(right_width)) => left_width == right_width,
+                            (Err(_), Err(_)) => left_ty == right_ty,
+                            _ => false,
+                        };
+                    if !same_width {
                         return Err(SymbolicEvalError::UnsupportedOperation(format!(
                             "merge type mismatch on register {register}: {left_ty:?} vs {right_ty:?}"
                         )));
@@ -2537,13 +3371,16 @@ fn bool_and_chain(arena: &SymbolicArena, constraints: &[ExprId]) -> Result<ExprI
 }
 
 /// IR type → expression sort for mergeable bindings.
+///
+/// Vectors and opmasks merge as flat bitvectors of their full width — the
+/// same representation the evaluators use. [`ExprSort::Vector`] is never
+/// interned: the solver FFI lowers only bitvector sorts, and an `Ite` over a
+/// Vector sort would be un-lowerable at query time.
 fn sort_of(ty: IrType) -> Result<ExprSort, SymbolicEvalError> {
     match ty {
         IrType::Bits(bits) => Ok(ExprSort::BitVec(bits)),
-        IrType::Vector { width_bits, lane_bits } => Ok(ExprSort::Vector {
-            lanes: width_bits / lane_bits.max(1),
-            lane_bits,
-        }),
+        IrType::Vector { width_bits, .. } if width_bits > 0 => Ok(ExprSort::BitVec(width_bits)),
+        IrType::Opmask { width_bits } if width_bits > 0 => Ok(ExprSort::BitVec(width_bits)),
         IrType::Float32 => Ok(ExprSort::Float {
             exponent_bits: 8,
             significand_bits: 24,
@@ -2933,4 +3770,1287 @@ mod tests {
         assert!(merge_snapshots(&arena, &parent, &left, &right).is_err());
         Ok(())
     }
+
+    // ------------------------------------------------------------------
+    // Vector (flat-BitVec) shadow support
+    // ------------------------------------------------------------------
+
+    const ZMM0: u32 = 0x0100;
+
+    fn vec_ty(width: u16, lane: u16) -> IrType {
+        IrType::Vector {
+            width_bits: width,
+            lane_bits: lane,
+        }
+    }
+
+    fn const_bytes(ty: IrType, bytes: Vec<u8>) -> IrInstruction {
+        IrInstruction {
+            result: None,
+            op: IrOp::Constant { ty, bytes_le: bytes },
+        }
+    }
+
+    fn with_result(result: u32, mut instruction: IrInstruction) -> IrInstruction {
+        instruction.result = Some(IrValueId(result));
+        instruction
+    }
+
+    #[test]
+    fn vector_register_write_read_stays_flat() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        let payload: Vec<u8> = (0u8..16).collect();
+
+        // Whole-vector move into xmm0: Constant(Vector128) -> zmm0.
+        let first = block(vec![
+            with_result(0, const_bytes(vec_ty(128, 8), payload.clone())),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: ZMM0,
+                    value: IrValueId(0),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+        ]);
+        evaluator.eval_block(&first)?;
+
+        let expr = evaluator
+            .register_value(ZMM0)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(arena.sort_of(expr), Some(ExprSort::BitVec(128)));
+        let node = arena.get(expr).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(node.op, ExprOp::Constant);
+        assert_eq!(node.immediate, payload, "vector constant keeps all 16 bytes");
+
+        // Reading the xmm view of the same parent reuses the expression —
+        // no fresh symbol, no re-lowering.
+        let second = block(vec![
+            with_result(
+                0,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::ReadRegister {
+                        register: ZMM0,
+                        ty: vec_ty(128, 8),
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: ZMM0 + 1,
+                    value: IrValueId(0),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+        ]);
+        evaluator.eval_block(&second)?;
+        assert_eq!(evaluator.register_value(ZMM0 + 1), Some(expr));
+        assert!(
+            evaluator.symbols().is_empty(),
+            "a fully concrete vector move creates no input symbols"
+        );
+        assert_eq!(evaluator.debt_total(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn vector_load_store_through_shadow_memory() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        let mut memory = SymbolicSessionMemory::new(
+            angryier_memory::PersistentMemory::new(vec![angryier_memory::MemoryRegion {
+                object: angryier_types::ObjectId(1),
+                base: 0x2000,
+                size: 0x2000,
+                readable: true,
+                writable: true,
+                executable: false,
+            }])
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory init: {e:?}")))?,
+        );
+        let payload: Vec<u8> = (0x10u8..0x20).collect();
+        let concrete_bytes: Vec<angryier_memory::ByteValue> =
+            payload.iter().map(|byte| angryier_memory::ByteValue::Concrete(*byte)).collect();
+        memory.write_bytes(0x2000, &concrete_bytes)?;
+
+        // MOVDQU-shaped load: 16 bytes into xmm0 through the shadow.
+        let load_block = block(vec![
+            with_result(
+                0,
+                const_bytes(bits(64), 0x2000u64.to_le_bytes().to_vec()),
+            ),
+            with_result(
+                1,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Load {
+                        address: IrValueId(0),
+                        ty: vec_ty(128, 8),
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: ZMM0,
+                    value: IrValueId(1),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+        ]);
+        evaluator.eval_block_with_memory(&load_block, &mut memory)?;
+
+        let loaded = evaluator
+            .register_value(ZMM0)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
+        assert_eq!(arena.sort_of(loaded), Some(ExprSort::BitVec(128)));
+        let node = arena.get(loaded).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
+        assert_eq!(node.op, ExprOp::Constant, "all-concrete vector load folds to one constant");
+        assert_eq!(node.immediate, payload);
+
+        // Store it back out (MOVUPS-shaped) and verify byte-exact round-trip.
+        let store_block = block(vec![
+            with_result(
+                0,
+                const_bytes(bits(64), 0x3000u64.to_le_bytes().to_vec()),
+            ),
+            with_result(
+                1,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::ReadRegister {
+                        register: ZMM0,
+                        ty: vec_ty(128, 8),
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::Store {
+                    address: IrValueId(0),
+                    value: IrValueId(1),
+                },
+            },
+        ]);
+        evaluator.eval_block_with_memory(&store_block, &mut memory)?;
+        let readback = memory.read_bytes(0x3000, 16)?;
+        let moved: Option<Vec<u8>> = readback
+            .iter()
+            .map(|byte| match byte {
+                angryier_memory::ByteValue::Concrete(value) => Some(*value),
+                angryier_memory::ByteValue::Symbolic(_) => None,
+            })
+            .collect();
+        assert_eq!(moved.as_deref(), Some(payload.as_slice()), "store must land byte-exact");
+
+        // One symbolic source byte: the reload must stay a symbolic 128-bit
+        // expression, not fold.
+        let sym = symbol(&arena, 8)
+            .map_err(SymbolicEvalError::UnsupportedOperation)?;
+        memory.write_bytes(0x2008, &[angryier_memory::ByteValue::Symbolic(sym)])?;
+        let reload_block = block(vec![
+            with_result(
+                0,
+                const_bytes(bits(64), 0x2000u64.to_le_bytes().to_vec()),
+            ),
+            with_result(
+                1,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Load {
+                        address: IrValueId(0),
+                        ty: vec_ty(128, 8),
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: ZMM0 + 2,
+                    value: IrValueId(1),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+        ]);
+        evaluator.eval_block_with_memory(&reload_block, &mut memory)?;
+        let mixed = evaluator
+            .register_value(ZMM0 + 2)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
+        assert_eq!(arena.sort_of(mixed), Some(ExprSort::BitVec(128)));
+        assert_ne!(arena.op_of(mixed), Some(ExprOp::Constant), "symbolic byte must keep the load symbolic");
+        Ok(())
+    }
+
+    #[test]
+    fn xmm_partial_write_splices_into_zmm_parent() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+
+        // MOVQ-shaped write: a 64-bit value into the low half of an
+        // untouched xmm — the parent is the 512-bit zmm slot and bits
+        // 64..512 must be preserved (as a fresh under-constrained view).
+        let first = block(vec![
+            with_result(0, const_bytes(bits(64), 0x42u64.to_le_bytes().to_vec())),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: ZMM0 + 2,
+                    value: IrValueId(0),
+                    kind: RegisterWriteKind::PreserveParent {
+                        bit_offset: 0,
+                        width_bits: 64,
+                    },
+                },
+            },
+        ]);
+        evaluator.eval_block(&first)?;
+
+        let expr = evaluator
+            .register_value(ZMM0 + 2)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(arena.sort_of(expr), Some(ExprSort::BitVec(512)));
+        let node = arena.get(expr).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(node.op, ExprOp::Concat);
+        // Little-endian concat: operands[0] is the written low 64 bits,
+        // operands[1] the preserved high 448 bits.
+        let low = arena.get(node.operands[0]).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(low.op, ExprOp::Constant);
+        assert_eq!(low.immediate, 0x42u64.to_le_bytes().to_vec());
+        let high = arena.get(node.operands[1]).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(high.op, ExprOp::Extract);
+        // Extract immediate = [start:u16 LE][width:u16 LE].
+        let start = high.immediate.get(..2).and_then(|b| <[u8; 2]>::try_from(b).ok()).map(u16::from_le_bytes);
+        let width = high.immediate.get(2..4).and_then(|b| <[u8; 2]>::try_from(b).ok()).map(u16::from_le_bytes);
+        assert_eq!(start, Some(64));
+        assert_eq!(width, Some(448));
+        assert_eq!(high.sort, ExprSort::BitVec(448));
+
+        // Reading the 64-bit view back folds the extract chain to the
+        // written constant; reading the xmm view yields a 128-bit expression.
+        let second = block(vec![
+            with_result(
+                0,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::ReadRegister {
+                        register: ZMM0 + 2,
+                        ty: bits(64),
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: 0,
+                    value: IrValueId(0),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+            with_result(
+                1,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::ReadRegister {
+                        register: ZMM0 + 2,
+                        ty: vec_ty(128, 8),
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: ZMM0 + 3,
+                    value: IrValueId(1),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+        ]);
+        evaluator.eval_block(&second)?;
+        let low_view = evaluator
+            .register_value(0)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        // The 64-bit view is Extract(splice, 0, 64) — the high 448 bits are
+        // a fresh symbol, so the extract cannot fold to a constant, but its
+        // window and operand must be exact.
+        let low_node = arena.get(low_view).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(low_node.op, ExprOp::Extract);
+        let start = low_node.immediate.get(..2).and_then(|b| <[u8; 2]>::try_from(b).ok()).map(u16::from_le_bytes);
+        let width = low_node.immediate.get(2..4).and_then(|b| <[u8; 2]>::try_from(b).ok()).map(u16::from_le_bytes);
+        assert_eq!(start, Some(0));
+        assert_eq!(width, Some(64));
+        assert_eq!(low_node.operands, vec![expr]);
+        let xmm_view = evaluator
+            .register_value(ZMM0 + 3)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
+        assert_eq!(arena.sort_of(xmm_view), Some(ExprSort::BitVec(128)));
+        Ok(())
+    }
+
+    #[test]
+    fn gpr_partial_write_keeps_64_bit_parent() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        // setcc-shaped write: one byte into al of an untracked rax — the
+        // parent stays a 64-bit GPR splice.
+        let first = block(vec![
+            with_result(0, const_bytes(bits(8), vec![7])),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: 0,
+                    value: IrValueId(0),
+                    kind: RegisterWriteKind::PreserveParent {
+                        bit_offset: 0,
+                        width_bits: 8,
+                    },
+                },
+            },
+        ]);
+        evaluator.eval_block(&first)?;
+        let expr = evaluator
+            .register_value(0)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(arena.sort_of(expr), Some(ExprSort::BitVec(64)));
+        Ok(())
+    }
+
+    #[test]
+    fn wide_read_ignores_u64_concrete_snapshot() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        evaluator.restore(&SymbolicStateSnapshot {
+            concrete_registers: BTreeMap::from([(ZMM0, 0xA5A5A5A5u64)]),
+            ..SymbolicStateSnapshot::default()
+        });
+        // A 128-bit read of a register whose snapshot value is a u64 must
+        // not fabricate a zero-padded constant (the arena would reject the
+        // non-canonical immediate) — it materializes an under-constrained
+        // symbol instead.
+        let read_block = block(vec![with_result(
+            0,
+            IrInstruction {
+                result: None,
+                op: IrOp::ReadRegister {
+                    register: ZMM0,
+                    ty: vec_ty(128, 8),
+                },
+            },
+        )]);
+        evaluator.eval_block(&read_block)?;
+        let expr = evaluator
+            .register_value(ZMM0)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(arena.op_of(expr), Some(ExprOp::Symbol));
+        Ok(())
+    }
+
+    #[test]
+    fn vector_lane_primitive_concretizes_with_debt() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+
+        let lane_add_block = block(vec![
+            with_result(0, const_bytes(vec_ty(128, 8), vec![1u8; 16])),
+            with_result(1, const_bytes(vec_ty(128, 8), vec![2u8; 16])),
+            with_result(
+                2,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Primitive {
+                        op: IrPrimitive::VecLaneAdd,
+                        ty: vec_ty(128, 8),
+                        inputs: vec![IrValueId(0), IrValueId(1)],
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: ZMM0 + 4,
+                    value: IrValueId(2),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+        ]);
+        evaluator.eval_block(&lane_add_block)?;
+
+        let expr = evaluator
+            .register_value(ZMM0 + 4)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+        assert_eq!(arena.op_of(expr), Some(ExprOp::Symbol), "lane add falls back to a fresh symbol");
+        assert_eq!(arena.sort_of(expr), Some(ExprSort::BitVec(128)));
+        assert_eq!(evaluator.debt_total(), 1);
+        assert_eq!(evaluator.debt_sites(), &[SymbolicDebtSite {
+            op: IrPrimitive::VecLaneAdd,
+            width_bits: 128,
+            lane_bits: 8,
+        }]);
+
+        // A second, different primitive adds a site; repeating the first
+        // only moves the total (sites dedupe, total counts every hit).
+        let shuffle_block = block(vec![
+            with_result(0, const_bytes(vec_ty(128, 8), vec![3u8; 16])),
+            with_result(
+                1,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Primitive {
+                        op: IrPrimitive::VecInterleaveLow,
+                        ty: vec_ty(128, 8),
+                        inputs: vec![IrValueId(0), IrValueId(0)],
+                    },
+                },
+            ),
+        ]);
+        evaluator.eval_block(&shuffle_block)?;
+        assert_eq!(evaluator.debt_total(), 2);
+        assert_eq!(evaluator.debt_sites().len(), 2);
+        evaluator.eval_block(&lane_add_block)?;
+        assert_eq!(evaluator.debt_total(), 3);
+        assert_eq!(evaluator.debt_sites().len(), 2);
+        Ok(())
+    }
+
+    /// Minimal concrete image for the concolic vector tests: a byte-backed
+    /// memory and explicit register bytes.
+    struct VecImage {
+        regs: BTreeMap<u32, Vec<u8>>,
+        mem: BTreeMap<u64, u8>,
+    }
+
+    impl ConcolicImage for VecImage {
+        fn read_register(&self, register: u32) -> Option<Vec<u8>> {
+            self.regs.get(&register).cloned()
+        }
+
+        fn read_bytes(&self, address: u64, length: usize) -> Option<Vec<angryier_memory::ByteValue>> {
+            let mut out = Vec::with_capacity(length);
+            for offset in 0..length as u64 {
+                out.push(angryier_memory::ByteValue::Concrete(*self.mem.get(&(address + offset))?));
+            }
+            Some(out)
+        }
+    }
+
+    #[test]
+    fn concolic_vector_move_is_exact_and_debt_records_lane_ops() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        let mut evaluator = ConcolicEvaluator::new(&arena);
+        let payload: Vec<u8> = (0x30u8..0x40).collect();
+        let image = VecImage {
+            regs: BTreeMap::new(),
+            mem: payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| (0x5000 + index as u64, *byte))
+                .collect(),
+        };
+
+        let move_block = block(vec![
+            with_result(0, const_bytes(bits(64), 0x5000u64.to_le_bytes().to_vec())),
+            with_result(
+                1,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Load {
+                        address: IrValueId(0),
+                        ty: vec_ty(128, 8),
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: ZMM0 + 5,
+                    value: IrValueId(1),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+            with_result(2, const_bytes(bits(64), 0x6000u64.to_le_bytes().to_vec())),
+            with_result(
+                3,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::ReadRegister {
+                        register: ZMM0 + 5,
+                        ty: vec_ty(128, 8),
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::Store {
+                    address: IrValueId(2),
+                    value: IrValueId(3),
+                },
+            },
+        ]);
+        evaluator.eval_block(&image, &move_block)?;
+
+        // The whole-vector move never leaves the concrete-first path: every
+        // moved byte lands in the shadow memory, and the register shadow
+        // keeps an exact 128-bit concrete tag.
+        for (index, byte) in payload.iter().enumerate() {
+            assert_eq!(
+                evaluator.shadow_memory().get(&(0x6000 + index as u64)),
+                Some(&angryier_memory::ByteValue::Concrete(*byte))
+            );
+        }
+        let expected_tag = payload
+            .iter()
+            .enumerate()
+            .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)));
+        assert_eq!(evaluator.register_concretes().get(&(ZMM0 + 5)), Some(&Some(expected_tag)));
+        assert_eq!(evaluator.debt_total(), 0);
+
+        // A lane op on the concolic path records visible debt and yields an
+        // untagged (under-constrained) shadow.
+        let lane_block = block(vec![
+            with_result(0, const_bytes(vec_ty(128, 8), vec![5u8; 16])),
+            with_result(1, const_bytes(vec_ty(128, 8), vec![6u8; 16])),
+            with_result(
+                2,
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Primitive {
+                        op: IrPrimitive::VecLaneMaskEq,
+                        ty: vec_ty(128, 8),
+                        inputs: vec![IrValueId(0), IrValueId(1)],
+                    },
+                },
+            ),
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: ZMM0 + 6,
+                    value: IrValueId(2),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+        ]);
+        evaluator.eval_block(&image, &lane_block)?;
+        assert_eq!(evaluator.debt_total(), 1);
+        assert_eq!(
+            evaluator.debt_sites(),
+            &[SymbolicDebtSite {
+                op: IrPrimitive::VecLaneMaskEq,
+                width_bits: 128,
+                lane_bits: 8,
+            }]
+        );
+        assert_eq!(evaluator.register_concretes().get(&(ZMM0 + 6)), Some(&None));
+        let shadowed = evaluator
+            .register_value(ZMM0 + 6)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+        assert_eq!(arena.op_of(shadowed), Some(ExprOp::Symbol));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_accepts_equal_width_vector_and_bits_bindings() -> Result<(), String> {
+        // One side tracked the xmm view as a Vector type, the other as flat
+        // Bits(128) — same flat width, same sort, so the merge must succeed.
+        let arena = arena();
+        let a = symbol(&arena, 128)?;
+        // Canonical 128-bit constant: exactly 16 immediate bytes.
+        let b = arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(128),
+                op: ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: {
+                    let mut bytes = 9u64.to_le_bytes().to_vec();
+                    bytes.resize(16, 0);
+                    bytes
+                },
+            })
+            .map_err(|e| format!("{e:?}"))?;
+        let parent = SymbolicStateSnapshot::default();
+        let left = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(ZMM0, (a, vec_ty(128, 8)))]),
+            concrete_registers: BTreeMap::new(),
+            constraints: Vec::new(),
+            symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
+        };
+        let right = SymbolicStateSnapshot {
+            registers: BTreeMap::from([(ZMM0, (b, IrType::Bits(128)))]),
+            concrete_registers: BTreeMap::new(),
+            constraints: Vec::new(),
+            symbols: Vec::new(),
+            expr_concrete: BTreeMap::new(),
+        };
+        let merged = merge_snapshots(&arena, &parent, &left, &right).map_err(|e| format!("{e:?}"))?;
+        let (expr, _) = *merged.registers.get(&ZMM0).ok_or("zmm0")?;
+        let node = arena.get(expr).ok_or("merged node")?;
+        assert_eq!(node.op, ExprOp::Ite);
+        assert_eq!(node.sort, ExprSort::BitVec(128));
+        Ok(())
+    }
+
+    /// The `uc_memory` policy: with the flag armed on the persistent memory
+    /// under a session's byte store, unmapped reads resolve to zero bytes
+    /// and unmapped writes allocate zero-backed pages — both debt-recorded
+    /// in the shared ledger — instead of surfacing
+    /// `UnsupportedOperation("memory read/write: Unmapped(..)")`. Flag off
+    /// keeps the exact faulting behavior.
+    #[test]
+    fn uc_memory_session_accesses_resolve_when_armed_and_fault_when_off() -> Result<(), SymbolicEvalError> {
+        let region = || angryier_memory::MemoryRegion {
+            object: angryier_types::ObjectId(1),
+            base: 0x2000,
+            size: 0x2000,
+            readable: true,
+            writable: true,
+            executable: false,
+        };
+        let armed = angryier_memory::PersistentMemory::new(vec![region()])
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory init: {e:?}")))?
+            .with_uc_memory();
+        let mut memory = SymbolicSessionMemory::new(armed);
+
+        // Unmapped read: zero bytes, no fault.
+        let read = memory.read_bytes(0x7000, 8)?;
+        assert!(
+            read.iter().all(|byte| *byte == angryier_memory::ByteValue::Concrete(0)),
+            "an unmapped read under the policy returns zero bytes"
+        );
+        // Unmapped write: allocates the page, bytes read back.
+        let payload: Vec<angryier_memory::ByteValue> = b"UCMEM"
+            .iter()
+            .copied()
+            .map(angryier_memory::ByteValue::Concrete)
+            .collect();
+        memory.write_bytes(0x9000, &payload)?;
+        let readback = memory.read_bytes(0x9000, 5)?;
+        let moved: Option<Vec<u8>> = readback
+            .iter()
+            .map(|byte| match byte {
+                angryier_memory::ByteValue::Concrete(value) => Some(*value),
+                angryier_memory::ByteValue::Symbolic(_) => None,
+            })
+            .collect();
+        assert_eq!(moved.as_deref(), Some(b"UCMEM".as_slice()), "store must land byte-exact");
+
+        // Debt is in the shared ledger, reachable through any handle.
+        let inner = memory.memory.inner();
+        assert!(inner.uc_memory_armed());
+        assert_eq!(inner.uc_memory_total(), 3, "read + write + read-back");
+        let sites = inner.uc_memory_sites();
+        assert_eq!(sites.len(), 3, "read@0x7000, write@0x9000, read@0x9000");
+        assert_eq!(sites[0].op, angryier_memory::UcMemoryOp::Read);
+        assert_eq!(sites[0].address, 0x7000);
+        assert_eq!(sites[1].op, angryier_memory::UcMemoryOp::Write);
+        assert_eq!(sites[1].address, 0x9000);
+
+        // Flag off: the same accesses fault exactly as today.
+        let mut strict = SymbolicSessionMemory::new(
+            angryier_memory::PersistentMemory::new(vec![region()])
+                .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory init: {e:?}")))?,
+        );
+        assert!(matches!(
+            strict.read_bytes(0x7000, 8),
+            Err(SymbolicEvalError::UnsupportedOperation(message))
+                if message.contains("memory read") && message.contains("Unmapped")
+        ));
+        assert!(matches!(
+            strict.write_bytes(0x7000, &[angryier_memory::ByteValue::Concrete(1)]),
+            Err(SymbolicEvalError::UnsupportedOperation(message))
+                if message.contains("memory write") && message.contains("Unmapped")
+        ));
+        Ok(())
+    }
+
+    // --- Read-only-write relaxation through the session store -------------
+
+    fn ro_region() -> angryier_memory::MemoryRegion {
+        angryier_memory::MemoryRegion {
+            object: angryier_types::ObjectId(1),
+            base: 0x1404d0000,
+            size: 0x2000,
+            readable: true,
+            writable: false,
+            executable: false,
+        }
+    }
+
+    #[test]
+    fn uc_write_ro_relaxes_through_the_session_store() -> Result<(), SymbolicEvalError> {
+        let memory = angryier_memory::PersistentMemory::new(vec![ro_region()])
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory init: {e:?}")))?;
+        let mut armed = SymbolicSessionMemory::new(memory.with_uc_memory().with_uc_write_ro(true));
+        armed.write_bytes(0x1404d0018, &[angryier_memory::ByteValue::Concrete(0xaa); 4])?;
+        let inner = armed.memory.inner();
+        assert_eq!(inner.uc_memory_ro_write_total(), 1);
+        assert_eq!(inner.uc_memory_sites()[0].op, angryier_memory::UcMemoryOp::WriteRO);
+        assert_eq!(
+            armed.read_bytes(0x1404d0018, 4)?,
+            vec![angryier_memory::ByteValue::Concrete(0xaa); 4]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn uc_write_ro_off_still_denies_through_the_session_store() -> Result<(), SymbolicEvalError> {
+        let memory = angryier_memory::PersistentMemory::new(vec![ro_region()])
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory init: {e:?}")))?;
+        let mut armed = SymbolicSessionMemory::new(memory.with_uc_memory());
+        let error = armed
+            .write_bytes(0x1404d0018, &[angryier_memory::ByteValue::Concrete(0xaa)])
+            .expect_err("flag off must keep the denial");
+        assert!(error.to_string().contains("PermissionDenied"));
+        Ok(())
+    }
+
+    // --- Bit-precise Popcnt / Clz / Ctz / Crc32 ---------------------------
+
+    /// The test sink register every block below writes its result to.
+    const SINK: u32 = 0x7f;
+
+    /// Ends a block by writing value slot `slot` into the sink register —
+    /// the evaluator's public surface exposes computed values through the
+    /// register file, not the block-local value table.
+    fn write_sink(slot: u8) -> IrInstruction {
+        IrInstruction {
+            result: None,
+            op: IrOp::WriteRegister {
+                register: SINK,
+                value: IrValueId(u32::from(slot)),
+                kind: angryier_ir::RegisterWriteKind::ReplaceParent,
+            },
+        }
+    }
+
+    /// A one-input primitive block: Constant (or symbolic register) input,
+    /// one primitive, result written to the sink register.
+    fn bitcount_block(op: IrPrimitive, ty: IrType, input: IrOp) -> IrBlock {
+        block(vec![
+            IrInstruction {
+                result: Some(IrValueId(0)),
+                op: input,
+            },
+            IrInstruction {
+                result: Some(IrValueId(1)),
+                op: IrOp::Primitive {
+                    op,
+                    ty,
+                    inputs: vec![IrValueId(0)],
+                },
+            },
+            write_sink(1),
+        ])
+    }
+
+    fn const_op(ty: IrType, value: u64) -> IrOp {
+        let width = match ty {
+            IrType::Bits(bits) => bits,
+            IrType::Float32 => 32,
+            IrType::Float64 => 64,
+            other => panic!("const_op only supports Bits/Float32/Float64, got {other:?}"),
+        };
+        let byte_width = usize::from(width).div_ceil(8);
+        IrOp::Constant {
+            ty,
+            bytes_le: value.to_le_bytes()[..byte_width].to_vec(),
+        }
+    }
+
+    fn mask64(width: u16) -> u64 {
+        if width >= 64 { u64::MAX } else { (1u64 << width) - 1 }
+    }
+
+    #[test]
+    fn popcnt_concrete_inputs_round_trip_against_concrete_semantics() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        for width in [8u16, 16, 32, 64] {
+            for value in [0u64, 1, 0x0f, 0x55, 0x8000_0000_0000_0000, u64::MAX] {
+                let masked = value & mask64(width);
+                let mut evaluator = SymbolicEvaluator::new(&arena);
+                evaluator.eval_block(&bitcount_block(
+                    IrPrimitive::Popcnt,
+                    bits(width),
+                    const_op(bits(width), masked),
+                ))?;
+                let expression = evaluator
+                    .register_value(SINK)
+                    .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
+                let folded = constant_value(&arena, expression)
+                    .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("popcnt did not fold: {e:?}")))?;
+                assert_eq!(
+                    folded as u32,
+                    u32::try_from(masked.count_ones()).unwrap(),
+                    "popcnt {masked:#x} at width {width}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn clz_ctz_concrete_inputs_round_trip_against_concrete_semantics() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        for width in [8u16, 16, 32, 64] {
+            for value in [0u64, 1, 0x8000, 0x8000_0000_0000_0000, u64::MAX] {
+                let masked = value & mask64(width);
+                // Clz: the interpreter takes leading_zeros over the full
+                // u128 carrier (whose upper half is always zero for these
+                // widths) and subtracts the unused head — equivalently the
+                // u64 leading_zeros shifted by the width gap.
+                let expected_clz = if masked == 0 {
+                    u32::from(width)
+                } else {
+                    masked.leading_zeros() - (64 - u32::from(width))
+                };
+                let expected_ctz = if masked == 0 {
+                    u32::from(width)
+                } else {
+                    masked.trailing_zeros()
+                };
+                for (op, expected) in [(IrPrimitive::Clz, expected_clz), (IrPrimitive::Ctz, expected_ctz)] {
+                    let mut evaluator = SymbolicEvaluator::new(&arena);
+                    evaluator.eval_block(&bitcount_block(op, bits(width), const_op(bits(width), masked)))?;
+                    let expression = evaluator
+                        .register_value(SINK)
+                        .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
+                    let folded = constant_value(&arena, expression).map_err(|e| {
+                        SymbolicEvalError::UnsupportedOperation(format!("{op:?} did not fold: {e:?}"))
+                    })?;
+                    assert_eq!(folded as u32, expected, "{op:?} {masked:#x} at width {width}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn popcnt_clz_ctz_symbolic_inputs_stay_symbolic() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        for op in [IrPrimitive::Popcnt, IrPrimitive::Clz, IrPrimitive::Ctz] {
+            let mut evaluator = SymbolicEvaluator::new(&arena);
+            evaluator.eval_block(&bitcount_block(
+                op,
+                bits(64),
+                IrOp::ReadRegister {
+                    register: 7,
+                    ty: bits(64),
+                },
+            ))?;
+            let expression = evaluator
+                .register_value(SINK)
+                .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
+            let node = arena
+                .get(expression)
+                .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
+            assert!(
+                node.op != ExprOp::Constant,
+                "{op:?} over a symbolic input must stay symbolic, got {node:?}"
+            );
+            // The lowering only uses well-sorted bitvector nodes.
+            assert!(matches!(node.sort, ExprSort::BitVec(64)));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn crc32_concrete_inputs_match_the_bitwise_reference() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        // The concrete interpreter's bitwise CRC-32C reference.
+        fn reference(crc: u32, data: u64, byte_count: usize) -> u32 {
+            let mut crc = crc;
+            for byte_idx in 0..byte_count {
+                let byte = ((data >> (byte_idx * 8)) & 0xFF) as u8;
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82F63B78 } else { crc >> 1 };
+                }
+            }
+            crc
+        }
+        for (data_bits, byte_count) in [(8u16, 1usize), (16, 2), (32, 4), (64, 8)] {
+            for (crc_in, data) in [
+                (0u64, 0u64),
+                (0xFFFF_FFFF, u64::MAX),
+                (0x1234_5678, 0x0102_0304_0506_0708),
+                (42, 0x80),
+            ] {
+                let mut evaluator = SymbolicEvaluator::new(&arena);
+                evaluator.eval_block(&block(vec![
+                    IrInstruction {
+                        result: Some(IrValueId(0)),
+                        op: const_op(bits(32), crc_in),
+                    },
+                    IrInstruction {
+                        result: Some(IrValueId(1)),
+                        op: const_op(bits(data_bits), data & mask64(data_bits)),
+                    },
+                    IrInstruction {
+                        result: Some(IrValueId(2)),
+                        op: IrOp::Primitive {
+                            op: IrPrimitive::Crc32,
+                            ty: bits(32),
+                            inputs: vec![IrValueId(0), IrValueId(1)],
+                        },
+                    },
+                    write_sink(2),
+                ]))?;
+                let expression = evaluator
+                    .register_value(SINK)
+                    .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+                let folded = constant_value(&arena, expression)
+                    .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("crc32 did not fold: {e:?}")))?;
+                assert_eq!(
+                    folded as u32,
+                    reference(crc_in as u32, data & mask64(data_bits), byte_count),
+                    "crc32 crc={crc_in:#x} data={data:#x} width={data_bits}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn crc32_symbolic_input_stays_symbolic() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        evaluator.eval_block(&block(vec![
+            IrInstruction {
+                result: Some(IrValueId(0)),
+                op: IrOp::ReadRegister {
+                    register: 1,
+                    ty: bits(32),
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(1)),
+                op: IrOp::ReadRegister {
+                    register: 2,
+                    ty: bits(64),
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(2)),
+                op: IrOp::Primitive {
+                    op: IrPrimitive::Crc32,
+                    ty: bits(32),
+                    inputs: vec![IrValueId(0), IrValueId(1)],
+                },
+            },
+            write_sink(2),
+        ]))?;
+        let expression = evaluator
+            .register_value(SINK)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+        let node = arena
+            .get(expression)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+        assert!(node.op != ExprOp::Constant, "crc32 over symbolic input must stay symbolic");
+        assert!(matches!(node.sort, ExprSort::BitVec(32)));
+        Ok(())
+    }
+
+    // --- Float primitives --------------------------------------------------
+
+    #[test]
+    fn float_concrete_operands_compute_exact_results() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        // 1.5 + 2.25 = 3.75, encoded as a Float64 bit pattern.
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        evaluator.eval_block(&block(vec![
+            IrInstruction {
+                result: Some(IrValueId(0)),
+                op: const_op(IrType::Float64, (1.5f64).to_bits()),
+            },
+            IrInstruction {
+                result: Some(IrValueId(1)),
+                op: const_op(IrType::Float64, (2.25f64).to_bits()),
+            },
+            IrInstruction {
+                result: Some(IrValueId(2)),
+                op: IrOp::Primitive {
+                    op: IrPrimitive::FAdd,
+                    ty: IrType::Float64,
+                    inputs: vec![IrValueId(0), IrValueId(1)],
+                },
+            },
+            write_sink(2),
+        ]))?;
+        let expression = evaluator
+            .register_value(SINK)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+        let folded = constant_value(&arena, expression)
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("fadd did not fold: {e:?}")))?;
+        assert_eq!(f64::from_bits(folded), 3.75);
+
+        // FDiv over Float32: mirrored through f32 rounding.
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        evaluator.eval_block(&block(vec![
+            IrInstruction {
+                result: Some(IrValueId(0)),
+                op: const_op(IrType::Float32, u64::from(1.0f32.to_bits())),
+            },
+            IrInstruction {
+                result: Some(IrValueId(1)),
+                op: const_op(IrType::Float32, u64::from(3.0f32.to_bits())),
+            },
+            IrInstruction {
+                result: Some(IrValueId(2)),
+                op: IrOp::Primitive {
+                    op: IrPrimitive::FDiv,
+                    ty: IrType::Float32,
+                    inputs: vec![IrValueId(0), IrValueId(1)],
+                },
+            },
+            write_sink(2),
+        ]))?;
+        let expression = evaluator
+            .register_value(SINK)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+        let folded = constant_value(&arena, expression)
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("fdiv did not fold: {e:?}")))?;
+        assert_eq!(f32::from_bits(folded as u32), 1.0f32 / 3.0f32);
+        Ok(())
+    }
+
+    #[test]
+    fn fcompare_flags_concrete_operands_mirror_rflags_layout() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        // (left, right, expected flags) — CF=0/PF=2/ZF=6, NaN unordered
+        // triple, exactly the concrete interpreter's encoding.
+        let cases: &[(f64, f64, u64)] = &[
+            (1.0, 2.0, 1u64 << 0),  // below → CF
+            (2.0, 1.0, 0),          // above → none
+            (2.0, 2.0, 1u64 << 6),  // equal → ZF
+            (f64::NAN, 1.0, (1 << 6) | (1 << 2) | (1 << 0)), // unordered
+        ];
+        for (left, right, expected) in cases {
+            let mut evaluator = SymbolicEvaluator::new(&arena);
+            evaluator.eval_block(&block(vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: const_op(IrType::Float64, left.to_bits()),
+                },
+                IrInstruction {
+                    result: Some(IrValueId(1)),
+                    op: const_op(IrType::Float64, right.to_bits()),
+                },
+                IrInstruction {
+                    result: Some(IrValueId(2)),
+                    op: IrOp::Primitive {
+                        op: IrPrimitive::FCompareFlags,
+                        ty: bits(64),
+                        inputs: vec![IrValueId(0), IrValueId(1)],
+                    },
+                },
+                write_sink(2),
+            ]))?;
+            let expression = evaluator
+                .register_value(SINK)
+                .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+            let folded = constant_value(&arena, expression)
+                .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("compare did not fold: {e:?}")))?;
+            assert_eq!(folded, *expected, "compare {left} vs {right}");
+            // No debt: the compare was exact.
+            assert_eq!(evaluator.debt_total(), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn float_symbolic_operands_concretize_with_debt() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        for op in [
+            IrPrimitive::FAdd,
+            IrPrimitive::FSub,
+            IrPrimitive::FMul,
+            IrPrimitive::FDiv,
+            IrPrimitive::FCompareFlags,
+        ] {
+            let mut evaluator = SymbolicEvaluator::new(&arena);
+            evaluator.eval_block(&block(vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: IrOp::ReadRegister {
+                        register: 1,
+                        ty: IrType::Float64,
+                    },
+                },
+                IrInstruction {
+                    result: Some(IrValueId(1)),
+                    op: const_op(IrType::Float64, (2.0f64).to_bits()),
+                },
+                IrInstruction {
+                    result: Some(IrValueId(2)),
+                    op: IrOp::Primitive {
+                        op,
+                        ty: if op == IrPrimitive::FCompareFlags {
+                            bits(64)
+                        } else {
+                            IrType::Float64
+                        },
+                        inputs: vec![IrValueId(0), IrValueId(1)],
+                    },
+                },
+                write_sink(2),
+            ]))?;
+            let expression = evaluator
+                .register_value(SINK)
+                .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+            let node = arena
+                .get(expression)
+                .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+            assert!(
+                node.op != ExprOp::Constant,
+                "{op:?} over a symbolic operand must concretize with debt, got {node:?}"
+            );
+            assert_eq!(evaluator.debt_total(), 1, "{op:?} must record its debt site");
+            assert_eq!(evaluator.debt_sites().len(), 1);
+        }
+        Ok(())
+    }
+
+    // --- Concretization retry pinning mechanics ---------------------------
+
+    /// A block that reads an UNBOUND register (no symbolic binding, no
+    /// concrete value) — the read materializes a fresh under-constrained
+    /// symbol — and returns it through the sink register.
+    fn fresh_symbol_block(register: u32) -> IrBlock {
+        block(vec![
+            IrInstruction {
+                result: Some(IrValueId(0)),
+                op: IrOp::ReadRegister {
+                    register,
+                    ty: bits(64),
+                },
+            },
+            write_sink(0),
+        ])
+    }
+
+    /// The runtime retry loop restores the evaluator from the state's
+    /// PRE-EVAL bindings (register writes commit only after a clean eval),
+    /// so the retry re-sees an unbound register and materializes a fresh
+    /// symbol again. This helper mirrors exactly that: pristine snapshot
+    /// first, eval, restore, re-eval.
+    fn retry_passes(
+        evaluator: &mut SymbolicEvaluator,
+        arena: &ShardedExprArena,
+    ) -> Result<(Option<ExprId>, Option<ExprId>), SymbolicEvalError> {
+        let pristine = evaluator.snapshot();
+        let _ = arena;
+        evaluator.eval_block(&fresh_symbol_block(0x30))?;
+        let first = evaluator.register_value(SINK);
+        evaluator.restore(&pristine);
+        evaluator.eval_block(&fresh_symbol_block(0x30))?;
+        let second = evaluator.register_value(SINK);
+        Ok((first, second))
+    }
+
+    #[test]
+    fn block_local_symbols_rebuild_identical_exprs_across_re_evaluations() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena).with_block_local_symbols();
+        let (first, second) = retry_passes(&mut evaluator, &arena)?;
+        assert_eq!(
+            first, second,
+            "retry re-evaluation must rebuild byte-identical expressions so a pin keyed by ExprId hits"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn monotonic_symbols_rematerialize_new_exprs_per_re_evaluation() -> Result<(), SymbolicEvalError> {
+        // The pre-fix behavior, kept as a documented regression guard: with
+        // a monotonically advancing counter across re-evaluations, every
+        // retry rebuilds the fresh symbol under a NEW ExprId — the original
+        // root cause that made the old 4-retry budget unable to converge.
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        let (first, second) = retry_passes(&mut evaluator, &arena)?;
+        assert_ne!(first, second, "monotonic ids must change across re-evaluations");
+        Ok(())
+    }
+
+    /// Reproduces the runtime retry loop's pin-and-rerun mechanics: a block
+    /// whose LOAD address depends on a fresh symbol fails UnresolvedAddress
+    /// on the first pass, and — with block-local symbols — converges once
+    /// the failing address expression is pinned in `expr_concrete`.
+    #[test]
+    fn pinned_address_converges_across_block_local_re_evaluations() -> Result<(), SymbolicEvalError> {
+        use angryier_memory::{ByteValue, PersistentMemory};
+        let arena = arena();
+        let inner = PersistentMemory::new(vec![angryier_memory::MemoryRegion {
+            object: angryier_types::ObjectId(1),
+            base: 0x10000,
+            size: 0x1000,
+            readable: true,
+            writable: true,
+            executable: false,
+        }])
+        .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory init: {e:?}")))?;
+        let mut memory = SymbolicSessionMemory::new(inner);
+        memory.write_bytes(0x10420, &[ByteValue::Concrete(0xab)])?;
+
+        // The address is `fresh_symbol + 0x420`: unresolved while the fresh
+        // symbol has no concrete value.
+        let load_block = block(vec![
+            IrInstruction {
+                result: Some(IrValueId(0)),
+                op: IrOp::ReadRegister {
+                    register: 0x30,
+                    ty: bits(64),
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(1)),
+                op: IrOp::Constant {
+                    ty: bits(64),
+                    bytes_le: 0x420u64.to_le_bytes().to_vec(),
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(2)),
+                op: IrOp::Primitive {
+                    op: IrPrimitive::Add,
+                    ty: bits(64),
+                    inputs: vec![IrValueId(0), IrValueId(1)],
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(3)),
+                op: IrOp::Load {
+                    address: IrValueId(2),
+                    ty: bits(8),
+                },
+            },
+            write_sink(3),
+        ]);
+
+        let mut evaluator = SymbolicEvaluator::new(&arena).with_block_local_symbols();
+        // Pristine pre-eval bindings (what the retry loop restores).
+        let pristine = evaluator.snapshot();
+        // Pass 1: the address can't resolve.
+        let first = evaluator.eval_block_with_memory(&load_block, &mut memory);
+        let Err(SymbolicEvalError::UnresolvedAddress(expr)) = first else {
+            panic!("expected UnresolvedAddress on pass 1, got {first:?}");
+        };
+        // The retry: restore the pristine bindings, pin the failing
+        // expression to the mapped address, and re-run — the SAME ExprId
+        // must rebuild (block-local symbols), so the pin resolves the load.
+        let mut restored = pristine.clone();
+        restored.expr_concrete.insert(expr, 0x10420);
+        evaluator.restore(&restored);
+        let second = evaluator.eval_block_with_memory(&load_block, &mut memory);
+        assert!(second.is_ok(), "pinned re-evaluation must converge, got {second:?}");
+        let expression = evaluator
+            .register_value(SINK)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(3)))?;
+        let folded = constant_value(&arena, expression)
+            .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("load did not fold: {e:?}")))?;
+        assert_eq!(folded, 0xab);
+        Ok(())
+    }
 }
+
