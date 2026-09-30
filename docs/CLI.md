@@ -1,6 +1,6 @@
 # Angryier CLI Reference
 
-> Binary: `angryier` (crate `angryier-cli`). The default build is dependency-free Rust — `version`, `status`, `crates`, and `help` work anywhere. The `run` subcommand (symbolic/concolic execution, optionally driven by an embedded Lua script) is a feature-gated build that pulls native decoding (Intel XED) and solver (Z3) dependencies.
+> Binary: `angryier` (crate `angryier-cli`). The default build includes the `run` subcommand (symbolic/concolic execution, optionally driven by an embedded Lua script, plus PE driver mode) with native decoding (Intel XED) and solver (Z3) dependencies. A dependency-free metadata-only build (`version`, `status`, `crates`, `help`) is available via `--no-default-features` and works anywhere Rust compiles.
 >
 > Source of truth: `crates/angryier-cli/src/main.rs` (argument parsing) and `crates/angryier-runtime/src/script.rs` (the Lua surface).
 
@@ -12,19 +12,19 @@ The workspace builds with stable Rust (`rust-toolchain.toml` pins the channel). 
 
 | Build | Command | Native requirements |
 |---|---|---|
-| Metadata-only (default) | `cargo build -p angryier-cli` | None. Pure `std`, zero dependencies. |
-| With `run` | `cargo build -p angryier-cli --features run` | C/C++ toolchain (mlua compiles vendored Lua 5.4; `xed-sys` builds Intel XED from source) and the system `libz3` (linked by `z3-sys`, e.g. `apt install libz3-dev`). |
+| Full (default) | `cargo build -p angryier-cli` | C toolchain (mlua compiles vendored Lua 5.4; `xed-sys` builds Intel XED from source) and the system `libz3` (linked by `z3-sys`, e.g. `apt install libz3-dev`). |
+| Metadata-only | `cargo build -p angryier-cli --no-default-features` | None. Pure `std`, zero dependencies. |
 
-The `run` feature enables `angryier-runtime/xed` (native Intel XED decoding) and `angryier-runtime/script` (Lua + the native Z3 backend). Without it, `angryier run` prints a rebuild hint and exits 1.
+The `run` feature (on by default) enables `angryier-runtime/xed` (native Intel XED decoding) and `angryier-runtime/script` (Lua + the native Z3 backend). In `--no-default-features` builds, `angryier run` prints a rebuild hint and exits 1.
 
 To run from a checkout without installing:
 
 ```bash
 cargo run -p angryier-cli -- status
-cargo run -p angryier-cli --features run -- run ./target-fixture --symbolic rdi
+cargo run -p angryier-cli -- run ./target-fixture --symbolic rdi
 ```
 
-The binary name is `angryier`; `cargo install --path crates/angryier-cli` (add `--features run` for the execution subcommand) installs it into `~/.cargo/bin`.
+The binary name is `angryier`; `cargo install --path crates/angryier-cli` installs the full (run-capable) binary into `~/.cargo/bin`.
 
 ---
 
@@ -177,7 +177,7 @@ Tests: 585 tests across 78 suites (0 failures, historical count)
 **Symbolic run with a find target (CLI flags):** fork on symbolic `rdi`, hunt for the success branch at `0x40102a`, symbolize 8 bytes of `argv[0]`:
 
 ```bash
-cargo run -p angryier-cli --features run -- run ./crackme \
+cargo run -p angryier-cli -- run ./crackme \
     --symbolic rdi --find 0x40102a --argv 8 --steps 1024
 # steps=... forks=... merges=... terminated=... found=1
 ```
@@ -202,7 +202,7 @@ end
 ```
 
 ```bash
-cargo run -p angryier-cli --features run -- run ./crackme --script find.lua
+cargo run -p angryier-cli -- run ./crackme --script find.lua
 ```
 
 **Interactive stepping** (`angry.open`):

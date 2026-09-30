@@ -161,10 +161,10 @@ Angryier features software semantics for modern and legacy x86-64 extensions:
 
 ### Build & Run
 
-Angryier builds with **zero native dependencies** by default:
+The default build includes the full CLI — symbolic execution, embedded Lua, and PE driver mode (`run` pulls vendored Lua 5.4, Intel XED built from source, and the system `libz3`):
 
 ```bash
-# Build the workspace
+# Build the workspace (run-capable `angryier` in target/release)
 cargo build --release
 
 # Inspect workspace crate status
@@ -174,13 +174,15 @@ cargo run -p angryier-cli -- status
 cargo test --workspace
 ```
 
+Need a build with zero native dependencies (e.g. a bare container)? `cargo build -p angryier-cli --no-default-features` yields a metadata-only CLI (`version`, `status`, `crates`, `help`).
+
 ### CLI Exploration
 
 To execute a binary symbolically using the CLI:
 
 ```bash
-# Build CLI with execution and XED support
-cargo build -p angryier-cli --features run
+# Build the workspace
+cargo build --release
 
 # Symbolically execute target, marking RDI as symbolic
 ./target/release/angryier run ./tests/fixtures/symbolic_branch --symbolic rdi --find 0x401006
