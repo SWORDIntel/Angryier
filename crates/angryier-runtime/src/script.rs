@@ -229,6 +229,12 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         process.hook_simproc(crate::EXIT_HOOK, "exit");
     }
 
+    // Function-entry RSP after the override (sentinel retaddr at [rsp]):
+    // stack-passed args live at [rsp+8], [rsp+0x10], ... — surfaced so
+    // structured-entry scripts can poke/symbolize exact argument slots.
+    let entry_rsp = process
+        .read_register(crate::register_id::GPR_BASE + 4)
+        .map_err(|e| mlua::Error::external(format!("entry rsp probe: {e:?}")))?;
     // Under-constrained memory guard (opt-in, debt-recorded): map the low
     // 64 KiB as zeroed RAM so reads/writes through NULL-adjacent garbage
     // pointers behave as zero pages instead of faulting. Standard UC-SymEX
@@ -409,6 +415,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     out.set("live_states", report.live_states)?;
     out.set("found", report.found.len())?;
     out.set("timed_out", report.timed_out)?;
+    out.set("entry_rsp", entry_rsp)?;
     // Solver-assisted address-concretization attempts (each attempt solves
     // one unresolved address, pins the model's value, and re-runs the
     // block) — visible budget diagnostics for under-constrained runs.
