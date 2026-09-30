@@ -917,7 +917,12 @@ mod tests {
     #[test]
     fn crates_output_contains_all_previously_omitted_crates() {
         let crates = crates_output();
-        for name in ["angryier", "angryier-cfg", "angryier-runtime", "angryier-solver-fuzzy"] {
+        for name in [
+            "angryier",
+            "angryier-cfg",
+            "angryier-runtime",
+            "angryier-solver-fuzzy",
+        ] {
             assert!(crates.contains(name), "missing workspace crate {name}");
         }
     }
