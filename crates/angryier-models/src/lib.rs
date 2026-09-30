@@ -1373,6 +1373,10 @@ pub struct KernelPoolReport {
 pub struct KernelPoolTracker {
     next_fresh: AtomicU64,
     state: Mutex<PoolState>,
+    /// Internal image addresses bound to pool routines
+    /// ([`KernelPoolTracker::bind_internal_address`]) — direct-call targets
+    /// inside kernel code (e.g. ntoskrnl's own `ExAllocatePoolWithTag`).
+    internal: Mutex<BTreeMap<u64, PoolRoutine>>,
 }
 
 #[derive(Default)]
@@ -1389,6 +1393,7 @@ impl KernelPoolTracker {
         Self {
             next_fresh: AtomicU64::new(KERNEL_POOL_FRESH_BASE),
             state: Mutex::new(PoolState::default()),
+            internal: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1454,6 +1459,58 @@ impl KernelPoolTracker {
 impl Default for KernelPoolTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Which pool routine an image address is bound to — the allocation family
+/// (`ExAllocatePool*`) or the free family (`ExFreePool*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PoolRoutine {
+    /// `ExAllocatePool*`: the bound call returns a fresh pool pointer and
+    /// records an allocation.
+    Alloc,
+    /// `ExFreePool*`: the bound call records a free (pointer + caller).
+    Free,
+}
+
+impl KernelPoolTracker {
+    /// Binds an INTERNAL image address — ntoskrnl.exe's own
+    /// `ExAllocatePoolWithTag`/`ExFreePoolWithTag`, reached by direct `call`
+    /// instructions inside kernel code rather than through driver IAT
+    /// imports — to a pool routine. Re-binding an address replaces the
+    /// previous routine; unrelated bindings are untouched. The existing
+    /// import-binding path (runtime-side, keyed by IAT stub address) is
+    /// unaffected: bindings only ADD interceptable addresses.
+    ///
+    /// The tracker records bindings but never executes them — the runtime
+    /// consults [`KernelPoolTracker::internal_bindings`]/[
+    /// `KernelPoolTracker::internal_routine`] to install the matching
+    /// [`KernelAllocProcedure`]/[`KernelFreeProcedure`] SimProcedure at each
+    /// bound address.
+    pub fn bind_internal_address(&self, address: u64, routine: PoolRoutine) {
+        let mut bindings = self.internal.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        bindings.insert(address, routine);
+    }
+
+    /// Snapshot of all internal bindings (address → routine), sorted by
+    /// address — the query surface the runtime iterates when wiring
+    /// per-address SimProcedures.
+    pub fn internal_bindings(&self) -> BTreeMap<u64, PoolRoutine> {
+        self.internal.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    /// Returns the routine bound at `address`, if any.
+    pub fn internal_routine(&self, address: u64) -> Option<PoolRoutine> {
+        self.internal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&address)
+            .copied()
+    }
+
+    /// Number of internal bindings currently registered.
+    pub fn internal_binding_count(&self) -> usize {
+        self.internal.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
     }
 }
 
@@ -2810,5 +2867,76 @@ mod tests {
 
         let unknown = table.dispatch(999, &state);
         assert_eq!(unknown, None);
+    }
+
+    #[test]
+    fn internal_binding_round_trip() {
+        let tracker = Arc::new(KernelPoolTracker::new());
+        assert_eq!(tracker.internal_binding_count(), 0);
+        assert_eq!(tracker.internal_routine(0x1400_1010), None);
+
+        tracker.bind_internal_address(0x1400_1010, PoolRoutine::Alloc);
+        tracker.bind_internal_address(0x1400_1020, PoolRoutine::Free);
+        assert_eq!(tracker.internal_binding_count(), 2);
+        assert_eq!(tracker.internal_routine(0x1400_1010), Some(PoolRoutine::Alloc));
+        assert_eq!(tracker.internal_routine(0x1400_1020), Some(PoolRoutine::Free));
+        assert_eq!(tracker.internal_routine(0x1400_1030), None);
+
+        // Snapshot matches the bound set, deterministically sorted by
+        // address for reproducible runtime wiring.
+        let snapshot = tracker.internal_bindings();
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot.get(&0x1400_1010), Some(&PoolRoutine::Alloc));
+        assert_eq!(snapshot.get(&0x1400_1020), Some(&PoolRoutine::Free));
+        let addresses: Vec<u64> = snapshot.keys().copied().collect();
+        assert_eq!(addresses, vec![0x1400_1010, 0x1400_1020]);
+    }
+
+    #[test]
+    fn internal_binding_rebind_replaces() {
+        let tracker = KernelPoolTracker::new();
+        tracker.bind_internal_address(0x1000, PoolRoutine::Alloc);
+        tracker.bind_internal_address(0x1000, PoolRoutine::Free);
+        assert_eq!(tracker.internal_binding_count(), 1);
+        assert_eq!(tracker.internal_routine(0x1000), Some(PoolRoutine::Free));
+    }
+
+    #[test]
+    fn internal_bindings_leave_import_path_recording_intact() {
+        let tracker = Arc::new(KernelPoolTracker::new());
+        // Bind internal addresses exactly as a kernel-image bootstrap would:
+        // ntoskrnl's own alloc/free routines reached by direct calls.
+        tracker.bind_internal_address(0xFFFF_F800_0000_1000, PoolRoutine::Alloc);
+        tracker.bind_internal_address(0xFFFF_F800_0000_2000, PoolRoutine::Free);
+
+        // The import-path SimProcedures behave identically with bindings
+        // present: fresh distinct pointers, void-free modeled as 0.
+        let alloc = KernelAllocProcedure { tracker: tracker.clone() };
+        let free = KernelFreeProcedure { tracker: tracker.clone() };
+        let state = SimState::new();
+        let (p1, p2) = match (alloc.apply(&state), alloc.apply(&state)) {
+            (SimResult::Return(first), SimResult::Return(second)) => (first, second),
+            _ => (0, 0),
+        };
+        assert_eq!(p1, KERNEL_POOL_FRESH_BASE);
+        assert_eq!(p2, KERNEL_POOL_FRESH_BASE + 0x1000);
+        assert_eq!(free.apply(&state), SimResult::Return(0));
+
+        // The recording path still detects double frees (pointer + caller).
+        tracker.record_free(p1, 0x1400_2000);
+        tracker.record_free(p1, 0x1400_2000);
+        let report = tracker.snapshot();
+        assert_eq!(report.frees, 2);
+        assert_eq!(
+            report.double_frees,
+            vec![PoolEvent {
+                pointer: p1,
+                caller: 0x1400_2000
+            }]
+        );
+        assert!(report.uaf_writes.is_empty());
+        // Pool activity leaves the binding table untouched.
+        assert_eq!(tracker.internal_binding_count(), 2);
+        assert_eq!(tracker.internal_routine(0xFFFF_F800_0000_1000), Some(PoolRoutine::Alloc));
     }
 }

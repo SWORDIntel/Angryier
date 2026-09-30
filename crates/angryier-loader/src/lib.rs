@@ -130,6 +130,30 @@ impl LoadedImage {
     pub fn pe_imports(&self) -> Option<&[PeImport]> {
         self.pe.as_ref().map(|pe| pe.imports.as_slice())
     }
+
+    /// Returns the named exports parsed from a PE32+ export directory, or
+    /// `None` for non-PE images. A PE image without an export directory
+    /// yields an empty slice, not an error.
+    ///
+    /// Forwarded exports (RVA inside the export directory itself — the entry
+    /// resolves in another module) are skipped at parse time and never appear
+    /// here; they are not executable code in this image.
+    pub fn pe_exports(&self) -> Option<&[PeExport]> {
+        self.pe.as_ref().map(|pe| pe.exports.as_slice())
+    }
+
+    /// Resolves a PE export name to its in-image virtual address
+    /// (`ImageBase + RVA` of the exported function/data) — the address a
+    /// direct internal `call` inside the image lands on. Name matching is
+    /// exact (the runtime's PE-import binding convention); Windows
+    /// `GetProcAddress` case-folding is deliberately not applied. Returns
+    /// `None` for non-PE images, images without an export directory, or
+    /// unknown names. Use [`LoadedImage::pe_exports`] for custom matching.
+    pub fn export_address(&self, name: &str) -> Option<Address> {
+        let pe = self.pe.as_ref()?;
+        let export = pe.exports.iter().find(|export| export.name == name)?;
+        Some(pe.image_base + u64::from(export.rva))
+    }
 }
 
 pub trait ImageLoader: Send + Sync {
@@ -168,6 +192,9 @@ pub enum LoaderError {
     TruncatedImportTable,
     /// A PE32+ import DLL name exceeds the enforced maximum of 64 bytes.
     ImportDllNameTooLong,
+    /// The PE32+ export directory, its RVAs, lookup arrays, or an export name
+    /// is truncated or points outside the mapped image.
+    TruncatedExportTable,
 }
 
 impl fmt::Display for LoaderError {
@@ -184,6 +211,7 @@ impl fmt::Display for LoaderError {
             Self::SegmentOutOfRange => f.write_str("segment offset or size is out of range"),
             Self::TruncatedImportTable => f.write_str("PE import table is truncated or out of range"),
             Self::ImportDllNameTooLong => f.write_str("PE import DLL name exceeds 64 characters"),
+            Self::TruncatedExportTable => f.write_str("PE export table is truncated or out of range"),
         }
     }
 }
@@ -781,6 +809,10 @@ const PE_IMPORT_DESCRIPTOR_SIZE: usize = 20;
 const PE_IMPORT_ORDINAL_FLAG: u64 = 0x8000_0000_0000_0000;
 /// Maximum accepted import DLL-name length in bytes (excluding the NUL).
 const PE_IMPORT_DLL_NAME_MAX: usize = 64;
+/// `IMAGE_DIRECTORY_ENTRY_EXPORT` — data-directory index of the export table.
+const IMAGE_DIRECTORY_ENTRY_EXPORT: u32 = 0;
+/// Size of one `IMAGE_EXPORT_DIRECTORY` (10 fields, 40 bytes).
+const PE_EXPORT_DIRECTORY_SIZE: usize = 40;
 
 /// How a PE32+ import is resolved by the exporting DLL.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -804,6 +836,19 @@ pub struct PeImport {
     pub iat_rva: u32,
 }
 
+/// One named export parsed from a PE32+ export directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeExport {
+    /// Export name as recorded in the export name table (ASCIZ).
+    pub name: String,
+    /// RVA of the exported function/data. Add [`PeInfo::image_base`] for a
+    /// virtual address. Forwarded exports are skipped at parse time.
+    pub rva: u32,
+    /// Absolute export ordinal (`OrdinalBase + index` into
+    /// `AddressOfFunctions`), as `GetProcAddress` would report it.
+    pub ordinal: u32,
+}
+
 /// PE32+ metadata parsed by [`Pe32Loader`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PeInfo {
@@ -813,12 +858,20 @@ pub struct PeInfo {
     /// and bound imports (`IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT`) are out of
     /// scope and skipped — drivers rarely use them.
     pub imports: Vec<PeImport>,
+    /// Named exports from `IMAGE_DIRECTORY_ENTRY_EXPORT` (directory index
+    /// 0), in export-name-table order. Empty when the image declares no
+    /// export directory. Ordinal-only exports (no name) are not enumerated.
+    pub exports: Vec<PeExport>,
+    /// `ImageBase` from the optional header — every segment address and
+    /// [`LoadedImage::export_address`] result is relative to this.
+    pub image_base: u64,
 }
 
 /// PE32+ image loader: maps each section at `image_base + VirtualAddress`
-/// and resolves the entry point from the optional header. The import
-/// directory is parsed into [`PeInfo`] (see [`LoadedImage::pe_imports`]);
-/// IAT patching/import linking is out of scope — that is downstream work.
+/// and resolves the entry point from the optional header. The import and
+/// export directories are parsed into [`PeInfo`] (see
+/// [`LoadedImage::pe_imports`] and [`LoadedImage::pe_exports`]); IAT
+/// patching/import linking is out of scope — that is downstream work.
 pub struct Pe32Loader {
     next_id: Mutex<u64>,
 }
@@ -908,7 +961,11 @@ impl ImageLoader for Pe32Loader {
         if segments.is_empty() {
             return Err(LoaderError::NoProgramHeaders);
         }
-        let pe = Some(parse_pe_imports(bytes, opt, opt_size, &file_ranges)?);
+        let pe = Some(PeInfo {
+            imports: parse_pe_imports(bytes, opt, opt_size, &file_ranges)?,
+            exports: parse_pe_exports(bytes, opt, opt_size, &file_ranges)?,
+            image_base,
+        });
         Ok(LoadedImage {
             id: {
                 let mut g = self.next_id.lock().unwrap_or_else(|e| e.into_inner());
@@ -927,8 +984,26 @@ impl ImageLoader for Pe32Loader {
     }
 }
 
+/// RVA → file-offset translation through the section table's raw ranges.
+/// Below `SizeOfHeaders` the image maps the file header identically. Shared
+/// by the import- and export-directory parsers.
+fn pe_rva_to_file(rva: u32, file_ranges: &[(u32, u32, u32)], size_of_headers: usize) -> Option<usize> {
+    let rva = usize::try_from(rva).unwrap_or(usize::MAX);
+    for &(va, raw_size, raw_ptr) in file_ranges {
+        let (va, raw_size, raw_ptr) = (
+            usize::try_from(va).unwrap_or(usize::MAX),
+            usize::try_from(raw_size).unwrap_or(0),
+            usize::try_from(raw_ptr).unwrap_or(usize::MAX),
+        );
+        if rva >= va && rva.saturating_sub(va) < raw_size {
+            return raw_ptr.checked_add(rva - va);
+        }
+    }
+    (rva < size_of_headers).then_some(rva)
+}
+
 /// Parses the PE32+ import directory (`IMAGE_DIRECTORY_ENTRY_IMPORT`, index
-/// 1) into an ordered [`PeInfo`].
+/// 1) into an ordered import list.
 ///
 /// Behavior:
 /// - No data directories, fewer than two of them, or a null import-directory
@@ -951,15 +1026,15 @@ fn parse_pe_imports(
     opt: usize,
     opt_size: usize,
     file_ranges: &[(u32, u32, u32)],
-) -> Result<PeInfo, LoaderError> {
+) -> Result<Vec<PeImport>, LoaderError> {
     if opt_size < PE32PLUS_DATA_DIRS {
         // Optional header too small to carry data directories: no imports.
-        return Ok(PeInfo::default());
+        return Ok(Vec::new());
     }
     let num_dirs = read_u32_le(bytes, opt + PE32PLUS_NUM_RVA_AND_SIZES)?;
     if num_dirs <= IMAGE_DIRECTORY_ENTRY_IMPORT {
         // Import directory not declared: no imports.
-        return Ok(PeInfo::default());
+        return Ok(Vec::new());
     }
     let dir_va_field = PE32PLUS_DATA_DIRS + 8 * IMAGE_DIRECTORY_ENTRY_IMPORT as usize;
     if opt_size < dir_va_field + 4 {
@@ -968,24 +1043,10 @@ fn parse_pe_imports(
     }
     let dir_rva = read_u32_le(bytes, opt + dir_va_field)?;
     if dir_rva == 0 {
-        return Ok(PeInfo::default());
+        return Ok(Vec::new());
     }
     let size_of_headers = usize::try_from(read_u32_le(bytes, opt + 60)?).unwrap_or(0);
-    let rva_to_file = |rva: u32| -> Option<usize> {
-        let rva = usize::try_from(rva).unwrap_or(usize::MAX);
-        for &(va, raw_size, raw_ptr) in file_ranges {
-            let (va, raw_size, raw_ptr) = (
-                usize::try_from(va).unwrap_or(usize::MAX),
-                usize::try_from(raw_size).unwrap_or(0),
-                usize::try_from(raw_ptr).unwrap_or(usize::MAX),
-            );
-            if rva >= va && rva.saturating_sub(va) < raw_size {
-                return raw_ptr.checked_add(rva - va);
-            }
-        }
-        // Below SizeOfHeaders the image maps the file header identically.
-        (rva < size_of_headers).then_some(rva)
-    };
+    let rva_to_file = |rva: u32| pe_rva_to_file(rva, file_ranges, size_of_headers);
 
     let mut imports = Vec::new();
     let mut desc_off = rva_to_file(dir_rva).ok_or(LoaderError::TruncatedImportTable)?;
@@ -1006,7 +1067,7 @@ fn parse_pe_imports(
         }
         let dll = {
             let name_off = rva_to_file(name_rva).ok_or(LoaderError::TruncatedImportTable)?;
-            let (dll, len) = read_pe_asciz(bytes, name_off)?;
+            let (dll, len) = read_pe_asciz(bytes, name_off).map_err(|_| LoaderError::TruncatedImportTable)?;
             if len > PE_IMPORT_DLL_NAME_MAX {
                 return Err(LoaderError::ImportDllNameTooLong);
             }
@@ -1041,7 +1102,8 @@ fn parse_pe_imports(
                 let by_name_rva = (thunk & 0xFFFF_FFFF) as u32;
                 let by_name_off = rva_to_file(by_name_rva).ok_or(LoaderError::TruncatedImportTable)?;
                 let name_off = by_name_off.checked_add(2).ok_or(LoaderError::TruncatedImportTable)?;
-                let (name, _) = read_pe_asciz(bytes, name_off)?;
+                let (name, _) =
+                    read_pe_asciz(bytes, name_off).map_err(|_| LoaderError::TruncatedImportTable)?;
                 PeImportKind::Name(name)
             };
             imports.push(PeImport {
@@ -1053,19 +1115,132 @@ fn parse_pe_imports(
         }
         desc_off = desc_end;
     }
-    Ok(PeInfo { imports })
+    Ok(imports)
+}
+
+/// Parses the PE32+ export directory (`IMAGE_DIRECTORY_ENTRY_EXPORT`, index
+/// 0) into an ordered list of named [`PeExport`]s.
+///
+/// Behavior:
+/// - No data directories, fewer than one of them, or a null export-directory
+///   RVA yields an empty list (an image without exports is not an error).
+/// - The `IMAGE_EXPORT_DIRECTORY` drives three parallel arrays:
+///   `AddressOfFunctions` (u32 RVA per function), `AddressOfNames` (u32 RVA
+///   per name), and `AddressOfNameOrdinals` (u16 index into the function
+///   array per name). A name whose ordinal index lands past the function
+///   table fails closed with [`LoaderError::TruncatedExportTable`].
+/// - Forwarded exports — a function RVA pointing inside the export directory
+///   itself — resolve in another module and are skipped.
+/// - Ordinal-only exports (function-table entries without a name-table
+///   entry) are not enumerated.
+/// - All RVAs must resolve inside the file-backed image; every read is
+///   bounds-checked and malformed data fails closed with
+///   [`LoaderError::TruncatedExportTable`].
+fn parse_pe_exports(
+    bytes: &[u8],
+    opt: usize,
+    opt_size: usize,
+    file_ranges: &[(u32, u32, u32)],
+) -> Result<Vec<PeExport>, LoaderError> {
+    if opt_size < PE32PLUS_DATA_DIRS {
+        // Optional header too small to carry data directories: no exports.
+        return Ok(Vec::new());
+    }
+    let num_dirs = read_u32_le(bytes, opt + PE32PLUS_NUM_RVA_AND_SIZES)?;
+    // Index 0 is the lowest directory, so "not declared" is exactly zero.
+    if num_dirs == IMAGE_DIRECTORY_ENTRY_EXPORT {
+        // Export directory not declared: no exports.
+        return Ok(Vec::new());
+    }
+    let dir_va_field = PE32PLUS_DATA_DIRS + 8 * IMAGE_DIRECTORY_ENTRY_EXPORT as usize;
+    if opt_size < dir_va_field + 8 {
+        // Declared but the optional header is too small to hold it.
+        return Err(LoaderError::TruncatedExportTable);
+    }
+    let dir_rva = read_u32_le(bytes, opt + dir_va_field)?;
+    let dir_size = read_u32_le(bytes, opt + dir_va_field + 4)?;
+    if dir_rva == 0 {
+        return Ok(Vec::new());
+    }
+    let size_of_headers = usize::try_from(read_u32_le(bytes, opt + 60)?).unwrap_or(0);
+    let rva_to_file = |rva: u32| pe_rva_to_file(rva, file_ranges, size_of_headers);
+
+    let dir_off = rva_to_file(dir_rva).ok_or(LoaderError::TruncatedExportTable)?;
+    let dir_end = dir_off
+        .checked_add(PE_EXPORT_DIRECTORY_SIZE)
+        .ok_or(LoaderError::TruncatedExportTable)?;
+    bytes
+        .get(dir_off..dir_end)
+        .ok_or(LoaderError::TruncatedExportTable)?;
+    let ordinal_base = read_u32_le(bytes, dir_off + 0x10)?;
+    let number_of_functions = read_u32_le(bytes, dir_off + 0x14)?;
+    let number_of_names = read_u32_le(bytes, dir_off + 0x18)?;
+    let functions_rva = read_u32_le(bytes, dir_off + 0x1C)?;
+    let names_rva = read_u32_le(bytes, dir_off + 0x20)?;
+    let ordinals_rva = read_u32_le(bytes, dir_off + 0x24)?;
+    if number_of_functions == 0
+        || number_of_names == 0
+        || functions_rva == 0
+        || names_rva == 0
+        || ordinals_rva == 0
+    {
+        // Degenerate directory: nothing name-resolvable to enumerate.
+        return Ok(Vec::new());
+    }
+
+    // Function-RVA table, read once; every name entry indexes into it.
+    let functions_off = rva_to_file(functions_rva).ok_or(LoaderError::TruncatedExportTable)?;
+    let mut function_rvas = Vec::with_capacity(number_of_functions as usize);
+    for index in 0..number_of_functions as usize {
+        let entry = functions_off
+            .checked_add(index.checked_mul(4).ok_or(LoaderError::TruncatedExportTable)?)
+            .ok_or(LoaderError::TruncatedExportTable)?;
+        let rva = read_u32_le(bytes, entry).map_err(|_| LoaderError::TruncatedExportTable)?;
+        function_rvas.push(rva);
+    }
+
+    let names_off = rva_to_file(names_rva).ok_or(LoaderError::TruncatedExportTable)?;
+    let ordinals_off = rva_to_file(ordinals_rva).ok_or(LoaderError::TruncatedExportTable)?;
+    let mut exports = Vec::new();
+    for index in 0..number_of_names as usize {
+        let name_ptr = names_off
+            .checked_add(index.checked_mul(4).ok_or(LoaderError::TruncatedExportTable)?)
+            .ok_or(LoaderError::TruncatedExportTable)?;
+        let name_rva = read_u32_le(bytes, name_ptr).map_err(|_| LoaderError::TruncatedExportTable)?;
+        let name_off = rva_to_file(name_rva).ok_or(LoaderError::TruncatedExportTable)?;
+        let (name, _) = read_pe_asciz(bytes, name_off).map_err(|_| LoaderError::TruncatedExportTable)?;
+
+        let ordinal_slot = ordinals_off
+            .checked_add(index.checked_mul(2).ok_or(LoaderError::TruncatedExportTable)?)
+            .ok_or(LoaderError::TruncatedExportTable)?;
+        let ordinal_index =
+            usize::from(read_u16_le(bytes, ordinal_slot).map_err(|_| LoaderError::TruncatedExportTable)?);
+        if ordinal_index >= function_rvas.len() {
+            // Name entry indexing past the function table: malformed.
+            return Err(LoaderError::TruncatedExportTable);
+        }
+        let rva = function_rvas[ordinal_index];
+        // A function RVA inside the export directory itself is a forwarder
+        // string ("OTHER.dll.Symbol"), not code in this image — skip it.
+        if rva >= dir_rva && rva < dir_rva.saturating_add(dir_size) {
+            continue;
+        }
+        exports.push(PeExport {
+            name,
+            rva,
+            ordinal: ordinal_base.wrapping_add(ordinal_index as u32),
+        });
+    }
+    Ok(exports)
 }
 
 /// Reads an ASCIZ string at `off`, returning it together with its byte length
-/// (excluding the NUL). Fails closed with
-/// [`LoaderError::TruncatedImportTable`] when `off` is out of range or the
-/// NUL terminator is missing before the end of the buffer.
-fn read_pe_asciz(bytes: &[u8], off: usize) -> Result<(String, usize), LoaderError> {
-    let rest = bytes.get(off..).ok_or(LoaderError::TruncatedImportTable)?;
-    let nul = rest
-        .iter()
-        .position(|&byte| byte == 0)
-        .ok_or(LoaderError::TruncatedImportTable)?;
+/// (excluding the NUL). Fails when `off` is out of range or the NUL
+/// terminator is missing before the end of the buffer; callers map the
+/// failure onto their directory-specific truncation error.
+fn read_pe_asciz(bytes: &[u8], off: usize) -> Result<(String, usize), ()> {
+    let rest = bytes.get(off..).ok_or(())?;
+    let nul = rest.iter().position(|&byte| byte == 0).ok_or(())?;
     Ok((String::from_utf8_lossy(&rest[..nul]).into_owned(), nul))
 }
 
@@ -1931,5 +2106,243 @@ mod pe32_tests {
             Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
         };
         assert!(image.pe_imports().is_none());
+    }
+}
+
+#[cfg(test)]
+mod pe_exports_tests {
+    use super::*;
+
+    /// Hand-builds a minimal PE32+ with a `.text` section (RVA 0x1000, code
+    /// at file 0x200) and a `.rdata` section (RVA 0x2000, file 0x400) whose
+    /// export directory lists `funcs` by name plus one ordinal-only export
+    /// (function-table slot without a name-table entry). Layout is
+    /// deterministic: directory at rdata+0, module name at +40, function
+    /// table next, then name pointers, then ordinal indices, then strings —
+    /// tests recompute the offsets to mutate them.
+    fn make_pe_with_exports(funcs: &[(&str, u32)]) -> Vec<u8> {
+        const RDATA_FILE: usize = 0x400;
+        const RDATA_VA: u32 = 0x2000;
+        let rva = |off: usize| RDATA_VA + off as u32;
+
+        let mut rdata = Vec::new();
+        let dir_off = rdata.len();
+        rdata.extend_from_slice(&[0u8; 40]); // IMAGE_EXPORT_DIRECTORY, patched below.
+        let module_off = rdata.len();
+        rdata.extend_from_slice(b"kernel_mod.sys\0");
+        // Function table: one slot per named export + one ordinal-only slot.
+        let functions_off = rdata.len();
+        for _ in funcs {
+            rdata.extend_from_slice(&0u32.to_le_bytes()); // patched below
+        }
+        rdata.extend_from_slice(&0x1050u32.to_le_bytes()); // ordinal-only slot
+        let names_off = rdata.len();
+        for _ in funcs {
+            rdata.extend_from_slice(&0u32.to_le_bytes()); // patched below
+        }
+        let ordinals_off = rdata.len();
+        for index in 0..funcs.len() {
+            rdata.extend_from_slice(&(index as u16).to_le_bytes());
+        }
+        for (index, (name, target_rva)) in funcs.iter().enumerate() {
+            let name_off = rdata.len();
+            rdata.extend_from_slice(name.as_bytes());
+            rdata.push(0);
+            let slot = names_off + index * 4;
+            rdata[slot..slot + 4].copy_from_slice(&rva(name_off).to_le_bytes());
+            let fslot = functions_off + index * 4;
+            rdata[fslot..fslot + 4].copy_from_slice(&target_rva.to_le_bytes());
+        }
+        // Directory fields: Name, Base, NumberOfFunctions, NumberOfNames,
+        // AddressOfFunctions, AddressOfNames, AddressOfNameOrdinals.
+        rdata[dir_off + 0x0C..dir_off + 0x10].copy_from_slice(&rva(module_off).to_le_bytes());
+        rdata[dir_off + 0x10..dir_off + 0x14].copy_from_slice(&1u32.to_le_bytes()); // OrdinalBase
+        rdata[dir_off + 0x14..dir_off + 0x18].copy_from_slice(&((funcs.len() + 1) as u32).to_le_bytes());
+        rdata[dir_off + 0x18..dir_off + 0x1C].copy_from_slice(&(funcs.len() as u32).to_le_bytes());
+        rdata[dir_off + 0x1C..dir_off + 0x20].copy_from_slice(&rva(functions_off).to_le_bytes());
+        rdata[dir_off + 0x20..dir_off + 0x24].copy_from_slice(&rva(names_off).to_le_bytes());
+        rdata[dir_off + 0x24..dir_off + 0x28].copy_from_slice(&rva(ordinals_off).to_le_bytes());
+
+        let mut pe = vec![0u8; RDATA_FILE];
+        pe[0] = 0x4D;
+        pe[1] = 0x5A;
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(&[0x50, 0x45, 0, 0]);
+        pe[0x84..0x86].copy_from_slice(&PE_MACHINE_AMD64.to_le_bytes());
+        pe[0x86..0x88].copy_from_slice(&2u16.to_le_bytes()); // 2 sections
+        pe[0x94..0x96].copy_from_slice(&0xF0u16.to_le_bytes()); // opt size 240
+        pe[0x98..0x9A].copy_from_slice(&PE32PLUS_MAGIC.to_le_bytes());
+        pe[0xA8..0xAC].copy_from_slice(&0x1000u32.to_le_bytes()); // entry RVA
+        pe[0xB0..0xB8].copy_from_slice(&0x140000000u64.to_le_bytes()); // image base
+        pe[0xD4..0xD8].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfHeaders
+        pe[0x104..0x108].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes
+        // Data directory 0 (EXPORT) at optional-header offset 112.
+        pe[0x108..0x10C].copy_from_slice(&rva(dir_off).to_le_bytes());
+        pe[0x10C..0x110].copy_from_slice(&(rdata.len() as u32).to_le_bytes());
+        // .text section header at 0x188.
+        pe[0x188..0x190].copy_from_slice(b".text\0\0\0");
+        pe[0x190..0x194].copy_from_slice(&0x100u32.to_le_bytes()); // virtual size
+        pe[0x194..0x198].copy_from_slice(&0x1000u32.to_le_bytes()); // va
+        pe[0x198..0x19C].copy_from_slice(&6u32.to_le_bytes()); // raw size
+        pe[0x19C..0x1A0].copy_from_slice(&0x200u32.to_le_bytes()); // raw ptr
+        pe[0x1AC..0x1B0].copy_from_slice(&(SECTION_EXEC | SECTION_READ).to_le_bytes());
+        // .rdata section header at 0x1B0.
+        pe[0x1B0..0x1B8].copy_from_slice(b".rdata\0\0");
+        pe[0x1B8..0x1BC].copy_from_slice(&(rdata.len() as u32).to_le_bytes()); // virtual size
+        pe[0x1BC..0x1C0].copy_from_slice(&RDATA_VA.to_le_bytes()); // va
+        pe[0x1C0..0x1C4].copy_from_slice(&(rdata.len() as u32).to_le_bytes()); // raw size
+        pe[0x1C4..0x1C8].copy_from_slice(&(RDATA_FILE as u32).to_le_bytes()); // raw ptr
+        pe[0x1D4..0x1D8].copy_from_slice(&SECTION_READ.to_le_bytes()); // characteristics
+        // Code at file offset 0x200: mov eax,0x2a ; ret.
+        pe[0x200..0x205].copy_from_slice(&[0xB8, 0x2A, 0, 0, 0]);
+        pe[0x205] = 0xC3;
+        pe.extend_from_slice(&rdata);
+        pe
+    }
+
+    /// File offset of the .rdata byte at `rdata_off` in the built image.
+    fn rdata_file(rdata_off: usize) -> usize {
+        0x400 + rdata_off
+    }
+
+    #[test]
+    fn pe32_parses_named_exports_and_resolves_addresses() {
+        let loader = Pe32Loader::new();
+        let pe = make_pe_with_exports(&[("ExAllocatePoolWithTag", 0x1000), ("ExFreePoolWithTag", 0x1010)]);
+        let image = match loader.load(&pe) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        let exports = image.pe_exports().unwrap_or(&[]);
+        // The ordinal-only slot must NOT be enumerated.
+        assert_eq!(exports.len(), 2);
+        assert_eq!(exports[0].name, "ExAllocatePoolWithTag");
+        assert_eq!(exports[0].rva, 0x1000);
+        assert_eq!(exports[0].ordinal, 1); // OrdinalBase 1 + index 0
+        assert_eq!(exports[1].name, "ExFreePoolWithTag");
+        assert_eq!(exports[1].rva, 0x1010);
+        assert_eq!(exports[1].ordinal, 2);
+        // export_address = ImageBase + RVA — the in-image call target.
+        assert_eq!(image.export_address("ExAllocatePoolWithTag"), Some(0x140001000));
+        assert_eq!(image.export_address("ExFreePoolWithTag"), Some(0x140001010));
+        // Exact-name matching only (the runtime's import-binding convention).
+        assert_eq!(image.export_address("exallocatepoolwithtag"), None);
+        assert_eq!(image.export_address("NotExported"), None);
+    }
+
+    #[test]
+    fn pe32_skips_forwarded_export() {
+        let loader = Pe32Loader::new();
+        let mut pe = make_pe_with_exports(&[("RtlFoo", 0x1000)]);
+        // Point the function slot inside the export directory itself
+        // (directory RVA = 0x2000): a forwarder string, not code here.
+        let fslot = rdata_file(40 + 15); // module name is 15 bytes ("kernel_mod.sys\0")
+        pe[fslot..fslot + 4].copy_from_slice(&0x2004u32.to_le_bytes());
+        let image = match loader.load(&pe) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        assert!(image.pe_exports().unwrap_or(&[]).is_empty(), "forwarded export must be skipped");
+        assert_eq!(image.export_address("RtlFoo"), None);
+    }
+
+    #[test]
+    fn pe32_without_export_directory_yields_empty_exports() {
+        let loader = Pe32Loader::new();
+        let mut pe = make_pe_with_exports(&[("ExAllocatePoolWithTag", 0x1000)]);
+        // Zero the export-directory RVA: the directory is not declared.
+        pe[0x108..0x10C].copy_from_slice(&0u32.to_le_bytes());
+        let image = match loader.load(&pe) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        assert!(image.pe_exports().unwrap_or(&[]).is_empty());
+        assert_eq!(image.export_address("ExAllocatePoolWithTag"), None);
+    }
+
+    #[test]
+    fn pe32_rejects_malformed_export_directory() {
+        let loader = Pe32Loader::new();
+
+        // Directory RVA points outside the mapped image.
+        let mut pe = make_pe_with_exports(&[("ExAllocatePoolWithTag", 0x1000)]);
+        pe[0x108..0x10C].copy_from_slice(&0x0090_0000u32.to_le_bytes());
+        assert_eq!(loader.load(&pe).err(), Some(LoaderError::TruncatedExportTable));
+
+        // Function-table RVA (directory field +0x1C) is unmapped.
+        let mut pe = make_pe_with_exports(&[("ExAllocatePoolWithTag", 0x1000)]);
+        pe[rdata_file(0x1C)..rdata_file(0x1C) + 4].copy_from_slice(&0x0090_0000u32.to_le_bytes());
+        assert_eq!(loader.load(&pe).err(), Some(LoaderError::TruncatedExportTable));
+
+        // Name-pointer slot (names table follows the function table:
+        // 40 dir + 15 module + 4*2 function slots = 63) is unmapped.
+        let mut pe = make_pe_with_exports(&[("ExAllocatePoolWithTag", 0x1000)]);
+        pe[rdata_file(63)..rdata_file(63) + 4].copy_from_slice(&0x0090_0000u32.to_le_bytes());
+        assert_eq!(loader.load(&pe).err(), Some(LoaderError::TruncatedExportTable));
+
+        // Ordinal index past the function table (ordinals at 63 + 4 = 67).
+        let mut pe = make_pe_with_exports(&[("ExAllocatePoolWithTag", 0x1000)]);
+        pe[rdata_file(67)..rdata_file(67) + 2].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        assert_eq!(loader.load(&pe).err(), Some(LoaderError::TruncatedExportTable));
+    }
+
+    #[test]
+    fn pe_exports_none_for_non_pe_images() {
+        let loader = InMemoryImageLoader::new();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0x1000u64.to_le_bytes()); // entry
+        buf.extend_from_slice(&1u64.to_le_bytes()); // target profile
+        buf.push(0xC3);
+        let image = match loader.load(&buf) {
+            Ok(image) => image,
+            Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
+        };
+        assert!(image.pe_exports().is_none());
+        assert_eq!(image.export_address("anything"), None);
+    }
+
+    /// Real driver fixture: every parsed export name must round-trip through
+    /// `export_address` to `ImageBase + RVA`, and pool-family wrapper exports
+    /// (these fixtures export their own `ExAllocatePool`/`ExFreePool`) must
+    /// resolve to non-zero in-image addresses. Silent skip when the fixture
+    /// tree is absent so the suite stays environment-independent.
+    #[test]
+    fn pe32_resolves_exports_in_real_driver_fixture() {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let bin_dir = std::path::Path::new(&home)
+            .join("Documents/byovd-harness/ghidra_pipeline/fixtures/bin");
+        let Ok(entries) = std::fs::read_dir(&bin_dir) else {
+            return;
+        };
+        let Some(fixture) = entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "sys"))
+        else {
+            return;
+        };
+        let Ok(bytes) = std::fs::read(&fixture) else {
+            return;
+        };
+        let image = match Pe32Loader::new().load(&bytes) {
+            Ok(image) => image,
+            Err(_) => return, // Not a PE32+ image: out of scope for this test.
+        };
+        let base = image.pe.as_ref().map(|pe| pe.image_base).unwrap_or(0);
+        let exports = image.pe_exports().unwrap_or(&[]);
+        assert!(!exports.is_empty(), "fixture {} has exports", fixture.display());
+        for export in exports {
+            let expected = base + u64::from(export.rva);
+            assert_eq!(image.export_address(&export.name), Some(expected));
+            assert_ne!(expected, 0);
+        }
+        // The pool-model-relevant wrapper exports, when present, resolve.
+        for name in ["DriverEntry", "ExAllocatePool", "ExFreePool"] {
+            if exports.iter().any(|export| export.name == name) {
+                assert!(image.export_address(name).is_some(), "{name} resolves");
+            }
+        }
     }
 }
