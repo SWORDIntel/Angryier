@@ -157,17 +157,13 @@ impl LuaSession {
 impl UserData for LuaSession {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // s:states() or s:states_count() -> integer
-        methods.add_method("states", |_, this, ()| {
-            Ok(this.inner.borrow().session.states.len())
-        });
+        methods.add_method("states", |_, this, ()| Ok(this.inner.borrow().session.states.len()));
         methods.add_method("states_count", |_, this, ()| {
             Ok(this.inner.borrow().session.states.len())
         });
 
         // s:dead_count() -> integer
-        methods.add_method("dead_count", |_, this, ()| {
-            Ok(this.inner.borrow().session.dead.len())
-        });
+        methods.add_method("dead_count", |_, this, ()| Ok(this.inner.borrow().session.dead.len()));
 
         // s:active_index([new_idx]) -> integer (0-based)
         methods.add_method("active_index", |_, this, new_idx: Option<usize>| {
@@ -200,18 +196,22 @@ impl UserData for LuaSession {
         methods.add_method("state", |_, this, idx: Option<usize>| {
             let inner = this.inner.borrow();
             let target_idx = idx.unwrap_or(inner.active_state_idx);
-            let state = inner.session.states.get(target_idx).ok_or_else(|| {
-                mlua::Error::external(format!("no active state at index {target_idx}"))
-            })?;
+            let state = inner
+                .session
+                .states
+                .get(target_idx)
+                .ok_or_else(|| mlua::Error::external(format!("no active state at index {target_idx}")))?;
             Ok(LuaState::new(Rc::clone(&this.inner), state.id))
         });
 
         // s:dead_state(idx) -> LuaState handle
         methods.add_method("dead_state", |_, this, idx: usize| {
             let inner = this.inner.borrow();
-            let state = inner.session.dead.get(idx).ok_or_else(|| {
-                mlua::Error::external(format!("no dead state at index {idx}"))
-            })?;
+            let state = inner
+                .session
+                .dead
+                .get(idx)
+                .ok_or_else(|| mlua::Error::external(format!("no dead state at index {idx}")))?;
             Ok(LuaState::new(Rc::clone(&this.inner), state.id))
         });
 
@@ -259,37 +259,40 @@ impl UserData for LuaSession {
         });
 
         // s:step_until(target_pc, [max_steps]) -> (outcome, steps_taken)
-        methods.add_method("step_until", |lua, this, (target_pc, max_steps): (u64, Option<usize>)| {
-            let limit = max_steps.unwrap_or(10_000);
-            let mut steps_taken = 0;
+        methods.add_method(
+            "step_until",
+            |lua, this, (target_pc, max_steps): (u64, Option<usize>)| {
+                let limit = max_steps.unwrap_or(10_000);
+                let mut steps_taken = 0;
 
-            loop {
-                if steps_taken >= limit {
-                    return Ok(("budget_exceeded", steps_taken));
-                }
-                {
-                    let inner = this.inner.borrow();
-                    if inner.session.states.is_empty() {
-                        return Ok(("terminated", steps_taken));
+                loop {
+                    if steps_taken >= limit {
+                        return Ok(("budget_exceeded", steps_taken));
                     }
-                    let idx = inner.active_state_idx.min(inner.session.states.len().saturating_sub(1));
-                    if let Ok(pc) = inner.session.states[idx].process.pc() {
-                        if pc == target_pc {
-                            return Ok(("reached", steps_taken));
+                    {
+                        let inner = this.inner.borrow();
+                        if inner.session.states.is_empty() {
+                            return Ok(("terminated", steps_taken));
                         }
-                    } else {
-                        return Ok(("terminated", steps_taken));
+                        let idx = inner.active_state_idx.min(inner.session.states.len().saturating_sub(1));
+                        if let Ok(pc) = inner.session.states[idx].process.pc() {
+                            if pc == target_pc {
+                                return Ok(("reached", steps_taken));
+                            }
+                        } else {
+                            return Ok(("terminated", steps_taken));
+                        }
+                    }
+
+                    let outcome = this.step_n(lua, 1)?;
+                    steps_taken += 1;
+
+                    if outcome == "terminated" || outcome == "breakpoint" || outcome == "hook_terminated" {
+                        return Ok((outcome, steps_taken));
                     }
                 }
-
-                let outcome = this.step_n(lua, 1)?;
-                steps_taken += 1;
-
-                if outcome == "terminated" || outcome == "breakpoint" || outcome == "hook_terminated" {
-                    return Ok((outcome, steps_taken));
-                }
-            }
-        });
+            },
+        );
 
         // Shortcuts forwarding directly to the active state:
         methods.add_method("pc", |_, this, new_pc: Option<u64>| {
@@ -320,6 +323,18 @@ impl UserData for LuaSession {
             st.get_regs(lua)
         });
 
+        // Exact-hex shortcuts (the `_hex` convention): kernel pointers
+        // above i64::MAX arrive lossy through the numeric forms.
+        methods.add_method("pc_hex", |_, this, ()| this.active_state()?.get_pc_hex());
+
+        methods.add_method("reg_hex", |_, this, name: String| {
+            this.active_state()?.get_reg_hex(&name)
+        });
+
+        methods.add_method("regs_hex", |lua, this, ()| this.active_state()?.get_regs_hex(lua));
+
+        methods.add_method("trace_hex", |lua, this, ()| this.active_state()?.get_trace_hex(lua));
+
         methods.add_method("read_bytes", |lua, this, (addr, len): (u64, usize)| {
             let st = this.active_state()?;
             st.read_bytes_lua(lua, addr, len)
@@ -336,7 +351,11 @@ impl UserData for LuaSession {
                     }
                     vec
                 }
-                _ => return Err(mlua::Error::external("write_bytes: data must be a string or table of bytes")),
+                _ => {
+                    return Err(mlua::Error::external(
+                        "write_bytes: data must be a string or table of bytes",
+                    ));
+                }
             };
             st.write_bytes_slice(addr, &raw)
         });
@@ -428,7 +447,9 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
         if let Ok(entry) = opts.get::<i64>("entry")
             && entry > 0
         {
-            process.write_pc(entry as u64).map_err(|e| mlua::Error::external(format!("entry: {e:?}")))?;
+            process
+                .write_pc(entry as u64)
+                .map_err(|e| mlua::Error::external(format!("entry: {e:?}")))?;
         }
     }
 
@@ -443,7 +464,8 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
                 let (k, v) = pair?;
                 if let Some((name, width)) = super::symbolic_mark_from_pair(&k, &v)? {
                     let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
-                    session.mark_symbolic(0, reg, angryier_ir::IrType::Bits(width))
+                    session
+                        .mark_symbolic(0, reg, angryier_ir::IrType::Bits(width))
                         .map_err(|e| mlua::Error::external(format!("mark_symbolic: {e:?}")))?;
                 }
             }
@@ -452,7 +474,9 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
             for pair in tbl.pairs::<String, i64>() {
                 let (name, value) = pair?;
                 let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
-                session.states[0].process.write_register(reg, value as u64)
+                session.states[0]
+                    .process
+                    .write_register(reg, value as u64)
                     .map_err(|e| mlua::Error::external(format!("regs[{name}]: {e:?}")))?;
                 session.states[0].concrete_registers.insert(reg, value as u64);
             }
@@ -463,7 +487,10 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
                 let addr = entry.get::<i64>("addr")? as u64;
                 let value = entry.get::<i64>("value")? as u64;
                 session.states[0].process.state.memory = session.states[0]
-                    .process.state.memory.load_concrete(addr, &value.to_le_bytes())
+                    .process
+                    .state
+                    .memory
+                    .load_concrete(addr, &value.to_le_bytes())
                     .map_err(|e| mlua::Error::external(format!("poke: {e:?}")))?;
             }
         }
@@ -472,7 +499,8 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
                 let (_, entry) = pair?;
                 let addr = entry.get::<i64>("addr")? as u64;
                 let len = entry.get::<i64>("len")? as usize;
-                session.mark_memory_symbolic(0, addr, len)
+                session
+                    .mark_memory_symbolic(0, addr, len)
                     .map_err(|e| mlua::Error::external(format!("symbolic_memory: {e:?}")))?;
             }
         }
@@ -480,9 +508,8 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
 
     let arena_reader = Arc::new(StaticArenaReader(arena));
 
-    let backend = angryier_solver_z3::Z3Backend::native_ffi(
-        arena_reader.clone() as Arc<dyn angryier_expr::ExprReader>,
-    ).ok();
+    let backend =
+        angryier_solver_z3::Z3Backend::native_ffi(arena_reader.clone() as Arc<dyn angryier_expr::ExprReader>).ok();
 
     Ok(LuaSession {
         inner: Rc::new(RefCell::new(SessionInner {

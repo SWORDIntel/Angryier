@@ -41,7 +41,17 @@ impl LuaState {
         let inner = this_inner(&self.inner);
         let idx = Self::active_index(&inner, self.state_id)
             .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
-        inner.session.states[idx].process.pc().map_err(|e| mlua::Error::external(format!("{e:?}")))
+        inner.session.states[idx]
+            .process
+            .pc()
+            .map_err(|e| mlua::Error::external(format!("{e:?}")))
+    }
+
+    /// Exact hex form of the PC ([`super::hex64`]). Kernel-address PCs
+    /// (entry overrides, pool hooks) exceed i64::MAX and arrive through
+    /// `st:pc()` as lossy floats — this accessor is exact.
+    pub fn get_pc_hex(&self) -> Result<String, mlua::Error> {
+        Ok(super::hex64(self.get_pc()?))
     }
 
     pub fn set_pc(&self, target: u64) -> Result<(), mlua::Error> {
@@ -49,14 +59,18 @@ impl LuaState {
         let idx = Self::active_index(&inner, self.state_id)
             .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
         let state = &mut inner.session.states[idx];
-        state.process.write_pc(target).map_err(|e| mlua::Error::external(format!("{e:?}")))?;
-        state.concrete_registers.insert(angryier_arch_intel64::register_id::RIP.0, target);
+        state
+            .process
+            .write_pc(target)
+            .map_err(|e| mlua::Error::external(format!("{e:?}")))?;
+        state
+            .concrete_registers
+            .insert(angryier_arch_intel64::register_id::RIP.0, target);
         Ok(())
     }
 
     pub fn get_reg(&self, name: &str) -> Result<Option<u64>, mlua::Error> {
-        let reg = reg_by_name(name)
-            .ok_or_else(|| mlua::Error::external(format!("unknown register '{name}'")))?;
+        let reg = reg_by_name(name).ok_or_else(|| mlua::Error::external(format!("unknown register '{name}'")))?;
         let inner = this_inner(&self.inner);
         let idx = Self::active_index(&inner, self.state_id)
             .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
@@ -69,14 +83,22 @@ impl LuaState {
         }
     }
 
+    /// Exact hex form of one register value ([`super::hex64`]) — the
+    /// integer-safe read for kernel pointers above i64::MAX.
+    pub fn get_reg_hex(&self, name: &str) -> Result<Option<String>, mlua::Error> {
+        Ok(self.get_reg(name)?.map(super::hex64))
+    }
+
     pub fn set_reg(&self, name: &str, val: u64) -> Result<(), mlua::Error> {
-        let reg = reg_by_name(name)
-            .ok_or_else(|| mlua::Error::external(format!("unknown register '{name}'")))?;
+        let reg = reg_by_name(name).ok_or_else(|| mlua::Error::external(format!("unknown register '{name}'")))?;
         let mut inner = this_inner_mut(&self.inner);
         let idx = Self::active_index(&inner, self.state_id)
             .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
         let state = &mut inner.session.states[idx];
-        state.process.write_register(reg, val).map_err(|e| mlua::Error::external(format!("{e:?}")))?;
+        state
+            .process
+            .write_register(reg, val)
+            .map_err(|e| mlua::Error::external(format!("{e:?}")))?;
         state.concrete_registers.insert(reg, val);
         state.registers.remove(&reg);
         Ok(())
@@ -93,7 +115,10 @@ impl LuaState {
         for i in 0..16u32 {
             let reg = base + i;
             if let Some(name) = name_by_reg(reg) {
-                let val = state.concrete_registers.get(&reg).copied()
+                let val = state
+                    .concrete_registers
+                    .get(&reg)
+                    .copied()
                     .or_else(|| state.process.read_register(reg).ok());
                 if let Some(v) = val {
                     tbl.set(name, v)?;
@@ -102,6 +127,37 @@ impl LuaState {
         }
         if let Ok(rip) = state.process.pc() {
             tbl.set("rip", rip)?;
+        }
+        Ok(tbl)
+    }
+
+    /// `regs` accessor with every value in the exact [`super::hex64`]
+    /// form, keyed by the same register names. Kernel register values
+    /// (pool pointers, kernel stack addresses) exceed i64::MAX and arrive
+    /// through `st:regs()` as lossy floats.
+    pub fn get_regs_hex(&self, lua: &Lua) -> Result<Table, mlua::Error> {
+        let inner = this_inner(&self.inner);
+        let idx = Self::active_index(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
+        let state = &inner.session.states[idx];
+        let tbl = lua.create_table()?;
+
+        let base = angryier_arch_intel64::register_id::GPR_BASE;
+        for i in 0..16u32 {
+            let reg = base + i;
+            if let Some(name) = name_by_reg(reg) {
+                let val = state
+                    .concrete_registers
+                    .get(&reg)
+                    .copied()
+                    .or_else(|| state.process.read_register(reg).ok());
+                if let Some(v) = val {
+                    tbl.set(name, super::hex64(v))?;
+                }
+            }
+        }
+        if let Ok(rip) = state.process.pc() {
+            tbl.set("rip", super::hex64(rip))?;
         }
         Ok(tbl)
     }
@@ -149,8 +205,7 @@ impl LuaState {
     }
 
     pub fn mark_symbolic(&self, name: &str, width: Option<i64>) -> Result<(), mlua::Error> {
-        let reg = reg_by_name(name)
-            .ok_or_else(|| mlua::Error::external(format!("unknown register '{name}'")))?;
+        let reg = reg_by_name(name).ok_or_else(|| mlua::Error::external(format!("unknown register '{name}'")))?;
         let width = super::validate_symbolic_width(name, width)?;
 
         let mut inner = this_inner_mut(&self.inner);
@@ -189,6 +244,21 @@ impl LuaState {
         Ok(tbl)
     }
 
+    /// `trace` accessor with every PC in the exact [`super::hex64`] form —
+    /// the integer-safe variant for traces that cross i64::MAX.
+    pub fn get_trace_hex(&self, lua: &Lua) -> Result<Table, mlua::Error> {
+        let inner = this_inner(&self.inner);
+        let idx = Self::active_index(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
+        let state = &inner.session.states[idx];
+
+        let tbl = lua.create_table()?;
+        for (i, pc) in state.process.trace.iter().enumerate() {
+            tbl.set(i + 1, super::hex64(*pc))?;
+        }
+        Ok(tbl)
+    }
+
     pub fn constraints_count(&self) -> Result<usize, mlua::Error> {
         let inner = this_inner(&self.inner);
         let idx = Self::active_index(&inner, self.state_id)
@@ -203,14 +273,14 @@ impl LuaState {
 
         let arena = inner.arena.clone();
         if inner.backend.is_none() {
-            let b = angryier_solver_z3::Z3Backend::native_ffi(
-                arena as std::sync::Arc<dyn angryier_expr::ExprReader>,
-            )
-            .map_err(|e| mlua::Error::external(format!("z3 initialization: {e:?}")))?;
+            let b = angryier_solver_z3::Z3Backend::native_ffi(arena as std::sync::Arc<dyn angryier_expr::ExprReader>)
+                .map_err(|e| mlua::Error::external(format!("z3 initialization: {e:?}")))?;
             inner.backend = Some(b);
         }
         let SessionInner { session, backend, .. } = &mut *inner;
-        let backend = backend.as_mut().ok_or_else(|| mlua::Error::external("backend not available"))?;
+        let backend = backend
+            .as_mut()
+            .ok_or_else(|| mlua::Error::external("backend not available"))?;
 
         let model = session
             .solve_state_symbols(idx, backend, Duration::from_secs(10))
@@ -224,8 +294,7 @@ impl LuaState {
     }
 
     pub fn eval(&self, name: &str) -> Result<u64, mlua::Error> {
-        let reg = reg_by_name(name)
-            .ok_or_else(|| mlua::Error::external(format!("unknown register '{name}'")))?;
+        let reg = reg_by_name(name).ok_or_else(|| mlua::Error::external(format!("unknown register '{name}'")))?;
         let mut inner = this_inner_mut(&self.inner);
         let idx = Self::active_index(&inner, self.state_id)
             .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
@@ -236,14 +305,14 @@ impl LuaState {
 
         let arena = inner.arena.clone();
         if inner.backend.is_none() {
-            let b = angryier_solver_z3::Z3Backend::native_ffi(
-                arena as std::sync::Arc<dyn angryier_expr::ExprReader>,
-            )
-            .map_err(|e| mlua::Error::external(format!("z3 initialization: {e:?}")))?;
+            let b = angryier_solver_z3::Z3Backend::native_ffi(arena as std::sync::Arc<dyn angryier_expr::ExprReader>)
+                .map_err(|e| mlua::Error::external(format!("z3 initialization: {e:?}")))?;
             inner.backend = Some(b);
         }
         let SessionInner { session, backend, .. } = &mut *inner;
-        let backend = backend.as_mut().ok_or_else(|| mlua::Error::external("backend not available"))?;
+        let backend = backend
+            .as_mut()
+            .ok_or_else(|| mlua::Error::external("backend not available"))?;
 
         let solved = session
             .solve_state(idx, backend, Duration::from_secs(10))
@@ -289,6 +358,10 @@ impl UserData for LuaState {
             }
         });
 
+        // st:pc_hex() -> string — exact PC form for kernel addresses above
+        // i64::MAX (the module's `_hex` convention).
+        methods.add_method("pc_hex", |_, this, ()| this.get_pc_hex());
+
         // st:reg(name, [new_val]) -> integer or nil
         methods.add_method("reg", |_, this, (name, new_val): (String, Option<u64>)| {
             if let Some(val) = new_val {
@@ -304,6 +377,12 @@ impl UserData for LuaState {
 
         // st:regs() -> table { rax = 0x..., rbx = 0x..., ... }
         methods.add_method("regs", |lua, this, ()| this.get_regs(lua));
+
+        // st:reg_hex(name) -> string | nil — exact hex register value
+        methods.add_method("reg_hex", |_, this, name: String| this.get_reg_hex(&name));
+
+        // st:regs_hex() -> table { rax = "0x...", ... } — every value exact
+        methods.add_method("regs_hex", |lua, this, ()| this.get_regs_hex(lua));
 
         // st:read_bytes(addr, len) -> string
         methods.add_method("read_bytes", |lua, this, (addr, len): (u64, usize)| {
@@ -321,15 +400,17 @@ impl UserData for LuaState {
                     }
                     vec
                 }
-                _ => return Err(mlua::Error::external("write_bytes: data must be a string or table of bytes")),
+                _ => {
+                    return Err(mlua::Error::external(
+                        "write_bytes: data must be a string or table of bytes",
+                    ));
+                }
             };
             this.write_bytes_slice(addr, &raw)
         });
 
         // st:poke(addr, val)
-        methods.add_method("poke", |_, this, (addr, val): (u64, u64)| {
-            this.poke(addr, val)
-        });
+        methods.add_method("poke", |_, this, (addr, val): (u64, u64)| this.poke(addr, val));
 
         // st:symbolic(name, [width])
         methods.add_method("symbolic", |_, this, (name, width): (String, Option<i64>)| {
@@ -343,6 +424,9 @@ impl UserData for LuaState {
 
         // st:trace()
         methods.add_method("trace", |lua, this, ()| this.get_trace(lua));
+
+        // st:trace_hex() -> table of exact hex PC strings
+        methods.add_method("trace_hex", |lua, this, ()| this.get_trace_hex(lua));
 
         // st:constraints_count()
         methods.add_method("constraints_count", |_, this, ()| this.constraints_count());

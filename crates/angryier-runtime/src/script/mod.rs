@@ -13,6 +13,21 @@
 //! print(r.steps, r.forks, r.merges)
 //! for i, input in ipairs(r.inputs) do print(input) end
 //! ```
+//!
+//! # 64-bit values: the `_hex` convention
+//!
+//! Lua 5.4 integers are signed 64-bit. mlua pushes a Rust `u64` that
+//! exceeds `i64::MAX` as a Lua *float* (double), so kernel pointers such
+//! as `0xffff800000000000` arrive float-lossy — exact only up to 2^53 —
+//! and `&` masks / `string.format("%x", ...)` both fail on them. Every
+//! value the result table (and the `LuaState` accessors) exposes that can
+//! carry a full machine address therefore ALSO appears as a `<name>_hex`
+//! sibling: a Lua string, lowercase, `0x`-prefixed, zero-padded to 16 hex
+//! digits, exact for all 64 bits ([`hex64`]). The plain numeric fields
+//! stay for backward compatibility and are exact Lua integers up to
+//! `i64::MAX`; above that they are delivered as doubles and must be
+//! treated as lossy. Scripts formatting or comparing kernel addresses use
+//! the `_hex` form. Documented for downstream hosts in `docs/DEPLOYMENT.md`.
 
 use angryier_expr::ExprArena;
 use angryier_loader::ImageLoader;
@@ -30,6 +45,27 @@ pub const DEFAULT_MAX_STATES: usize = 16;
 /// expressions. Widths other than this are rejected with an explicit error
 /// instead of being silently coerced or ignored.
 pub const SYMBOLIC_GPR_WIDTH: u16 = 64;
+
+/// Canonical exact form for a 64-bit machine value exposed to Lua:
+/// lowercase, `0x`-prefixed, zero-padded to 16 hex digits. One value maps
+/// to exactly one string, so `_hex` fields are directly comparable.
+///
+/// This is the integer-safe side of the module's `_hex` convention: Lua
+/// 5.4 integers are signed 64-bit, and mlua pushes a `u64` above
+/// `i64::MAX` as a double (float-lossy beyond 2^53), so kernel pointers
+/// like `0xffff800000000000` cannot round-trip through the numeric field.
+pub(crate) fn hex64(value: u64) -> String {
+    format!("{value:#018x}")
+}
+
+/// Stores one machine-address pair on a Lua table: `key` keeps the raw
+/// numeric `u64` (backward compatible; float-lossy above `i64::MAX`) and
+/// `key_hex` carries the exact [`hex64`] form scripts must use for
+/// formatting, masking, or comparing addresses that may exceed `i64::MAX`.
+pub(crate) fn set_addr64(table: &Table, key: &str, value: u64) -> mlua::Result<()> {
+    table.set(key, value)?;
+    table.set(format!("{key}_hex"), hex64(value))
+}
 
 /// Validates a symbolic-register width from the opts table / session
 /// method. `None` (the `{ "rdi" }` list form or `s:symbolic("rdi")`)
@@ -60,16 +96,16 @@ fn symbolic_mark_from_pair(k: &Value, v: &Value) -> Result<Option<(String, u16)>
     let width = validate_symbolic_width(&name, width)?;
     Ok(Some((name, width)))
 }
-pub mod utils;
-#[cfg(feature = "xed")]
-pub mod state;
 #[cfg(feature = "xed")]
 pub mod session;
+#[cfg(feature = "xed")]
+pub mod state;
+pub mod utils;
 
 #[cfg(feature = "xed")]
-pub use state::LuaState;
-#[cfg(feature = "xed")]
 pub use session::{LuaSession, open_session};
+#[cfg(feature = "xed")]
+pub use state::LuaState;
 pub use utils::{name_by_reg, reg_by_name};
 
 /// The `angry` library installed into each script VM.
@@ -83,9 +119,7 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
     #[cfg(feature = "xed")]
     lib.set(
         "open",
-        lua.create_function(|_, (path, opts): (String, Option<Table>)| {
-            open_session(&path, opts.as_ref())
-        })?,
+        lua.create_function(|_, (path, opts): (String, Option<Table>)| open_session(&path, opts.as_ref()))?,
     )?;
     lib.set("version", lua.create_function(|_, ()| Ok(env!("CARGO_PKG_VERSION")))?)?;
     lua.globals().set("angry", lib)?;
@@ -100,17 +134,15 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // exactness on unmodeled forms (privileged hints like CLI/STI, RDMSR,
     // HLT — dense in kernel images) for reachability, with every fallback
     // hit reported back in the result table as fidelity debt.
-    let unsupported_fallback =
-        if opts.get::<String>("unsupported").ok().as_deref() == Some("fallthrough") {
-            let fallback =
-                std::sync::Arc::new(angryier_semantics_intel64::UnsupportedFallthrough::new());
-            runtime.registry.set_unsupported_fallback(std::sync::Arc::clone(
-                &fallback,
-            ) as std::sync::Arc<dyn angryier_semantics::SemanticProvider>);
-            Some(fallback)
-        } else {
-            None
-        };
+    let unsupported_fallback = if opts.get::<String>("unsupported").ok().as_deref() == Some("fallthrough") {
+        let fallback = std::sync::Arc::new(angryier_semantics_intel64::UnsupportedFallthrough::new());
+        runtime.registry.set_unsupported_fallback(
+            std::sync::Arc::clone(&fallback) as std::sync::Arc<dyn angryier_semantics::SemanticProvider>
+        );
+        Some(fallback)
+    } else {
+        None
+    };
     let use_dynamic = opts.get::<bool>("dynamic").unwrap_or(false);
     // Format dispatch: an MZ magic means PE32+, which loads in driver mode
     // (sections mapped, IAT resolved to import stubs, DriverEntry entry
@@ -376,10 +408,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         None
     } else {
         Some(
-            angryier_solver_z3::Z3Backend::native_ffi(
-                arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>,
-            )
-            .map_err(|e| mlua::Error::external(format!("z3: {e:?}")))?,
+            angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>)
+                .map_err(|e| mlua::Error::external(format!("z3: {e:?}")))?,
         )
     };
     // Wall budget per run: `timeout_secs` (default 120) bounds the whole
@@ -408,7 +438,9 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     out.set("live_states", report.live_states)?;
     out.set("found", report.found.len())?;
     out.set("timed_out", report.timed_out)?;
-    out.set("entry_rsp", entry_rsp)?;
+    // Function-entry RSP: kernel stacks live above i64::MAX, so the numeric
+    // form is float-lossy there — `entry_rsp_hex` is the exact value.
+    set_addr64(&out, "entry_rsp", entry_rsp)?;
     // Solver-assisted address-concretization attempts (each attempt solves
     // one unresolved address, pins the model's value, and re-runs the
     // block) — visible budget diagnostics for under-constrained runs.
@@ -424,15 +456,24 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             .or_else(|| session.dead.first());
         if let Some(state) = candidate {
             let trace = lua.create_table()?;
+            // Parallel `trace_hex`: block PCs are normally image VAs, but an
+            // entry override (or a hook at a kernel address) can push them
+            // past i64::MAX, where the numeric array turns into floats.
+            let trace_hex = lua.create_table()?;
             for (index, pc) in state.process.trace.iter().enumerate() {
                 trace.set(index + 1, *pc)?;
+                trace_hex.set(index + 1, hex64(*pc))?;
             }
             out.set("trace", trace)?;
+            out.set("trace_hex", trace_hex)?;
         }
     }
 
     // Kernel pool model report (driver-mode PE loads only): allocation /
-    // free counters and the double-free event list.
+    // free counters and the double-free event list. Pool pointers are
+    // kernel addresses (`0xffff8000...` base) — always above i64::MAX — so
+    // each event carries exact `pointer_hex` / `caller_hex` strings; the
+    // numeric `pointer` / `caller` fields are float-lossy doubles there.
     if let Some(tracker) = kernel_pool.as_ref() {
         let snap = tracker.snapshot();
         let kernel = lua.create_table()?;
@@ -441,8 +482,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         let dfs = lua.create_table()?;
         for (index, event) in snap.double_frees.iter().enumerate() {
             let entry = lua.create_table()?;
-            entry.set("pointer", event.pointer)?;
-            entry.set("caller", event.caller)?;
+            set_addr64(&entry, "pointer", event.pointer)?;
+            set_addr64(&entry, "caller", event.caller)?;
             dfs.set(index + 1, entry)?;
         }
         kernel.set("double_frees", dfs)?;
@@ -457,7 +498,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         let site_tbl = lua.create_table()?;
         for (index, (pc, form)) in sites.iter().enumerate() {
             let entry = lua.create_table()?;
-            entry.set("pc", *pc)?;
+            set_addr64(&entry, "pc", *pc)?;
             entry.set("form", *form)?;
             site_tbl.set(index + 1, entry)?;
         }
@@ -478,8 +519,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         for (index, site) in probe.uc_memory_sites().iter().enumerate() {
             let entry = lua.create_table()?;
             entry.set("op", site.op.as_str())?;
-            entry.set("address", site.address)?;
-            entry.set("page", site.page)?;
+            set_addr64(&entry, "address", site.address)?;
+            set_addr64(&entry, "page", site.page)?;
             site_tbl.set(index + 1, entry)?;
         }
         out.set("unmapped_sites", site_tbl)?;
@@ -487,7 +528,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         let revert_tbl = lua.create_table()?;
         for (index, revert) in probe.uc_memory_ro_reverts().iter().enumerate() {
             let entry = lua.create_table()?;
-            entry.set("address", revert.address)?;
+            set_addr64(&entry, "address", revert.address)?;
             entry.set("previous", revert.previous)?;
             revert_tbl.set(index + 1, entry)?;
         }
@@ -527,21 +568,24 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
         out.set("inputs", inputs)?;
     }
-    // Register bindings of the first found state as `regs`.
+    // Register bindings of the first found state as `regs` (keyed by
+    // register id), with the exact `regs_hex` sibling — a found state can
+    // hold a kernel pointer above i64::MAX in driver mode.
     if let Some(found) = report.found.first() {
         let regs = lua.create_table()?;
+        let regs_hex = lua.create_table()?;
         for (reg, (expr, _ty)) in &found.registers {
             if let Some(node) = arena.get(*expr)
                 && node.op == angryier_expr::ExprOp::Constant
                 && node.immediate.len() >= 8
             {
-                regs.set(
-                    *reg,
-                    u64::from_le_bytes(node.immediate[..8].try_into().unwrap_or([0; 8])),
-                )?;
+                let value = u64::from_le_bytes(node.immediate[..8].try_into().unwrap_or([0; 8]));
+                regs.set(*reg, value)?;
+                regs_hex.set(*reg, hex64(value))?;
             }
         }
         out.set("regs", regs)?;
+        out.set("regs_hex", regs_hex)?;
     }
     Ok(out)
 }
@@ -641,5 +685,95 @@ mod tests {
         assert_eq!(reg_by_name("rdi"), Some(base + 7));
         assert_eq!(reg_by_name("r15"), Some(base + 15));
         assert_eq!(reg_by_name("xmm0"), None);
+    }
+
+    /// The `_hex` form is one canonical string per value: lowercase,
+    /// `0x`-prefixed, always 16 hex digits.
+    #[test]
+    fn hex64_is_canonical_sixteen_digit_lowercase() {
+        assert_eq!(hex64(0), "0x0000000000000000");
+        assert_eq!(hex64(0x401000), "0x0000000000401000");
+        assert_eq!(hex64(i64::MAX as u64), "0x7fffffffffffffff");
+        assert_eq!(hex64(0xffff_8000_0000_0000), "0xffff800000000000");
+        assert_eq!(hex64(0xffff_8000_dead_beef), "0xffff8000deadbeef");
+        assert_eq!(hex64(u64::MAX), "0xffffffffffffffff");
+        for value in [hex64(1), hex64(0xdead_beef), hex64(u64::MAX)] {
+            assert_eq!(value.len(), 18, "width must be fixed: {value}");
+        }
+    }
+
+    /// Regression (downstream 730xd buildout, 2026-10-01): a kernel
+    /// pointer above i64::MAX — exactly what the pool model's double-free
+    /// events carry — must survive the trip into Lua. mlua pushes such a
+    /// u64 as a Lua float, so the numeric field is a lossy double (and
+    /// `string.format("%x", ...)` rejects it); the `_hex` sibling set by
+    /// the same [`set_addr64`] call the result table uses is exact.
+    #[test]
+    fn kernel_pointer_hex_fields_round_trip_exactly() -> Result<(), Box<dyn std::error::Error>> {
+        let lua = Lua::new();
+        let event = lua.create_table()?;
+        // Two shapes: the even pool base (exactly a double, still > i64::MAX
+        // so `%x` refuses it) and a pointer with nonzero low bits (not even
+        // exactly representable as a double).
+        set_addr64(&event, "pointer", 0xffff_8000_0000_0000)?;
+        set_addr64(&event, "caller", 0xffff_8000_dead_beef)?;
+        lua.globals().set("event", event)?;
+        lua.load(
+            r#"
+local ev = event
+-- The defect, pinned: u64 > i64::MAX arrives as a Lua float, not an integer.
+assert(math.type(ev.pointer) == "float",
+       "pointer must arrive as float, got " .. math.type(ev.pointer))
+assert(math.type(ev.caller) == "float",
+       "caller must arrive as float, got " .. math.type(ev.caller))
+-- That float is what breaks downstream formatting: %x rejects it.
+assert(not pcall(string.format, "%x", ev.pointer),
+       "lossy float must not be %x-formattable")
+assert(not pcall(string.format, "%x", ev.caller))
+-- The _hex sibling is exact for all 64 bits.
+assert(ev.pointer_hex == "0xffff800000000000", ev.pointer_hex)
+assert(ev.caller_hex == "0xffff8000deadbeef", ev.caller_hex)
+assert(type(ev.pointer_hex) == "string" and type(ev.caller_hex) == "string")
+-- Consistency: the numeric field and the _hex field describe the SAME
+-- address. This Lua build (5.4.3+) parses an out-of-range hex string as
+-- a WRAPPED (negative) integer rather than a float, so unwrapping by
+-- 2^64 recovers the value mlua delivered as a float; a float parse
+-- rounds exactly like the push itself, so it compares directly.
+local function same_address(num, hex)
+  local back = tonumber(hex)
+  if math.type(back) == "integer" and back < 0 then
+    return num == back + 2^64
+  end
+  return num == back
+end
+assert(same_address(ev.pointer, ev.pointer_hex), "pointer fields disagree")
+assert(same_address(ev.caller, ev.caller_hex), "caller fields disagree")
+return true
+"#,
+        )
+        .eval::<bool>()?;
+        Ok(())
+    }
+
+    /// Small image-VAs keep their exact integer numeric field alongside the
+    /// `_hex` sibling — backward compatibility for user-mode-scale values.
+    #[test]
+    fn small_addresses_stay_exact_integers_with_hex_siblings() -> Result<(), Box<dyn std::error::Error>> {
+        let lua = Lua::new();
+        let event = lua.create_table()?;
+        set_addr64(&event, "pointer", 0x40102a)?;
+        lua.globals().set("event", event)?;
+        lua.load(
+            r#"
+local ev = event
+assert(math.type(ev.pointer) == "integer")
+assert(ev.pointer == 0x40102a)
+assert(ev.pointer_hex == "0x000000000040102a")
+assert(string.format("%x", ev.pointer) == "40102a")
+return true
+"#,
+        )
+        .eval::<bool>()?;
+        Ok(())
     }
 }

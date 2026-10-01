@@ -105,6 +105,30 @@ for i, solution in ipairs(report.inputs) do
 end
 ```
 
+### 64-bit Values: the `_hex` Fields
+
+Lua 5.4 integers are signed 64-bit; a Rust `u64` above `i64::MAX`
+(0x7fff_ffff_ffff_ffff) is pushed as a Lua float (double), exact only to
+2^53. Kernel pointers (`0xffff8000...` pool bases, kernel stacks) cannot
+round-trip through the numeric fields: `&` masks and
+`string.format("%x", ...)` both misbehave on the delivered float.
+
+Every address-bearing value therefore also appears as a `<name>_hex`
+sibling — a Lua **string**, lowercase, `0x`-prefixed, zero-padded to 16
+hex digits, exact for all 64 bits:
+
+- `angry.run` result table: `entry_rsp_hex`, `trace_hex[i]`,
+  `kernel.double_frees[i].pointer_hex` / `.caller_hex`,
+  `unsupported_sites[i].pc_hex`, `unmapped_sites[i].address_hex` /
+  `.page_hex`, `ro_write_reverts[i].address_hex`, `regs_hex[id]`.
+- State/session accessors: `st:pc_hex()`, `st:reg_hex(name)`,
+  `st:regs_hex()`, `st:trace_hex()` (also callable directly on the
+  session as active-state shortcuts).
+
+Scripts that format, mask, or compare kernel addresses must use the
+`_hex` forms; the numeric fields remain for compatibility and are exact
+Lua integers up to `i64::MAX` only.
+
 ---
 
 ## 4. Interactive Session Controller (`angry.open` / `LuaSession`)
@@ -146,7 +170,7 @@ end
 - `s:unhook(addr) -> boolean`: Removes a hook.
 
 ### Active State Shortcuts
-All `LuaState` inspection and mutation methods (`pc`, `reg`, `regs`, `read_bytes`, `write_bytes`, `poke`, `symbolic`, `symbolic_memory`, `trace`, `constraints_count`, `solve`, `eval`, `is_alive`) are also callable directly on `s`, forwarding to the active state.
+All `LuaState` inspection and mutation methods (`pc`, `pc_hex`, `reg`, `reg_hex`, `regs`, `regs_hex`, `read_bytes`, `write_bytes`, `poke`, `symbolic`, `symbolic_memory`, `trace`, `trace_hex`, `constraints_count`, `solve`, `eval`, `is_alive`) are also callable directly on `s`, forwarding to the active state.
 
 ---
 
@@ -161,8 +185,11 @@ A `LuaState` represents an individual symbolic or concrete execution path. State
 
 ### Registers
 - `st:pc([new_pc]) -> number`: Reads or writes the instruction pointer (RIP).
+- `st:pc_hex() -> string`: Exact 16-digit hex form of the PC (the `_hex` convention) for kernel addresses above `i64::MAX`.
 - `st:reg(name, [new_val]) -> number | nil`: Reads or writes a register by name (`"rax"`, `"rbx"`, `"rip"`, `"rflags"`, etc.).
+- `st:reg_hex(name) -> string | nil`: Exact 16-digit hex form of one register value.
 - `st:regs() -> table`: Returns a table mapping register names to their current 64-bit concrete values.
+- `st:regs_hex() -> table`: Same map with every value as an exact hex string (includes `rip`).
 
 ### Memory
 - `st:read_bytes(addr, len) -> string`: Reads `len` bytes starting at `addr` as a Lua string.
@@ -174,6 +201,7 @@ A `LuaState` represents an individual symbolic or concrete execution path. State
 - `st:symbolic_memory(addr, len)`: Marks `len` bytes at `addr` as fresh symbolic variables.
 - `st:constraints_count() -> number`: Number of accumulated path constraints.
 - `st:trace() -> table`: Returns an array of executed PC addresses in this path's trace ring.
+- `st:trace_hex() -> table`: The same trace as exact 16-digit hex strings (the `_hex` convention).
 - `st:solve() -> table`: Queries the native Z3 SMT solver for a satisfiable assignment to all symbolic variables on this path. Returns an array of byte strings for each symbol.
 - `st:eval(name) -> number`: Solves the path constraints and evaluates the concrete 64-bit integer value for register `name`.
 

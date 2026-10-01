@@ -3,12 +3,18 @@
 
 Both engines run aligned, equal-fidelity kernel models. This benchmark
 reports observed work and timing across engines.
+
+The default driver lives in the CORPUS_DIR fixture root (env var, else
+the historical ~/Documents/driver_analysis/... default); the Angryier leg
+sweeps that same root so both engines always see the driver. Pass an
+explicit driver path to benchmark any other image.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -18,10 +24,20 @@ from pathlib import Path
 from gate_j_probe import POOL, SCRATCH, hook_externs, make_ret_zero
 
 
-DEFAULT_DRIVER = (
+DEFAULT_CORPUS_DIR = (
     Path.home()
-    / "Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic/GVCIDrv64.sys"
+    / "Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic"
 )
+
+
+def env_root(env_var: str, default: Path) -> Path:
+    """Env override (non-blank) or the historical default."""
+    override = os.environ.get(env_var, "").strip()
+    return Path(override) if override else default
+
+
+CORPUS_DIR = env_root("CORPUS_DIR", DEFAULT_CORPUS_DIR)
+DEFAULT_DRIVER = CORPUS_DIR / "GVCIDrv64.sys"
 MAX_INST = 20_000
 ANGR_TIMEOUT = 60.0
 CORPUS_ROW = re.compile(
@@ -94,22 +110,35 @@ def run_angr(driver: Path) -> dict[str, object]:
     }
 
 
-def run_angryier(driver_name: str) -> dict[str, object]:
+def run_angryier(driver: Path) -> dict[str, object]:
     command = [
         "cargo", "test", "--release", "-p", "angryier-runtime",
         "--features", "xed", "--test", "corpus_exec", "--", "--nocapture",
     ]
+    # The sweep must include this driver's directory: export it as the
+    # CORPUS_DIR root (unless the caller already set one), so the Angryier
+    # leg works on hosts where the historical corpus path does not exist.
+    env = dict(os.environ)
+    env.setdefault("CORPUS_DIR", str(driver.parent))
     last_output = ""
     for attempt in range(1, 4):
         started = time.monotonic()
-        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        result = subprocess.run(command, text=True, capture_output=True, check=False, env=env)
         seconds = time.monotonic() - started
         last_output = result.stdout + "\n" + result.stderr
         if result.returncode == 0:
             rows = {match.group("name"): match for match in CORPUS_ROW.finditer(last_output)}
-            match = rows.get(driver_name)
+            match = rows.get(driver.name)
             if match is None:
-                raise RuntimeError(f"release sweep did not report {driver_name}")
+                skip_lines = [
+                    line for line in last_output.splitlines()
+                    if line.startswith("SKIP:") or "SKIPPED" in line
+                ]
+                detail = f"\n{chr(10).join(skip_lines)}" if skip_lines else ""
+                raise RuntimeError(
+                    f"release sweep did not report {driver.name} "
+                    f"(swept CORPUS_DIR={env.get('CORPUS_DIR')}){detail}"
+                )
             steps = int(match.group("steps"))
             driver_seconds = float(match.group("seconds")) if match.group("seconds") else seconds
             return {
@@ -161,10 +190,13 @@ def main() -> int:
     parser.add_argument("driver", nargs="?", type=Path, default=DEFAULT_DRIVER)
     args = parser.parse_args()
     if not args.driver.is_file():
-        parser.error(f"driver does not exist: {args.driver}")
+        parser.error(
+            f"driver does not exist: {args.driver} "
+            f"(default root CORPUS_DIR={CORPUS_DIR}; set CORPUS_DIR to override)"
+        )
 
     try:
-        print(markdown(run_angr(args.driver), run_angryier(args.driver.name)))
+        print(markdown(run_angr(args.driver), run_angryier(args.driver)))
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1

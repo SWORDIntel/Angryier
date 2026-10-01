@@ -17,12 +17,23 @@ the report, not measured).
 Usage: python3 scripts/gate_j_corpus.py [--max-inst N] [--timeout S]
        [--driver NAME ...]   # repeatable; default: auto-pick terminated
                              # drivers with <= MAX_ANGRYIER_STEPS steps
+       [--corpus-dir DIR]    # override the driver corpus root
+
+Fixture roots (both must exist somewhere for a full table):
+       CORPUS_DIR   env var, else --corpus-dir, else the historical
+                    ~/Documents/driver_analysis/... default below
+       FIXTURE_DIR  env var, else the historical
+                    ~/Documents/byovd-harness/... default below
+Missing roots are reported loudly (path included) and never silently
+treated as an empty corpus; the effective roots are exported to the
+corpus_exec sweep so the Angryier leg sees the same drivers.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -31,14 +42,24 @@ from pathlib import Path
 
 from gate_j_probe import POOL, SCRATCH, hook_externs, make_ret_zero
 
-CORPUS_DIR = (
+DEFAULT_CORPUS_DIR = (
     Path.home()
     / "Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic"
 )
-# The second fixture root corpus_exec sweeps (vuln/safe harness fixtures).
-FIXTURE_DIR = (
+DEFAULT_FIXTURE_DIR = (
     Path.home() / "Documents/byovd-harness/ghidra_pipeline/fixtures/bin"
 )
+
+
+def env_root(env_var: str, default: Path) -> Path:
+    """Env override (non-blank) or the historical default."""
+    override = os.environ.get(env_var, "").strip()
+    return Path(override) if override else default
+
+
+CORPUS_DIR = env_root("CORPUS_DIR", DEFAULT_CORPUS_DIR)
+# The second fixture root corpus_exec sweeps (vuln/safe harness fixtures).
+FIXTURE_DIR = env_root("FIXTURE_DIR", DEFAULT_FIXTURE_DIR)
 MAX_INST = 20_000
 ANGR_TIMEOUT = 60.0
 # Angryier drivers with more steps than this are excluded from the
@@ -114,13 +135,20 @@ def run_angr(driver: Path, max_inst: int, timeout: float) -> dict[str, object]:
     }
 
 
-def run_angryier_sweep() -> dict[str, dict[str, object]]:
-    """One release corpus_exec run; returns per-driver rows keyed by name."""
+def run_angryier_sweep(corpus_dir: Path, fixture_dir: Path) -> dict[str, dict[str, object]]:
+    """One release corpus_exec run; returns per-driver rows keyed by name.
+
+    The effective roots are exported to the sweep so the Angryier leg
+    always looks in the same directories the angr leg resolves from.
+    """
     command = [
         "cargo", "test", "--release", "-p", "angryier-runtime",
         "--features", "xed", "--test", "corpus_exec", "--", "--nocapture",
     ]
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    env = dict(os.environ)
+    env.setdefault("CORPUS_DIR", str(corpus_dir))
+    env.setdefault("FIXTURE_DIR", str(fixture_dir))
+    result = subprocess.run(command, text=True, capture_output=True, check=False, env=env)
     output = result.stdout + "\n" + result.stderr
     if result.returncode != 0:
         tail = "\n".join(output.splitlines()[-20:])
@@ -185,6 +213,27 @@ def markdown(
     return "\n".join(lines)
 
 
+def report_roots(roots: dict[str, Path]) -> list[Path]:
+    """Announce every fixture root and which of them exist.
+
+    A missing root prints the exact path looked for plus the env var that
+    overrides it — a host without the corpus is told what to set instead of
+    getting an empty table. Returns the roots that exist.
+    """
+    present: list[Path] = []
+    for env_var, root in roots.items():
+        if root.is_dir():
+            print(f"fixture root {env_var}={root} (exists)", file=sys.stderr)
+            present.append(root)
+        else:
+            print(
+                f"WARNING: fixture root {env_var}={root} does not exist "
+                f"(looked for {root}); set {env_var} to override",
+                file=sys.stderr,
+            )
+    return present
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-inst", type=int, default=MAX_INST)
@@ -192,21 +241,33 @@ def main() -> int:
     parser.add_argument("--driver", action="append", dest="drivers", default=[])
     parser.add_argument(
         "--corpus-dir", type=Path, default=CORPUS_DIR,
-        help="driver corpus directory (default: %(default)s)",
+        help="driver corpus directory (env CORPUS_DIR; default: %(default)s)",
     )
     args = parser.parse_args()
-    if not args.corpus_dir.is_dir():
-        parser.error(f"corpus dir does not exist: {args.corpus_dir}")
+    roots = {"CORPUS_DIR": args.corpus_dir, "FIXTURE_DIR": FIXTURE_DIR}
+    present = report_roots(roots)
+    if not present:
+        print(
+            "no fixture roots exist — looked for "
+            + ", ".join(f"{var}={root}" for var, root in roots.items()),
+            file=sys.stderr,
+        )
+        return 1
 
     def resolve(name: str) -> Path:
-        for root in (args.corpus_dir, FIXTURE_DIR):
+        for root in present:
             candidate = root / name
             if candidate.is_file():
                 return candidate
+        print(
+            f"driver {name!r} not found in any existing fixture root "
+            + "(searched: " + ", ".join(str(root) for root in present) + ")",
+            file=sys.stderr,
+        )
         raise FileNotFoundError(name)
 
     print("running Angryier release corpus sweep...", file=sys.stderr)
-    sweep = run_angryier_sweep()
+    sweep = run_angryier_sweep(args.corpus_dir, FIXTURE_DIR)
     if args.drivers:
         selected = args.drivers
     else:

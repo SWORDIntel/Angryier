@@ -8,6 +8,17 @@
 //!   BLOCK-NULL  — executed a null/undefined target (missing code guards).
 //!   BLOCK-OTHER — some other execution error.
 //!   BUDGET      — still running at the step budget (deep execution).
+//!
+//! Fixture roots are configurable so the sweep runs on any host (the
+//! 730xd buildout hit this: the hardcoded corpus only existed on the
+//! authoring machine and the sweep silently reported zero images):
+//!   CORPUS_DIR  — the curated real-driver corpus.
+//!   FIXTURE_DIR — the vuln/safe harness fixture root.
+//! Unset vars fall back to the historical default paths. A missing root
+//! is SKIP-WITH-REASON: the skip line names the path that was looked
+//! for, and with no roots at all the whole sweep prints a skip banner
+//! and passes (a host without corpora is not a test failure — but it
+//! must never look like an empty successful measurement either).
 #![cfg(feature = "xed")]
 use std::path::PathBuf;
 
@@ -18,14 +29,29 @@ use angryier_types::{SemanticVersion, TargetProfileId};
 
 const STEP_BUDGET: u64 = 3000;
 
-fn fixture_dirs() -> Vec<PathBuf> {
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => "/home/john".to_string(),
-    };
+/// Historical default for the real-driver corpus root.
+const DEFAULT_CORPUS_SUFFIX: &str = "Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic";
+/// Historical default for the vuln/safe harness fixture root.
+const DEFAULT_FIXTURE_SUFFIX: &str = "Documents/byovd-harness/ghidra_pipeline/fixtures/bin";
+
+fn home_root() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/john".to_string()))
+}
+
+/// One configured fixture root: the env var's value when set (non-blank),
+/// else the historical default under `$HOME`.
+fn configured_root(env_var: &str, default_suffix: &str) -> PathBuf {
+    match std::env::var(env_var) {
+        Ok(value) if !value.trim().is_empty() => PathBuf::from(value),
+        _ => home_root().join(default_suffix),
+    }
+}
+
+/// `(env var name, root)` pairs the sweep looks in, in order.
+fn fixture_roots() -> Vec<(&'static str, PathBuf)> {
     vec![
-        PathBuf::from(&home).join("Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic"),
-        PathBuf::from(&home).join("Documents/byovd-harness/ghidra_pipeline/fixtures/bin"),
+        ("CORPUS_DIR", configured_root("CORPUS_DIR", DEFAULT_CORPUS_SUFFIX)),
+        ("FIXTURE_DIR", configured_root("FIXTURE_DIR", DEFAULT_FIXTURE_SUFFIX)),
     ]
 }
 
@@ -58,12 +84,38 @@ struct Totals {
 
 #[test]
 fn corpus_execution_sweep() -> Result<(), Box<dyn std::error::Error>> {
+    // Resolve and report every fixture root first: a missing root must
+    // announce itself (name AND path), never silently contribute nothing.
+    let roots = fixture_roots();
     let mut all_files = Vec::new();
-    for dir in &fixture_dirs() {
-        all_files.extend(collect_image_files(dir));
+    let mut present_roots = Vec::new();
+    for (env_var, root) in &roots {
+        match std::fs::read_dir(root) {
+            Ok(_) => present_roots.push((env_var, root)),
+            Err(err) => println!(
+                "SKIP: {env_var} fixture root not found (looked for {}): {err}",
+                root.display()
+            ),
+        }
+    }
+    for (_, root) in &present_roots {
+        all_files.extend(collect_image_files(root));
     }
     all_files.sort();
     all_files.dedup();
+
+    if all_files.is_empty() {
+        println!();
+        println!("=== corpus execution sweep SKIPPED: no fixture roots found ===");
+        for (env_var, root) in &roots {
+            println!("  looked for {env_var}={}", root.display());
+        }
+        println!(
+            "  set CORPUS_DIR and/or FIXTURE_DIR to an existing driver corpus and re-run; \
+             an absent corpus is not a failure, but it is never a measurement either."
+        );
+        return Ok(());
+    }
 
     let mut totals = Totals::default();
     let mut rows: Vec<(String, String, u64, f64, String)> = Vec::new();
