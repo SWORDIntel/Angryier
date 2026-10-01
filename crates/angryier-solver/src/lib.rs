@@ -1301,10 +1301,10 @@ impl BatchSolver {
                         name1, res1.outcome, name2, res2.outcome
                     );
                     // Prefer Z3 result if one of the backends is z3
-                    if name1 == "z3" {
+                    if name1.starts_with("z3") {
                         return res1;
                     }
-                    if name2 == "z3" {
+                    if name2.starts_with("z3") {
                         return res2;
                     }
                     // Otherwise prefer non-error result
@@ -1328,7 +1328,7 @@ impl BatchSolver {
                     backend.solve(query)
                 };
                 self.router.record_outcome(name, result.outcome, result.elapsed);
-                if result.outcome != SolverOutcomeKind::BackendError {
+                if matches!(result.outcome, SolverOutcomeKind::Sat | SolverOutcomeKind::Unsat) {
                     return result;
                 }
             }
@@ -1504,9 +1504,10 @@ impl CachingSolverBackend {
                     .copied()
             })
             .collect();
-        if let Some(core_keys) = core_keys
+        if let Some(mut core_keys) = core_keys
             && let Ok(mut cores) = self.unsat_cores.lock()
         {
+            core_keys.insert(query.predicate_key());
             cores.push(core_keys);
         }
     }

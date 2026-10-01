@@ -51,5 +51,9 @@ required-features = ["xed"]
 name = "string_io_runtime"
 required-features = ["xed"]
 
+[[test]]
+name = "lua_api"
+required-features = ["xed", "script"]
+
 [lints]
 workspace = true

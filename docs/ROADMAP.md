@@ -823,12 +823,16 @@ Enhanced environment modeling in `crates/angryier-models/src/lib.rs`:
 - `SyscallDispatchTable`: Versioned Linux syscall dispatcher routing to 14 standard libc/kernel SimProcedures (38/38 tests clean).
 
 ### Phase 15 — API stability, scripting, packaging
-**Status: Landed 2026-09-30.**
+**Status: Landed 2026-10-01.**
 - **Top-Level API Stability Suite:** `crates/angryier/tests/api_stability.rs` provides
   10 comprehensive integration tests covering `Engine`, `Session`, `RunOptions`,
   `RunReport`, single-stepping, find/avoid path isolation, concrete seeding,
   memory poking, and model input solving (RAX=42 recovered).
-- Lua scripting + `angryier run` CLI documented and verified.
+- **Strong Lua 5.4 Scripting Subsystem:** Modularized under `crates/angryier-runtime/src/script/`:
+  - **Binary Utilities (`angry.*`):** `angry.hex`, `angry.unhex`, `angry.pack64`/`unpack64`, `angry.pack32`/`unpack32`, `angry.disasm` (XED decoder with `len`, `length`, `hex`, `operands_count`).
+  - **First-Class State Handles (`LuaState`):** Individual execution path handles backed by stable `state_id: u64` exposing `:pc()`, `:reg()`, `:regs()`, `:read_bytes()`, `:write_bytes()`, `:poke()`, `:symbolic()`, `:symbolic_memory()`, `:trace()`, `:constraints_count()`, `:solve()`, `:eval()`, `:is_alive()`, `:terminate()`.
+  - **Interactive Session Controller (`LuaSession`):** Configurable `angry.open(path, [opts])` with Z3 SMT backend, multi-stepping `:step([n])`, target seeking `:step_until(target_pc, [max_steps])`, interactive hooks (`:hook(addr, fn)` with abort/termination semantics, `:unhook(addr)`), breakpoints (`:add_breakpoint()`, `:remove_breakpoint()`, `:breakpoints()`), and active-state shortcuts.
+  - **Integration Test Suite & Documentation:** 11 comprehensive tests in `crates/angryier-runtime/tests/lua_api.rs` (11/11 passing) and complete user-facing reference in `docs/LUA_API.md`.
 
 ### Phase 16 — hybrid fuzzing engine
 **Status: Landed 2026-09-30.**

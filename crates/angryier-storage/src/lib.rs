@@ -134,7 +134,10 @@ impl InMemoryWal {
         Ok(*seq)
     }
 
-    fn evict_under_pressure(records: &mut BTreeMap<u64, WalRecord>) -> bool {
+    fn evict_under_pressure(
+        records: &mut BTreeMap<u64, WalRecord>,
+        incoming_priority: RecordPriority,
+    ) -> Result<(), WalError> {
         // Try to evict the oldest best-effort record first.
         let candidate = records
             .iter()
@@ -143,20 +146,28 @@ impl InMemoryWal {
             .next();
         if let Some(seq) = candidate {
             records.remove(&seq);
-            return true;
+            return Ok(());
         }
-        // Then try structural records.
-        let candidate = records
-            .iter()
-            .filter(|(_, r)| r.priority == RecordPriority::Structural)
-            .map(|(seq, _)| *seq)
-            .next();
-        if let Some(seq) = candidate {
-            records.remove(&seq);
-            return true;
+
+        // Only allow eviction of Structural records if incoming record is CorrectnessCritical.
+        if incoming_priority == RecordPriority::CorrectnessCritical {
+            let candidate = records
+                .iter()
+                .filter(|(_, r)| r.priority == RecordPriority::Structural)
+                .map(|(seq, _)| *seq)
+                .next();
+            if let Some(seq) = candidate {
+                records.remove(&seq);
+                return Ok(());
+            }
         }
-        // Never evict correctness-critical records.
-        false
+
+        if incoming_priority == RecordPriority::BestEffort {
+            return Err(WalError::BestEffortDropped);
+        }
+
+        // Never evict correctness-critical records (and structural cannot evict structural/critical).
+        Err(WalError::Full)
     }
 }
 
@@ -174,10 +185,7 @@ impl LocalWal for InMemoryWal {
 
         if records.len() >= self.capacity {
             // Under backpressure, try to evict lower-priority records.
-            if !Self::evict_under_pressure(&mut records) {
-                // Only critical records remain — cannot drop them.
-                return Err(WalError::Full);
-            }
+            Self::evict_under_pressure(&mut records, record.priority)?;
         }
         records.insert(seq, record);
         Ok(())
@@ -326,6 +334,15 @@ mod tests {
         assert!(!replayed.iter().any(|r| r.artifact == ContentId([1; 32])));
         assert!(replayed.iter().any(|r| r.artifact == ContentId([2; 32])));
         assert!(replayed.iter().any(|r| r.artifact == ContentId([3; 32])));
+    }
+
+    #[test]
+    fn wal_drops_best_effort_when_only_structural_remain() {
+        let wal = InMemoryWal::new(2);
+        assert!(wal.append(record(1, RecordPriority::Structural)).is_ok());
+        assert!(wal.append(record(2, RecordPriority::Structural)).is_ok());
+        let result = wal.append(record(3, RecordPriority::BestEffort));
+        assert_eq!(result, Err(WalError::BestEffortDropped));
     }
 
     #[test]

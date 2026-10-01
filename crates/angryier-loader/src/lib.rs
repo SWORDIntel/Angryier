@@ -1190,7 +1190,9 @@ fn parse_pe_exports(
 
     // Function-RVA table, read once; every name entry indexes into it.
     let functions_off = rva_to_file(functions_rva).ok_or(LoaderError::TruncatedExportTable)?;
-    let mut function_rvas = Vec::with_capacity(number_of_functions as usize);
+    let max_possible = (bytes.len().saturating_sub(functions_off)) / 4;
+    let capacity = (number_of_functions as usize).min(max_possible).min(65536);
+    let mut function_rvas = Vec::with_capacity(capacity);
     for index in 0..number_of_functions as usize {
         let entry = functions_off
             .checked_add(index.checked_mul(4).ok_or(LoaderError::TruncatedExportTable)?)

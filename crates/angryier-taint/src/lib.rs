@@ -191,7 +191,6 @@ impl InMemoryTaintEngine {
         }
         if let Ok(mut guard) = self.transform_counts.write() {
             guard.insert(id, new_count);
-            guard.insert(parent, new_count);
         }
         id
     }

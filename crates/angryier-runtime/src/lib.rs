@@ -59,6 +59,8 @@ pub mod form_map;
 
 #[cfg(feature = "script")]
 pub mod script;
+#[cfg(feature = "script")]
+pub use mlua;
 
 pub mod function_summaries;
 pub mod pipeline_speculation;
@@ -1793,7 +1795,8 @@ impl<D: Decoder> Runtime<D> {
                     }
                 }
                 if !is_cookie {
-                    break;
+                    addr += 8;
+                    continue;
                 }
                 let value = u64::from_le_bytes(bytes);
                 if value == PE_DRIVER_DEFAULT_COOKIE {
@@ -2283,7 +2286,7 @@ impl<D: Decoder> Runtime<D> {
         // compute concrete addresses for register-based operands).
         if process.kernel_pool.is_some() {
             for operand in &decoded.operands {
-                if operand.access != AccessKind::Write {
+                if operand.access != AccessKind::Write && operand.access != AccessKind::ReadWrite {
                     continue;
                 }
                 let OperandKind::Memory(mem) = &operand.kind else {
@@ -6198,7 +6201,6 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         let stat = std::env::var_os("ANGRYIER_DEBUG_STEPSTAT").is_some();
         let mut t_restore = std::time::Duration::ZERO;
         let mut t_eval = std::time::Duration::ZERO;
-        let mut t_post = std::time::Duration::ZERO;
         let t_step0 = std::time::Instant::now();
 
         // Block-local fresh-symbol ids: a solver-assisted concretization
@@ -6473,7 +6475,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         let t_p0 = std::time::Instant::now();
         let post = evaluator.snapshot();
         if stat {
-            t_post = t_p0.elapsed();
+            let t_post = t_p0.elapsed();
             eprintln!(
                 "[stepstat] restore={:?} eval={:?} post={:?} total={:?}",
                 t_restore,
@@ -6503,6 +6505,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 if let Some(val) = val {
                     state.concrete_registers.insert(reg, val);
                     let _ = state.process.write_register(reg, val);
+                } else {
+                    state.concrete_registers.remove(&reg);
                 }
             }
         }

@@ -222,7 +222,7 @@ fn exact_float_concolic(op: IrPrimitive, ty: IrType, inputs: &[(ExprId, Option<u
         .map(|(_, concrete, _)| concrete.map(|value| value as u64))
         .collect();
     let operands = raws?;
-    let result = match op {
+    match op {
         IrPrimitive::FAdd | IrPrimitive::FSub | IrPrimitive::FMul | IrPrimitive::FDiv => {
             let left_raw = *operands.first()?;
             let right_raw = *operands.get(1)?;
@@ -258,8 +258,7 @@ fn exact_float_concolic(op: IrPrimitive, ty: IrType, inputs: &[(ExprId, Option<u
             Some(flags)
         }
         _ => None,
-    };
-    result
+    }
 }
 
 /// Architectural width of a parent register for `PreserveParent` splices,
@@ -1491,7 +1490,7 @@ fn lower_crc32(
     output_width: u16,
 ) -> Result<ExprId, SymbolicEvalError> {
     const POLY: u32 = 0x82F63B78;
-    if data_bits % 8 != 0 || data_bits == 0 || data_bits > 64 {
+    if !data_bits.is_multiple_of(8) || data_bits == 0 || data_bits > 64 {
         return Err(SymbolicEvalError::UnsupportedOperation(format!("crc32 input width {data_bits}")));
     }
     let poly = bv_constant(arena, 32, u64::from(POLY))?;
@@ -2341,7 +2340,7 @@ impl<'a> ConcolicEvaluator<'a> {
                     }
                     let mut concrete = 0u128;
                     for (offset, slot) in bytes.iter_mut().enumerate() {
-                        let value = match self.memory.get(&(base + offset as u64)) {
+                        let value = match self.memory.get(&(base.wrapping_add(offset as u64))) {
                             Some(ByteValue::Concrete(byte)) => ByteValue::Concrete(*byte),
                             Some(ByteValue::Symbolic(_)) => return None,
                             None => *slot,
@@ -2366,7 +2365,7 @@ impl<'a> ConcolicEvaluator<'a> {
                     let byte_width = usize::from(width).div_ceil(8);
                     for offset in 0..byte_width {
                         let byte = (value >> (8 * offset)) as u8;
-                        pending_memory.push((base + offset as u64, byte));
+                        pending_memory.push((base.wrapping_add(offset as u64), byte));
                     }
                     None
                 }
@@ -2708,13 +2707,13 @@ impl<'a> ConcolicEvaluator<'a> {
         };
         if image.read_bytes_into(base, bytes) {
             for (offset, slot) in bytes.iter_mut().enumerate() {
-                if let Some(value) = self.memory.get(&(base + offset as u64)) {
+                if let Some(value) = self.memory.get(&(base.wrapping_add(offset as u64))) {
                     *slot = *value;
                 }
             }
         } else {
             for (offset, slot) in bytes.iter_mut().enumerate() {
-                let at = base + offset as u64;
+                let at = base.wrapping_add(offset as u64);
                 *slot = match self.memory.get(&at) {
                     Some(value) => *value,
                     None => {
@@ -2813,7 +2812,7 @@ impl<'a> ConcolicEvaluator<'a> {
         if op == ExprOp::Constant {
             if let Some(node) = self.arena.get(value) {
                 for (offset, byte) in node.immediate.iter().enumerate().take(byte_width) {
-                    self.memory.insert(base + offset as u64, ByteValue::Concrete(*byte));
+                    self.memory.insert(base.wrapping_add(offset as u64), ByteValue::Concrete(*byte));
                 }
                 return Ok(());
             }
@@ -2821,7 +2820,7 @@ impl<'a> ConcolicEvaluator<'a> {
         }
         for offset in 0..byte_width {
             let byte_expr = self.extract(value, offset as u16 * 8, 8)?;
-            self.memory.insert(base + offset as u64, ByteValue::Symbolic(byte_expr));
+            self.memory.insert(base.wrapping_add(offset as u64), ByteValue::Symbolic(byte_expr));
         }
         Ok(())
     }

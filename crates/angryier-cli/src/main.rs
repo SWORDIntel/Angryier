@@ -518,10 +518,11 @@ mod run_cmd {
         let find_table = config.find.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
         let argv_opt = config.argv.map(|n| format!("argv = {n},")).unwrap_or_default();
         let dyn_opt = if config.dynamic { "dynamic = true," } else { "" };
+        let escaped_path = config.path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
             r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = {steps}, states = {states} }})
 print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.steps, r.forks, r.merges, r.terminated, r.found))"#,
-            path = config.path,
+            path = escaped_path,
             steps = config.steps,
             states = angryier_runtime::script::DEFAULT_MAX_STATES
         )
@@ -766,6 +767,13 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
             assert!(!lua.contains("steps = 1024"), "stale 1024 default: {lua}");
             cfg.steps = 512;
             assert!(default_driver_lua(&cfg).contains("steps = 512"));
+        }
+
+        #[test]
+        fn default_driver_escapes_binary_path() {
+            let cfg = config(r#"./path/with\slash/and\"quote"#, None, &[], &[], None, 256, false);
+            let lua = default_driver_lua(&cfg);
+            assert!(lua.contains(r#"./path/with\\slash/and\\\"quote"#));
         }
 
         #[test]

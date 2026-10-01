@@ -366,6 +366,12 @@ fn lower_memory_address(
         });
     }
 
+    if let Some(MemoryIndex::Vsib { .. }) = memory.index {
+        return Err(IrLoweringError::UnsupportedValue(
+            "vsib memory operand cannot be lowered as a scalar address",
+        ));
+    }
+
     if memory.displacement != 0 || address.is_none() {
         let displacement = emitter.produce(IrOp::Constant {
             ty: pointer_type,

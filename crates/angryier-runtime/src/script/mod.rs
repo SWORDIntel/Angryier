@@ -60,76 +60,36 @@ fn symbolic_mark_from_pair(k: &Value, v: &Value) -> Result<Option<(String, u16)>
     let width = validate_symbolic_width(&name, width)?;
     Ok(Some((name, width)))
 }
-
-/// A live symbolic session exposed to Lua as a userdata handle. The
-/// runtime and arena are `Box::leak`'d so the session's borrows are
-/// 'static — acceptable for a CLI driver (one VM per process run).
+pub mod utils;
 #[cfg(feature = "xed")]
-pub struct LuaSession {
-    session: crate::SymbolicSession<'static, crate::XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>>,
-}
+pub mod state;
+#[cfg(feature = "xed")]
+pub mod session;
 
 #[cfg(feature = "xed")]
-impl mlua::UserData for LuaSession {
-    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        // s:step() → outcome string ("stepped"|"branched"|"terminated")
-        methods.add_method_mut("step", |_, this, ()| match this.session.step_state(0) {
-            Ok(crate::SymbolicStepOutcome::Stepped { .. }) => Ok("stepped"),
-            Ok(crate::SymbolicStepOutcome::Branched { .. }) => Ok("branched"),
-            Ok(crate::SymbolicStepOutcome::Terminated) => Ok("terminated"),
-            Err(e) => Err(mlua::Error::external(format!("step: {e:?}"))),
-        });
-        // s:pc() → current pc of state 0
-        methods.add_method("pc", |_, this, ()| {
-            this.session.states[0]
-                .process
-                .pc()
-                .map_err(|e| mlua::Error::external(format!("{e:?}")))
-        });
-        // s:reg("rdi") → concrete value (or nil when symbolic)
-        methods.add_method("reg", |_, this, name: String| {
-            let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
-            match this.session.states[0].process.read_register(reg) {
-                Ok(v) => Ok(mlua::Value::Integer(v as i64)),
-                Err(_) => Ok(mlua::Value::Nil),
-            }
-        });
-        methods.add_method("states", |_, this, ()| Ok(this.session.states.len()));
-        // s:symbolic("rdi") or s:symbolic("rdi", 64) — mark a register
-        // symbolic on state 0. The optional width is validated: only
-        // 64-bit GPR symbols are supported (see SYMBOLIC_GPR_WIDTH).
-        methods.add_method_mut("symbolic", |_, this, (name, width): (String, Option<i64>)| {
-            let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
-            let width = validate_symbolic_width(&name, width)?;
-            this.session
-                .mark_symbolic(0, reg, angryier_ir::IrType::Bits(width))
-                .map_err(|e| mlua::Error::external(format!("{e:?}")))
-        });
-    }
-}
+pub use state::LuaState;
+#[cfg(feature = "xed")]
+pub use session::{LuaSession, open_session};
+pub use utils::{name_by_reg, reg_by_name};
 
 /// The `angry` library installed into each script VM.
 pub fn register(lua: &Lua) -> mlua::Result<()> {
     let lib = lua.create_table()?;
+    utils::register_utils(lua, &lib)?;
     lib.set(
         "run",
         lua.create_function(|lua, (path, opts): (String, Table)| run_driver(lua, &path, &opts))?,
     )?;
     #[cfg(feature = "xed")]
-    lib.set("open", lua.create_function(|_, path: String| open_session(&path))?)?;
+    lib.set(
+        "open",
+        lua.create_function(|_, (path, opts): (String, Option<Table>)| {
+            open_session(&path, opts.as_ref())
+        })?,
+    )?;
     lib.set("version", lua.create_function(|_, ()| Ok(env!("CARGO_PKG_VERSION")))?)?;
     lua.globals().set("angry", lib)?;
     Ok(())
-}
-
-/// Registers by name → symbolic input marks.
-fn reg_by_name(name: &str) -> Option<u32> {
-    let gprs = [
-        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-    ];
-    gprs.iter()
-        .position(|n| *n == name)
-        .map(|i| crate::register_id::GPR_BASE + i as u32)
 }
 
 fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
@@ -242,7 +202,17 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // review, and callers must surface the relaxation in verdict
     // provenance. Never changes executable mappings.
     if opts.get::<bool>("zero_low_pages").unwrap_or(false) {
-        let _ = process.state.memory.load_concrete(0, &vec![0u8; 0x1_0000]);
+        let region = angryier_memory::MemoryRegion {
+            object: angryier_types::ObjectId(0),
+            base: 0,
+            size: 0x1_0000,
+            readable: true,
+            writable: true,
+            executable: false,
+        };
+        if let Ok(m) = process.state.memory.with_region(region) {
+            process.state.memory = m.load_concrete(0, &vec![0u8; 0x1_0000]).unwrap_or(m);
+        }
     }
 
     // Opt-in under-constrained memory (`uc_memory = true`, default OFF —
@@ -574,34 +544,6 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         out.set("regs", regs)?;
     }
     Ok(out)
-}
-
-/// `angry.open(path)` → a live session handle with :step()/:pc()/:reg()/
-/// :states()/:symbolic() — REPL-style control.
-#[cfg(feature = "xed")]
-fn open_session(path: &str) -> mlua::Result<LuaSession> {
-    let bytes = std::fs::read(path).map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
-    let runtime: &'static crate::Runtime<crate::XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>> =
-        Box::leak(Box::new(crate::Runtime::with_native_xed(
-            angryier_types::SemanticVersion(1),
-            angryier_types::TargetProfileId(1),
-        )));
-    let arena: &'static angryier_expr::ShardedExprArena = Box::leak(Box::new(angryier_expr::ShardedExprArena::new(
-        angryier_types::ExpressionNormalizationVersion(1),
-    )));
-    let is_pe = bytes.len() > 1 && bytes[0] == b'M' && bytes[1] == b'Z';
-    let process = if is_pe {
-        runtime
-            .load_pe(&bytes)
-            .map_err(|e| mlua::Error::external(format!("load_pe: {e:?}")))?
-    } else {
-        runtime
-            .load_elf(&bytes)
-            .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?
-    };
-    Ok(LuaSession {
-        session: crate::SymbolicSession::new(runtime, arena, process),
-    })
 }
 
 #[cfg(test)]

@@ -200,11 +200,16 @@ impl FuzzCorpus {
             return None;
         }
 
-        let total_weight: u64 = self.entries.iter().map(|e| e.scheduling_weight()).sum();
+        let total_weight: u64 = self
+            .entries
+            .iter()
+            .map(|e| e.scheduling_weight())
+            .fold(0u64, |acc, w| acc.saturating_add(w));
         if total_weight == 0 {
             let id = CorpusId(0);
             if let Some(entry) = self.entries.get_mut(0) {
                 entry.execution_count += 1;
+                entry.has_new_coverage = false;
                 self.total_executions += 1;
             }
             return Some(id);
@@ -218,6 +223,7 @@ impl FuzzCorpus {
             cumulative = cumulative.saturating_add(entry.scheduling_weight());
             if cumulative > choice_point {
                 entry.execution_count += 1;
+                entry.has_new_coverage = false;
                 chosen_id = entry.id;
                 break;
             }

@@ -275,6 +275,7 @@ pub mod fx {
                 for (index, byte) in remainder.iter().enumerate() {
                     packed |= (*byte as u64) << (8 * index);
                 }
+                self.add_to_hash(remainder.len() as u64);
                 self.add_to_hash(packed);
             }
         }
@@ -392,5 +393,12 @@ mod tests {
         let mut repeated = FxHasher::default();
         repeated.write(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
         assert_eq!(bytes.finish(), repeated.finish());
+
+        // Trailing zeros in remainder do not collide
+        let mut r1 = FxHasher::default();
+        r1.write(&[1]);
+        let mut r2 = FxHasher::default();
+        r2.write(&[1, 0]);
+        assert_ne!(r1.finish(), r2.finish());
     }
 }

@@ -195,7 +195,7 @@ pub(crate) fn write_fcom_condition_codes(
         let merged = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U16, &[with_codes, shifted])?;
         out.write_register(register_id::X87_SW, merged)?;
     } else {
-        let clear = const_u16(out, !((1 << SW_C0_BIT) | (1 << SW_C2_BIT) | (1 << SW_C3_BIT)))?;
+        let clear = const_u16(out, !((1 << SW_C0_BIT) | (1 << SW_C1_BIT) | (1 << SW_C2_BIT) | (1 << SW_C3_BIT)))?;
         let cleared = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U16, &[old, clear])?;
         let merged = out.emit(SemanticOp::Primitive(PrimitiveOp::Or), U16, &[cleared, codes])?;
         out.write_register(register_id::X87_SW, merged)?;
@@ -308,7 +308,8 @@ fn pop_st(out: &mut dyn SemanticBuilder) -> Result<(), SemanticError> {
 /// Index of the x87 register named by the operand (parent id minus X87_BASE).
 fn operand_st_index(insn: &dyn DecodedInstructionView, index: u8) -> Result<u32, SemanticError> {
     match insn.operand(index).map(|operand| operand.kind) {
-        Some(angryier_arch::OperandKind::Register(view)) if view.parent.0 >= X87_BASE => Ok(view.parent.0 - X87_BASE),
+        Some(angryier_arch::OperandKind::Register(view))
+            if view.parent.0 >= X87_BASE && view.parent.0 < X87_BASE + u32::from(X87_COUNT) => Ok(view.parent.0 - X87_BASE),
         _ => Err(SemanticError::InvalidOperand),
     }
 }

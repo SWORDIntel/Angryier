@@ -626,12 +626,10 @@ impl PersistentMemory {
     /// Locks the shared policy ledger. A poisoned lock still yields the
     /// ledger — debt accounting must not turn a panicking state into
     /// unusable memory.
-    fn uc_ledger(&self) -> std::sync::MutexGuard<'_, UcMemoryLedger> {
+    fn uc_ledger(&self) -> Option<std::sync::MutexGuard<'_, UcMemoryLedger>> {
         self.uc
             .as_ref()
-            .expect("uc_ledger called with policy disarmed")
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map(|ledger| ledger.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
     /// Total accesses resolved through the under-constrained policy
@@ -937,9 +935,7 @@ impl PersistentMemory {
             MemoryAccessKind::Execute => return Err(MemoryError::Unmapped(first_unmapped)),
         };
         let end = Self::inclusive_end(address, len)?;
-        let mut ledger = self.uc_ledger();
-        // One hit per relaxed access; sites deduplicate per (op, page).
-        ledger.record_hit(op, first_unmapped, Self::page_base(first_unmapped));
+        let mut ledger = self.uc_ledger().ok_or(MemoryError::Unmapped(first_unmapped))?;
 
         let mut new_pages: Vec<u64> = Vec::new();
         let mut capped = false;
@@ -998,6 +994,10 @@ impl PersistentMemory {
                 }
             }
         }
+        // One hit per relaxed access; sites deduplicate per (op, page).
+        // Recorded after the loop to avoid counting hits that returned early
+        // with a permission error.
+        ledger.record_hit(op, first_unmapped, Self::page_base(first_unmapped));
         if capped {
             // Fail closed exactly like the flag-off path (debt is still
             // recorded above — the hit happened either way).
@@ -1022,6 +1022,7 @@ impl PersistentMemory {
     ///    the flag-off path), and
     /// 3. concrete under the span: no symbolic cell may be clobbered by a
     ///    relaxation that cannot represent what it would overwrite.
+    ///
     /// On success the ledger records a [`UcMemoryOp::WriteRO`] hit, bumps
     /// `ro_write_total`, and logs the previous byte of each span byte
     /// (first-come, capped at [`UC_MEMORY_RO_REVERT_CAP`]).
@@ -1096,7 +1097,7 @@ impl PersistentMemory {
                 previous,
             });
         }
-        let mut ledger = self.uc_ledger();
+        let mut ledger = self.uc_ledger().ok_or_else(fail)?;
         ledger.record_ro_write(denied, Self::page_base(denied), &reverts);
         Ok(())
     }

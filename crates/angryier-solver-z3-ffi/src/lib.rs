@@ -886,6 +886,7 @@ impl Drop for Z3FfiBridge {
         // is not used after this point, and retirement above joined every
         // thread that held it.
         unsafe {
+            Z3_solver_dec_ref(self.context, self.solver);
             Z3_del_context(self.context);
         }
     }

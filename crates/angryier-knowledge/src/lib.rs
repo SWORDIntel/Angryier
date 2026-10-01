@@ -294,6 +294,10 @@ impl InMemoryDependencyGraph {
         let mut visited: BTreeSet<ContentId> = BTreeSet::new();
         let mut queue: Vec<DependencyKey> = vec![changed];
         let mut result: Vec<ContentId> = Vec::new();
+        let self_artifact = ContentId(changed.0);
+        if visited.insert(self_artifact) {
+            result.push(self_artifact);
+        }
         {
             let forward = self.forward.read().map_err(|_| KnowledgeError::Poisoned)?;
             while let Some(key) = queue.pop() {
@@ -476,7 +480,12 @@ impl InMemoryKnowledgeStore {
         }
         let entries = self.entries.read().map_err(|_| KnowledgeError::Poisoned)?;
         match entries.get(&id) {
-            Some((stored, bytes)) if envelopes_match(stored, validity) => Ok(Some(bytes.clone())),
+            Some((stored, bytes)) if envelopes_match(stored, validity) => {
+                if stored.dependencies.iter().any(|d| stale.contains(&ContentId(d.0))) {
+                    return Ok(None);
+                }
+                Ok(Some(bytes.clone()))
+            }
             _ => Ok(None),
         }
     }
@@ -574,6 +583,7 @@ impl InMemoryKnowledgeStore {
             let mut fingerprints = self.fingerprints.write().map_err(|_| KnowledgeError::Poisoned)?;
             fingerprints.remove(&id);
         }
+        let _ = self.graph.invalidate(DependencyKey(id.0))?;
         Ok(())
     }
 
@@ -889,10 +899,11 @@ mod tests {
         graph.depend(artifact2, DependencyKey(artifact1.0))?;
 
         let affected = graph.invalidate(root)?;
-        // Both artifact1 (direct) and artifact2 (transitive) are affected.
+        // Both artifact1 (direct) and artifact2 (transitive) are affected, plus root itself.
+        assert!(affected.contains(&ContentId(root.0)));
         assert!(affected.contains(&artifact1));
         assert!(affected.contains(&artifact2));
-        assert_eq!(affected.len(), 2);
+        assert_eq!(affected.len(), 3);
         Ok(())
     }
 
@@ -1008,7 +1019,8 @@ mod tests {
             handle.join().map_err(|_| KnowledgeError::Poisoned)??;
         }
         let affected = graph.invalidate(root)?;
-        assert_eq!(affected.len(), 8);
+        assert_eq!(affected.len(), 9);
+        assert!(affected.contains(&ContentId(root.0)));
         Ok(())
     }
 
@@ -1032,7 +1044,7 @@ mod tests {
         let key = dep(7);
         graph.depend(artifact, key)?;
         let affected = graph.invalidate(key)?;
-        assert_eq!(affected, vec![artifact]);
+        assert_eq!(affected, vec![artifact, ContentId(key.0)]);
         Ok(())
     }
 
@@ -1255,7 +1267,7 @@ mod tests {
 
         // Invalidate dependency key 10
         let affected = store.invalidate(dep(10))?;
-        assert_eq!(affected, vec![id1]);
+        assert_eq!(affected, vec![id1, ContentId(dep(10).0)]);
 
         // After invalidation, artifact 1 must be removed from similarity results
         let hits_after = store.similar(fp1, 10)?;
@@ -1292,9 +1304,10 @@ mod tests {
 
         assert_eq!(store.similar(SemanticFingerprint([1; 32]), 10)?.len(), 3);
 
-        // Invalidate root dep(100): affects id1 directly and id2 transitively
+        // Invalidate root dep(100): affects root itself, id1 directly and id2 transitively
         let affected = store.invalidate(dep(100))?;
-        assert_eq!(affected.len(), 2);
+        assert_eq!(affected.len(), 3);
+        assert!(affected.contains(&ContentId(dep(100).0)));
         assert!(affected.contains(&id1));
         assert!(affected.contains(&id2));
 
@@ -1350,7 +1363,7 @@ mod tests {
 
         // Invalidate directly on the shared graph
         let affected = graph.invalidate(root)?;
-        assert_eq!(affected, vec![id]);
+        assert_eq!(affected, vec![id, ContentId(root.0)]);
 
         // Store observed invalidation and removed it from similarity results
         assert!(store.similar(fp, 10)?.is_empty());
@@ -1386,7 +1399,34 @@ mod tests {
         let key = dep(7);
         store.depend(artifact, key)?;
         let affected = store.invalidate(key)?;
-        assert_eq!(affected, vec![artifact]);
+        assert_eq!(affected, vec![artifact, ContentId(key.0)]);
+        Ok(())
+    }
+
+    #[test]
+    fn cascading_stale_and_dependency_stale_in_get_exact() -> Result<(), KnowledgeError> {
+        let store = InMemoryKnowledgeStore::new();
+
+        let id1 = content(1);
+        let env1 = envelope(1, vec![], None);
+        store.put_exact(id1, &env1, b"payload1")?;
+
+        let id2 = content(2);
+        let env2 = envelope(1, vec![DependencyKey(id1.0)], None);
+        store.put_exact(id2, &env2, b"payload2")?;
+
+        // id2 is valid initially
+        assert_eq!(store.get_exact(id2, &env2)?, Some(b"payload2".to_vec()));
+
+        // Mark id1 as stale: cascades to id2 via graph invalidation
+        store.mark_stale(id1)?;
+        assert!(store.is_stale(id1)?);
+        assert!(store.is_stale(id2)?);
+
+        // id2 is rejected because it is stale, and even if not explicitly checked,
+        // its dependency is stale
+        assert_eq!(store.get_exact(id2, &env2)?, None);
+
         Ok(())
     }
 }

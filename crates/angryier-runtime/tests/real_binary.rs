@@ -2198,7 +2198,7 @@ end:
     let policy = ExplorationPolicy {
         find: Vec::new(),
         avoid: vec![0x40100f],
-        prefer_new_coverage: false,
+        ..Default::default()
     };
     let report = session.run_with_policy(512, 16, None, std::time::Duration::from_secs(5), false, &policy)?;
     assert_eq!(report.forks, 1);
@@ -2299,7 +2299,7 @@ end:
     let policy = ExplorationPolicy {
         find: vec![0x40100f],
         avoid: Vec::new(),
-        prefer_new_coverage: false,
+        ..Default::default()
     };
     let report = session.run_with_policy(256, 16, None, std::time::Duration::from_secs(5), false, &policy)?;
     assert_eq!(report.found.len(), 1, "one state should reach `target`");

@@ -170,26 +170,17 @@ impl SpeculativeConstraintBatch {
         }
 
         let mut unique: Vec<SpeculativeAssertion> = Vec::new();
-        let mut dep_key_to_idx: HashMap<DependencyKey, usize> = HashMap::new();
         let mut query_key_to_idx: HashMap<DependencyKey, usize> = HashMap::new();
         let mut deduplicated_count = 0;
 
         for assertion in self.assertions.drain(..) {
-            let dep_key = assertion.dependency_key;
             let query_key = assertion.query.canonical_key();
 
-            let matched_idx = if dep_key != DependencyKey::default() {
-                dep_key_to_idx.get(&dep_key).copied()
+            let matched_idx = if query_key != DependencyKey::default() {
+                query_key_to_idx.get(&query_key).copied()
             } else {
                 None
-            }
-            .or_else(|| {
-                if query_key != DependencyKey::default() {
-                    query_key_to_idx.get(&query_key).copied()
-                } else {
-                    None
-                }
-            });
+            };
 
             if let Some(idx) = matched_idx {
                 unique[idx].associated_tags.extend(assertion.associated_tags);
@@ -197,9 +188,6 @@ impl SpeculativeConstraintBatch {
                 deduplicated_count += 1;
             } else {
                 let new_idx = unique.len();
-                if dep_key != DependencyKey::default() {
-                    dep_key_to_idx.insert(dep_key, new_idx);
-                }
                 if query_key != DependencyKey::default() {
                     query_key_to_idx.insert(query_key, new_idx);
                 }

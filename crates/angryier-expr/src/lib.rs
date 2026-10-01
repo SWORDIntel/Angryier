@@ -920,7 +920,7 @@ fn validate_sorts(node: &ExprNode, inputs: &[ExprSort]) -> Result<(), ExprArenaE
             inputs.first() == Some(&node.sort) && matches!(inputs.get(1), Some(ExprSort::BitVec(_)))
         }
         ExprOp::RotL | ExprOp::RotR => {
-            matches!(node.sort, ExprSort::BitVec(_))
+            matches!(node.sort, ExprSort::BitVec(bits) if bits > 0)
                 && inputs.first() == Some(&node.sort)
                 && matches!(inputs.get(1), Some(ExprSort::BitVec(_)))
         }

@@ -649,7 +649,7 @@ pub(crate) fn write_shift_flags(
         )?,
         ShiftKind::RightArith => zero,
         ShiftKind::RotateRight => {
-            let bit62_off = const_u64(out, 62)?;
+            let bit62_off = const_u64(out, u64::from(width_bits.saturating_sub(2)))?;
             let bit62 = out.emit(
                 SemanticOp::Primitive(PrimitiveOp::LogicalShiftRight),
                 U64,
@@ -5548,6 +5548,16 @@ pub(crate) fn emit_memory_rotate_carry(
             &[count, seventeen],
         )?;
         let product = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[quotient, seventeen])?;
+        count = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[count, product])?;
+    }
+    if width == 8 {
+        let nine = const_u64(out, 9)?;
+        let quotient = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::UnsignedDiv),
+            U64,
+            &[count, nine],
+        )?;
+        let product = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[quotient, nine])?;
         count = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[count, product])?;
     }
     let one = const_u64(out, 1)?;

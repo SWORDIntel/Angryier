@@ -194,8 +194,8 @@ fn emit_pop2(
     let slot1 = out.read_operand(2, U64)?;
     let addr2 = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsp, eight])?;
     let slot2 = out.emit(SemanticOp::Primitive(PrimitiveOp::Load), U64, &[addr2])?;
-    out.write_operand(0, slot1)?;
-    out.write_operand(1, slot2)?;
+    out.write_operand(0, slot2)?;
+    out.write_operand(1, slot1)?;
     let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsp, sixteen])?;
     out.write_register(rsp_reg, new_rsp)?;
     fall_through(out, insn)?;

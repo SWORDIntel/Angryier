@@ -1414,7 +1414,7 @@ impl KernelPoolTracker {
     pub fn record_free(&self, pointer: u64, caller: u64) {
         if let Ok(mut st) = self.state.lock() {
             st.frees += 1;
-            if !st.freed.insert(pointer) {
+            if !st.freed.insert(pointer & !0xFFF) {
                 st.double_frees.push(PoolEvent { pointer, caller });
             }
         }
@@ -1602,6 +1602,7 @@ impl SimProcedure for KernelCreateDeviceProcedure {
         if pptr != 0 {
             next.write_memory(pptr, device.to_le_bytes().to_vec());
         }
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
         SimResult::Continue(next)
     }
 }
@@ -1625,6 +1626,7 @@ impl SimProcedure for KernelAttachDeviceProcedure {
         if out_ptr != 0 {
             next.write_memory(out_ptr, attached.to_le_bytes().to_vec());
         }
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
         SimResult::Continue(next)
     }
 }
@@ -1685,7 +1687,8 @@ impl SimProcedure for KernelGetDeviceObjectPointerProcedure {
         if p_device != 0 {
             next.write_memory(p_device, device.to_le_bytes().to_vec());
         }
-        SimResult::Return(0) // STATUS_SUCCESS
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
+        SimResult::Continue(next)
     }
 }
 
@@ -1708,7 +1711,8 @@ impl SimProcedure for KernelEtwRegisterProcedure {
         if p_handle != 0 {
             next.write_memory(p_handle, handle.to_le_bytes().to_vec());
         }
-        SimResult::Return(0) // STATUS_SUCCESS
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
+        SimResult::Continue(next)
     }
 }
 
@@ -1745,7 +1749,8 @@ impl SimProcedure for KernelZwOpenKeyProcedure {
         if p_handle != 0 {
             next.write_memory(p_handle, handle.to_le_bytes().to_vec());
         }
-        SimResult::Return(0)
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
+        SimResult::Continue(next)
     }
 }
 
@@ -1775,7 +1780,8 @@ impl SimProcedure for KernelZwQueryValueKeyProcedure {
         if p_result_len != 0 {
             next.write_memory(p_result_len, 4u32.to_le_bytes().to_vec());
         }
-        SimResult::Return(0)
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
+        SimResult::Continue(next)
     }
 }
 
@@ -1797,7 +1803,8 @@ impl SimProcedure for KernelInitializeEventProcedure {
             next.write_memory(event, 0u16.to_le_bytes().to_vec()); // Type = NotificationEvent
             next.write_memory(event + 4, signal.to_le_bytes().to_vec());
         }
-        SimResult::Return(0)
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
+        SimResult::Continue(next)
     }
 }
 
@@ -1816,7 +1823,8 @@ impl SimProcedure for KernelInitializeMutexProcedure {
             next.write_memory(mutex, 1u16.to_le_bytes().to_vec()); // Type = Mutex
             next.write_memory(mutex + 4, 1u32.to_le_bytes().to_vec()); // signaled
         }
-        SimResult::Return(0)
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
+        SimResult::Continue(next)
     }
 }
 
@@ -2144,9 +2152,15 @@ impl SimProcedure for KernelCreateSystemThreadProcedure {
     fn name(&self) -> &'static str {
         "kernel_create_system_thread"
     }
-    fn apply(&self, _state: &SimState) -> SimResult {
-        // A non-zero handle: drivers check for NULL/INVALID_HANDLE_VALUE
-        SimResult::Return(0xFFFF_FFFF_0000_0042)
+    fn apply(&self, state: &SimState) -> SimResult {
+        let mut next = state.clone();
+        let p_handle = state.get_reg(1); // RCX = ThreadHandle OUT
+        if p_handle != 0 {
+            let handle = 0xFFFF_FFFF_0000_0042u64;
+            next.write_memory(p_handle, handle.to_le_bytes().to_vec());
+        }
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
+        SimResult::Continue(next)
     }
 }
 
@@ -2175,7 +2189,8 @@ impl SimProcedure for KernelBuildIrpProcedure {
         // StackCount=1 / CurrentLocation=1 (x64 IRP layout offsets).
         next.write_memory(irp + 0x53, 1u8.to_le_bytes().to_vec());
         next.write_memory(irp + 0x54, 1u8.to_le_bytes().to_vec());
-        SimResult::Return(irp)
+        next.set_reg(0, irp); // return IRP address in RAX
+        SimResult::Continue(next)
     }
 }
 
@@ -2206,7 +2221,8 @@ impl SimProcedure for KernelGetVersionProcedure {
             next.write_memory(out + 12, 19045u32.to_le_bytes().to_vec()); // dwBuildNumber
             next.write_memory(out + 16, 2u32.to_le_bytes().to_vec()); // VER_PLATFORM_WIN32_NT
         }
-        SimResult::Return(0) // STATUS_SUCCESS
+        next.set_reg(0, 0); // STATUS_SUCCESS in RAX
+        SimResult::Continue(next)
     }
 }
 

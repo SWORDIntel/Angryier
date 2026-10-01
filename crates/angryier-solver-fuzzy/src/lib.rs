@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Fuzzy-SAT: a mutation-based approximate solver tier for the EXPLORE/HUNT
 //! concolic path.
 //!
@@ -144,9 +146,9 @@ impl FuzzySatBackend {
                 }
             }
             ExprOp::Concat => {
-                let high = operand(0, env, budget)?;
-                let low_width = node_width(&node.operands[1], self);
-                let low = operand(1, env, budget)? & mask_for(low_width);
+                let low_width = node_width(&node.operands[0], self);
+                let low = operand(0, env, budget)? & mask_for(low_width);
+                let high = operand(1, env, budget)?;
                 (high << low_width) | low
             }
             ExprOp::Extract => {
@@ -278,9 +280,10 @@ impl SolverBackend for FuzzySatBackend {
 fn sort_width(node: &ExprNode) -> u16 {
     match node.sort {
         ExprSort::BitVec(width) => width,
-        // Booleans evaluate as 0/1; non-scalar sorts are outside the fuzzy
-        // envelope and report a nominal 64 bits (they are never constructed
-        // by the concolic shadow today).
+        ExprSort::Bool => 1,
+        // Non-scalar sorts are outside the fuzzy envelope and report a
+        // nominal 64 bits (they are never constructed by the concolic
+        // shadow today).
         _ => 64,
     }
 }

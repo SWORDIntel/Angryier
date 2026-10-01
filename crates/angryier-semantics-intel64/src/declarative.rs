@@ -134,7 +134,7 @@ fn emit_pattern(
             let ty = scalar(*width_bits);
             let left = out.read_operand(0, ty)?;
             let count = out.read_operand(1, ty)?;
-            let mask_bits = u64::from(*width_bits) - 1;
+            let mask_bits = if *width_bits == 64 { 0x3Fu64 } else { 0x1Fu64 };
             let mask = out.constant(ty, &mask_bits.to_le_bytes()[..usize::from(*width_bits).div_ceil(8)])?;
             let count_masked = out.emit(SemanticOp::Primitive(PrimitiveOp::And), ty, &[count, mask])?;
             let (prim, shift_kind) = match kind {
@@ -148,7 +148,7 @@ fn emit_pattern(
             match kind {
                 ShiftPattern::RotateLeft | ShiftPattern::RotateRight => {
                     let count64 = widen_to_u64(out, count_masked, *width_bits)?;
-                    write_rotate_flags_width_count(out, result, shift_kind, 64, Some(count64))?;
+                    write_rotate_flags_width_count(out, result, shift_kind, *width_bits, Some(count64))?;
                 }
                 _ => write_shift_flags(out, left, count_masked, result, shift_kind, *width_bits)?,
             }

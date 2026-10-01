@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "angryier"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-arch-intel64",
@@ -21,14 +21,14 @@ dependencies = [
 
 [[package]]
 name = "angryier-arch"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-arch-intel64"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-types",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-arch-xed-ffi"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-arch-intel64",
@@ -47,14 +47,14 @@ dependencies = [
 
 [[package]]
 name = "angryier-bench"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-cfg"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-arch-xed-ffi",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-models",
  "angryier-runtime",
@@ -76,14 +76,14 @@ dependencies = [
 
 [[package]]
 name = "angryier-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-decode-xed"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-arch-intel64",
@@ -92,14 +92,14 @@ dependencies = [
 
 [[package]]
 name = "angryier-distribution"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-execution"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-expr",
  "angryier-ir",
@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-expr"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
  "blake3",
@@ -119,21 +119,21 @@ dependencies = [
 
 [[package]]
 name = "angryier-fusion"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-fuzz"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-ir"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-semantic-contracts",
  "angryier-semantics",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-jit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-core",
  "angryier-ir",
@@ -152,35 +152,35 @@ dependencies = [
 
 [[package]]
 name = "angryier-keystone"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-knowledge"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-ledger"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-loader"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-memory"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-core",
  "angryier-types",
@@ -188,39 +188,39 @@ dependencies = [
 
 [[package]]
 name = "angryier-models"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-plugins"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "angryier-provenance"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-qihse"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-replay"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-runtime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-arch-intel64",
@@ -248,21 +248,21 @@ dependencies = [
 
 [[package]]
 name = "angryier-scheduler"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-semantic-contracts"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-semantics"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-semantic-contracts",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-semantics-gen"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-semantics",
  "angryier-types",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-semantics-intel64"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-arch-intel64",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-solver"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-expr",
  "angryier-solver-bitwuzla",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-solver-bitwuzla"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-expr",
  "angryier-solver",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-solver-bitwuzla-ffi"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-expr",
  "angryier-solver",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-solver-fuzzy"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-expr",
  "angryier-solver",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-solver-z3"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-expr",
  "angryier-solver",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-solver-z3-ffi"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-expr",
  "angryier-solver",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "angryier-state"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-memory",
  "angryier-types",
@@ -366,28 +366,28 @@ dependencies = [
 
 [[package]]
 name = "angryier-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-taint"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-telemetry"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "angryier-types",
 ]
 
 [[package]]
 name = "angryier-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "sha2",
 ]

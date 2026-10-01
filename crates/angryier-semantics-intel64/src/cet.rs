@@ -109,7 +109,9 @@ cet_provider!(
     forms::INCSSPD_R32,
     |out: &mut dyn SemanticBuilder, _insn: &dyn DecodedInstructionView| {
         let count32 = out.read_operand(0, U32)?;
-        let count64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[count32])?;
+        let ff = out.constant(U32, &0xFFu32.to_le_bytes())?;
+        let count8 = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U32, &[count32, ff])?;
+        let count64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[count8])?;
         let four = out.constant(U64, &4u64.to_le_bytes())?;
         let delta = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[count64, four])?;
         let ssp = out.read_register(register_id::SSP, U64)?;
@@ -125,8 +127,10 @@ cet_provider!(
     forms::INCSSPQ_R64,
     |out: &mut dyn SemanticBuilder, _insn: &dyn DecodedInstructionView| {
         let count = out.read_operand(0, U64)?;
+        let ff = out.constant(U64, &0xFFu64.to_le_bytes())?;
+        let count_byte = out.emit(SemanticOp::Primitive(PrimitiveOp::And), U64, &[count, ff])?;
         let eight = out.constant(U64, &8u64.to_le_bytes())?;
-        let delta = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[count, eight])?;
+        let delta = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[count_byte, eight])?;
         let ssp = out.read_register(register_id::SSP, U64)?;
         let new_ssp = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[ssp, delta])?;
         out.write_register(register_id::SSP, new_ssp)?;

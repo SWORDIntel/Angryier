@@ -18,7 +18,6 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use angryier_arch_intel64::register_id;
 use angryier_expr::ShardedExprArena;
 use angryier_runtime::{ExplorationPolicy, Runtime, UNRESOLVED_ADDRESS_RETRY_BUDGET};
 use angryier_types::{ExpressionNormalizationVersion, SemanticVersion, TargetProfileId};
@@ -81,7 +80,7 @@ fn symbolic_session<'a>(
     elf: &[u8],
 ) -> angryier_runtime::SymbolicSession<'a, angryier_runtime::XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>> {
     let process = runtime.load_elf(elf).expect("load elf");
-    let mut session = angryier_runtime::SymbolicSession::new(runtime, arena, process);
+    let session = angryier_runtime::SymbolicSession::new(runtime, arena, process);
     session
 }
 
