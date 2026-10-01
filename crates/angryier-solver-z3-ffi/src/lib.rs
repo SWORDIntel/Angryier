@@ -15,6 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use z3_sys::*;
 
+/// Entry ceiling for the persistent AST interning cache. On overflow the
+/// cache is cleared wholesale (correct — the solver holds its own
+/// references to asserted formulas — just a one-query translation hiccup).
+const AST_CACHE_CAP: usize = 1 << 20;
+
 /// Error returned by the Z3 FFI bridge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Z3FfiError {
@@ -43,19 +48,76 @@ impl std::error::Error for Z3FfiError {}
 pub struct Z3FfiBridge {
     reader: Arc<dyn ExprReader>,
     context: Z3_context,
-    /// Persistent solver for incremental queries — scopes are pushed one
-    /// per path constraint so consecutive queries sharing a constraint
-    /// prefix reuse the solver's learned state instead of rebuilding.
+    /// Persistent incremental solver — scopes are pushed one per path
+    /// constraint so consecutive queries sharing a constraint prefix
+    /// reuse the solver's learned state instead of rebuilding.
     solver: Z3_solver,
-    /// Dependency key + tracking literal per live scope (scope i asserts
+    /// Identity + tracking literal per live scope. Scope i asserts
     /// `assumption_i → constraint_i` so UNSAT cores name the culprit
-    /// constraints).
-    scope_keys: Vec<(angryier_types::DependencyKey, angryier_types::ConstraintId, Z3_ast)>,
+    /// constraints. Scope identity is `(constraint id, expr id)` in the
+    /// caller's constraint order — see [`Z3FfiBridge::solve_incremental`]
+    /// for why the query's canonical key list cannot serve as identity.
+    scopes: Vec<ScopeEntry>,
+    /// Persistent translation cache (AST interning): `ExprId -> Z3_ast`.
+    /// Z3 hash-conses ASTs within a context, so an AST built for one
+    /// query is the identical pointer the same expression needs in any
+    /// later query on this bridge; caching it makes repeated translation
+    /// of shared subtrees O(new nodes) instead of O(all nodes). Entries
+    /// are `Z3_inc_ref`ed and released on eviction/drop.
+    ast_cache: HashMap<ExprId, Z3_ast>,
+    /// Symbol table for `ExprOp::Symbol` nodes translated so far (same
+    /// ASTs as the `ast_cache` entries; kept for model extraction).
+    symbol_asts: HashMap<ExprId, Z3_ast>,
+    /// Memoized per-subtree symbol sets: the model-extraction universe of
+    /// a query is the symbol set reachable from its predicate.
+    subtree_symbols: HashMap<ExprId, Arc<[u32]>>,
+    /// Timeout param value last installed on the solver, so an unchanged
+    /// query timeout doesn't re-set solver params every query.
+    installed_timeout_ms: Option<u32>,
+    /// Counters describing the most recent solve (diagnostics + tests).
+    last_stats: IncrementalStats,
     /// Watchdog thread armed around the check call of a
     /// `solve_with_deadline` solve — `None` unless a check is in flight.
     /// Only ever touched under `&mut self`; see the watchdog commentary
     /// below [`WatchdogFlags`] for the lifetime reasoning.
     watchdog: Option<ArmedWatchdog>,
+}
+
+/// One live solver scope: the constraint it asserts (identity pair), and
+/// the assumption literal guarding it for UNSAT-core extraction.
+struct ScopeEntry {
+    cid: angryier_types::ConstraintId,
+    expr: ExprId,
+    assumption: Z3_ast,
+}
+
+/// Counters from the most recent solve on a [`Z3FfiBridge`] — evidence for
+/// whether incremental scope reuse is actually engaging:
+/// `shared_prefix` scopes survived from the previous query, `popped` were
+/// popped, `pushed` were freshly asserted, `translated_nodes` ASTs were
+/// built (cache misses), and `cache_entries` are interned overall.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IncrementalStats {
+    pub shared_prefix: usize,
+    pub popped: usize,
+    pub pushed: usize,
+    pub translated_nodes: usize,
+    pub cache_entries: usize,
+}
+
+/// Process-wide knobs (env), read once:
+/// - `ANGRYIER_Z3_FFI_NO_SOLVER_TIMEOUT=1`: never install the per-query
+///   `timeout` solver param (rely on `solve_with_deadline`'s watchdog for
+///   limits). For isolating whether per-query param updates disturb the
+///   persistent solver.
+fn env_knob(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Whether per-solve phase timings should print (`ANGRYIER_Z3_FFI_DEBUG_TIMING`).
+fn debug_timing_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| env_knob("ANGRYIER_Z3_FFI_DEBUG_TIMING"))
 }
 
 // SAFETY: The caller must ensure single-threaded access to the Z3 context,
@@ -172,6 +234,14 @@ impl Z3FfiBridge {
             ctx
         };
         let solver = unsafe {
+            // Z3_mk_solver (the default tactic pipeline). Measured A/B
+            // against Z3_mk_simple_solver (raw SMT core): the simple
+            // solver is ~1.3x faster per check on the incremental
+            // campaign pattern (tests/incremental_reuse_bench.rs), but it
+            // cannot solve the Gate C semiprime-factoring family inside
+            // its 30 s budget — the tactic pipeline's preprocessing
+            // (simplification, solve-eqs) is decisive for hard cold
+            // queries, so it stays.
             let s = Z3_mk_solver(context).ok_or(Z3FfiError::NullContext)?;
             Z3_solver_inc_ref(context, s);
             // Assumption-based UNSAT-core extraction.
@@ -189,16 +259,32 @@ impl Z3FfiBridge {
             reader,
             context,
             solver,
-            scope_keys: Vec::new(),
+            scopes: Vec::new(),
+            ast_cache: HashMap::new(),
+            symbol_asts: HashMap::new(),
+            subtree_symbols: HashMap::new(),
+            installed_timeout_ms: None,
+            last_stats: IncrementalStats::default(),
             watchdog: None,
         })
     }
 
     /// Incremental solve over the persistent solver: pops the scopes past
-    /// the longest shared constraint-key prefix, pushes the suffix, then
-    /// checks the predicate in a transient scope. Returns `None` to signal
-    /// the caller should fall back to a fresh solver (timeout param is
-    /// set per-query and can't be scoped).
+    /// the longest shared constraint prefix, pushes the suffix, then
+    /// checks the predicate in a transient scope.
+    ///
+    /// Scope identity is `(constraint id, expr id)` at each position of
+    /// the caller's constraint order — the order a growing path extends,
+    /// so consecutive queries of an append-only path share the full
+    /// prefix and each solve pushes exactly one scope. The query's
+    /// canonical key list (`constraint_keys`) must NOT be used as scope
+    /// identity: `SolverQuery::canonical` returns it sorted and deduped,
+    /// so a freshly appended constraint's key (a hash) lands at a
+    /// uniformly random rank — the shared prefix collapses to O(1) in
+    /// expectation and every query pays a full pop/re-push/re-translate
+    /// cycle, which measured as linear per-query cost growth with path
+    /// length. Within one arena a constraint's key is a pure function of
+    /// its expr, so matching `(id, expr)` implies matching keys.
     fn solve_incremental(&mut self, query: &SolverQuery) -> SolverResult {
         self.solve_incremental_inner(query, None)
     }
@@ -214,75 +300,120 @@ impl Z3FfiBridge {
             return backend_error();
         }
         let ctx = self.context;
-        // Per-query timeout on the persistent solver.
+        let timing = debug_timing_enabled();
+        let started = std::time::Instant::now();
+        self.last_stats = IncrementalStats::default();
+        // Per-query timeout on the persistent solver — installed only when
+        // the value changes, so an unchanged timeout doesn't churn solver
+        // params on every query. `ANGRYIER_Z3_FFI_NO_SOLVER_TIMEOUT=1`
+        // skips the param entirely; `solve_with_deadline`'s watchdog then
+        // remains the only limit (useful to isolate whether per-query
+        // param updates disturb the persistent solver's reuse).
         let timeout_ms = query.timeout().as_millis();
-        if timeout_ms > 0 {
-            unsafe {
-                if let Some(params) = Z3_mk_params(ctx) {
-                    Z3_params_inc_ref(ctx, params);
-                    if let Some(key) = Z3_mk_string_symbol(ctx, c"timeout".as_ptr()) {
-                        Z3_params_set_uint(ctx, params, key, timeout_ms as u32);
-                        Z3_solver_set_params(ctx, self.solver, params);
+        if timeout_ms > 0 && !env_knob("ANGRYIER_Z3_FFI_NO_SOLVER_TIMEOUT") {
+            let wanted = u32::try_from(timeout_ms).unwrap_or(u32::MAX);
+            if self.installed_timeout_ms != Some(wanted) {
+                unsafe {
+                    if let Some(params) = Z3_mk_params(ctx) {
+                        Z3_params_inc_ref(ctx, params);
+                        if let Some(key) = Z3_mk_string_symbol(ctx, c"timeout".as_ptr()) {
+                            Z3_params_set_uint(ctx, params, key, wanted);
+                            Z3_solver_set_params(ctx, self.solver, params);
+                        }
+                        Z3_params_dec_ref(ctx, params);
                     }
-                    Z3_params_dec_ref(ctx, params);
                 }
+                self.installed_timeout_ms = Some(wanted);
             }
         }
-        let keys = query.constraint_keys();
-        // Longest common prefix of live scopes and this query's constraints.
+        let entries = query.constraint_expressions();
+        // Longest common prefix of live scopes and this query's
+        // constraints, identified positionally by (constraint id, expr id)
+        // in the caller's constraint order (see `solve_incremental`).
         let shared = self
-            .scope_keys
+            .scopes
             .iter()
-            .zip(keys.iter())
-            .take_while(|((a, _, _), b)| a == *b)
+            .zip(entries.iter())
+            .take_while(|(scope, (cid, expr))| scope.cid == *cid && scope.expr == *expr)
             .count();
-        let excess = self.scope_keys.len() - shared;
+        self.last_stats.shared_prefix = shared;
+        let excess = self.scopes.len() - shared;
         if excess > 0 {
             unsafe { Z3_solver_pop(ctx, self.solver, excess as u32) };
-            self.scope_keys.truncate(shared);
+            // SAFETY: assumption literals are inc_ref'd on push; release
+            // the ones leaving the live scope set.
+            for scope in self.scopes.drain(shared..) {
+                unsafe { Z3_dec_ref(ctx, scope.assumption) };
+            }
+            self.last_stats.popped = excess;
         }
-        let mut cache = HashMap::new();
-        let mut symbols = HashMap::new();
-        // Push one scope per new constraint, guarded by a fresh assumption
-        // literal so UNSAT cores name the responsible constraints.
-        for ((cid, expr), key) in query.constraint_expressions().iter().zip(keys.iter()).skip(shared) {
-            match self.translate(*expr, &mut cache, &mut symbols) {
-                Ok(ast) => unsafe {
-                    Z3_solver_push(ctx, self.solver);
-                    let sym_name = std::ffi::CString::new(format!("pc{}", self.scope_keys.len())).unwrap_or_default();
-                    let name = Z3_mk_string_symbol(ctx, sym_name.as_ptr());
-                    let bool_sort = Z3_mk_bool_sort(ctx);
-                    let assumption = match (name, bool_sort) {
-                        (Some(n), Some(s)) => Z3_mk_const(ctx, n, s),
-                        _ => None,
-                    };
-                    let Some(assumption) = assumption else {
-                        return backend_error();
-                    };
-                    if let Some(imp) = Z3_mk_implies(ctx, assumption, ast) {
-                        Z3_solver_assert(ctx, self.solver, imp);
-                    }
-                    self.scope_keys.push((*key, *cid, assumption));
-                },
+        // Phase A: translate every new constraint expr BEFORE touching the
+        // scope stack — translation only interns ASTs, so a failure leaves
+        // the persistent solver's scopes exactly as the previous query
+        // left them (no half-pushed state).
+        let mut new_asts = Vec::with_capacity(entries.len().saturating_sub(shared));
+        for (cid, expr) in entries.iter().skip(shared) {
+            match self.translate(*expr) {
+                Ok(ast) => new_asts.push((*cid, *expr, ast)),
                 Err(_) => return backend_error(),
             }
         }
-        // Transient scope for the predicate.
-        unsafe { Z3_solver_push(ctx, self.solver) };
-        let failed = match self.translate(query.predicate(), &mut cache, &mut symbols) {
+        let translate_done = if timing { Some(started.elapsed()) } else { None };
+        // Phase B: push one scope per new constraint, guarded by a fresh
+        // assumption literal so UNSAT cores name the responsible
+        // constraints. The literal is created (and checked) before the
+        // push so a failure can never leave an untracked scope behind.
+        for (cid, expr, ast) in new_asts {
+            unsafe {
+                let sym_name = std::ffi::CString::new(format!("pc{}", self.scopes.len())).unwrap_or_default();
+                let name = Z3_mk_string_symbol(ctx, sym_name.as_ptr());
+                let bool_sort = Z3_mk_bool_sort(ctx);
+                let assumption = match (name, bool_sort) {
+                    (Some(n), Some(s)) => Z3_mk_const(ctx, n, s),
+                    _ => None,
+                };
+                let Some(assumption) = assumption else {
+                    return backend_error();
+                };
+                let Some(imp) = Z3_mk_implies(ctx, assumption, ast) else {
+                    Z3_dec_ref(ctx, assumption);
+                    return backend_error();
+                };
+                Z3_solver_push(ctx, self.solver);
+                Z3_solver_assert(ctx, self.solver, imp);
+                Z3_inc_ref(ctx, assumption);
+                self.scopes.push(ScopeEntry { cid, expr, assumption });
+                self.last_stats.pushed += 1;
+            }
+        }
+        let push_done = if timing { Some(started.elapsed()) } else { None };
+        // Transient scope for the predicate. Translation happens before
+        // the push for the same half-push-avoidance reason as Phase A.
+        // (Tried: passing the predicate as an extra check ASSUMPTION
+        // instead of a scope, to spare Z3 the pop's lemma retraction —
+        // measured SLOWER (~30 ms vs ~18 ms mean per query): Z3
+        // internalizes a non-atomic assumption by re-asserting it per
+        // check. The scoped push/pop is the cheaper of the two.)
+        let predicate = query.predicate();
+        let failed = match self.translate(predicate) {
             Ok(ast) => {
-                unsafe { Z3_solver_assert(ctx, self.solver, ast) };
+                unsafe {
+                    Z3_solver_push(ctx, self.solver);
+                    Z3_solver_assert(ctx, self.solver, ast);
+                }
                 false
             }
             Err(e) => {
-                let mut stack = vec![query.predicate()];
+                let mut stack = vec![predicate];
                 let mut seen = std::collections::HashSet::new();
+                let mut scratch = HashMap::new();
                 while let Some(id) = stack.pop() {
                     if !seen.insert(id) {
                         continue;
                     }
                     if let Some(n) = self.reader.read(id) {
-                        if let Err(e2) = self.translate_node(id, &n, &cache, &mut HashMap::new()) {
+                        let res = Self::translate_node(&self.reader, ctx, id, &n, &mut HashMap::new(), &mut scratch);
+                        if let Err(e2) = res {
                             eprintln!(
                                 "  fail node {:?} {:?} sort={:?} ops={:?} -> {e2:?}",
                                 id, n.op, n.sort, n.operands
@@ -295,12 +426,40 @@ impl Z3FfiBridge {
                 true
             }
         };
+        // Model-extraction universe: symbols reachable from the predicate
+        // (the runtime consumes register assignments for exactly those).
+        let predicate_symbols: Arc<[u32]> = self.subtree_symbols.get(&predicate).cloned().unwrap_or_default();
+        self.last_stats.cache_entries = self.ast_cache.len();
         let result = if failed {
+            // No transient scope was pushed (the predicate never
+            // translated) — popping here would eat a constraint scope.
             backend_error()
         } else {
-            self.check_and_extract(&mut symbols, deadline)
+            let r = self.check_and_extract(&predicate_symbols, deadline);
+            // Retire the transient predicate scope.
+            unsafe { Z3_solver_pop(ctx, self.solver, 1) };
+            r
         };
-        unsafe { Z3_solver_pop(ctx, self.solver, 1) };
+        if timing {
+            let total = started.elapsed();
+            let translate = translate_done.unwrap_or_default();
+            let push = push_done.map(|p| p - translate).unwrap_or_default();
+            let check = total - push_done.unwrap_or_default();
+            eprintln!(
+                "[z3ffi] constraints={} shared={} popped={} pushed={} translated={} cache={} \
+                 translate={:.2?} push={:.2?} check={:.2?} total={:.2?}",
+                entries.len(),
+                shared,
+                excess,
+                self.last_stats.pushed,
+                self.last_stats.translated_nodes,
+                self.last_stats.cache_entries,
+                translate,
+                push,
+                check,
+                total
+            );
+        }
         result
     }
 
@@ -401,11 +560,11 @@ impl Z3FfiBridge {
         watchdog.flags.fired.load(Ordering::Acquire)
     }
 
-    fn check_and_extract(&mut self, symbols: &mut HashMap<ExprId, Z3_ast>, deadline: Option<Duration>) -> SolverResult {
+    /// Check under the live scope assumptions — the UNSAT core names
+    /// which constraint literals are responsible.
+    fn check_and_extract(&mut self, predicate_symbols: &[u32], deadline: Option<Duration>) -> SolverResult {
         let ctx = self.context;
-        // Check under the live scope assumptions — the UNSAT core names
-        // which constraint literals are responsible.
-        let assumptions: Vec<Z3_ast> = self.scope_keys.iter().map(|(_, _, a)| *a).collect();
+        let assumptions: Vec<Z3_ast> = self.scopes.iter().map(|s| s.assumption).collect();
         // Arm the watchdog only now: every translation/push is complete, so
         // the interrupt can only land on the check itself — never before it
         // (a pre-armed flag is consumed by preceding API calls).
@@ -443,9 +602,15 @@ impl Z3FfiBridge {
                     Some(model) => {
                         Z3_model_inc_ref(ctx, model);
                         let mut extracted = Vec::new();
-                        for (sym_id, ast) in symbols.iter() {
+                        for &sym_raw in predicate_symbols {
+                            let sym_id = ExprId(sym_raw);
+                            // The AST for this symbol: persistent interning
+                            // means it is the very AST asserted in scopes.
+                            let Some(&ast) = self.symbol_asts.get(&sym_id) else {
+                                continue;
+                            };
                             let mut eval_result: std::mem::MaybeUninit<Z3_ast> = std::mem::MaybeUninit::zeroed();
-                            let success = Z3_model_eval(ctx, model, *ast, true, eval_result.as_mut_ptr());
+                            let success = Z3_model_eval(ctx, model, ast, true, eval_result.as_mut_ptr());
                             if success {
                                 let eval_ast = eval_result.assume_init();
                                 // Expected model-value size from the symbol's
@@ -453,12 +618,12 @@ impl Z3FfiBridge {
                                 // little-endian values (the old u128 parse
                                 // silently dropped them); everything else
                                 // keeps the historical 16-byte form.
-                                let byte_width = match self.reader.read(*sym_id).map(|node| node.sort) {
+                                let byte_width = match self.reader.read(sym_id).map(|node| node.sort) {
                                     Some(ExprSort::BitVec(w)) => Some(usize::from(w).div_ceil(8)),
                                     _ => None,
                                 };
                                 if let Some(bytes) = numeral_to_bytes(ctx, eval_ast, byte_width) {
-                                    extracted.push((u64::from(sym_id.0), bytes));
+                                    extracted.push((u64::from(sym_raw), bytes));
                                 }
                             }
                         }
@@ -476,9 +641,9 @@ impl Z3FfiBridge {
                         let mut ids = Vec::new();
                         for i in 0..Z3_ast_vector_size(ctx, core) {
                             if let Some(ast) = Z3_ast_vector_get(ctx, core, i)
-                                && let Some((_, cid, _)) = self.scope_keys.iter().find(|(_, _, a)| *a == ast)
+                                && let Some(entry) = self.scopes.iter().find(|s| s.assumption == ast)
                             {
-                                ids.push(*cid);
+                                ids.push(entry.cid);
                             }
                         }
                         ids
@@ -497,18 +662,21 @@ impl Z3FfiBridge {
         }
     }
 
-    /// Iterative post-order DAG translator.
-    ///
-    /// Replaces the formerly-recursive `translate` to avoid stack overflow on
-    /// deeply-nested symbolic expressions (documented in ROADMAP.md Known Gaps).
+    /// Iterative post-order DAG translator over the PERSISTENT interning
+    /// cache (`ast_cache`): each `ExprId` is built at most once per bridge,
+    /// not once per query — Z3 ASTs are hash-consed within a context, so
+    /// a cached pointer is the identical AST a re-translation would build.
+    /// Replaces the formerly-recursive `translate` to avoid stack overflow
+    /// on deeply-nested symbolic expressions (documented in ROADMAP.md
+    /// Known Gaps).
     ///
     /// Algorithm — explicit two-phase work stack:
     ///
     /// Each entry on the work stack is `(ExprId, /* children_pushed */ bool)`.
     ///
     /// * **First encounter** (`children_pushed == false`): re-push the node
-    ///   with `children_pushed = true`, then push all children with
-    ///   `children_pushed = false`.  This ensures children are processed
+    ///   with `children_pushed == true`, then push all children with
+    ///   `children_pushed == false`.  This ensures children are processed
     ///   (post-ordered) before the parent.
     ///
     /// * **Second encounter** (`children_pushed == true`): all operands are
@@ -518,42 +686,59 @@ impl Z3FfiBridge {
     ///
     /// Already-cached nodes (DAG sharing) are short-circuited at the top of
     /// the first-encounter branch, so each `ExprId` is built at most once.
-    fn translate(
-        &self,
-        root: ExprId,
-        cache: &mut HashMap<ExprId, Z3_ast>,
-        symbols: &mut HashMap<ExprId, Z3_ast>,
-    ) -> Result<Z3_ast, Z3FfiError> {
+    fn translate(&mut self, root: ExprId) -> Result<Z3_ast, Z3FfiError> {
         // Fast path: root already translated (e.g. shared sub-expression).
-        if let Some(&ast) = cache.get(&root) {
+        if let Some(&ast) = self.ast_cache.get(&root) {
             return Ok(ast);
+        }
+        // Bound the interning cache: a pathological walk (or a very long
+        // campaign) could otherwise grow it without limit. Eviction is a
+        // full clear — the solver keeps its asserted formulas alive on its
+        // own references, so this is sound, just a one-query translation
+        // hiccup.
+        if self.ast_cache.len() >= AST_CACHE_CAP {
+            self.clear_ast_cache();
         }
 
         // Work stack: (node_id, children_have_been_pushed_already)
         let mut stack: Vec<(ExprId, bool)> = Vec::new();
         stack.push((root, false));
+        let reader = self.reader.clone();
+        let mut translated = 0usize;
 
         while let Some((id, children_pushed)) = stack.pop() {
             // Short-circuit for nodes already in cache (DAG sharing).
-            if cache.contains_key(&id) {
+            if self.ast_cache.contains_key(&id) {
                 continue;
             }
 
-            let node = self.reader.read(id).ok_or(Z3FfiError::UnresolvedExpression(id))?;
+            let node = reader.read(id).ok_or(Z3FfiError::UnresolvedExpression(id))?;
 
             if !children_pushed {
                 // If all operands are already in cache (or leaf node with 0 operands),
                 // translate immediately without a second push/pop cycle.
-                if node.operands.iter().all(|child| cache.contains_key(child)) {
-                    let ast = self.translate_node(id, &node, cache, symbols)?;
-                    cache.insert(id, ast);
+                if node.operands.iter().all(|child| self.ast_cache.contains_key(child)) {
+                    let ast = Self::translate_node(
+                        &reader,
+                        self.context,
+                        id,
+                        &node,
+                        &mut self.ast_cache,
+                        &mut self.symbol_asts,
+                    )?;
+                    // SAFETY: the cache (and only the cache) keeps this AST
+                    // alive past the current solve; released on clear/drop.
+                    unsafe { Z3_inc_ref(self.context, ast) };
+                    self.ast_cache.insert(id, ast);
+                    self.memoize_symbols(id, &node);
+                    translated += 1;
                 } else {
                     // Phase 1: schedule this node for building after its children.
                     stack.push((id, true));
                     // Push children in reverse order so the leftmost child is
                     // processed first (stack is LIFO).
                     for &child in node.operands.iter().rev() {
-                        if !cache.contains_key(&child) {
+                        if !self.ast_cache.contains_key(&child) {
                             stack.push((child, false));
                         }
                     }
@@ -561,22 +746,82 @@ impl Z3FfiBridge {
             } else {
                 // Phase 2: all operands are guaranteed to be in `cache` now.
                 // `translate_node` reads them directly from `cache` — no recursion.
-                let ast = self.translate_node(id, &node, cache, symbols)?;
-                cache.insert(id, ast);
+                let ast = Self::translate_node(
+                    &reader,
+                    self.context,
+                    id,
+                    &node,
+                    &mut self.ast_cache,
+                    &mut self.symbol_asts,
+                )?;
+                // SAFETY: as above.
+                unsafe { Z3_inc_ref(self.context, ast) };
+                self.ast_cache.insert(id, ast);
+                self.memoize_symbols(id, &node);
+                translated += 1;
             }
         }
 
-        cache.get(&root).copied().ok_or(Z3FfiError::UnresolvedExpression(root))
+        self.last_stats.translated_nodes += translated;
+        self.ast_cache
+            .get(&root)
+            .copied()
+            .ok_or(Z3FfiError::UnresolvedExpression(root))
+    }
+
+    /// Release every interned AST and the memoization tables that describe
+    /// them. Sound at any point: the solver holds its own references to
+    /// anything asserted, and assumption literals in `scopes` are inc_ref'd
+    /// independently.
+    fn clear_ast_cache(&mut self) {
+        // SAFETY: every entry was inc_ref'd on insertion; the solver's
+        // assertions keep any still-asserted formulas alive on their own
+        // references.
+        unsafe {
+            for (_, ast) in self.ast_cache.drain() {
+                Z3_dec_ref(self.context, ast);
+            }
+        }
+        self.symbol_asts.clear();
+        self.subtree_symbols.clear();
+    }
+
+    /// Record `id`'s subtree symbol set: the union of its operands' sets
+    /// (every operand is interned before its parent — post-order) plus
+    /// itself if it is a Symbol node. Read once per translated node; read
+    /// back at the query predicate to define the model-extraction universe.
+    fn memoize_symbols(&mut self, id: ExprId, node: &ExprNode) {
+        let mut set: Vec<u32> = Vec::new();
+        for &child in &node.operands {
+            if let Some(children) = self.subtree_symbols.get(&child) {
+                set.extend_from_slice(children);
+            }
+        }
+        if node.op == ExprOp::Symbol {
+            set.push(id.0);
+        }
+        set.sort_unstable();
+        set.dedup();
+        self.subtree_symbols.insert(id, Arc::from(set));
+    }
+
+    /// Diagnostics for the most recent solve — see [`IncrementalStats`].
+    /// (`cache_entries` is read live so direct `translate` experiments
+    /// report truthfully too.)
+    pub fn last_incremental_stats(&self) -> IncrementalStats {
+        let mut stats = self.last_stats;
+        stats.cache_entries = self.ast_cache.len();
+        stats
     }
 
     fn translate_node(
-        &self,
+        reader: &Arc<dyn ExprReader>,
+        ctx: Z3_context,
         id: ExprId,
         node: &ExprNode,
-        cache: &HashMap<ExprId, Z3_ast>,
+        cache: &mut HashMap<ExprId, Z3_ast>,
         symbols: &mut HashMap<ExprId, Z3_ast>,
     ) -> Result<Z3_ast, Z3FfiError> {
-        let ctx = self.context;
         let get = |child: ExprId| -> Result<Z3_ast, Z3FfiError> {
             cache
                 .get(&child)
@@ -682,8 +927,7 @@ impl Z3FfiBridge {
                     _ => return Err(Z3FfiError::UnsupportedSort),
                 };
                 let value = get(node.operands[0])?;
-                let count_node = self
-                    .reader
+                let count_node = reader
                     .read(node.operands[1])
                     .ok_or(Z3FfiError::UnresolvedExpression(node.operands[1]))?;
                 let count_width = match count_node.sort {
@@ -802,8 +1046,7 @@ impl Z3FfiBridge {
                         (node.operands[0], start)
                     }
                     2 => {
-                        let start_node = self
-                            .reader
+                        let start_node = reader
                             .read(node.operands[1])
                             .ok_or(Z3FfiError::UnresolvedExpression(node.operands[1]))?;
                         (node.operands[0], bytes_to_u64(&start_node.immediate))
@@ -825,8 +1068,7 @@ impl Z3FfiBridge {
                     return Err(Z3FfiError::MalformedExpression);
                 }
                 let operand = get(node.operands[0])?;
-                let operand_node = self
-                    .reader
+                let operand_node = reader
                     .read(node.operands[0])
                     .ok_or(Z3FfiError::UnresolvedExpression(node.operands[0]))?;
                 let input_bits = match operand_node.sort {
@@ -884,8 +1126,16 @@ impl Drop for Z3FfiBridge {
         self.retire_watchdog();
         // SAFETY: `self.context` was created by `Z3_mk_context` in `new`,
         // is not used after this point, and retirement above joined every
-        // thread that held it.
+        // thread that held it. Every AST the bridge stored past a single
+        // solve (interning cache entries, live assumption literals) was
+        // inc_ref'd on insertion and is released here.
         unsafe {
+            for scope in self.scopes.drain(..) {
+                Z3_dec_ref(self.context, scope.assumption);
+            }
+            for (_, ast) in self.ast_cache.drain() {
+                Z3_dec_ref(self.context, ast);
+            }
             Z3_solver_dec_ref(self.context, self.solver);
             Z3_del_context(self.context);
         }
@@ -1243,13 +1493,27 @@ mod tests {
         let reader: Arc<dyn ExprReader> = arena.clone();
         let mut bridge = Z3FfiBridge::new(reader)?;
 
-        // Test direct translation with empty cache.
-        let mut cache = HashMap::new();
-        let mut symbols = HashMap::new();
-        let ast = bridge.translate(predicate, &mut cache, &mut symbols)?;
-        let _ = ast;
-        // Exactly DEPTH + 2 unique nodes in cache: x, 600 add nodes, and the eq predicate.
-        assert_eq!(cache.len(), DEPTH + 2);
+        // Test direct translation through the persistent intern cache.
+        let first_stats = bridge.last_incremental_stats();
+        let ast = bridge.translate(predicate)?;
+        let after_first = bridge.last_incremental_stats();
+        assert_eq!(after_first.cache_entries, DEPTH + 2);
+        assert_eq!(
+            after_first.translated_nodes - first_stats.translated_nodes,
+            DEPTH + 2,
+            "a cold translation builds exactly DEPTH + 2 unique nodes"
+        );
+        // Re-translation of the same root is a pure cache hit: no new
+        // nodes translated, the identical AST pointer returns.
+        let again = bridge.translate(predicate)?;
+        assert_eq!(again, ast);
+        let after_second = bridge.last_incremental_stats();
+        assert_eq!(
+            after_second.translated_nodes - after_first.translated_nodes,
+            0,
+            "a warm re-translation must hit the intern cache for every node"
+        );
+        assert_eq!(after_second.cache_entries, DEPTH + 2);
 
         // Also test solving the query.
         let query = make_query(predicate, &[], &arena);
