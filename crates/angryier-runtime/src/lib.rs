@@ -64,9 +64,9 @@ pub use mlua;
 
 pub mod function_summaries;
 pub mod pipeline_speculation;
-pub mod speculative_summary;
-pub mod speculative_fork;
 pub mod speculative_concolic;
+pub mod speculative_fork;
+pub mod speculative_summary;
 
 /// Default stack size in bytes (64 KiB).
 const STACK_SIZE: u64 = 0x1_0000;
@@ -529,8 +529,7 @@ pub const KERNEL_POOL_ALLOC_NAMES: [&str; 5] = [
     "ExAllocatePool2",
 ];
 /// Pool-free routines matched by exact export/import name.
-pub const KERNEL_POOL_FREE_NAMES: [&str; 3] =
-    ["ExFreePool", "ExFreePoolWithTag", "ExFreePoolWithQuota"];
+pub const KERNEL_POOL_FREE_NAMES: [&str; 3] = ["ExFreePool", "ExFreePoolWithTag", "ExFreePoolWithQuota"];
 
 impl<D: Decoder> Runtime<D> {
     /// Attaches the Windows kernel pool model to a PE-driver process:
@@ -5182,6 +5181,22 @@ pub struct SymbolicSession<'a, D: Decoder> {
     uc_pin_fallback: bool,
     /// Next fabricated pin page (advances one page per fallback pin).
     next_uc_pin_page: u64,
+    /// Region-fork cap for fork-aggressive runs (`Some(n)`, n > 0 arms the
+    /// fallback; `Some(0)`/`None` defer). When the solver cannot
+    /// concretize an unresolved address, the state forks over its largest
+    /// mapped RW regions — one child per region, each pinning the address
+    /// to a representative address inside that region — before the parent
+    /// takes its usual [`Self::uc_pin_fallback`] behavior. `None` defers
+    /// to `ANGRYIER_REGION_FORK_MAX` (unset/zero/garbage ⇒ off), read once
+    /// per run in `run_with_policy`.
+    region_fork_max: Option<usize>,
+    /// Total region-fork children created across the run (uncapped debt
+    /// counter — surfaced as `region_fork_children` on the report).
+    region_fork_children_total: u64,
+    /// First-seen region-fork pin sites, capped at
+    /// [`REGION_FORK_SITE_CAP`] and deduplicated — the ledger that keeps
+    /// the relaxation inspectable, mirroring `vector_debt_sites`.
+    region_fork_sites: Vec<RegionForkSite>,
 }
 
 /// Default solver-assisted address-concretization attempts per step. The
@@ -5190,6 +5205,69 @@ pub struct SymbolicSession<'a, D: Decoder> {
 /// under-constrained kernel paths legitimately pin more than 4 in a single
 /// block.
 pub const UNRESOLVED_ADDRESS_RETRY_BUDGET: u32 = 16;
+
+/// Default per-step cap on region-fork children when region forking is
+/// armed through `ANGRYIER_REGION_FORK_MAX` (the recommended value; the
+/// env var carries the actual cap).
+pub const DEFAULT_REGION_FORK_MAX: usize = 8;
+
+/// First-seen region-fork pin sites kept on the session (deduplicated,
+/// mirroring the vector-debt site cap pattern).
+pub const REGION_FORK_SITE_CAP: usize = 64;
+
+/// One region-fork pin: the unresolved address expression was pinned to
+/// `pinned` — a representative address inside the mapped RW region
+/// `[region_base, region_base + region_size)` — at step `pc`, because the
+/// solver could not concretize it within budget. Part of the fidelity
+/// ledger: every region-fork child explores a guessed world, and the guess
+/// stays inspectable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionForkSite {
+    /// Program counter of the step that forked (the failing access's
+    /// block).
+    pub pc: Address,
+    /// The unresolved address expression that was pinned.
+    pub expr: ExprId,
+    /// The representative address the child pins the expression to.
+    pub pinned: Address,
+    /// Base of the mapped RW region the pin landed in.
+    pub region_base: Address,
+    /// Size of that region.
+    pub region_size: u64,
+}
+
+/// Parses an `ANGRYIER_REGION_FORK_MAX` value into a region-fork cap.
+/// `Some(n)` with `n > 0` arms region forking with at most `n` children
+/// per step; unset, non-numeric, overflowing, or zero values disable it
+/// (`None`) — flag-off runs stay byte-identical. Pure: callers own the
+/// env read, so tests never mutate process-global state.
+pub fn region_fork_cap_from_env_value(value: Option<&std::ffi::OsStr>) -> Option<usize> {
+    let raw = value?.to_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed: usize = raw.parse().ok()?;
+    (parsed > 0).then_some(parsed)
+}
+
+/// The representative address a region-fork child pins an unresolved
+/// expression to inside `[base, base + size)`: a 16-byte-aligned offset
+/// derived from a splitmix64 mix of the expression id. Deterministic by
+/// construction (no seeded hasher, no address-space layout dependence), so
+/// the same (expression, region) pair always pins the same address across
+/// runs and replays. 16-byte alignment keeps common width-1/2/4/8/16
+/// accesses inside the region; `size < 16` regions pin their base.
+pub fn region_fork_representative_address(base: Address, size: u64, expr: ExprId) -> Address {
+    fn splitmix64(seed: u64) -> u64 {
+        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    let slots = (size / 16).max(1);
+    let offset = (splitmix64(u64::from(expr.0)) % slots) * 16;
+    base.wrapping_add(offset)
+}
 
 impl<'a, D: Decoder> SymbolicSession<'a, D> {
     /// Opens a session from `process` — its memory seeds every state's
@@ -5245,14 +5323,67 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             feasibility_memo: std::collections::HashMap::new(),
             uc_pin_fallback: false,
             next_uc_pin_page: 0x5000_0000_0000,
+            region_fork_max: None,
+            region_fork_children_total: 0,
+            region_fork_sites: Vec::new(),
         }
     }
 
     /// Arms the UC address-pin fallback (see the field docs). Returns the
     /// session for chaining.
+    ///
+    /// Pairs with the `uc_memory` policy: the fabricated pin page is only
+    /// zero-backed under `PersistentMemory::with_uc_memory()`, so arm that
+    /// on the process memory BEFORE building the session (the script
+    /// surface does exactly this). Without it, a load through the pinned
+    /// page faults `Unmapped` instead of resolving to debt-recorded zero
+    /// bytes.
     pub fn with_uc_pin_fallback(mut self) -> Self {
         self.uc_pin_fallback = true;
         self
+    }
+
+    /// Overrides the region-fork cap for fork-aggressive runs (see the
+    /// `region_fork_max` field docs). Takes precedence over
+    /// `ANGRYIER_REGION_FORK_MAX`; `0` disables region forking outright.
+    /// Programmatic counterpart of the env knob, so library callers and
+    /// tests can arm it without process-global state.
+    pub fn set_region_fork_max(&mut self, cap: usize) {
+        self.region_fork_max = Some(cap);
+    }
+
+    /// The region-fork cap this session will use in fork-aggressive runs:
+    /// the programmatic override when set, else the env-derived value, else
+    /// 0 (off). Resolved once per run in `run_with_policy`; before any run
+    /// this reports only the override when one exists.
+    pub fn region_fork_max(&self) -> usize {
+        self.region_fork_max
+            .or_else(|| region_fork_cap_from_env_value(std::env::var_os("ANGRYIER_REGION_FORK_MAX").as_deref()))
+            .unwrap_or(0)
+    }
+
+    /// Total region-fork children created across the run (uncapped debt
+    /// counter; mirrors `vector_debt_total`).
+    pub fn region_fork_children_total(&self) -> u64 {
+        self.region_fork_children_total
+    }
+
+    /// First-seen region-fork pin sites of this session (capped,
+    /// deduplicated; mirrors `vector_debt_sites`).
+    pub fn region_fork_sites(&self) -> &[RegionForkSite] {
+        &self.region_fork_sites
+    }
+
+    /// Debt-records one region-fork pin: the uncapped counter always
+    /// advances; the site lands in the capped first-seen ledger when there
+    /// is room and it has not been seen yet (dedup key: the whole site —
+    /// the same expression pinned in the same region at the same pc is one
+    /// guess, a different region or pc is a new one).
+    fn record_region_fork_site(&mut self, site: RegionForkSite) {
+        self.region_fork_children_total = self.region_fork_children_total.saturating_add(1);
+        if self.region_fork_sites.len() < REGION_FORK_SITE_CAP && !self.region_fork_sites.contains(&site) {
+            self.region_fork_sites.push(site);
+        }
     }
 
     /// Overrides the per-step solver-assisted concretization retry budget
@@ -6441,29 +6572,112 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 }
             }
         }
-        // UC address-pin fallback: the solver could not concretize the
-        // address within budget (hard query, or no solver at all). Rather
-        // than fail the state — which starves fork-aggressive exploration,
-        // where thousands of paths each hit the same unresolved write — pin
-        // the address to a fresh fabricated page. The page is zero-backed;
-        // any write through it lands in the memory ledger's unmapped-write
-        // debt, so the relaxation stays visible in provenance.
-        if self.uc_pin_fallback
-            && let Err(angryier_execution::SymbolicEvalError::UnresolvedAddress(expr)) = summary
-        {
-            let page = self.next_uc_pin_page;
-            self.next_uc_pin_page = page.wrapping_add(0x1000);
-            self.states[index].expr_concrete.insert(expr, page);
-            evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
-                registers: self.states[index].registers.clone(),
-                concrete_registers: self.states[index].concrete_registers.clone(),
-                constraints: self.states[index].constraints.clone(),
-                symbols: self.states[index].symbols.clone(),
-                expr_concrete: self.states[index].expr_concrete.clone(),
-            });
-            summary = evaluator.eval_block_with_memory(&ir_block, &mut self.states[index].memory);
-            if std::env::var_os("ANGRYIER_DEBUG_CONCRETIZE").is_some() {
-                eprintln!("[conc] uc-pin fallback expr={expr:?} -> page={page:#x} ok={}", summary.is_ok());
+        // Unresolved address survived the solver retry loop (hard query,
+        // timed-out query, or no solver at all). Two fallbacks, in order:
+        //
+        // 1. Region forking (fork-aggressive mode + armed cap): fork the
+        //    state over its largest mapped RW regions, one child per region
+        //    (capped), each pinning the address expression to a
+        //    deterministic representative address inside that region. The
+        //    single fabricated-page pin below describes ONE guessed world —
+        //    downstream branches fold against it and the exploration
+        //    determinizes (observed: a function's forks dropped
+        //    20,618 → 20 when the pin fallback engaged). One child per
+        //    region keeps the downstream branch structure alive per
+        //    candidate world. Nothing else is constrained: the pin rides
+        //    `expr_concrete` exactly like the solver-retry pins.
+        // 2. UC address-pin fallback: the parent pins the address to a
+        //    fresh fabricated page instead of failing the state. The page
+        //    is zero-backed; any write through it lands in the memory
+        //    ledger's unmapped-write debt, so the relaxation stays visible
+        //    in provenance. Without `uc_pin_fallback` the parent keeps the
+        //    historical behavior (the state fails) — region forking never
+        //    changes it.
+        if let Err(angryier_execution::SymbolicEvalError::UnresolvedAddress(expr)) = summary {
+            let region_fork_cap = if self.fork_on_symbolic {
+                self.region_fork_max()
+            } else {
+                0
+            };
+            if region_fork_cap > 0 {
+                // Largest mapped RW regions first (readable AND writable —
+                // the failing access may be either side), then by base for
+                // a deterministic enumeration. The region list is owned
+                // before any fork touches `self.states`.
+                let pc_now = pc;
+                let mut rw_regions: Vec<(Address, u64)> = self.states[index]
+                    .process
+                    .state
+                    .memory
+                    .regions()
+                    .iter()
+                    .filter(|region| region.readable && region.writable && region.size > 0)
+                    .map(|region| (region.base, region.size))
+                    .collect();
+                rw_regions.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                let parent_id = self.states[index].id;
+                let children: Vec<SymbolicState> = rw_regions
+                    .iter()
+                    .take(region_fork_cap)
+                    .map(|&(base, size)| {
+                        let pinned = region_fork_representative_address(base, size, expr);
+                        let mut child = self.states[index].clone();
+                        child.expr_concrete.insert(expr, pinned);
+                        child.id = self.next_state_id;
+                        self.next_state_id += 1;
+                        self.record_region_fork_site(RegionForkSite {
+                            pc: pc_now,
+                            expr,
+                            pinned,
+                            region_base: base,
+                            region_size: size,
+                        });
+                        child
+                    })
+                    .collect();
+                let child_ids: Vec<u64> = children.iter().map(|child| child.id).collect();
+                let forked = children.len();
+                self.states.extend(children);
+                for child_id in child_ids {
+                    self.record_event(
+                        child_id,
+                        angryier_provenance::ProvenanceEventKind::StateFork,
+                        angryier_types::ProvenanceTier::Tier1,
+                        Vec::new(),
+                    );
+                }
+                if std::env::var_os("ANGRYIER_DEBUG_CONCRETIZE").is_some() {
+                    eprintln!(
+                        "[conc] region-fork expr={expr:?} parent={parent_id} children={forked} cap={region_fork_cap}"
+                    );
+                }
+            }
+            // UC address-pin fallback: the solver could not concretize the
+            // address within budget (hard query, or no solver at all).
+            // Rather than fail the state — which starves fork-aggressive
+            // exploration, where thousands of paths each hit the same
+            // unresolved write — pin the address to a fresh fabricated
+            // page. The page is zero-backed; any write through it lands in
+            // the memory ledger's unmapped-write debt, so the relaxation
+            // stays visible in provenance.
+            if self.uc_pin_fallback {
+                let page = self.next_uc_pin_page;
+                self.next_uc_pin_page = page.wrapping_add(0x1000);
+                self.states[index].expr_concrete.insert(expr, page);
+                evaluator.restore(&angryier_execution::SymbolicStateSnapshot {
+                    registers: self.states[index].registers.clone(),
+                    concrete_registers: self.states[index].concrete_registers.clone(),
+                    constraints: self.states[index].constraints.clone(),
+                    symbols: self.states[index].symbols.clone(),
+                    expr_concrete: self.states[index].expr_concrete.clone(),
+                });
+                summary = evaluator.eval_block_with_memory(&ir_block, &mut self.states[index].memory);
+                if std::env::var_os("ANGRYIER_DEBUG_CONCRETIZE").is_some() {
+                    eprintln!(
+                        "[conc] uc-pin fallback expr={expr:?} -> page={page:#x} ok={}",
+                        summary.is_ok()
+                    );
+                }
             }
         }
         // The per-step evaluator dies here — drain its vector-debt ledger
@@ -6912,8 +7126,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     by_pc.entry(pc).or_default().push(index);
                 }
             }
-            let Some((_pc, mut indices)) = by_pc.into_iter().find(|(_, group)| group.len() > 1)
-            else {
+            let Some((_pc, mut indices)) = by_pc.into_iter().find(|(_, group)| group.len() > 1) else {
                 break;
             };
             {
@@ -7009,6 +7222,16 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         // every round and reports the truncation via `timed_out`.
         let deadline = std::time::Instant::now() + timeout;
         self.fork_on_symbolic = policy.fork_on_symbolic;
+        // Region-fork cap, resolved once per run: the programmatic
+        // override (`set_region_fork_max`) wins, else
+        // `ANGRYIER_REGION_FORK_MAX` (unset/zero/garbage ⇒ 0, off —
+        // flag-off runs stay byte-identical). Cached into the field so
+        // per-step fallback sites never re-read the environment.
+        if self.region_fork_max.is_none() {
+            self.region_fork_max = Some(
+                region_fork_cap_from_env_value(std::env::var_os("ANGRYIER_REGION_FORK_MAX").as_deref()).unwrap_or(0),
+            );
+        }
         while steps < max_steps && !self.states.is_empty() {
             if std::time::Instant::now() >= deadline {
                 report.timed_out = true;
@@ -7224,6 +7447,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         report.live_states = self.states.len() as u64;
         report.dead_states = self.dead.len() as u64;
         report.concretization_retries = self.concretization_retries_total;
+        report.region_fork_children = self.region_fork_children_total;
         Ok(report)
     }
 }
@@ -7282,6 +7506,12 @@ pub struct SymbolicRunReport {
     /// Solver-assisted address-concretization attempts made during the run
     /// (each attempt solves one unresolved address and re-runs the block).
     pub concretization_retries: u64,
+    /// Region-fork children created during the run — one per unresolved
+    /// address × mapped RW region (capped), each pinning the address to a
+    /// representative address inside its region. Every child explores a
+    /// guessed world: this counter is the fidelity debt the guesses carry,
+    /// the session's `region_fork_sites()` holds the capped site ledger.
+    pub region_fork_children: u64,
     /// States that reached a `find` pc.
     pub found: Vec<SymbolicState>,
 }
@@ -7543,6 +7773,13 @@ where
         // single-threaded exploration path).
         let function_summaries = self.function_summaries.clone();
         let summary_cost_model = std::sync::Arc::clone(&self.summary_cost_model);
+        // Region-fork settings travel to the shards: the cap inherits the
+        // parent's resolved value, and shard pin debt folds back into the
+        // parent ledger below (like vector debt). The shards themselves run
+        // solver-less with `fork_on_symbolic: false`, so the fallback stays
+        // dormant there today — the plumbing keeps a future fork-aggressive
+        // shard honest about its debt.
+        let shard_region_fork_max = self.region_fork_max;
         type ShardResult = Result<
             (
                 SymbolicRunReport,
@@ -7550,6 +7787,8 @@ where
                 Vec<SymbolicState>,
                 u64,
                 Vec<angryier_execution::SymbolicDebtSite>,
+                u64,
+                Vec<RegionForkSite>,
             ),
             RuntimeError,
         >;
@@ -7588,9 +7827,20 @@ where
                         feasibility_memo: std::collections::HashMap::new(),
                         uc_pin_fallback: false,
                         next_uc_pin_page: 0x5000_0000_0000,
+                        region_fork_max: shard_region_fork_max,
+                        region_fork_children_total: 0,
+                        region_fork_sites: Vec::new(),
                     };
                     let report = sub.run(max_steps, max_states, None, timeout, false)?;
-                    Ok((report, sub.states, sub.dead, sub.vector_debt_total, sub.vector_debt_sites))
+                    Ok((
+                        report,
+                        sub.states,
+                        sub.dead,
+                        sub.vector_debt_total,
+                        sub.vector_debt_sites,
+                        sub.region_fork_children_total,
+                        sub.region_fork_sites,
+                    ))
                 }));
             }
             handles
@@ -7604,10 +7854,16 @@ where
 
         let mut reports = Vec::new();
         for result in results {
-            let (report, states, dead, debt_total, debt_sites) = result?;
+            let (report, states, dead, debt_total, debt_sites, fork_children, fork_sites) = result?;
             // Shard vector debt folds into the parent session's ledger so a
             // parallel run reports one aggregate, like the serial path.
             self.record_vector_debt(debt_total, &debt_sites);
+            self.region_fork_children_total = self.region_fork_children_total.saturating_add(fork_children);
+            for site in &fork_sites {
+                if self.region_fork_sites.len() < REGION_FORK_SITE_CAP && !self.region_fork_sites.contains(site) {
+                    self.region_fork_sites.push(*site);
+                }
+            }
             self.states.extend(states);
             self.dead.extend(dead);
             reports.push(report);

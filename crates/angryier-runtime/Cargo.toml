@@ -52,6 +52,10 @@ name = "string_io_runtime"
 required-features = ["xed"]
 
 [[test]]
+name = "region_fork"
+required-features = ["xed", "z3"]
+
+[[test]]
 name = "lua_api"
 required-features = ["xed", "script"]
 
