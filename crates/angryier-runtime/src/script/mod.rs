@@ -96,6 +96,58 @@ fn symbolic_mark_from_pair(k: &Value, v: &Value) -> Result<Option<(String, u16)>
     let width = validate_symbolic_width(&name, width)?;
     Ok(Some((name, width)))
 }
+
+/// Parses one `regs` opts-table pair into a `(register id, value)` seed.
+/// Two documented forms: the numeric form `rcx = 64` (Lua integer, exact
+/// up to `i64::MAX`) and the `_hex` string form `rcx_hex = "0xffff8000…"`
+/// — exact for all 64 bits, which is how kernel-pointer seeds travel
+/// (pool addresses live above `i64::MAX`, where Lua integers wrap and
+/// doubles go lossy). Returns `Ok(None)` for pairs with no string or
+/// numeric payload (skipped, mirroring [`symbolic_mark_from_pair`]); a
+/// malformed value or unknown register is an honest error naming both.
+fn reg_seed_from_pair(k: &Value, v: &Value) -> Result<Option<(u32, u64)>, mlua::Error> {
+    let name = match k {
+        Value::String(s) => s.to_str()?.to_string(),
+        _ => return Ok(None),
+    };
+    // `_hex` string form: `rcx_hex = "0xffff800000000000"`.
+    if let Some(base) = name.strip_suffix("_hex") {
+        let Value::String(s) = v else {
+            return Err(mlua::Error::external(format!(
+                "regs[{name}]: _hex form takes a 0x-prefixed hex string"
+            )));
+        };
+        let text = s.to_str()?.to_string();
+        let digits = text
+            .strip_prefix("0x")
+            .or_else(|| text.strip_prefix("0X"))
+            .unwrap_or(text.as_str());
+        let value = u64::from_str_radix(digits, 16)
+            .map_err(|e| mlua::Error::external(format!("regs[{name}]: bad hex value {text:?}: {e}")))?;
+        let reg = reg_by_name(base).ok_or_else(|| mlua::Error::external(format!("bad reg {base}")))?;
+        return Ok(Some((reg, value)));
+    }
+    // Numeric form: Lua integers directly; exact whole-number floats are
+    // accepted the way mlua's i64 conversion did (64.0 behaves as 64).
+    let value = match v {
+        Value::Integer(i) => *i as u64,
+        Value::Number(f) if f.fract() == 0.0 && (i64::MIN as f64..=i64::MAX as f64).contains(f) => *f as i64 as u64,
+        _ => {
+            return Err(mlua::Error::external(format!(
+                "regs[{name}]: integer or _hex string required — kernel pointers above i64::MAX must use the {name}_hex string form"
+            )));
+        }
+    };
+    let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
+    Ok(Some((reg, value)))
+}
+
+/// Upper bound for `pool_prealloc`: pre-seeded tracked pool blocks per
+/// run. The pool shadow region maps 1 MiB of 0x1000-strided blocks, and
+/// probe drivers seed single-digit counts; the cap only stops a script
+/// from exhausting the shadow with one call.
+pub const POOL_PREALLOC_CAP: usize = 64;
+
 #[cfg(feature = "xed")]
 pub mod session;
 #[cfg(feature = "xed")]
@@ -169,6 +221,9 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             .load_elf(&bytes)
             .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?
     };
+    // Exact addresses of `pool_prealloc` seeded blocks, hoisted so the
+    // result-table emission below can surface them after the run.
+    let mut pool_prealloc: Vec<u64> = Vec::new();
     if let (Some(tracker), runtime_any) = (&kernel_pool, &runtime) {
         // Bind INTERNAL pool routines before attach: a kernel image calls
         // its own ExAllocatePool*/ExFreePool* exports via direct calls, not
@@ -190,6 +245,24 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
         if let Err(e) = runtime_any.attach_kernel_pool_model(&mut process, tracker.clone()) {
             return Err(mlua::Error::external(format!("attach_kernel_pool_model: {e:?}")));
+        }
+        // Pool pre-seeding (`pool_prealloc = n`): mint n tracked pool
+        // blocks through the SAME fresh-pointer path the allocator
+        // SimProcedure uses, BEFORE the run. A structured-entry probe can
+        // then pin a symbolic pointer argument to one of these exact
+        // addresses (`regs = { rcx_hex = ... }`), so the pool tracker sees
+        // a tracked allocation instead of a uc-fabricated zero page and a
+        // genuine double-free validates against a real block. Each seeded
+        // block is recorded as an allocation (honest `allocs` count) and
+        // the exact addresses surface in the result's `pool_prealloc`
+        // table as `_hex`-convention strings (the pool base is above
+        // i64::MAX — numeric forms would be float-lossy there).
+        if let Ok(n) = opts.get::<usize>("pool_prealloc") {
+            for _ in 0..n.min(POOL_PREALLOC_CAP) {
+                let ptr = tracker.fresh_pointer();
+                tracker.record_alloc();
+                pool_prealloc.push(ptr);
+            }
         }
     }
 
@@ -304,15 +377,26 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
     }
     // Concrete register seeds: `regs = { rcx = 0x..., rdx = 0x... }` —
-    // dispatch-entry drivers get IRP-shaped pointer arguments.
+    // dispatch-entry drivers get IRP-shaped pointer arguments. Kernel
+    // pointers above i64::MAX travel in the `_hex` string form:
+    // `regs = { rcx_hex = "0xffff8000..." }` (see [`reg_seed_from_pair`]).
     if let Ok(tbl) = opts.get::<Table>("regs") {
-        for pair in tbl.pairs::<String, i64>() {
-            let (name, value) = pair?;
-            let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
+        for pair in tbl.pairs::<Value, Value>() {
+            let (k, v) = pair?;
+            let Some((reg, value)) = reg_seed_from_pair(&k, &v)? else {
+                continue;
+            };
             session.states[0]
                 .process
-                .write_register(reg, value as u64)
-                .map_err(|e| mlua::Error::external(format!("regs[{name}]: {e:?}")))?;
+                .write_register(reg, value)
+                .map_err(|e| mlua::Error::external(format!("regs seed: {e:?}")))?;
+            // The evaluator's execution shadow was seeded from the state's
+            // register file at session construction — a seed that only
+            // touches the process store is erased on the first step (the
+            // shadow re-derives the concrete value). `concrete_registers`
+            // is the seed surface the shadow consults; the session-level
+            // (`open_session`) regs path has always written it.
+            session.states[0].concrete_registers.insert(reg, value);
         }
     }
 
@@ -488,6 +572,16 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
         kernel.set("double_frees", dfs)?;
         out.set("kernel", kernel)?;
+    }
+    // Pool pre-seed addresses (`pool_prealloc = n`): exact `_hex` strings,
+    // one per pre-minted tracked block, in mint order — the addresses a
+    // structured-entry probe pins a symbolic pointer argument to.
+    if !pool_prealloc.is_empty() {
+        let tbl = lua.create_table()?;
+        for (index, ptr) in pool_prealloc.iter().enumerate() {
+            tbl.set(index + 1, hex64(*ptr))?;
+        }
+        out.set("pool_prealloc", tbl)?;
     }
     // Unsupported-form fallback debt: only present when the run armed the
     // fallback — `unsupported_total` counts fall-through steps and
@@ -676,6 +770,54 @@ mod tests {
     fn symbolic_table_pairs_without_strings_are_skipped() -> Result<(), Box<dyn std::error::Error>> {
         let (k, v) = (Value::Integer(1), Value::Boolean(true));
         assert_eq!(symbolic_mark_from_pair(&k, &v)?, None);
+        Ok(())
+    }
+
+    /// Numeric `regs` seeds stay exact and unknown registers error — the
+    /// pre-existing contract, now routed through [`reg_seed_from_pair`].
+    #[test]
+    fn reg_seed_numeric_form_and_errors() -> Result<(), Box<dyn std::error::Error>> {
+        let lua = Lua::new();
+        let s = |v: &str| -> Result<Value, mlua::Error> { Ok(Value::String(lua.create_string(v)?)) };
+        let pair = reg_seed_from_pair(&s("rcx")?, &Value::Integer(64))?;
+        assert_eq!(pair, Some((reg_by_name("rcx").unwrap(), 64)));
+        // Exact whole-number float behaves like mlua's old i64 conversion.
+        let pair = reg_seed_from_pair(&s("rdx")?, &Value::Number(64.0))?;
+        assert_eq!(pair, Some((reg_by_name("rdx").unwrap(), 64)));
+        // Kernel pointer as a float is lossy > i64::MAX: honest error, not a
+        // silently truncated seed.
+        let err = reg_seed_from_pair(&s("rcx")?, &Value::Number(1.8446603336221197e19))
+            .expect_err("lossy float must be rejected");
+        assert!(err.to_string().contains("_hex"), "{err}");
+        // Unknown register and non-numeric payloads are honest errors too.
+        assert!(reg_seed_from_pair(&s("xmm0")?, &Value::Integer(1)).is_err());
+        assert!(reg_seed_from_pair(&s("rcx")?, &Value::Boolean(true)).is_err());
+        // Non-string keys are skipped (mirrors symbolic_mark_from_pair).
+        assert_eq!(reg_seed_from_pair(&Value::Integer(1), &Value::Integer(1))?, None);
+        Ok(())
+    }
+
+    /// The `_hex` string form carries kernel pointers above i64::MAX
+    /// exactly — the shape pool pre-seeding (`pool_prealloc`) hands to
+    /// structured-entry probes to pin a symbolic argument at a tracked
+    /// block.
+    #[test]
+    fn reg_seed_hex_form_is_exact_for_kernel_pointers() -> Result<(), Box<dyn std::error::Error>> {
+        let lua = Lua::new();
+        let s = |v: &str| -> Result<Value, mlua::Error> { Ok(Value::String(lua.create_string(v)?)) };
+        let kernel_ptr = 0xffff_8000_0000_1234u64;
+        let pair = reg_seed_from_pair(&s("rcx_hex")?, &s("0xffff800000001234")?)?;
+        assert_eq!(pair, Some((reg_by_name("rcx").unwrap(), kernel_ptr)));
+        // `0X` prefix and bare digits are accepted; wrong register or
+        // garbage digits are honest errors naming the key.
+        let pair = reg_seed_from_pair(&s("r9_hex")?, &s("0XFF")?)?;
+        assert_eq!(pair, Some((reg_by_name("r9").unwrap(), 0xff)));
+        let err = reg_seed_from_pair(&s("nope_hex")?, &s("0x10")?).expect_err("bad reg");
+        assert!(err.to_string().contains("nope"), "{err}");
+        let err = reg_seed_from_pair(&s("rcx_hex")?, &s("zzz")?).expect_err("bad hex");
+        assert!(err.to_string().contains("rcx_hex"), "{err}");
+        // _hex with a non-string payload is an error, not a skip.
+        assert!(reg_seed_from_pair(&s("rcx_hex")?, &Value::Integer(7)).is_err());
         Ok(())
     }
 
