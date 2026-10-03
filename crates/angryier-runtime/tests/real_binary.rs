@@ -187,10 +187,13 @@ fn real_binary_runs_end_to_end_with_native_xed() -> Result<(), Box<dyn std::erro
 #[test]
 fn unmapped_instructions_fail_explicitly() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
-    // `addps` decodes under XED but has no exact corpus semantics (the SIMD
-    // forms are not yet mapped); the runtime must report an unsupported form
-    // instead of guessing.
-    let mut process = runtime.load_elf(&build_fixture_from("_start:\n    addps %xmm1, %xmm0\n    hlt\n")?)?;
+    // `femms` (3DNow) decodes under XED but has no exact corpus semantics
+    // (it is not in any declared family); the runtime must report an
+    // unsupported form instead of guessing. This fixture previously used
+    // `addps`, which the legacy-SSE decode-wiring round mapped with exact
+    // semantics — the probe must stay on an instruction that is genuinely
+    // unmapped.
+    let mut process = runtime.load_elf(&build_fixture_from("_start:\n    femms\n    hlt\n")?)?;
     let error = runtime
         .step(&mut process)
         .err()

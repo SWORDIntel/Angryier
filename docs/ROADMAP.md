@@ -252,6 +252,22 @@ suites require system Z3/XED):
   `FileReplayStore`; tier schema, adaptive trace governor, per-worker
   `FlightRecorder` ring (Tier-0-first eviction, never drops Tier 1).
 
+**2026-10-03 — 1.0.0 regression closure.** The release train had shipped
+three test regressions; all fixed and verified: (1) APX POP2/POP2P wrote
+the two destination operands in swapped order (`e676bc0`; write order
+restored to `pop dst1; pop dst2` per the SDM shape the test pins);
+(2) `CachingSolverBackend::index_unsat_core` injected the solving query's
+predicate key into recorded cores, so no later query could contain a core
+and the UNSAT-core superset short-circuit never fired (`e676bc0`; cores
+are constraints-only again); (3) `6b8a195` narrowed z3 model extraction to
+predicate-subtree symbols while the runtime still sent a constant-true
+predicate — every solve returned Sat with an empty model. The runtime now
+sends a balanced And-tree of the state's path constraints as the solve
+predicate (sat outcomes unchanged; only the extraction universe is
+correct). The unmapped-form probe fixture moved from `addps` (now mapped
+by the legacy-SSE wiring) to `femms` (3DNow, genuinely unmapped). Full
+default-feature workspace suite green again.
+
 ### Known gaps (honest list)
 
 - Broad ISA form mapping: unmapped instructions fail explicitly as form

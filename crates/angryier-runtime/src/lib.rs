@@ -7599,6 +7599,57 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Ok(Some(SymbolicStepOutcome::Stepped { next_pc }))
     }
 
+    /// Model-extraction predicate shared by [`Self::solve_state`] and
+    /// [`Self::solve_state_symbols`]: the conjunction of the state's path
+    /// constraints. The z3 FFI bridge extracts model values for exactly
+    /// the symbols reachable from the query predicate, so a constant-true
+    /// predicate yields an empty model universe — and an empty model —
+    /// whenever the state carries constraints. The constraint conjunction
+    /// carries every symbol the caller's bindings consume (a symbol
+    /// cannot steer the path without appearing in a constraint). Built as
+    /// a balanced And tree so long paths stay logarithmically shallow for
+    /// the arena's dependency summarizer. Returns `None` when there are
+    /// no constraints, or when the conjunction has no dependency summary
+    /// (unkeyable — the same rule the concretization retry loop applies
+    /// to region bounds); callers then fall back to the trivially-true
+    /// predicate, whose model legitimately assigns nothing.
+    fn solve_predicate_conjunction(
+        &self,
+        exprs: impl Iterator<Item = ExprId>,
+    ) -> Result<Option<(ExprId, angryier_types::DependencyKey)>, RuntimeError> {
+        let mut ids: Vec<ExprId> = exprs.collect();
+        ids.sort_unstable_by_key(|expr| expr.0);
+        ids.dedup();
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let mut level = ids;
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            for pair in level.chunks(2) {
+                let node = if pair.len() == 2 {
+                    self.arena
+                        .intern(angryier_expr::ExprNode {
+                            sort: angryier_expr::ExprSort::Bool,
+                            op: angryier_expr::ExprOp::And,
+                            operands: vec![pair[0], pair[1]],
+                            immediate: Vec::new(),
+                        })
+                        .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?
+                } else {
+                    pair[0]
+                };
+                next.push(node);
+            }
+            level = next;
+        }
+        let predicate = level[0];
+        let Some(summary) = self.arena.dependency_summary(predicate) else {
+            return Ok(None);
+        };
+        Ok(Some((predicate, summary.key)))
+    }
+
     /// Like [`SymbolicSession::solve_state`], but returns the raw model:
     /// every symbol's `(ExprId, bytes)` — memory-materialized symbols
     /// (stdin bytes) appear here while `solve_state` only reports
@@ -7634,15 +7685,26 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 immediate: vec![1],
             })
             .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-        let key = self
-            .arena
-            .dependency_summary(true_expr)
-            .map(|s| s.key)
-            .ok_or_else(|| RuntimeError::Symbolic("missing predicate summary".into()))?;
+        // Predicate: the path-constraint conjunction (see
+        // `solve_predicate_conjunction`) so the solver's model universe
+        // covers the symbols the model is consumed for; constant-true
+        // only when the state has no constraints to conjoin. Built from
+        // the same summary-filtered list the query asserts.
+        let (predicate, key) = match self.solve_predicate_conjunction(constraints.iter().map(|c| c.expr))? {
+            Some((predicate, key)) => (predicate, key),
+            None => {
+                let key = self
+                    .arena
+                    .dependency_summary(true_expr)
+                    .map(|s| s.key)
+                    .ok_or_else(|| RuntimeError::Symbolic("missing predicate summary".into()))?;
+                (true_expr, key)
+            }
+        };
         let query = SolverQuery::canonical(
             SolverQueryId(index as u64),
             &constraints,
-            true_expr,
+            predicate,
             key,
             state.process.target_profile,
             ConstraintCanonicalizationVersion(1),
@@ -7692,15 +7754,26 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 immediate: vec![1],
             })
             .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-        let key = self
-            .arena
-            .dependency_summary(true_expr)
-            .map(|s| s.key)
-            .ok_or_else(|| RuntimeError::Symbolic("missing predicate summary".into()))?;
+        // Predicate: the path-constraint conjunction (see
+        // `solve_predicate_conjunction`) so the solver's model universe
+        // covers the symbols the bindings below consume; constant-true
+        // only when the state has no constraints to conjoin. Built from
+        // the same summary-filtered list the query asserts.
+        let (predicate, key) = match self.solve_predicate_conjunction(constraints.iter().map(|c| c.expr))? {
+            Some((predicate, key)) => (predicate, key),
+            None => {
+                let key = self
+                    .arena
+                    .dependency_summary(true_expr)
+                    .map(|s| s.key)
+                    .ok_or_else(|| RuntimeError::Symbolic("missing predicate summary".into()))?;
+                (true_expr, key)
+            }
+        };
         let query = SolverQuery::canonical(
             SolverQueryId(index as u64),
             &constraints,
-            true_expr,
+            predicate,
             key,
             state.process.target_profile,
             ConstraintCanonicalizationVersion(1),
