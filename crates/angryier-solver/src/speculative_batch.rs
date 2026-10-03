@@ -36,12 +36,7 @@ pub struct SpeculativeAssertion {
 impl SpeculativeAssertion {
     /// Creates a new speculative assertion, populating its dependency cone
     /// from `dependency_key`, `query.predicate_key()`, and `query.constraint_keys()`.
-    pub fn new(
-        state_id: StateId,
-        branch_id: BranchId,
-        dependency_key: DependencyKey,
-        query: SolverQuery,
-    ) -> Self {
+    pub fn new(state_id: StateId, branch_id: BranchId, dependency_key: DependencyKey, query: SolverQuery) -> Self {
         let mut dependency_cone = BTreeSet::new();
         if dependency_key != DependencyKey::default() {
             dependency_cone.insert(dependency_key);
@@ -96,9 +91,7 @@ impl SpeculativeAssertion {
     /// Checks if this assertion is functionally identical to another assertion
     /// across concurrent speculative paths.
     pub fn is_identical_to(&self, other: &Self) -> bool {
-        if self.dependency_key != DependencyKey::default()
-            && self.dependency_key == other.dependency_key
-        {
+        if self.dependency_key != DependencyKey::default() && self.dependency_key == other.dependency_key {
             return true;
         }
         self.query.canonical_key() == other.query.canonical_key()
@@ -131,12 +124,7 @@ impl SpeculativeConstraintBatch {
         dependency_key: DependencyKey,
         query: SolverQuery,
     ) {
-        self.add(SpeculativeAssertion::new(
-            state_id,
-            branch_id,
-            dependency_key,
-            query,
-        ));
+        self.add(SpeculativeAssertion::new(state_id, branch_id, dependency_key, query));
     }
 
     /// Number of assertions currently in the batch.
@@ -335,11 +323,7 @@ pub struct BatchSolvePlan {
 }
 
 impl BatchSolvePlan {
-    pub fn new(
-        partitions: Vec<BatchPartition>,
-        total_batched: usize,
-        deduplicated_queries: usize,
-    ) -> Self {
+    pub fn new(partitions: Vec<BatchPartition>, total_batched: usize, deduplicated_queries: usize) -> Self {
         Self {
             partitions,
             total_batched,
@@ -590,12 +574,7 @@ impl SpeculativeBatchCoordinator {
         dependency_key: DependencyKey,
         query: SolverQuery,
     ) -> BranchWaiter {
-        self.submit(SpeculativeAssertion::new(
-            state_id,
-            branch_id,
-            dependency_key,
-            query,
-        ))
+        self.submit(SpeculativeAssertion::new(state_id, branch_id, dependency_key, query))
     }
 
     /// Triggers immediate evaluation of all currently queued items.
@@ -662,10 +641,8 @@ impl SpeculativeBatchCoordinator {
         }
 
         let mut batch = SpeculativeConstraintBatch::new();
-        let mut responders_by_tag: HashMap<
-            (StateId, BranchId, DependencyKey),
-            Vec<mpsc::Sender<SolverResult>>,
-        > = HashMap::new();
+        let mut responders_by_tag: HashMap<(StateId, BranchId, DependencyKey), Vec<mpsc::Sender<SolverResult>>> =
+            HashMap::new();
 
         for item in items {
             let tag = item.assertion.tag();
@@ -681,8 +658,7 @@ impl SpeculativeBatchCoordinator {
             Err(p) => p.into_inner(),
         };
 
-        let mut results_by_tag: HashMap<(StateId, BranchId, DependencyKey), SolverResult> =
-            HashMap::new();
+        let mut results_by_tag: HashMap<(StateId, BranchId, DependencyKey), SolverResult> = HashMap::new();
 
         for partition in &plan.partitions {
             for assertion in &partition.assertions {
@@ -712,10 +688,9 @@ impl SpeculativeBatchCoordinator {
         state_guard.metrics.deduplicated_queries += plan.deduplicated_queries as u64;
         state_guard.total_solve_time += elapsed;
         state_guard.total_solved_queries += plan.total_batched as u64;
-        state_guard.metrics.amortized_solve_time_us =
-            (state_guard.total_solve_time.as_micros() as u64)
-                .checked_div(state_guard.total_solved_queries)
-                .unwrap_or(0);
+        state_guard.metrics.amortized_solve_time_us = (state_guard.total_solve_time.as_micros() as u64)
+            .checked_div(state_guard.total_solved_queries)
+            .unwrap_or(0);
     }
 }
 
@@ -735,9 +710,7 @@ impl Drop for SpeculativeBatchCoordinator {
 mod tests {
     use super::*;
     use crate::{CanonicalConstraint, MockSolverBackend, SolverOutcomeKind};
-    use angryier_types::{
-        ConstraintCanonicalizationVersion, ConstraintId, ExprId, SolverQueryId, TargetProfileId,
-    };
+    use angryier_types::{ConstraintCanonicalizationVersion, ConstraintId, ExprId, SolverQueryId, TargetProfileId};
 
     fn key(byte: u8) -> DependencyKey {
         let mut arr = [0u8; 32];
@@ -847,7 +820,10 @@ mod tests {
 
         let plan = batch.plan();
         assert_eq!(plan.total_batched, 4);
-        assert_eq!(plan.deduplicated_queries, 2, "2 identical assertions should be deduplicated");
+        assert_eq!(
+            plan.deduplicated_queries, 2,
+            "2 identical assertions should be deduplicated"
+        );
         assert_eq!(plan.total_unique_queries(), 2, "only 2 unique queries remain");
 
         // Check that the merged assertion retained all 3 associated tags
@@ -857,9 +833,21 @@ mod tests {
             .find(|a| a.dependency_key == key(10))
             .ok_or("assertion present")?;
         assert_eq!(deduplicated_assertion.associated_tags.len(), 3);
-        assert!(deduplicated_assertion.associated_tags.contains(&(StateId(1), BranchId(0), key(10))));
-        assert!(deduplicated_assertion.associated_tags.contains(&(StateId(2), BranchId(1), key(10))));
-        assert!(deduplicated_assertion.associated_tags.contains(&(StateId(3), BranchId(0), key(10))));
+        assert!(
+            deduplicated_assertion
+                .associated_tags
+                .contains(&(StateId(1), BranchId(0), key(10)))
+        );
+        assert!(
+            deduplicated_assertion
+                .associated_tags
+                .contains(&(StateId(2), BranchId(1), key(10)))
+        );
+        assert!(
+            deduplicated_assertion
+                .associated_tags
+                .contains(&(StateId(3), BranchId(0), key(10)))
+        );
         Ok(())
     }
 

@@ -5,9 +5,8 @@ pub mod speculative_batch;
 
 pub use alpha::{AlphaKey, AlphaReuseConfig, AlphaReuseStats, alpha_key};
 pub use speculative_batch::{
-    BatchCoordinatorConfig, BatchPartition, BatchSolvePlan, BranchId, BranchWaiter,
-    SpeculativeAssertion, SpeculativeBatchCoordinator, SpeculativeBatchMetrics,
-    SpeculativeConstraintBatch,
+    BatchCoordinatorConfig, BatchPartition, BatchSolvePlan, BranchId, BranchWaiter, SpeculativeAssertion,
+    SpeculativeBatchCoordinator, SpeculativeBatchMetrics, SpeculativeConstraintBatch,
 };
 pub type SolverPortfolio = BatchSolver;
 use angryier_expr::ExprReader;
@@ -791,7 +790,12 @@ impl CrossCheckPolicy {
         hasher.update(&query.canonical_key().0);
         hasher.update(&query.id().0.to_le_bytes());
         let digest = hasher.finalize();
-        let val = u32::from_le_bytes([digest.as_bytes()[0], digest.as_bytes()[1], digest.as_bytes()[2], digest.as_bytes()[3]]);
+        let val = u32::from_le_bytes([
+            digest.as_bytes()[0],
+            digest.as_bytes()[1],
+            digest.as_bytes()[2],
+            digest.as_bytes()[3],
+        ]);
         let fraction = f64::from(val) / f64::from(u32::MAX);
         fraction < self.sample_rate
     }
@@ -1504,10 +1508,14 @@ impl CachingSolverBackend {
                     .copied()
             })
             .collect();
-        if let Some(mut core_keys) = core_keys
+        // Record exactly the backend-reported conflicting constraint keys.
+        // The core is expressed as `ConstraintId`s, so a constraints-only
+        // core is contradictory on its own and stays reusable across
+        // predicates; injecting this query's predicate key here would pin
+        // the core to that predicate and silently disable superset reuse.
+        if let Some(core_keys) = core_keys
             && let Ok(mut cores) = self.unsat_cores.lock()
         {
-            core_keys.insert(query.predicate_key());
             cores.push(core_keys);
         }
     }
