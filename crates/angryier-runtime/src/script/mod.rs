@@ -1158,6 +1158,147 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     branch_out.set("steering_action", verdict.action)?;
                     branch_out.set("steering_confidence", verdict.confidence)?;
                     branch_out.set("steering_reason", verdict.reason)?;
+
+                    // At most one older branch receives a solver query. The
+                    // candidate has already been ranked by the shared bounded
+                    // CFG as a strictly better alternate route to --find.
+                    if let Some((
+                        candidate_index,
+                        candidate_decision,
+                        candidate_target,
+                        candidate_alt_distance,
+                        candidate_chosen_distance,
+                        _,
+                        _,
+                    )) = history_candidate
+                    {
+                        let candidate_out = lua.create_table()?;
+                        candidate_out.set("index", candidate_index)?;
+                        set_addr64(&candidate_out, "pc", candidate_decision.pc)?;
+                        set_addr64(&candidate_out, "find_target", candidate_target)?;
+                        candidate_out.set("cfg_preference", "alternate")?;
+                        candidate_out.set("cfg_alternate_distance", candidate_alt_distance)?;
+                        if let Some(chosen_distance) = candidate_chosen_distance {
+                            candidate_out.set("cfg_chosen_distance", chosen_distance)?;
+                        }
+                        let candidate_chosen_target = if candidate_decision.chose_taken {
+                            candidate_decision.taken
+                        } else {
+                            candidate_decision.not_taken
+                        };
+                        let candidate_alternate_target = if candidate_decision.chose_taken {
+                            candidate_decision.not_taken
+                        } else {
+                            candidate_decision.taken
+                        };
+                        set_addr64(&candidate_out, "chosen_target", candidate_chosen_target)?;
+                        set_addr64(&candidate_out, "alternate_target", candidate_alternate_target)?;
+                        candidate_out.set("prefix_constraints", candidate_decision.prefix_constraints)?;
+
+                        if let Some(backend) = backend.as_mut() {
+                            match session.solve_alternate_branch_decision(
+                                state,
+                                candidate_decision,
+                                backend,
+                                std::time::Duration::from_millis(branch_timeout_ms),
+                            ) {
+                                Ok(solution) => {
+                                    let solver_status = format!("{:?}", solution.outcome);
+                                    candidate_out.set("solver_status", solver_status.as_str())?;
+                                    candidate_out
+                                        .set("solver_elapsed_us", solution.solver_elapsed.as_micros() as u64)?;
+
+                                    let model = lua.create_table()?;
+                                    for (index, (expression, bytes)) in solution.model.iter().enumerate() {
+                                        let entry = lua.create_table()?;
+                                        entry.set("expression", *expression)?;
+                                        entry.set("bytes", lua.create_string(bytes)?)?;
+                                        entry.set(
+                                            "hex",
+                                            bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                                        )?;
+                                        if let Some(binding) = state
+                                            .symbols
+                                            .iter()
+                                            .find(|binding| u64::from(binding.expression.0) == *expression)
+                                        {
+                                            entry.set("width", binding.width)?;
+                                            if binding.width == 64 {
+                                                entry.set("source_kind", "register")?;
+                                                entry.set("register", binding.register)?;
+                                                if let Some(name) = name_by_reg(binding.register) {
+                                                    entry.set("name", name)?;
+                                                }
+                                                let mut value_bytes = [0u8; 8];
+                                                let len = bytes.len().min(8);
+                                                value_bytes[..len].copy_from_slice(&bytes[..len]);
+                                                set_addr64(&entry, "value", u64::from_le_bytes(value_bytes))?;
+                                            } else {
+                                                entry.set("source_kind", "byte-symbol")?;
+                                            }
+                                        } else {
+                                            entry.set("source_kind", "unbound-symbol")?;
+                                        }
+                                        model.set(index + 1, entry)?;
+                                    }
+                                    candidate_out.set("model", model)?;
+
+                                    let replay_out = lua.create_table()?;
+                                    let replay_status = match session.replay_alternate_branch_model(state, &solution, steps)
+                                    {
+                                        Ok(replay) => {
+                                            replay_out.set("status", replay.status)?;
+                                            replay_out.set("steps", replay.steps)?;
+                                            replay_out.set("reached_branch", replay.reached_branch)?;
+                                            replay_out.set("matched_alternate", replay.matched_alternate)?;
+                                            replay_out.set("applied_registers", replay.applied_registers)?;
+                                            replay_out.set("detail", replay.detail)?;
+                                            if let Some(observed) = replay.observed_target {
+                                                set_addr64(&replay_out, "observed_target", observed)?;
+                                            }
+                                            Some(replay.status)
+                                        }
+                                        Err(error) => {
+                                            replay_out.set("status", "error")?;
+                                            replay_out.set("detail", error.to_string())?;
+                                            Some("error")
+                                        }
+                                    };
+                                    candidate_out.set("replay", replay_out)?;
+
+                                    let candidate_verdict = branch_steering_verdict(
+                                        &solver_status,
+                                        policy.find.contains(&candidate_chosen_target),
+                                        policy.find.contains(&candidate_alternate_target),
+                                        Some("alternate"),
+                                        replay_status,
+                                    );
+                                    candidate_out.set("steering_action", candidate_verdict.action)?;
+                                    candidate_out.set("steering_confidence", candidate_verdict.confidence)?;
+                                    candidate_out.set("steering_reason", candidate_verdict.reason)?;
+                                }
+                                Err(error) => {
+                                    candidate_out.set("solver_status", "Error")?;
+                                    candidate_out.set("error", error.to_string())?;
+                                    candidate_out.set("steering_action", "unresolved")?;
+                                    candidate_out.set("steering_confidence", "low")?;
+                                    candidate_out.set(
+                                        "steering_reason",
+                                        "older candidate alternate-edge solving failed",
+                                    )?;
+                                }
+                            }
+                        } else {
+                            candidate_out.set("solver_status", "Unavailable")?;
+                            candidate_out.set("steering_action", "unresolved")?;
+                            candidate_out.set("steering_confidence", "low")?;
+                            candidate_out.set(
+                                "steering_reason",
+                                "solver is disabled; CFG ranking is structural evidence only",
+                            )?;
+                        }
+                        branch_out.set("history_candidate_analysis", candidate_out)?;
+                    }
                 } else {
                     branch_out.set("status", "no-symbolic-branch")?;
                     branch_out.set(
