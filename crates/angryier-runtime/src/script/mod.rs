@@ -746,6 +746,53 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
 
             if branch_analysis {
                 let branch_out = lua.create_table()?;
+
+                // Bounded branch provenance for multi-candidate follow-up.
+                // Entries preserve execution order; the last entry is the
+                // decision analyzed in detail below unless a merge cleared
+                // provenance. Exact alternate->find edges are highlighted so
+                // frontends can surface older high-value flip points.
+                branch_out.set("history_count", state.branch_history.len())?;
+                let history = lua.create_table()?;
+                let mut latest_exact_find: Option<(usize, angryier_runtime::SymbolicBranchDecision, u64)> = None;
+                for (index, recorded) in state.branch_history.iter().copied().enumerate() {
+                    let entry = lua.create_table()?;
+                    entry.set("index", index + 1)?;
+                    set_addr64(&entry, "pc", recorded.pc)?;
+                    entry.set("condition", recorded.condition.0)?;
+                    entry.set("prefix_constraints", recorded.prefix_constraints)?;
+                    entry.set("chosen", if recorded.chose_taken { "taken" } else { "not_taken" })?;
+                    let chosen = if recorded.chose_taken {
+                        recorded.taken
+                    } else {
+                        recorded.not_taken
+                    };
+                    let alternate = if recorded.chose_taken {
+                        recorded.not_taken
+                    } else {
+                        recorded.taken
+                    };
+                    set_addr64(&entry, "chosen_target", chosen)?;
+                    set_addr64(&entry, "alternate_target", alternate)?;
+                    let chosen_find = policy.find.contains(&chosen);
+                    let alternate_find = policy.find.contains(&alternate);
+                    entry.set("chosen_is_find_target", chosen_find)?;
+                    entry.set("alternate_is_find_target", alternate_find)?;
+                    if let Some(summary) = arena.dependency_summary(recorded.condition) {
+                        entry.set("dependency_sources", summary.symbolic_sources.len())?;
+                    }
+                    if alternate_find {
+                        latest_exact_find = Some((index + 1, recorded, alternate));
+                    }
+                    history.set(index + 1, entry)?;
+                }
+                branch_out.set("history", history)?;
+                if let Some((index, recorded, target)) = latest_exact_find {
+                    branch_out.set("history_exact_find_index", index)?;
+                    set_addr64(&branch_out, "history_exact_find_pc", recorded.pc)?;
+                    set_addr64(&branch_out, "history_exact_find_target", target)?;
+                }
+
                 if let Some(decision) = state.last_branch {
                     branch_out.set("status", "recorded")?;
                     set_addr64(&branch_out, "pc", decision.pc)?;
