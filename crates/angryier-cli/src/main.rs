@@ -637,11 +637,15 @@ print(string.format("  exploration steps      : %d (engine work units executed)"
 print(string.format("  forks                  : %d (new execution states created at symbolic branches)", r.forks or 0))
 print(string.format("  merges                 : %d (compatible execution states recombined)", r.merges or 0))
 print(string.format("  terminated states      : %d (states that reached a modeled terminal condition)", r.terminated or 0))
+print(string.format("  pruned states          : %d (states discarded by policy/state-cap economics)", r.pruned_states or 0))
 print(string.format("  failed states          : %d (states stopped by execution/model/semantic failure)", r.failed or 0))
 print(string.format("  live states            : %d (states still explorable when this run stopped)", r.live_states or 0))
+print(string.format("  dead states            : %d (terminated/failed/pruned states retained for inspection)", r.dead_states or 0))
+print(string.format("  peak live states       : %d (maximum simultaneous exploration frontier)", r.peak_states or 0))
 print(string.format("  find hits              : %d (configured target-address states reached)", r.found or 0))
 print(string.format("  timed out              : %s", yn(r.timed_out)))
 print(string.format("  concretization retries : %d (solver-assisted unresolved-address recovery attempts)", r.concretization_retries or 0))
+print(string.format("  region-fork children   : %d (guessed address-world states created to continue unresolved pointers)", r.region_fork_children or 0))
 print(string.format("  trace blocks           : %d (blocks retained in the diagnostic execution trace)", count_table(r.trace_hex or r.trace)))
 
 if r.last_error ~= nil then
@@ -664,6 +668,67 @@ if (r.found or 0) == 0 then
     print("  target status           : no configured find target was reached in this run")
 else
     print("  target status           : one or more configured find targets were reached")
+end
+
+print("[angryier][analysis] evidence interpretation")
+local trace = r.trace_hex or r.trace
+local trace_count = count_table(trace)
+if trace_count > 0 then
+    local first = math.max(1, trace_count - 7)
+    print(string.format("  retained path tail      : last %d block(s)", trace_count - first + 1))
+    for i = first, trace_count do
+        print(string.format("    [%04d] %s", i, tostring(trace[i])))
+    end
+    print(string.format("  frontier block          : %s (last retained block; not automatically the CFG-closest block to a missed target)", tostring(trace[trace_count])))
+else
+    print("  retained path tail      : unavailable")
+end
+
+local approximation_debt =
+    (r.unsupported_total or 0) +
+    (r.unmapped_total or 0) +
+    (r.ro_write_total or 0) +
+    (r.vector_debt_total or 0) +
+    (r.region_fork_children or 0)
+
+local evidence_quality = "CLEANER"
+local evidence_reason = "no approximation/fidelity debt was reported by the exposed ledgers"
+if approximation_debt > 0 then
+    evidence_quality = "DEGRADED"
+    evidence_reason = "one or more semantic/memory/vector/address fallbacks altered fidelity"
+elseif (r.failed or 0) > 0 or (r.pruned_states or 0) > 0 or (r.concretization_retries or 0) > 0 then
+    evidence_quality = "MIXED"
+    evidence_reason = "no approximation ledger fired, but failures/pruning/concretization mean exploration was incomplete or constrained"
+end
+print(string.format("  evidence quality        : %s — %s", evidence_quality, evidence_reason))
+
+local limiter = "no single dominant limiter identified"
+if r.timed_out then
+    limiter = "wall-clock timeout"
+elseif (r.pruned_states or 0) > 0 then
+    limiter = "state-budget pressure / pruning"
+elseif (r.failed or 0) > 0 then
+    limiter = "execution, semantic, environment-model, or memory failure"
+elseif (r.unsupported_total or 0) > 0 then
+    limiter = "unsupported instruction semantics"
+elseif (r.region_fork_children or 0) > 0 or (r.unmapped_total or 0) > 0 then
+    limiter = "under-constrained address/memory modeling"
+elseif (r.vector_debt_total or 0) > 0 then
+    limiter = "vector semantic fidelity"
+elseif (r.live_states or 0) > 0 and (r.steps or 0) >= {steps} then
+    limiter = "step budget with unexplored live states remaining"
+elseif (r.forks or 0) == 0 and ({symbolic_count} > 0 or {argv_enabled} > 0) then
+    limiter = "configured symbolic source has not influenced a fork"
+elseif {find_count} > 0 and (r.found or 0) == 0 then
+    limiter = "target reachability remains unestablished"
+end
+print(string.format("  primary limiter         : %s", limiter))
+
+if (r.region_fork_children or 0) > 0 then
+    print(string.format("  address-world fidelity  : %d guessed child state(s); inspect region_fork_sites before treating reachability as real", r.region_fork_children))
+end
+if (r.pruned_states or 0) > 0 then
+    print(string.format("  state economics         : %d state(s) were pruned; peak frontier=%d, configured cap=%d", r.pruned_states, r.peak_states or 0, {states}))
 end
 
 print("[angryier][ideas] next symbolic-analysis moves")
@@ -709,6 +774,14 @@ end
 
 if (r.concretization_retries or 0) > 0 then
     idea("Symbolic-address concretization was required. Treat repeated retries as a signal to improve pointer provenance: symbolize the data feeding the address expression more precisely, constrain its region, or model the allocator/object layout.")
+end
+
+if (r.pruned_states or 0) > 0 then
+    idea("States were pruned by exploration economics. Inspect peak_states versus the configured cap and decide whether to raise states, add avoid targets, prefer new coverage, switch DFS/BFS strategy, or reduce irrelevant symbolic sources. More capacity without policy changes may only preserve expensive duplicate paths.")
+end
+
+if (r.region_fork_children or 0) > 0 then
+    idea("Region forking created guessed address worlds. Inspect region_fork_sites (pc, expression, pinned address, region base/size); validate any interesting path with a real object/allocator model or concrete replay before treating the result as evidence.")
 end
 
 if r.unsupported_total ~= nil and r.unsupported_total > 0 then
@@ -1111,10 +1184,18 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
             let cfg = config("./bin", None, &["rdi"], &[0x401000], None, 512, false);
             let lua = default_driver_lua(&cfg);
             for expected in [
+                "pruned states",
                 "failed states",
                 "live states",
+                "dead states",
+                "peak live states",
                 "concretization retries",
+                "region-fork children",
                 "trace blocks",
+                "[angryier][analysis] evidence interpretation",
+                "evidence quality",
+                "primary limiter",
+                "frontier block",
                 "[angryier][ideas] next symbolic-analysis moves",
                 "ABI-controlled inputs",
                 "intermediate --find waypoint",
