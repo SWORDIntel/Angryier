@@ -7898,20 +7898,33 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Ok(Some((predicate, summary.key)))
     }
 
-    /// Solves the edge opposite the state's most recent symbolic branch.
+    /// Solves the edge opposite one retained symbolic branch decision.
     ///
-    /// Only the path constraints that existed before the branch are asserted;
-    /// the chosen edge and all later constraints are intentionally excluded.
-    /// This makes the model a candidate for branch inversion at that exact
-    /// decision point rather than a contradictory request to satisfy both
-    /// sides of the already-taken path.
-    pub fn solve_alternate_branch(
+    /// Only the path constraints that existed before the supplied decision are
+    /// asserted; the chosen edge and every later constraint are intentionally
+    /// excluded. Retained branch history is therefore directly solvable
+    /// without reconstructing predicates from trace PCs or numeric proximity.
+    ///
+    /// Prefix provenance fails closed: a decision whose recorded prefix is
+    /// longer than the state's current constraint vector cannot be trusted, so
+    /// this returns an execution error instead of silently clamping the prefix.
+    pub fn solve_alternate_branch_decision(
         &self,
         state: &SymbolicState,
+        decision: SymbolicBranchDecision,
         backend: &mut dyn SolverBackend,
         timeout: Duration,
     ) -> Result<AlternateBranchSolution, RuntimeError> {
-        let decision = state.last_branch.ok_or(RuntimeError::NoBranchInTrace)?;
+        if decision.prefix_constraints > state.constraints.len() {
+            return Err(RuntimeError::Execution(format!(
+                "branch decision at {:#x} records prefix length {}, but state {} only has {} constraint(s)",
+                decision.pc,
+                decision.prefix_constraints,
+                state.id,
+                state.constraints.len()
+            )));
+        }
+
         let alternate = if decision.chose_taken {
             self.arena
                 .intern(angryier_expr::ExprNode {
@@ -7924,8 +7937,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         } else {
             decision.condition
         };
-        let prefix_len = decision.prefix_constraints.min(state.constraints.len());
-        let constraints: Vec<CanonicalConstraint> = state.constraints[..prefix_len]
+        let constraints: Vec<CanonicalConstraint> = state.constraints[..decision.prefix_constraints]
             .iter()
             .enumerate()
             .filter_map(|(i, expr)| {
@@ -7942,7 +7954,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .map(|s| s.key)
             .ok_or_else(|| RuntimeError::Symbolic("missing alternate-branch dependency summary".into()))?;
         let query = SolverQuery::canonical(
-            SolverQueryId(state.id),
+            SolverQueryId(state.id ^ decision.pc),
             &constraints,
             alternate,
             key,
@@ -7963,6 +7975,21 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             model: result.model,
             solver_elapsed: result.elapsed,
         })
+    }
+
+    /// Solves the edge opposite the state's most recent symbolic branch.
+    ///
+    /// This compatibility convenience delegates to the explicit-decision
+    /// solver; callers that retain branch history can solve an older decision
+    /// directly.
+    pub fn solve_alternate_branch(
+        &self,
+        state: &SymbolicState,
+        backend: &mut dyn SolverBackend,
+        timeout: Duration,
+    ) -> Result<AlternateBranchSolution, RuntimeError> {
+        let decision = state.last_branch.ok_or(RuntimeError::NoBranchInTrace)?;
+        self.solve_alternate_branch_decision(state, decision, backend, timeout)
     }
 
     /// Replays a SAT alternate-branch model concretely from the process entry
