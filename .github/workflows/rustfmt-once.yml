@@ -1,0 +1,37 @@
+name: One-shot rustfmt cleanup
+
+on:
+  push:
+    paths:
+      - ".github/workflows/rustfmt-once.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  rustfmt:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Toolchain
+        run: rustup show
+      - name: Format workspace
+        run: cargo fmt --all
+      - name: Remove one-shot workflow
+        run: rm .github/workflows/rustfmt-once.yml
+      - name: Commit formatting cleanup
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No formatting changes to commit."
+            exit 0
+          fi
+          git commit -m "Format Rust workspace"
+          git push origin HEAD:main
