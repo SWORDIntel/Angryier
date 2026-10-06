@@ -144,6 +144,8 @@ The generated driver also prints an `[angryier][analysis]` section before the re
 
 The analysis layer deliberately does **not** call the last trace block “closest to target” unless CFG evidence exists. A final trace PC is only the last retained frontier observation; numeric address proximity is not meaningful reachability evidence.
 
+The `[angryier][analysis] symbolic frontier` subsection reports which symbolic sources are present in the selected path's accumulated constraints. This is narrower than “all symbols created during execution”: a register source that does not appear in the retained constraint dependency union has not contributed to a retained path predicate on that diagnostic state. The CLI therefore recommends preserving path-relevant sources first and concretizing unrelated inputs unless trace/taint evidence justifies keeping them symbolic.
+
 When region forking is active, the CLI reports the number of guessed child worlds and tells the operator to inspect `region_fork_sites` before trusting a reachable path. When state pruning occurs, it prints the peak frontier against the configured cap so the next decision can distinguish “raise capacity” from “improve search policy.”
 
 ### Exit codes
@@ -192,6 +194,8 @@ Result table:
 | `concretization_retries` | Solver-assisted unresolved-address recovery attempts. |
 | `region_fork_children` | Guessed address-world child states created when unresolved pointers are forked across mapped RW regions. Non-zero is fidelity debt, not free coverage. |
 | `region_fork_sites` | Capped ledger of region-fork sites with PC, expression id, pinned address, region base and size. |
+| `frontier` | Diagnostic state selected from first found state, else first live state, else most recent dead state. Contains state id, PC/PC hex, path-constraint count, bound-symbol count, current symbolic-register set, and `constraint_dependencies`. |
+| `frontier.constraint_dependencies` | Union of symbolic leaf IDs that actually occur in the selected state's retained path constraints. Register-backed leaves include register id/name, width and expression id; unbound leaves stay explicitly labeled and may represent symbolic memory or fallback/free symbols. |
 | `found` | Number of states that reached a `find` target. |
 | `inputs` | Only with `solve = true`: one entry per solved found state, each an array of byte-strings (model bytes per symbol). Per-state model solving is capped at 10 seconds. |
 | `regs` | Only when at least one state was found: the first found state's register bindings, keyed by engine register ID (rax = 0 … r15 = 15), values are integers for concretely-bound registers. |
