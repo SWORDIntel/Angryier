@@ -1008,6 +1008,16 @@ if r.branch_analysis ~= nil then
         else
             print("  target relation         : neither immediate successor is an exact configured --find target")
         end
+        print(string.format("  CFG target analysis     : %s", tostring(b.cfg_status or "not-run")))
+        if b.cfg_preference ~= nil and b.cfg_preference ~= "none" then
+            print(string.format("  CFG preferred edge      : %s", tostring(b.cfg_preference)))
+            print(string.format("  CFG ranked find target  : %s", tostring(b.cfg_find_target_hex or b.cfg_find_target or "?")))
+            print(string.format("  chosen -> target        : %s edge(s)", tostring(b.cfg_chosen_distance or "unreachable/in-window")))
+            print(string.format("  alternate -> target     : %s edge(s)", tostring(b.cfg_alternate_distance or "unreachable/in-window")))
+        end
+        if b.cfg_error ~= nil then
+            print(string.format("  CFG analysis detail     : %s", tostring(b.cfg_error)))
+        end
         print(string.format("  condition expression    : %s", tostring(b.condition or "?")))
         print(string.format("  common prefix constraints: %s", tostring(b.prefix_constraints or 0)))
         print(string.format("  alternate solver status : %s", tostring(b.solver_status or "not-run")))
@@ -1124,6 +1134,10 @@ if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
     local b = r.branch_analysis
     if b.solver_status == "Sat" and b.alternate_is_find_target then
         idea("HIGH-VALUE NEXT RUN: the opposite edge is SAT and its immediate successor exactly matches a configured --find target. Replay the reported model with --reg seeds (or keep the inputs symbolic for a seeded rerun); this is direct target-edge evidence, though concrete replay should still validate the model.")
+    elseif b.solver_status == "Sat" and b.cfg_preference == "alternate" then
+        idea("TARGET-DIRECTED NEXT RUN: the alternate edge is SAT and the recovered CFG places that successor on a shorter static path to a configured --find target than the chosen successor. Replay the reported model first. CFG distance is structural guidance only; unresolved indirect edges or incomplete recovery can hide other routes.")
+    elseif b.solver_status == "Sat" and b.cfg_preference == "chosen" then
+        idea("The alternate edge is SAT, but the recovered CFG currently ranks the chosen successor closer to a configured --find target. Keep the alternate model as a coverage seed, but do not prioritize it over the chosen path solely for target reachability.")
     elseif b.solver_status == "Sat" then
         idea("The opposite edge of the most recent symbolic branch is SAT under the exact pre-branch path prefix. Use the reported alternate model as a mutation/seed candidate, then concretely replay it; SAT proves solver feasibility for the modeled prefix, not that the full alternate path reaches your target.")
     elseif b.solver_status == "Unsat" then
@@ -1748,6 +1762,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "[angryier][branch-analysis] most recent symbolic branch",
                 "alternate solver status",
                 "target relation",
+                "CFG target analysis",
                 "branch_analysis = true",
                 "constraint dependencies",
                 "symbolic register set",
