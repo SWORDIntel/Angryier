@@ -747,6 +747,37 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             if branch_analysis {
                 let branch_out = lua.create_table()?;
 
+                // Recover one bounded CFG rooted at the earliest retained
+                // branch. Reuse it for the entire history + latest-branch
+                // analysis so multi-candidate ranking does not multiply CFG
+                // recovery cost.
+                let analysis_cfg = if policy.find.is_empty() {
+                    None
+                } else {
+                    state
+                        .branch_history
+                        .first()
+                        .map(|decision| runtime.recover_cfg_window(&state.process, decision.pc, 16 * 1024 * 1024))
+                        .or_else(|| {
+                            state
+                                .last_branch
+                                .map(|decision| runtime.recover_cfg_window(&state.process, decision.pc, 16 * 1024 * 1024))
+                        })
+                };
+                // (history index, decision, target, alternate distance,
+                // chosen distance, class, improvement). Class 2 means the
+                // alternate reaches the target while the chosen edge does
+                // not; class 1 means both reach it but alternate is shorter.
+                let mut history_candidate: Option<(
+                    usize,
+                    crate::SymbolicBranchDecision,
+                    u64,
+                    usize,
+                    Option<usize>,
+                    u8,
+                    usize,
+                )> = None;
+
                 // Bounded branch provenance for multi-candidate follow-up.
                 // Entries preserve execution order; the last entry is the
                 // decision analyzed in detail below unless a merge cleared
@@ -781,6 +812,73 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     if let Some(summary) = arena.dependency_summary(recorded.condition) {
                         entry.set("dependency_sources", summary.symbolic_sources.len())?;
                     }
+
+                    if let Some(Ok(cfg)) = analysis_cfg.as_ref() {
+                        let mut best_for_decision: Option<(u64, usize, Option<usize>, u8, usize)> = None;
+                        for target in policy.find.iter().copied() {
+                            let chosen_distance = cfg.shortest_static_distance(chosen, target, 128);
+                            let alternate_distance = cfg.shortest_static_distance(alternate, target, 128);
+                            let Some(alternate_distance) = alternate_distance else {
+                                continue;
+                            };
+                            let (class, improvement) = match chosen_distance {
+                                None => (2u8, usize::MAX),
+                                Some(chosen_distance) if alternate_distance < chosen_distance => {
+                                    (1u8, chosen_distance - alternate_distance)
+                                }
+                                _ => continue,
+                            };
+                            let replace = best_for_decision.as_ref().is_none_or(
+                                |(_, best_alt, _, best_class, best_improvement)| {
+                                    class > *best_class
+                                        || (class == *best_class
+                                            && (improvement > *best_improvement
+                                                || (improvement == *best_improvement
+                                                    && alternate_distance < *best_alt)))
+                                },
+                            );
+                            if replace {
+                                best_for_decision =
+                                    Some((target, alternate_distance, chosen_distance, class, improvement));
+                            }
+                        }
+                        if let Some((target, alt_distance, chosen_distance, class, improvement)) = best_for_decision {
+                            entry.set("cfg_preference", "alternate")?;
+                            set_addr64(&entry, "cfg_find_target", target)?;
+                            entry.set("cfg_alternate_distance", alt_distance)?;
+                            if let Some(chosen_distance) = chosen_distance {
+                                entry.set("cfg_chosen_distance", chosen_distance)?;
+                            }
+
+                            // Do not auto-select the newest branch here: it
+                            // already receives the full detailed analysis
+                            // below. This candidate is specifically the best
+                            // OLDER mutation point.
+                            if index + 1 < state.branch_history.len() {
+                                let replace = history_candidate.as_ref().is_none_or(
+                                    |(_, _, _, best_alt, _, best_class, best_improvement)| {
+                                        class > *best_class
+                                            || (class == *best_class
+                                                && (improvement > *best_improvement
+                                                    || (improvement == *best_improvement
+                                                        && alt_distance < *best_alt)))
+                                    },
+                                );
+                                if replace {
+                                    history_candidate = Some((
+                                        index + 1,
+                                        recorded,
+                                        target,
+                                        alt_distance,
+                                        chosen_distance,
+                                        class,
+                                        improvement,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
                     if alternate_find {
                         latest_exact_find = Some((index + 1, recorded, alternate));
                     }
@@ -791,6 +889,28 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     branch_out.set("history_exact_find_index", index)?;
                     set_addr64(&branch_out, "history_exact_find_pc", recorded.pc)?;
                     set_addr64(&branch_out, "history_exact_find_target", target)?;
+                }
+                if let Some((index, recorded, target, alt_distance, chosen_distance, class, improvement)) =
+                    history_candidate
+                {
+                    branch_out.set("history_candidate_index", index)?;
+                    set_addr64(&branch_out, "history_candidate_pc", recorded.pc)?;
+                    set_addr64(&branch_out, "history_candidate_find_target", target)?;
+                    branch_out.set("history_candidate_alternate_distance", alt_distance)?;
+                    if let Some(chosen_distance) = chosen_distance {
+                        branch_out.set("history_candidate_chosen_distance", chosen_distance)?;
+                    }
+                    branch_out.set(
+                        "history_candidate_reason",
+                        if class == 2 {
+                            "alternate reaches target in bounded CFG while chosen edge does not"
+                        } else {
+                            "alternate is shorter than chosen edge in bounded CFG"
+                        },
+                    )?;
+                    if improvement != usize::MAX {
+                        branch_out.set("history_candidate_improvement", improvement)?;
+                    }
                 }
 
                 if let Some(decision) = state.last_branch {
@@ -824,8 +944,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     if policy.find.is_empty() {
                         branch_out.set("cfg_status", "no-find-targets")?;
                     } else {
-                        match runtime.recover_cfg_window(&state.process, decision.pc, 16 * 1024 * 1024) {
-                            Ok(cfg) => {
+                        match analysis_cfg.as_ref() {
+                            Some(Ok(cfg)) => {
                                 branch_out.set("cfg_status", "ok")?;
                                 let target_tbl = lua.create_table()?;
                                 let mut best_alternate: Option<(u64, usize, Option<usize>)> = None;
@@ -901,9 +1021,13 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                     branch_out.set("cfg_preference", "none")?;
                                 }
                             }
-                            Err(error) => {
+                            Some(Err(error)) => {
                                 branch_out.set("cfg_status", "unavailable")?;
                                 branch_out.set("cfg_error", error.to_string())?;
+                            }
+                            None => {
+                                branch_out.set("cfg_status", "unavailable")?;
+                                branch_out.set("cfg_error", "no retained branch root was available for CFG recovery")?;
                             }
                         }
                     }
