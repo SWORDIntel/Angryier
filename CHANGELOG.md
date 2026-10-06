@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Path-relevant symbolic frontier:** `angry.run` now exposes a diagnostic `frontier` state with current symbolic registers and the symbolic leaf IDs that actually occur in retained path constraints. Register-backed dependencies are mapped back to register name/width/expression, allowing the CLI to distinguish predicate-driving inputs from merely-symbolic inputs.
 - **Region-fork fidelity reporting:** result tables now expose region-fork child counts and the exact guessed address-world sites used to continue unresolved pointer paths.
 - **Early CLI compile gate:** CI compiles the run-capable CLI before the repository-wide rustfmt gate so functional regressions remain visible even while historical formatting debt exists elsewhere in the workspace.
+- **Alternate-branch inversion:** symbolic states record their latest exact branch predicate, successors, chosen edge, and pre-branch constraint prefix. Post-run analysis can solve the opposite edge without asserting the already-chosen branch or later divergent constraints.
+- **CFG-guided target direction:** bounded static CFG recovery compares each branch successor's edge distance to configured find targets. Solver feasibility and structural target preference are reported separately and combined only for evidence-backed next-run guidance.
+- **Concrete replay seeds:** `angryier run --reg REG=VALUE` seeds full-width GPR values, including exact `u64` kernel pointers; alternate-branch register models now emit canonical `value_hex` values and replay-ready seed flags.
+- **First-class search controls:** the CLI now exposes `--avoid`, `--states`, `--timeout`, `--branch-timeout-ms`, `--solve`, `--fork`, and `--dfs` instead of requiring a custom Lua driver for common exploration policy changes.
+- **Branch-analysis regression gates:** CI runs alternate-edge prefix solving, CFG target-distance, and branch-analysis regressions before the historical repository-wide format gate.
+
+### Fixed
+
+- **Found-state solving contract:** `solve = true` now exclusively controls post-run found-state model extraction; the Z3 backend may still feasibility-gate symbolic branches when model extraction is disabled.
+- **Merged-state branch provenance:** state merges now invalidate stored branch-prefix metadata instead of reusing an index from pre-merge constraint vectors, preventing potentially unsound alternate-edge queries.
 
 ## [1.0.0] — 2026-10-01
 
