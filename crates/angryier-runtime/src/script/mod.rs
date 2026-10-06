@@ -515,11 +515,14 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     out.set("forks", report.forks)?;
     out.set("merges", report.merges)?;
     out.set("terminated", report.terminated)?;
+    out.set("pruned_states", report.pruned_states)?;
     out.set("failed", report.failed)?;
     if let Some(error) = report.last_error.as_deref() {
         out.set("last_error", error)?;
     }
     out.set("live_states", report.live_states)?;
+    out.set("dead_states", report.dead_states)?;
+    out.set("peak_states", report.peak_states)?;
     out.set("found", report.found.len())?;
     out.set("timed_out", report.timed_out)?;
     // Function-entry RSP: kernel stacks live above i64::MAX, so the numeric
@@ -529,6 +532,23 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // one unresolved address, pins the model's value, and re-runs the
     // block) — visible budget diagnostics for under-constrained runs.
     out.set("concretization_retries", report.concretization_retries)?;
+    out.set("region_fork_children", report.region_fork_children)?;
+    // Every region-fork child is a guessed address world. Keep the capped
+    // site ledger machine-readable so frontends can explain exactly where
+    // fidelity was traded for continued exploration.
+    {
+        let sites = lua.create_table()?;
+        for (index, site) in session.region_fork_sites().iter().enumerate() {
+            let entry = lua.create_table()?;
+            set_addr64(&entry, "pc", site.pc)?;
+            entry.set("expr", site.expr.0)?;
+            set_addr64(&entry, "pinned", site.pinned)?;
+            set_addr64(&entry, "region_base", site.region_base)?;
+            entry.set("region_size", site.region_size)?;
+            sites.set(index + 1, entry)?;
+        }
+        out.set("region_fork_sites", sites)?;
+    }
     // Executed-path trace: last PCs of the most relevant dead state (the
     // failed path), else the first live state. Diagnosis aid for model
     // iteration — every block address the state actually executed.
