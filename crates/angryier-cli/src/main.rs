@@ -619,20 +619,135 @@ mod run_cmd {
         let escaped_path = config.path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
             r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = {steps}, states = {states} }})
+
+local function yn(v)
+    if v then return "yes" end
+    return "no"
+end
+
+local function count_table(t)
+    if t == nil then return 0 end
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
 print("[angryier][result] symbolic/concolic exploration completed")
-print(string.format("  exploration steps : %d (engine work units executed)", r.steps))
-print(string.format("  forks             : %d (new execution states created at branches)", r.forks))
-print(string.format("  merges            : %d (compatible states recombined)", r.merges))
-print(string.format("  terminated states : %d (states that reached a terminal condition)", r.terminated))
-print(string.format("  find hits         : %d (configured target-address hits)", r.found))
-if r.found == 0 then
-    print("  target status     : no configured find target was reached in this run")
+print(string.format("  exploration steps      : %d (engine work units executed)", r.steps or 0))
+print(string.format("  forks                  : %d (new execution states created at symbolic branches)", r.forks or 0))
+print(string.format("  merges                 : %d (compatible execution states recombined)", r.merges or 0))
+print(string.format("  terminated states      : %d (states that reached a modeled terminal condition)", r.terminated or 0))
+print(string.format("  failed states          : %d (states stopped by execution/model/semantic failure)", r.failed or 0))
+print(string.format("  live states            : %d (states still explorable when this run stopped)", r.live_states or 0))
+print(string.format("  find hits              : %d (configured target-address states reached)", r.found or 0))
+print(string.format("  timed out              : %s", yn(r.timed_out)))
+print(string.format("  concretization retries : %d (solver-assisted unresolved-address recovery attempts)", r.concretization_retries or 0))
+print(string.format("  trace blocks           : %d (blocks retained in the diagnostic execution trace)", count_table(r.trace_hex or r.trace)))
+
+if r.last_error ~= nil then
+    print(string.format("  last error              : %s", tostring(r.last_error)))
+end
+if r.unsupported_total ~= nil then
+    print(string.format("  unsupported semantics   : %d fallback hit(s)", r.unsupported_total))
+end
+if r.unmapped_total ~= nil then
+    print(string.format("  under-constrained mem   : %d relaxed access(es)", r.unmapped_total))
+end
+if r.ro_write_total ~= nil then
+    print(string.format("  relaxed read-only writes: %d", r.ro_write_total))
+end
+if r.vector_debt_total ~= nil then
+    print(string.format("  vector semantic debt    : %d under-constrained vector operation(s)", r.vector_debt_total))
+end
+
+if (r.found or 0) == 0 then
+    print("  target status           : no configured find target was reached in this run")
 else
-    print("  target status     : one or more configured find targets were reached")
-end"#,
+    print("  target status           : one or more configured find targets were reached")
+end
+
+print("[angryier][ideas] next symbolic-analysis moves")
+local ideas = 0
+local function idea(text)
+    ideas = ideas + 1
+    print(string.format("  %02d. %s", ideas, text))
+end
+
+if {symbolic_count} == 0 and {argv_enabled} == 0 then
+    idea("No symbolic source was configured. Start with ABI-controlled inputs instead of symbolizing everything: on SysV AMD64 try --symbolic rdi/rsi/rdx/rcx/r8/r9 according to the target function signature, or use --argv N when input naturally enters through argv[0].")
+elseif {symbolic_count} == 1 then
+    idea("Only one symbolic register is active. If control flow depends on a multi-argument predicate, add the next ABI argument register rather than widening the entire machine state.")
+else
+    idea("Multiple symbolic registers are active. If path growth becomes expensive, reduce the symbolic frontier to the arguments that actually influence the target and use taint/trace evidence to justify each additional source.")
+end
+
+if {find_count} == 0 then
+    idea("No --find target is configured. Add a semantically meaningful address such as an accept/success block, vulnerable call site, error bypass, allocator/free site, or post-validation block so exploration has a concrete objective.")
+elseif (r.found or 0) == 0 then
+    idea("The configured target was not reached. Inspect trace_hex and the final branch neighborhood, then add an intermediate --find waypoint to determine where reachability diverges before simply multiplying the budget.")
+else
+    idea("A target was reached. Re-run with a custom Lua script and solve=true to recover concrete satisfying inputs/models for the found state, then replay them concretely to validate the path.")
+end
+
+if (r.forks or 0) == 0 and ({symbolic_count} > 0 or {argv_enabled} > 0) then
+    idea("Symbolic data produced no forks. That usually means the chosen source has not reached a conditional yet, was overwritten/concretized, or execution ended too early; inspect the trace and move the symbolic source closer to the decision point.")
+elseif (r.forks or 0) > 0 and (r.live_states or 0) > 0 then
+    idea("Forking is active and live states remain. A larger step budget may expose deeper branches; if the state cap is the limiter, switch to a custom Lua run and raise states selectively rather than globally.")
+end
+
+if (r.live_states or 0) >= {states} then
+    idea("Live-state count reached the default state budget. The next useful experiment is a custom Lua driver with a larger states value, plus tighter find/avoid policy so extra capacity goes to promising branches instead of blind breadth.")
+end
+
+if r.timed_out then
+    idea("The run timed out. Increasing wall time alone is low-value: first narrow symbolic sources, add target/avoid guidance, use intermediate waypoints, or solve only states near the interesting branch.")
+end
+
+if (r.failed or 0) > 0 then
+    idea("At least one state failed. Use last_error plus trace_hex to classify the first failure as semantic coverage, environment-model debt, memory modeling, or solver/concretization trouble before increasing exploration limits.")
+end
+
+if (r.concretization_retries or 0) > 0 then
+    idea("Symbolic-address concretization was required. Treat repeated retries as a signal to improve pointer provenance: symbolize the data feeding the address expression more precisely, constrain its region, or model the allocator/object layout.")
+end
+
+if r.unsupported_total ~= nil and r.unsupported_total > 0 then
+    idea("Unsupported semantic fallback was exercised. Prioritize the first unsupported_sites entries by reachability and frequency; implementing those forms can be more valuable than adding raw steps because fallback debt weakens path fidelity.")
+end
+
+if r.unmapped_total ~= nil and r.unmapped_total > 0 then
+    idea("Under-constrained memory was used. Inspect unmapped_sites and decide whether each access should be backed by a real mapped object, a symbolic buffer, a modeled API result, or an explicit region constraint; fabricated memory can create false reachability.")
+end
+
+if r.ro_write_total ~= nil and r.ro_write_total > 0 then
+    idea("Execution relaxed writes into read-only memory. Check ro_write_reverts and determine whether this is loader protection drift, self-modifying behavior, an environment-model artifact, or a genuinely invalid path.")
+end
+
+if r.vector_debt_total ~= nil and r.vector_debt_total > 0 then
+    idea("Vector operations were replaced with under-constrained symbols. If the target predicate depends on those values, implement or tighten the corresponding vector semantics before trusting a SAT/reachability result.")
+end
+
+if (r.merges or 0) == 0 and (r.forks or 0) >= 8 then
+    idea("The run forked repeatedly without merging. Consider convergence-aware exploration or function/loop summaries around reconvergent regions to prevent equivalent path prefixes from consuming state budget.")
+elseif (r.merges or 0) > 0 then
+    idea("State merging is occurring. Compare merge count against forks and target reachability; aggressive merging can save memory, but target-sensitive regions may benefit from delaying merges until after key predicates.")
+end
+
+if count_table(r.trace_hex or r.trace) > 0 then
+    idea("Use the retained trace as a seed for the next run: identify the last stable block before divergence, then place a breakpoint/find waypoint there and inspect the immediately following predicate instead of restarting analysis from zero context.")
+end
+
+if ideas == 0 then
+    idea("The run did not expose an obvious bottleneck. Next escalation: add a custom Lua script that records branch-local state, enables solving only at selected targets, and emits the relevant register/memory slice for each candidate path.")
+end
+
+print("[angryier][ideas] treat these as evidence-driven hypotheses, not automatic proof; validate interesting paths with solved inputs and concrete replay.")"#,
             path = escaped_path,
             steps = config.steps,
-            states = angryier_runtime::script::DEFAULT_MAX_STATES
+            states = angryier_runtime::script::DEFAULT_MAX_STATES,
+            symbolic_count = config.symbolic.len(),
+            argv_enabled = usize::from(config.argv.is_some()),
+            find_count = config.find.len()
         )
     }
 
@@ -989,6 +1104,28 @@ end"#,
             assert!(!lua.contains("steps = 1024"), "stale 1024 default: {lua}");
             cfg.steps = 512;
             assert!(default_driver_lua(&cfg).contains("steps = 512"));
+        }
+
+        #[test]
+        fn default_driver_emits_diagnostic_metrics_and_future_ideas() {
+            let cfg = config("./bin", None, &["rdi"], &[0x401000], None, 512, false);
+            let lua = default_driver_lua(&cfg);
+            for expected in [
+                "failed states",
+                "live states",
+                "concretization retries",
+                "trace blocks",
+                "[angryier][ideas] next symbolic-analysis moves",
+                "ABI-controlled inputs",
+                "intermediate --find waypoint",
+                "solve=true",
+                "unsupported semantic fallback",
+                "under-constrained memory",
+                "vector operations",
+                "retained trace as a seed",
+            ] {
+                assert!(lua.contains(expected), "missing diagnostic/advice text: {expected}");
+            }
         }
 
         #[test]
