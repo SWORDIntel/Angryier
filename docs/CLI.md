@@ -148,6 +148,20 @@ To test the opposite edge, Angryier asserts only that shared pre-branch prefix p
 
 When the alternate edge is SAT, the CLI prints candidate model assignments and, for whole-register values, replay-ready `--reg REG=0x...` flags. For a concrete replay, omit the matching `--symbolic REG`; for a seeded symbolic rerun, keep it. SAT means the alternate edge is feasible under Angryier's current model and prefix—not that the remainder of that path reaches the analyst's target.
 
+### Search controls from the CLI
+
+The normal CLI now exposes the exploration controls that previously required a custom Lua driver. This matters because Angryier's own diagnostics can recommend a directly executable next command:
+
+- state pressure → raise `--states`;
+- unfinished live frontier → raise `--steps`;
+- wall timeout → adjust `--timeout` after first narrowing the symbolic frontier;
+- solver UNKNOWN on a useful alternate edge → raise `--branch-timeout-ms`;
+- concolic folding suppressing useful path diversity → add `--fork`;
+- breadth explosion while a target lies deeper on one path → add `--dfs`;
+- target reached and a concrete witness is needed → add `--solve`.
+
+These switches are injected only by the generated driver. When `--script` is supplied, the script owns its own `angry.run` options.
+
 
 The generated driver also prints an `[angryier][analysis]` section before the recommendation list. It includes the retained path tail, the last retained frontier block, a fidelity/evidence-quality classification, and a single primary limiter chosen from timeout, state pruning, state failure, unsupported semantics, under-constrained memory/address handling, vector semantic debt, step-budget exhaustion, absent symbolic influence, or unresolved target reachability.
 
