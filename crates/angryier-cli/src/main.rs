@@ -594,12 +594,12 @@ mod run_cmd {
             angryier_runtime::StepOutcome::Syscall { pc, number } => format!(
                 "[angryier][trace] step {step_index}: modeled syscall dispatched; pc={pc:#x}, syscall_number={number}"
             ),
-            angryier_runtime::StepOutcome::Terminated { pc } => format!(
-                "[angryier][trace] step {step_index}: execution terminated; final_pc={pc:#x}"
-            ),
-            angryier_runtime::StepOutcome::Trap { pc, vector } => format!(
-                "[angryier][trace] step {step_index}: trap raised; pc={pc:#x}, vector={vector:#x}"
-            ),
+            angryier_runtime::StepOutcome::Terminated { pc } => {
+                format!("[angryier][trace] step {step_index}: execution terminated; final_pc={pc:#x}")
+            }
+            angryier_runtime::StepOutcome::Trap { pc, vector } => {
+                format!("[angryier][trace] step {step_index}: trap raised; pc={pc:#x}, vector={vector:#x}")
+            }
         }
     }
 
@@ -659,10 +659,7 @@ end"#,
             println!("[angryier][input] loading custom Lua driver: {script}");
             match std::fs::read_to_string(script) {
                 Ok(s) => {
-                    println!(
-                        "[angryier][input] custom Lua driver loaded: {} byte(s)",
-                        s.len()
-                    );
+                    println!("[angryier][input] custom Lua driver loaded: {} byte(s)", s.len());
                     s
                 }
                 Err(e) => {
@@ -674,9 +671,7 @@ end"#,
                 }
             }
         } else {
-            println!(
-                "[angryier][input] synthesizing default exploration driver from CLI flags"
-            );
+            println!("[angryier][input] synthesizing default exploration driver from CLI flags");
             default_driver_lua(config)
         };
 
@@ -721,14 +716,9 @@ end"#,
                 return 1;
             }
         };
-        println!(
-            "[angryier][load] input read successfully: {} byte(s)",
-            bytes.len()
-        );
+        println!("[angryier][load] input read successfully: {} byte(s)", bytes.len());
 
-        println!(
-            "[angryier][init] constructing native-XED runtime (semantic_version=1, target_profile=1)"
-        );
+        println!("[angryier][init] constructing native-XED runtime (semantic_version=1, target_profile=1)");
         let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
         let mut process = match runtime.load_pe_driver(&bytes) {
             Ok(p) => p,
@@ -761,7 +751,11 @@ end"#,
         if imports.is_empty() {
             println!("  import preview : none");
         } else {
-            println!("  import preview : first {} entr{}", imports.len().min(12), if imports.len().min(12) == 1 { "y" } else { "ies" });
+            println!(
+                "  import preview : first {} entr{}",
+                imports.len().min(12),
+                if imports.len().min(12) == 1 { "y" } else { "ies" }
+            );
             for (address, dll, name) in imports.iter().take(12) {
                 println!("    {:#x} -> {}!{}", **address, dll, name);
             }
@@ -775,18 +769,14 @@ end"#,
 
         let budget = config.steps;
         let mut steps: u64 = 0;
-        println!(
-            "[angryier][exec] entering DriverEntry execution loop; budget={budget} runtime step(s)"
-        );
+        println!("[angryier][exec] entering DriverEntry execution loop; budget={budget} runtime step(s)");
         println!(
             "[angryier][trace] the first 12 ordinary instruction steps are shown in full; modeled calls/traps/termination remain visible afterwards"
         );
 
         let stop_reason = loop {
             if steps >= budget {
-                println!(
-                    "[angryier][exec] stop condition reached: step budget exhausted ({steps}/{budget})"
-                );
+                println!("[angryier][exec] stop condition reached: step budget exhausted ({steps}/{budget})");
                 break format!("step budget exhausted at {steps}/{budget}");
             }
 
@@ -805,8 +795,7 @@ end"#,
             };
             steps += 1;
 
-            let ordinary_instruction =
-                matches!(&outcome, angryier_runtime::StepOutcome::Stepped { .. });
+            let ordinary_instruction = matches!(&outcome, angryier_runtime::StepOutcome::Stepped { .. });
             if steps <= 12 || !ordinary_instruction {
                 println!("{}", driver_step_output(steps, &outcome));
             } else if steps == 13 {
@@ -838,16 +827,17 @@ end"#,
         println!("  steps completed     : {steps}");
         println!("  configured budget   : {budget}");
         println!("  final pc            : {:#x}", process.pc().unwrap_or(0));
-        println!("  process terminated  : {}", if process.terminated { "yes" } else { "no" });
+        println!(
+            "  process terminated  : {}",
+            if process.terminated { "yes" } else { "no" }
+        );
         println!("  simproc dispatches  : {}", process.simproc_dispatches);
         println!("  pool allocations    : {}", report.allocs);
         println!("  pool frees          : {}", report.frees);
         println!("  double-free events  : {}", report.double_frees.len());
 
         if report.double_frees.is_empty() {
-            println!(
-                "[angryier][verdict] no double-free event was observed by the kernel pool model during this run"
-            );
+            println!("[angryier][verdict] no double-free event was observed by the kernel pool model during this run");
         } else {
             println!(
                 "[angryier][verdict][warning] {} double-free event(s) observed:",
