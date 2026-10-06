@@ -1,0 +1,3 @@
+# Mechanical rustfmt-only cleanup. Ignore this revision when assigning
+# authorship/blame so semantic history stays readable.
+3781e14abfb156faadc3db81482be3eee5b7416b
