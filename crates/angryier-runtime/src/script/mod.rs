@@ -549,14 +549,16 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
         out.set("region_fork_sites", sites)?;
     }
-    // Executed-path trace: last PCs of the most relevant dead state (the
-    // failed path), else the first live state. Diagnosis aid for model
-    // iteration — every block address the state actually executed.
+    // Diagnostic frontier: prefer a found state (best evidence), then a
+    // still-live state (next work frontier), then the most recent dead state.
+    // This same state feeds the trace and dependency view so frontends do not
+    // accidentally combine evidence from unrelated paths.
     {
-        let candidate = session
-            .dead
-            .last()
+        let candidate = report
+            .found
+            .first()
             .or_else(|| session.states.first())
+            .or_else(|| session.dead.last())
             .or_else(|| session.dead.first());
         if let Some(state) = candidate {
             let trace = lua.create_table()?;
@@ -570,6 +572,69 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             }
             out.set("trace", trace)?;
             out.set("trace_hex", trace_hex)?;
+
+            let frontier = lua.create_table()?;
+            frontier.set("state_id", state.id)?;
+            if let Ok(pc) = state.process.pc() {
+                set_addr64(&frontier, "pc", pc)?;
+            }
+            frontier.set("constraints", state.constraints.len())?;
+            frontier.set("bound_symbols", state.symbols.len())?;
+            frontier.set("symbolic_registers", state.registers.len())?;
+
+            let regs = lua.create_table()?;
+            for (index, (reg, (expr, _ty))) in state.registers.iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("register", *reg)?;
+                if let Some(name) = name_by_reg(*reg) {
+                    entry.set("name", name)?;
+                }
+                entry.set("expression", expr.0)?;
+                regs.set(index + 1, entry)?;
+            }
+            frontier.set("registers", regs)?;
+
+            // Union the symbolic leaf ids that actually occur in this
+            // state's accumulated path constraints. Unlike the broader
+            // `state.symbols` list, this is path-relevance evidence: a source
+            // absent here has not contributed to any retained path predicate.
+            let mut dependency_sources = Vec::<u64>::new();
+            for constraint in &state.constraints {
+                if let Some(summary) = arena.dependency_summary(*constraint) {
+                    dependency_sources.extend(summary.symbolic_sources);
+                }
+            }
+            dependency_sources.sort_unstable();
+            dependency_sources.dedup();
+
+            let deps = lua.create_table()?;
+            for (index, source_id) in dependency_sources.iter().enumerate() {
+                let entry = lua.create_table()?;
+                entry.set("source_id", *source_id)?;
+                let binding = state.symbols.iter().find(|binding| {
+                    arena
+                        .get(binding.expression)
+                        .filter(|node| node.op == angryier_expr::ExprOp::Symbol)
+                        .and_then(|node| node.immediate.get(..8).map(|bytes| bytes.to_vec()))
+                        .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+                        .map(u64::from_le_bytes)
+                        == Some(*source_id)
+                });
+                if let Some(binding) = binding {
+                    entry.set("source_kind", "register")?;
+                    entry.set("register", binding.register)?;
+                    if let Some(name) = name_by_reg(binding.register) {
+                        entry.set("name", name)?;
+                    }
+                    entry.set("width", binding.width)?;
+                    entry.set("expression", binding.expression.0)?;
+                } else {
+                    entry.set("source_kind", "unbound-symbol")?;
+                }
+                deps.set(index + 1, entry)?;
+            }
+            frontier.set("constraint_dependencies", deps)?;
+            out.set("frontier", frontier)?;
         }
     }
 
