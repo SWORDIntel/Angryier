@@ -684,6 +684,44 @@ else
     print("  retained path tail      : unavailable")
 end
 
+if r.frontier ~= nil then
+    local f = r.frontier
+    print("[angryier][analysis] symbolic frontier")
+    print(string.format("  state id                : %s", tostring(f.state_id or "?")))
+    print(string.format("  pc                      : %s", tostring(f.pc_hex or f.pc or "?")))
+    print(string.format("  path constraints        : %d", f.constraints or 0))
+    print(string.format("  bound symbols           : %d", f.bound_symbols or 0))
+    print(string.format("  symbolic registers      : %d", f.symbolic_registers or 0))
+    local deps = f.constraint_dependencies
+    local dep_count = count_table(deps)
+    print(string.format("  constraint dependencies : %d symbolic source(s) occur in retained path predicates", dep_count))
+    if dep_count > 0 then
+        local shown = math.min(dep_count, 12)
+        for i = 1, shown do
+            local dep = deps[i]
+            if dep ~= nil and dep.source_kind == "register" then
+                print(string.format(
+                    "    source[%02d] %-5s width=%s expr=%s source_id=%s",
+                    i,
+                    tostring(dep.name or dep.register or "?"),
+                    tostring(dep.width or "?"),
+                    tostring(dep.expression or "?"),
+                    tostring(dep.source_id or "?")
+                ))
+            elseif dep ~= nil then
+                print(string.format(
+                    "    source[%02d] unbound-symbol source_id=%s (memory/fallback/free symbolic leaf)",
+                    i,
+                    tostring(dep.source_id or "?")
+                ))
+            end
+        end
+        if dep_count > shown then
+            print(string.format("    ... %d additional dependency source(s) omitted", dep_count - shown))
+        end
+    end
+end
+
 local approximation_debt =
     (r.unsupported_total or 0) +
     (r.unmapped_total or 0) +
@@ -744,6 +782,27 @@ elseif {symbolic_count} == 1 then
     idea("Only one symbolic register is active. If control flow depends on a multi-argument predicate, add the next ABI argument register rather than widening the entire machine state.")
 else
     idea("Multiple symbolic registers are active. If path growth becomes expensive, reduce the symbolic frontier to the arguments that actually influence the target and use taint/trace evidence to justify each additional source.")
+end
+
+if r.frontier ~= nil then
+    local deps = r.frontier.constraint_dependencies
+    local dep_count = count_table(deps)
+    if dep_count == 0 and ({symbolic_count} > 0 or {argv_enabled} > 0) then
+        idea("The selected frontier state's retained path constraints contain no identifiable symbolic source leaves. The configured input may not be steering control flow yet, or its influence may have been concretized/overwritten; use the frontier PC and trace tail to move symbolic introduction closer to the decision point.")
+    elseif dep_count > 0 then
+        local names = {{}}
+        for i = 1, dep_count do
+            local dep = deps[i]
+            if dep ~= nil and dep.source_kind == "register" and dep.name ~= nil then
+                names[#names + 1] = dep.name
+            end
+        end
+        if #names > 0 then
+            idea("Retained path predicates currently depend on register source(s): " .. table.concat(names, ", ") .. ". Preserve these as the first symbolic frontier in the next experiment; concretize unrelated inputs unless trace/taint evidence shows they are also needed.")
+        else
+            idea("Retained path predicates depend on symbolic leaves that are not mapped to architectural register bindings. Inspect the frontier dependency source IDs together with memory/under-constrained ledgers; these may be symbolic memory bytes or fallback-created free symbols.")
+        end
+    end
 end
 
 if {find_count} == 0 then
@@ -1196,6 +1255,9 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "evidence quality",
                 "primary limiter",
                 "frontier block",
+                "[angryier][analysis] symbolic frontier",
+                "constraint dependencies",
+                "Retained path predicates currently depend on register source(s)",
                 "[angryier][ideas] next symbolic-analysis moves",
                 "ABI-controlled inputs",
                 "intermediate --find waypoint",
