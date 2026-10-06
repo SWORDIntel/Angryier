@@ -466,6 +466,13 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         .unwrap_or_default();
     let steps = opts.get::<u64>("steps").unwrap_or(DEFAULT_STEPS);
     let max_states = opts.get::<usize>("states").unwrap_or(DEFAULT_MAX_STATES);
+    // Expensive post-run work stays explicit on the scripting surface.
+    // The generated CLI driver opts into branch analysis by default, while
+    // arbitrary Lua scripts keep their historical cost profile unless they
+    // request it.
+    let solve_models = opts.get::<bool>("solve").unwrap_or(false);
+    let branch_analysis = opts.get::<bool>("branch_analysis").unwrap_or(false);
+    let branch_timeout_ms = opts.get::<u64>("branch_timeout_ms").unwrap_or(1000).clamp(1, 10_000);
 
     // exploration = "fork": branch folding trusts hard constants only, so
     // symbolic-condition branches fork both directions (solver-checked) —
@@ -635,6 +642,109 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             }
             frontier.set("constraint_dependencies", deps)?;
             out.set("frontier", frontier)?;
+
+            if branch_analysis {
+                let branch_out = lua.create_table()?;
+                if let Some(decision) = state.last_branch {
+                    branch_out.set("status", "recorded")?;
+                    set_addr64(&branch_out, "pc", decision.pc)?;
+                    set_addr64(&branch_out, "taken_target", decision.taken)?;
+                    set_addr64(&branch_out, "not_taken_target", decision.not_taken)?;
+                    branch_out.set("chosen", if decision.chose_taken { "taken" } else { "not_taken" })?;
+                    branch_out.set("condition", decision.condition.0)?;
+                    branch_out.set("prefix_constraints", decision.prefix_constraints)?;
+
+                    let dep_tbl = lua.create_table()?;
+                    if let Some(summary) = arena.dependency_summary(decision.condition) {
+                        for (index, source_id) in summary.symbolic_sources.iter().enumerate() {
+                            let entry = lua.create_table()?;
+                            entry.set("source_id", *source_id)?;
+                            let binding = state.symbols.iter().find(|binding| {
+                                arena
+                                    .get(binding.expression)
+                                    .filter(|node| node.op == angryier_expr::ExprOp::Symbol)
+                                    .and_then(|node| node.immediate.get(..8).map(|bytes| bytes.to_vec()))
+                                    .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+                                    .map(u64::from_le_bytes)
+                                    == Some(*source_id)
+                            });
+                            if let Some(binding) = binding {
+                                entry.set("width", binding.width)?;
+                                entry.set("expression", binding.expression.0)?;
+                                if binding.width == 64 {
+                                    entry.set("source_kind", "register")?;
+                                    entry.set("register", binding.register)?;
+                                    if let Some(name) = name_by_reg(binding.register) {
+                                        entry.set("name", name)?;
+                                    }
+                                } else {
+                                    entry.set("source_kind", "byte-symbol")?;
+                                }
+                            } else {
+                                entry.set("source_kind", "unbound-symbol")?;
+                            }
+                            dep_tbl.set(index + 1, entry)?;
+                        }
+                    }
+                    branch_out.set("dependencies", dep_tbl)?;
+
+                    if let Some(backend) = backend.as_mut() {
+                        match session.solve_alternate_branch(
+                            state,
+                            backend,
+                            std::time::Duration::from_millis(branch_timeout_ms),
+                        ) {
+                            Ok(solution) => {
+                                branch_out.set("solver_status", format!("{:?}", solution.outcome))?;
+                                set_addr64(&branch_out, "alternate_target", solution.alternate_target)?;
+                                branch_out.set("solver_elapsed_us", solution.solver_elapsed.as_micros() as u64)?;
+                                let model = lua.create_table()?;
+                                for (index, (expression, bytes)) in solution.model.iter().enumerate() {
+                                    let entry = lua.create_table()?;
+                                    entry.set("expression", *expression)?;
+                                    entry.set("bytes", lua.create_string(bytes)?)?;
+                                    let hex = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+                                    entry.set("hex", hex)?;
+                                    if let Some(binding) = state
+                                        .symbols
+                                        .iter()
+                                        .find(|binding| u64::from(binding.expression.0) == *expression)
+                                    {
+                                        entry.set("width", binding.width)?;
+                                        if binding.width == 64 {
+                                            entry.set("source_kind", "register")?;
+                                            entry.set("register", binding.register)?;
+                                            if let Some(name) = name_by_reg(binding.register) {
+                                                entry.set("name", name)?;
+                                            }
+                                        } else {
+                                            entry.set("source_kind", "byte-symbol")?;
+                                        }
+                                    } else {
+                                        entry.set("source_kind", "unbound-symbol")?;
+                                    }
+                                    model.set(index + 1, entry)?;
+                                }
+                                branch_out.set("model", model)?;
+                            }
+                            Err(error) => {
+                                branch_out.set("solver_status", "Error")?;
+                                branch_out.set("error", error.to_string())?;
+                            }
+                        }
+                    } else {
+                        branch_out.set("solver_status", "Unavailable")?;
+                        branch_out.set("error", "solver=off; alternate-edge satisfiability was not checked")?;
+                    }
+                } else {
+                    branch_out.set("status", "no-symbolic-branch")?;
+                    branch_out.set(
+                        "error",
+                        "the selected diagnostic frontier has no recorded symbolic branch decision",
+                    )?;
+                }
+                out.set("branch_analysis", branch_out)?;
+            }
         }
     }
 
@@ -730,8 +840,12 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         out.set("vector_debt_sites", vector_tbl)?;
     }
     // `solve = true`: solve each found state; `inputs` is an array of
-    // per-state tables mapping symbol index → byte-string.
-    if let Some(backend) = backend.as_mut() {
+    // per-state tables mapping symbol index → byte-string. Feasibility
+    // checking during exploration still uses the backend regardless of this
+    // flag; model extraction is the expensive optional post-run operation.
+    if solve_models
+        && let Some(backend) = backend.as_mut()
+    {
         let inputs = lua.create_table()?;
         for found in report.found.iter() {
             session.states.push(found.clone());
