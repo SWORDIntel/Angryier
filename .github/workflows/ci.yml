@@ -16,6 +16,8 @@ jobs:
         run: rustup show
       - name: Check CLI run frontend
         run: cargo check -p angryier-cli --all-targets
+      - name: Test branch analysis regression
+        run: cargo test -p angryier-runtime --features "xed script" --test lua_api test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix -- --exact
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check
