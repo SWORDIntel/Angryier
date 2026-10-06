@@ -18,7 +18,8 @@
 use std::path::PathBuf;
 
 use angryier::{
-    ApiError, DEFAULT_MAX_STATES, DEFAULT_STEPS, Engine, GPRS, ImageKind, RunOptions, SYMBOLIC_GPR_WIDTH, StepKind,
+    ApiError, DEFAULT_MAX_STATES, DEFAULT_STEPS, DEFAULT_TIMEOUT_SECS, Engine, GPRS, ImageKind, RunOptions,
+    SYMBOLIC_GPR_WIDTH, StepKind,
 };
 
 /// Resolves a test fixture path using strictly relative or dynamic paths.
@@ -119,6 +120,8 @@ fn test_run_options_construction_and_defaults() {
     let def = RunOptions::default();
     assert_eq!(def.steps, DEFAULT_STEPS);
     assert_eq!(def.max_states, DEFAULT_MAX_STATES);
+    assert_eq!(DEFAULT_TIMEOUT_SECS, angryier_runtime::DEFAULT_RUN_TIMEOUT_SECS);
+    assert_eq!(DEFAULT_TIMEOUT_SECS, 120);
     assert!(def.find.is_empty());
     assert!(def.avoid.is_empty());
     assert!(def.entry.is_none());

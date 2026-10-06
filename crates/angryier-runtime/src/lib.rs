@@ -150,6 +150,11 @@ const MAX_INSN_LEN: usize = 15;
 /// Maximum number of executed block addresses retained for branch solving.
 const MAX_TRACE: usize = 4096;
 
+/// Default whole-run wall-clock budget shared by the stable Rust API and
+/// scripting/CLI frontends. Keeping this below the script feature boundary
+/// prevents public surfaces from silently drifting.
+pub const DEFAULT_RUN_TIMEOUT_SECS: u64 = 120;
+
 /// Form id reserved for instructions executed by the environment model rather
 /// than the semantic corpus (`syscall`). No corpus form uses this id.
 pub const SYSCALL_FORM_ID: u32 = 0xFFFF_0100;

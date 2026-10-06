@@ -40,7 +40,7 @@ pub const DEFAULT_STEPS: u64 = 256;
 /// the states value the CLI's synthesized driver passes explicitly.
 pub const DEFAULT_MAX_STATES: usize = 16;
 /// Default whole-run wall-clock budget for `angry.run`.
-pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
+pub const DEFAULT_TIMEOUT_SECS: u64 = crate::DEFAULT_RUN_TIMEOUT_SECS;
 /// Default post-run alternate-branch solver budget.
 pub const DEFAULT_BRANCH_TIMEOUT_MS: u64 = 1000;
 /// Bit width of GPR symbolic marks. Intel 64 GPR storage is 64-bit and the

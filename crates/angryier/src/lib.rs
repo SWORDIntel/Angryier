@@ -46,6 +46,10 @@ pub const DEFAULT_STEPS: u64 = 256;
 /// Lua surface's `angry.run` default (`DEFAULT_MAX_STATES`).
 pub const DEFAULT_MAX_STATES: usize = 16;
 
+/// Default whole-run wall-clock budget. Shared with the runtime/CLI/Lua
+/// surfaces without adding a field to the stable 1.0 `RunOptions` layout.
+pub const DEFAULT_TIMEOUT_SECS: u64 = angryier_runtime::DEFAULT_RUN_TIMEOUT_SECS;
+
 /// Bit width of GPR symbolic marks. Sub-64-bit GPR symbols are rejected
 /// with an explicit error (the evaluator stores registers at 64 bits).
 pub const SYMBOLIC_GPR_WIDTH: u16 = 64;
@@ -157,7 +161,7 @@ pub struct RunReport {
     pub kernel: KernelReport,
 }
 
-/// Options for one-shot runs — mirrors the Lua `angry.run` opts table.
+/// Stable core options for one-shot runs. The Lua/CLI surfaces expose additional search-policy controls without changing this 1.0 struct layout.
 #[derive(Clone, Debug)]
 pub struct RunOptions {
     /// Symbolic register marks: `(register name, bit width)`. Only 64-bit
@@ -365,7 +369,7 @@ impl Engine {
                 options.steps,
                 options.max_states,
                 backend.as_mut().map(|b| b as &mut dyn angryier_solver::SolverBackend),
-                Duration::from_secs(30),
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
                 true,
                 &policy,
             )
@@ -533,7 +537,7 @@ impl Session {
             options.steps,
             options.max_states,
             backend.as_mut().map(|b| b as &mut dyn angryier_solver::SolverBackend),
-            Duration::from_secs(30),
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             true,
             &policy,
         ) {
