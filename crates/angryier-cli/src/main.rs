@@ -1028,6 +1028,21 @@ if r.branch_analysis ~= nil then
         if b.cfg_error ~= nil then
             print(string.format("  CFG analysis detail     : %s", tostring(b.cfg_error)))
         end
+        if b.replay ~= nil then
+            local replay = b.replay
+            print("[angryier][branch-analysis] concrete alternate replay")
+            print(string.format("  replay status           : %s", tostring(replay.status or "?")))
+            print(string.format("  replay steps            : %s", tostring(replay.steps or 0)))
+            print(string.format("  reached branch          : %s", yn(replay.reached_branch)))
+            print(string.format("  matched alternate       : %s", yn(replay.matched_alternate)))
+            print(string.format("  applied registers       : %s", tostring(replay.applied_registers or 0)))
+            if replay.observed_target_hex ~= nil or replay.observed_target ~= nil then
+                print(string.format("  observed successor      : %s", tostring(replay.observed_target_hex or replay.observed_target)))
+            end
+            if replay.detail ~= nil then
+                print(string.format("  replay detail           : %s", tostring(replay.detail)))
+            end
+        end
         if b.steering_action ~= nil then
             print(string.format("  steering action         : %s", tostring(b.steering_action)))
             print(string.format("  steering confidence     : %s", tostring(b.steering_confidence or "?")))
@@ -1148,6 +1163,18 @@ end
 if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
     local b = r.branch_analysis
     local action = b.steering_action
+    local replay_status = b.replay ~= nil and b.replay.status or nil
+    if replay_status == "validated" then
+        idea("CONCRETE BRANCH FLIP VALIDATED: replay from the clean entry snapshot reached the recorded branch and took the solver-predicted alternate successor. This validates the immediate branch mutation in the modeled environment; it does not by itself prove the later target is reachable.")
+    elseif replay_status == "mismatch" then
+        idea("MODEL/REPLAY DIVERGENCE: the solver produced a SAT alternate model, but concrete replay reached the branch and took a different successor. Treat this as a fidelity bug or environment/model mismatch; do not promote the seed until the divergence is explained.")
+    elseif replay_status == "unsupported-model" then
+        idea("Concrete replay was skipped because the alternate model contains symbolic inputs that are not representable as 64-bit GPR seeds. A future input materializer should replay argv/stdin/file/memory symbols rather than silently dropping them.")
+    elseif replay_status == "stateful-kernel-model" or replay_status == "stateful-environment" then
+        idea("Concrete replay was deliberately skipped because stateful environment/model activity cannot yet be rewound with proof-quality fidelity. Keep the solver result as symbolic evidence only.")
+    elseif replay_status == "budget-exhausted" then
+        idea("Concrete replay exhausted the current --steps budget before returning to the recorded branch. Increase --steps only if validating this particular flip is worth the extra replay cost.")
+    end
     if action == "prioritize-alternate" then
         idea("TARGET-DIRECTED NEXT RUN: Angryier ranks the alternate edge as the best next branch (" .. tostring(b.steering_confidence or "?") .. " confidence). " .. tostring(b.steering_reason or "") .. ". Replay the reported model first, then validate the resulting path concretely before treating target reachability as established.")
     elseif action == "keep-chosen" then
@@ -1773,6 +1800,10 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "steering action",
                 "steering confidence",
                 "steering reason",
+                "[angryier][branch-analysis] concrete alternate replay",
+                "replay status",
+                "CONCRETE BRANCH FLIP VALIDATED",
+                "MODEL/REPLAY DIVERGENCE",
                 "TARGET-DIRECTED NEXT RUN",
                 "branch_analysis = true",
                 "constraint dependencies",
