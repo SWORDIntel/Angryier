@@ -58,6 +58,7 @@ Angryier: Dual-mode native engine in safe Rust — SymCC/QSYM-speed concolic fas
 - **🏎️ BLAKE3-Accelerated Merkle Keys**: One-shot stack-buffered digest eliminating the SHA-256 hot path on intern misses with zero heap allocation.
 - **🧵 NUMA-Aware Work-Stealing Scheduler**: Hierarchical steal order (Own $\to$ Same-NUMA $\to$ Cross-NUMA $\to$ Global) with `/proc/meminfo` memory pressure throttling.
 - **🧬 Hybrid Fuzzing & Learned Fusion**: Native `FuzzCorpus` energy scheduling, `HavocMutator`, solver hint ingestion, and 4-modality gated embedding fusion.
+- **🧭 Symbolic Branch Steering**: Post-run branch inversion solves the alternate edge under the exact shared prefix, compares bounded CFG distance to configured targets, emits replay-ready register models, and returns a machine-readable steering verdict with explicit confidence.
 
 ---
 
@@ -223,7 +224,9 @@ end
 
 -- The normal generated CLI driver additionally enables branch_analysis and
 -- prints predicate dependencies, alternate-edge SAT/UNSAT, CFG target
--- direction, and replay-ready register seeds.
+-- direction, replay-ready register seeds, and a stable steering verdict:
+-- prioritize-alternate / keep-chosen / reject-alternate / explore-both /
+-- explore-alternate / unresolved, with high/medium/low confidence.
 ```
 
 Run via CLI:
