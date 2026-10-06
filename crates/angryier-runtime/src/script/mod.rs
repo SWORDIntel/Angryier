@@ -754,7 +754,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                 // frontends can surface older high-value flip points.
                 branch_out.set("history_count", state.branch_history.len())?;
                 let history = lua.create_table()?;
-                let mut latest_exact_find: Option<(usize, angryier_runtime::SymbolicBranchDecision, u64)> = None;
+                let mut latest_exact_find: Option<(usize, crate::SymbolicBranchDecision, u64)> = None;
                 for (index, recorded) in state.branch_history.iter().copied().enumerate() {
                     let entry = lua.create_table()?;
                     entry.set("index", index + 1)?;
