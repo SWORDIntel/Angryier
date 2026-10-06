@@ -618,7 +618,7 @@ mod run_cmd {
         let dyn_opt = if config.dynamic { "dynamic = true," } else { "" };
         let escaped_path = config.path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
-            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = {steps}, states = {states} }})
+            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = {steps}, states = {states}, branch_analysis = true }})
 
 local function yn(v)
     if v then return "yes" end
@@ -804,6 +804,79 @@ if (r.pruned_states or 0) > 0 then
     print(string.format("  state economics         : %d state(s) were pruned; peak frontier=%d, configured cap=%d", r.pruned_states, r.peak_states or 0, {states}))
 end
 
+if r.branch_analysis ~= nil then
+    local b = r.branch_analysis
+    print("[angryier][branch-analysis] most recent symbolic branch")
+    print(string.format("  status                  : %s", tostring(b.status or "?")))
+    if b.status == "recorded" then
+        print(string.format("  branch pc               : %s", tostring(b.pc_hex or b.pc or "?")))
+        print(string.format("  chosen edge             : %s", tostring(b.chosen or "?")))
+        print(string.format("  taken target            : %s", tostring(b.taken_target_hex or b.taken_target or "?")))
+        print(string.format("  not-taken target        : %s", tostring(b.not_taken_target_hex or b.not_taken_target or "?")))
+        print(string.format("  alternate target        : %s", tostring(b.alternate_target_hex or b.alternate_target or "?")))
+        print(string.format("  condition expression    : %s", tostring(b.condition or "?")))
+        print(string.format("  common prefix constraints: %s", tostring(b.prefix_constraints or 0)))
+        print(string.format("  alternate solver status : %s", tostring(b.solver_status or "not-run")))
+        if b.solver_elapsed_us ~= nil then
+            print(string.format("  solver elapsed          : %s us", tostring(b.solver_elapsed_us)))
+        end
+        local deps = b.dependencies
+        local dep_count = count_table(deps)
+        print(string.format("  predicate dependencies  : %d source(s)", dep_count))
+        for i = 1, math.min(dep_count, 12) do
+            local dep = deps[i]
+            if dep ~= nil and dep.source_kind == "register" then
+                print(string.format(
+                    "    dep[%02d] register=%s width=%s expr=%s source_id=%s",
+                    i,
+                    tostring(dep.name or dep.register or "?"),
+                    tostring(dep.width or "?"),
+                    tostring(dep.expression or "?"),
+                    tostring(dep.source_id or "?")
+                ))
+            elseif dep ~= nil then
+                print(string.format(
+                    "    dep[%02d] kind=%s width=%s expr=%s source_id=%s",
+                    i,
+                    tostring(dep.source_kind or "?"),
+                    tostring(dep.width or "?"),
+                    tostring(dep.expression or "?"),
+                    tostring(dep.source_id or "?")
+                ))
+            end
+        end
+        local model = b.model
+        local model_count = count_table(model)
+        if model_count > 0 then
+            print(string.format("  alternate model         : %d assignment(s)", model_count))
+            for i = 1, math.min(model_count, 12) do
+                local assignment = model[i]
+                if assignment ~= nil and assignment.source_kind == "register" then
+                    print(string.format(
+                        "    model[%02d] %s = 0x%s",
+                        i,
+                        tostring(assignment.name or assignment.register or "?"),
+                        tostring(assignment.hex or "")
+                    ))
+                elseif assignment ~= nil then
+                    print(string.format(
+                        "    model[%02d] kind=%s expr=%s bytes=0x%s",
+                        i,
+                        tostring(assignment.source_kind or "?"),
+                        tostring(assignment.expression or "?"),
+                        tostring(assignment.hex or "")
+                    ))
+                end
+            end
+        end
+        if b.error ~= nil then
+            print(string.format("  branch analysis error   : %s", tostring(b.error)))
+        end
+    elseif b.error ~= nil then
+        print(string.format("  detail                  : %s", tostring(b.error)))
+    end
+end
+
 print("[angryier][ideas] next symbolic-analysis moves")
 local ideas = 0
 local function idea(text)
@@ -837,6 +910,21 @@ if r.frontier ~= nil then
         else
             idea("Retained path predicates depend on symbolic leaves that are not mapped to architectural register bindings. Inspect the frontier dependency source IDs together with memory/under-constrained ledgers; these may be symbolic memory bytes or fallback-created free symbols.")
         end
+    end
+end
+
+if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
+    local b = r.branch_analysis
+    if b.solver_status == "Sat" then
+        idea("The opposite edge of the most recent symbolic branch is SAT under the exact pre-branch path prefix. Use the reported alternate model as a mutation/seed candidate, then concretely replay it; SAT proves solver feasibility for the modeled prefix, not that the full alternate path reaches your target.")
+    elseif b.solver_status == "Unsat" then
+        idea("The opposite edge of the most recent symbolic branch is UNSAT under the shared pre-branch prefix. Do not waste budget repeatedly trying to flip that decision without changing an earlier path constraint or symbolic source.")
+    elseif b.solver_status == "Unknown" then
+        idea("The alternate edge was solver-UNKNOWN within the branch-analysis budget. Treat it as unresolved: try a longer branch_timeout_ms, another solver/backend, or simplify the predicate by concretizing irrelevant sources.")
+    elseif b.solver_status == "Unavailable" then
+        idea("Branch inversion was not checked because the solver is disabled. Re-enable the solver before treating the alternate edge as feasible.")
+    elseif b.solver_status == "Error" then
+        idea("Alternate-edge solving failed. Inspect the branch-analysis error before changing exploration budgets; this is a solver/query construction problem, not evidence that the edge is infeasible.")
     end
 end
 
@@ -1291,6 +1379,9 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "primary limiter",
                 "frontier block",
                 "[angryier][analysis] symbolic frontier",
+                "[angryier][branch-analysis] most recent symbolic branch",
+                "alternate solver status",
+                "branch_analysis = true",
                 "constraint dependencies",
                 "symbolic register set",
                 "path-relevant registers",
