@@ -43,6 +43,85 @@ pub const DEFAULT_MAX_STATES: usize = 16;
 pub const DEFAULT_TIMEOUT_SECS: u64 = crate::DEFAULT_RUN_TIMEOUT_SECS;
 /// Default post-run alternate-branch solver budget.
 pub const DEFAULT_BRANCH_TIMEOUT_MS: u64 = 1000;
+
+/// Machine-readable recommendation derived from branch solver evidence and
+/// bounded CFG target directionality. The strings are intentionally stable:
+/// external scripts/agents may consume them without reimplementing Angryier's
+/// steering policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BranchSteeringVerdict {
+    action: &'static str,
+    confidence: &'static str,
+    reason: &'static str,
+}
+
+fn branch_steering_verdict(
+    solver_status: &str,
+    chosen_is_find_target: bool,
+    alternate_is_find_target: bool,
+    cfg_preference: Option<&str>,
+) -> BranchSteeringVerdict {
+    if chosen_is_find_target {
+        return BranchSteeringVerdict {
+            action: "keep-chosen",
+            confidence: "high",
+            reason: "the chosen successor exactly matches a configured find target",
+        };
+    }
+
+    match solver_status {
+        "Unsat" => BranchSteeringVerdict {
+            action: "reject-alternate",
+            confidence: "high",
+            reason: "the alternate edge is UNSAT under the exact shared pre-branch constraint prefix",
+        },
+        "Sat" if alternate_is_find_target => BranchSteeringVerdict {
+            action: "prioritize-alternate",
+            confidence: "high",
+            reason: "the alternate edge is SAT and its immediate successor exactly matches a configured find target",
+        },
+        "Sat" if cfg_preference == Some("alternate") => BranchSteeringVerdict {
+            action: "prioritize-alternate",
+            confidence: "medium",
+            reason: "the alternate edge is SAT and bounded CFG recovery ranks it closer to a configured find target",
+        },
+        "Sat" if cfg_preference == Some("chosen") => BranchSteeringVerdict {
+            action: "keep-chosen",
+            confidence: "medium",
+            reason: "the alternate edge is SAT but bounded CFG recovery ranks the chosen edge closer to a configured find target",
+        },
+        "Sat" if cfg_preference == Some("equal") => BranchSteeringVerdict {
+            action: "explore-both",
+            confidence: "medium",
+            reason: "both successors have equal bounded-CFG distance to the best configured find target",
+        },
+        "Sat" => BranchSteeringVerdict {
+            action: "explore-alternate",
+            confidence: "low",
+            reason: "the alternate edge is solver-feasible but no stronger target-direction evidence is available",
+        },
+        "Unknown" | "Timeout" | "ResourceLimit" => BranchSteeringVerdict {
+            action: "unresolved",
+            confidence: "low",
+            reason: "alternate-edge satisfiability was not resolved within the solver budget",
+        },
+        "BackendError" | "Error" => BranchSteeringVerdict {
+            action: "unresolved",
+            confidence: "low",
+            reason: "alternate-edge solving failed in the solver/backend path",
+        },
+        "Unavailable" => BranchSteeringVerdict {
+            action: "unresolved",
+            confidence: "low",
+            reason: "alternate-edge solving is unavailable because the solver is disabled",
+        },
+        _ => BranchSteeringVerdict {
+            action: "unresolved",
+            confidence: "low",
+            reason: "insufficient solver evidence is available to rank this branch",
+        },
+    }
+}
 /// Bit width of GPR symbolic marks. Intel 64 GPR storage is 64-bit and the
 /// evaluator returns a register's stored expression regardless of the read
 /// width, so sub-64-bit GPR symbols would surface as width-mismatched
@@ -854,6 +933,20 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                         branch_out.set("solver_status", "Unavailable")?;
                         branch_out.set("error", "solver=off; alternate-edge satisfiability was not checked")?;
                     }
+
+                    let solver_status = branch_out
+                        .get::<String>("solver_status")
+                        .unwrap_or_else(|_| "Unavailable".to_string());
+                    let cfg_preference = branch_out.get::<String>("cfg_preference").ok();
+                    let verdict = branch_steering_verdict(
+                        &solver_status,
+                        policy.find.contains(&chosen_target),
+                        policy.find.contains(&alternate_target),
+                        cfg_preference.as_deref(),
+                    );
+                    branch_out.set("steering_action", verdict.action)?;
+                    branch_out.set("steering_confidence", verdict.confidence)?;
+                    branch_out.set("steering_reason", verdict.reason)?;
                 } else {
                     branch_out.set("status", "no-symbolic-branch")?;
                     branch_out.set(
@@ -1014,6 +1107,45 @@ mod tests {
         assert_eq!(DEFAULT_TIMEOUT_SECS, 120);
         assert_eq!(DEFAULT_BRANCH_TIMEOUT_MS, 1000);
         assert_eq!(SYMBOLIC_GPR_WIDTH, 64);
+    }
+
+    #[test]
+    fn branch_steering_prefers_direct_sat_target_edge() {
+        let verdict = branch_steering_verdict("Sat", false, true, Some("alternate"));
+        assert_eq!(verdict.action, "prioritize-alternate");
+        assert_eq!(verdict.confidence, "high");
+    }
+
+    #[test]
+    fn branch_steering_rejects_unsat_alternate() {
+        let verdict = branch_steering_verdict("Unsat", false, false, Some("alternate"));
+        assert_eq!(verdict.action, "reject-alternate");
+        assert_eq!(verdict.confidence, "high");
+    }
+
+    #[test]
+    fn branch_steering_keeps_exact_chosen_target() {
+        let verdict = branch_steering_verdict("Sat", true, false, Some("alternate"));
+        assert_eq!(verdict.action, "keep-chosen");
+        assert_eq!(verdict.confidence, "high");
+    }
+
+    #[test]
+    fn branch_steering_uses_cfg_only_after_sat() {
+        let sat = branch_steering_verdict("Sat", false, false, Some("alternate"));
+        assert_eq!(sat.action, "prioritize-alternate");
+        assert_eq!(sat.confidence, "medium");
+
+        let unknown = branch_steering_verdict("Unknown", false, false, Some("alternate"));
+        assert_eq!(unknown.action, "unresolved");
+        assert_eq!(unknown.confidence, "low");
+    }
+
+    #[test]
+    fn branch_steering_equal_cfg_keeps_both_paths_interesting() {
+        let verdict = branch_steering_verdict("Sat", false, false, Some("equal"));
+        assert_eq!(verdict.action, "explore-both");
+        assert_eq!(verdict.confidence, "medium");
     }
 
     #[test]
