@@ -1003,6 +1003,36 @@ end
 
 if r.branch_analysis ~= nil then
     local b = r.branch_analysis
+    local history = b.history
+    local history_count = count_table(history)
+    if history_count > 0 then
+        print("[angryier][branch-history] retained symbolic decisions")
+        print(string.format("  retained decisions      : %d (bounded provenance ledger)", history_count))
+        local first = math.max(1, history_count - 7)
+        for i = first, history_count do
+            local h = history[i]
+            if h ~= nil then
+                local marker = h.alternate_is_find_target and "  <-- alternate directly hits --find" or ""
+                print(string.format(
+                    "    [%02d] pc=%s chosen=%s alternate=%s deps=%s%s",
+                    i,
+                    tostring(h.pc_hex or h.pc or "?"),
+                    tostring(h.chosen or "?"),
+                    tostring(h.alternate_target_hex or h.alternate_target or "?"),
+                    tostring(h.dependency_sources or "?"),
+                    marker
+                ))
+            end
+        end
+        if b.history_exact_find_index ~= nil then
+            print(string.format(
+                "  earlier direct-target   : history[%s] pc=%s alternate=%s",
+                tostring(b.history_exact_find_index),
+                tostring(b.history_exact_find_pc_hex or b.history_exact_find_pc or "?"),
+                tostring(b.history_exact_find_target_hex or b.history_exact_find_target or "?")
+            ))
+        end
+    end
     print("[angryier][branch-analysis] most recent symbolic branch")
     print(string.format("  status                  : %s", tostring(b.status or "?")))
     if b.status == "recorded" then
@@ -1162,6 +1192,9 @@ end
 
 if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
     local b = r.branch_analysis
+    if b.history_exact_find_index ~= nil and not b.alternate_is_find_target then
+        idea("EARLIER DIRECT-TARGET BRANCH: retained branch history contains an older decision whose alternate successor exactly matches a configured --find target (history[" .. tostring(b.history_exact_find_index) .. "] at " .. tostring(b.history_exact_find_pc_hex or b.history_exact_find_pc or "?") .. "). The current last-branch solver does not analyze that earlier flip yet; prioritize it for the next targeted inversion rather than assuming the newest branch is the best mutation point.")
+    end
     local action = b.steering_action
     local replay_status = b.replay ~= nil and b.replay.status or nil
     if replay_status == "validated" then
@@ -1793,6 +1826,9 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "primary limiter",
                 "frontier block",
                 "[angryier][analysis] symbolic frontier",
+                "[angryier][branch-history] retained symbolic decisions",
+                "earlier direct-target",
+                "EARLIER DIRECT-TARGET BRANCH",
                 "[angryier][branch-analysis] most recent symbolic branch",
                 "alternate solver status",
                 "target relation",
