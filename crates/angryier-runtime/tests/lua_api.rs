@@ -352,10 +352,11 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
             b.steering_action,
             b.steering_confidence,
             b.steering_reason,
-            b.replay.status,
-            b.replay.matched_alternate,
-            b.replay.applied_registers,
-            b.replay.observed_target_hex
+            tostring(b.replay.status or "none"),
+            b.replay.matched_alternate == true,
+            b.replay.applied_registers or 0,
+            tostring(b.replay.observed_target_hex or "none"),
+            tostring(b.replay.detail or "none")
         "#
     );
 
@@ -372,6 +373,7 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
         replay_matched,
         replay_registers,
         replay_target,
+        replay_detail,
     ): (
         String,
         String,
@@ -385,6 +387,7 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
         bool,
         usize,
         String,
+        String,
     ) = lua.load(&script).eval().expect("branch analysis");
 
     assert_eq!(status, "recorded");
@@ -396,10 +399,10 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
     assert_eq!(solver_status, "Sat");
     assert!(dependency_count >= 1, "branch predicate should depend on rdi");
     assert!(model_count >= 1, "SAT alternate edge should produce a candidate model");
-    assert_eq!(replay_status, "validated");
-    assert!(replay_matched);
-    assert!(replay_registers >= 1);
-    assert!(!replay_target.is_empty());
+    assert_eq!(replay_status, "validated", "replay detail: {replay_detail}");
+    assert!(replay_matched, "replay detail: {replay_detail}");
+    assert!(replay_registers >= 1, "replay detail: {replay_detail}");
+    assert_ne!(replay_target, "none", "replay detail: {replay_detail}");
     assert_eq!(steering_action, "explore-alternate");
     assert_eq!(steering_confidence, "medium");
     assert!(
