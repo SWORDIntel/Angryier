@@ -4298,6 +4298,7 @@ impl<'a, D: Decoder> ConcolicSession<'a, D> {
             concrete_registers,
             id,
             expr_concrete,
+            last_branch: None,
         }
     }
 
@@ -5037,6 +5038,41 @@ mod tests {
     }
 }
 
+/// The most recent symbolic branch decision on one state.
+///
+/// `prefix_constraints` is the number of path constraints that existed
+/// immediately before this branch. It lets alternate-edge solving assert the
+/// common path prefix while deliberately dropping the chosen branch and every
+/// constraint accumulated after divergence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SymbolicBranchDecision {
+    /// PC of the conditional branch instruction/block being evaluated.
+    pub pc: Address,
+    /// Canonical Bool predicate: true selects `taken`, false selects
+    /// `not_taken`.
+    pub condition: ExprId,
+    pub taken: Address,
+    pub not_taken: Address,
+    /// Edge followed by this state.
+    pub chose_taken: bool,
+    /// Constraint count before this branch's edge predicate was appended.
+    pub prefix_constraints: usize,
+}
+
+/// Solver result for flipping a state's most recent symbolic branch while
+/// preserving only the constraints shared before that branch.
+#[derive(Clone, Debug)]
+pub struct AlternateBranchSolution {
+    pub decision: SymbolicBranchDecision,
+    pub alternate_target: Address,
+    pub outcome: SolverOutcomeKind,
+    /// Raw solver model keyed by expression id. Keeping this raw preserves
+    /// byte-granular symbolic-memory inputs instead of pretending every
+    /// symbol is a whole architectural register.
+    pub model: Vec<(u64, Vec<u8>)>,
+    pub solver_elapsed: Duration,
+}
+
 /// A symbolic execution state: the concrete [`Process`] (decode source,
 /// concrete fallbacks, environment model) plus the symbolic register
 /// bindings, path constraints, and symbolic byte store that make this the
@@ -5065,6 +5101,9 @@ pub struct SymbolicState {
     /// Concrete value each load-derived expression stands for (pointer
     /// provenance for address concretization).
     pub expr_concrete: BTreeMap<ExprId, u64>,
+    /// Most recent conditional-branch decision on this state. This is
+    /// execution evidence, not reconstructed from numeric PC proximity.
+    pub last_branch: Option<SymbolicBranchDecision>,
 }
 
 /// A summarized loop's operand (counter or bound) as resolved in one state:
@@ -5296,6 +5335,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             concrete_registers,
             id: 0,
             expr_concrete: BTreeMap::new(),
+            last_branch: None,
         };
         Self {
             runtime,
@@ -6820,11 +6860,28 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
 
             let child_index = self.states.len();
             let state = &mut self.states[index];
+            let prefix_constraints = state.constraints.len();
             if taken_feasible && other_feasible {
+                state.last_branch = Some(SymbolicBranchDecision {
+                    pc,
+                    condition,
+                    taken: branch.taken,
+                    not_taken: branch.not_taken,
+                    chose_taken: true,
+                    prefix_constraints,
+                });
                 state.constraints.push(condition);
                 let _ = state.process.write_pc(branch.taken);
                 let mut child = state.clone();
                 child.constraints.pop();
+                child.last_branch = Some(SymbolicBranchDecision {
+                    pc,
+                    condition,
+                    taken: branch.taken,
+                    not_taken: branch.not_taken,
+                    chose_taken: false,
+                    prefix_constraints,
+                });
                 child.constraints.push(not_cond);
                 let _ = child.process.write_pc(branch.not_taken);
                 child.id = self.next_state_id;
@@ -6860,11 +6917,19 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 return Ok(SymbolicStepOutcome::Branched { child: child_index });
             }
             // Exactly one direction is feasible — continue without forking.
-            let (constraint, next_pc) = if taken_feasible {
-                (condition, branch.taken)
+            let (constraint, next_pc, chose_taken) = if taken_feasible {
+                (condition, branch.taken, true)
             } else {
-                (not_cond, branch.not_taken)
+                (not_cond, branch.not_taken, false)
             };
+            state.last_branch = Some(SymbolicBranchDecision {
+                pc,
+                condition,
+                taken: branch.taken,
+                not_taken: branch.not_taken,
+                chose_taken,
+                prefix_constraints,
+            });
             state.constraints.push(constraint);
             let _ = state.process.write_pc(next_pc);
             return Ok(SymbolicStepOutcome::Stepped { next_pc });
@@ -7166,6 +7231,11 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     concrete_registers: left.concrete_registers.clone(),
                     id: left.id,
                     expr_concrete: snapshot.expr_concrete.clone(),
+                    last_branch: if left.last_branch == right.last_branch {
+                        left.last_branch
+                    } else {
+                        None
+                    },
                 };
                 self.states.insert(a, merged_state);
                 merged += 1;
@@ -7350,6 +7420,11 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             concrete_registers: left.concrete_registers,
                             id: left.id,
                             expr_concrete: snapshot.expr_concrete.clone(),
+                            last_branch: if left.last_branch == right.last_branch {
+                                left.last_branch
+                            } else {
+                                None
+                            },
                         },
                     );
                     report.merges += 1;
@@ -7648,6 +7723,73 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             return Ok(None);
         };
         Ok(Some((predicate, summary.key)))
+    }
+
+    /// Solves the edge opposite the state's most recent symbolic branch.
+    ///
+    /// Only the path constraints that existed before the branch are asserted;
+    /// the chosen edge and all later constraints are intentionally excluded.
+    /// This makes the model a candidate for branch inversion at that exact
+    /// decision point rather than a contradictory request to satisfy both
+    /// sides of the already-taken path.
+    pub fn solve_alternate_branch(
+        &self,
+        state: &SymbolicState,
+        backend: &mut dyn SolverBackend,
+        timeout: Duration,
+    ) -> Result<AlternateBranchSolution, RuntimeError> {
+        let decision = state.last_branch.ok_or(RuntimeError::NoBranchInTrace)?;
+        let alternate = if decision.chose_taken {
+            self.arena
+                .intern(angryier_expr::ExprNode {
+                    sort: angryier_expr::ExprSort::Bool,
+                    op: angryier_expr::ExprOp::Not,
+                    operands: vec![decision.condition],
+                    immediate: Vec::new(),
+                })
+                .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?
+        } else {
+            decision.condition
+        };
+        let prefix_len = decision.prefix_constraints.min(state.constraints.len());
+        let constraints: Vec<CanonicalConstraint> = state.constraints[..prefix_len]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, expr)| {
+                self.arena.dependency_summary(*expr).map(|s| CanonicalConstraint {
+                    id: ConstraintId(i as u64),
+                    key: s.key,
+                    expr: *expr,
+                })
+            })
+            .collect();
+        let key = self
+            .arena
+            .dependency_summary(alternate)
+            .map(|s| s.key)
+            .ok_or_else(|| RuntimeError::Symbolic("missing alternate-branch dependency summary".into()))?;
+        let query = SolverQuery::canonical(
+            SolverQueryId(state.id),
+            &constraints,
+            alternate,
+            key,
+            state.process.target_profile,
+            ConstraintCanonicalizationVersion(1),
+            timeout,
+        )
+        .map_err(|e| RuntimeError::Solver(format!("{e:?}")))?;
+        let result = backend.solve(&query);
+        Ok(AlternateBranchSolution {
+            decision,
+            alternate_target: if decision.chose_taken {
+                decision.not_taken
+            } else {
+                decision.taken
+            },
+            outcome: result.outcome,
+            model: result.model,
+            solver_elapsed: result.elapsed,
+        })
     }
 
     /// Like [`SymbolicSession::solve_state`], but returns the raw model:
