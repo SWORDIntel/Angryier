@@ -5048,6 +5048,53 @@ mod tests {
     }
 
     #[test]
+    fn reset_to_entry_rewinds_mutable_environment_cursors() -> Result<(), RuntimeError> {
+        let code = [0x90, 0xC3];
+        let elf = build_elf(&code);
+        let decoder = SyntheticDecoder::new();
+        let runtime = Runtime::new(decoder, SemanticVersion(1), TargetProfileId(1));
+        let mut process = runtime.load_elf(&elf)?;
+
+        let entry_pc = process.pc()?;
+        let entry_brk = process.entry_program_break;
+        process.stdin = vec![1, 2, 3, 4];
+        process.stdin_pos = 3;
+        process.files.insert("/fixture".into(), vec![0xaa]);
+        process.symbolic_files.insert("/symbolic".into());
+        process.open_fds.insert(7, (vec![0xbb], 1));
+        process.symbolic_fds.insert(7);
+        process.next_fd = 19;
+        process.program_break = entry_brk.wrapping_add(0x2000);
+        process.mmap_next = MMAP_BASE.wrapping_sub(0x8000);
+        process.pci_config_address = 0x8000_1234;
+        process.step_count = 91;
+        process.simproc_dispatches = 4;
+        process.terminated = true;
+        process.syscalls.record_write(b"noise");
+        process.write_pc(entry_pc.wrapping_add(1))?;
+
+        process.reset_to_entry();
+
+        assert_eq!(process.pc()?, entry_pc);
+        assert_eq!(process.program_break, entry_brk);
+        assert_eq!(process.mmap_next, MMAP_BASE);
+        assert!(process.open_fds.is_empty());
+        assert!(process.symbolic_fds.is_empty());
+        assert_eq!(process.stdin, vec![1, 2, 3, 4], "configured input bytes survive restart");
+        assert_eq!(process.stdin_pos, 0);
+        assert_eq!(process.next_fd, 3);
+        assert_eq!(process.pci_config_address, 0);
+        assert_eq!(process.step_count, 0);
+        assert_eq!(process.simproc_dispatches, 0);
+        assert!(!process.terminated);
+        assert_eq!(process.syscalls.invocations(), 0);
+        assert!(process.syscalls.output().is_empty());
+        assert_eq!(process.files.get("/fixture"), Some(&vec![0xaa]));
+        assert!(process.symbolic_files.contains("/symbolic"));
+        Ok(())
+    }
+
+    #[test]
     fn runtime_caches_lowered_blocks() -> Result<(), RuntimeError> {
         let code = [0x90, 0xC3];
         let elf = build_elf(&code);
@@ -5161,7 +5208,8 @@ pub struct AlternateBranchSolution {
 pub struct AlternateBranchReplay {
     /// Stable status for scripting/frontends: `validated`, `mismatch`,
     /// `budget-exhausted`, `terminated-before-branch`,
-    /// `unsupported-model`, `stateful-kernel-model`, or `not-sat`.
+    /// `unsupported-model`, `stateful-kernel-model`,
+    /// `stateful-environment`, or `not-sat`.
     pub status: &'static str,
     pub steps: u64,
     pub reached_branch: bool,
@@ -7926,6 +7974,21 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 applied_registers: 0,
                 detail: "kernel pool model state is externally shared and cannot be safely rewound for post-run replay"
                     .to_string(),
+            });
+        }
+
+        if state.process.simproc_dispatches > 0 {
+            return Ok(AlternateBranchReplay {
+                status: "stateful-environment",
+                steps: 0,
+                reached_branch: false,
+                observed_target: None,
+                matched_alternate: false,
+                applied_registers: 0,
+                detail: format!(
+                    "{} SimProcedure dispatch(es) occurred before the diagnostic frontier; post-run replay refuses to assume those model instances are rewindable",
+                    state.process.simproc_dispatches
+                ),
             });
         }
 
