@@ -8013,7 +8013,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     detail: format!("solver model expression {expression} is not a register-backed symbolic input"),
                 });
             };
-            if binding.width != 64 || bytes.len() > 8 {
+            let nonzero_upper = bytes.get(8..).is_some_and(|upper| upper.iter().any(|byte| *byte != 0));
+            if binding.width != 64 || nonzero_upper {
                 return Ok(AlternateBranchReplay {
                     status: "unsupported-model",
                     steps: 0,
@@ -8022,14 +8023,19 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     matched_alternate: false,
                     applied_registers: assignments.len(),
                     detail: format!(
-                        "solver model expression {expression} is {} bits / {} byte(s), not a replayable 64-bit GPR",
+                        "solver model expression {expression} is {} bits / {} byte(s), not a replayable 64-bit GPR value",
                         binding.width,
                         bytes.len()
                     ),
                 });
             }
+            // Native Z3 preserves a historical <=128-bit model container:
+            // even a 64-bit symbol may arrive as 16 little-endian bytes.
+            // Accept zero-extended upper bytes and replay the architectural
+            // low 64 bits, matching the existing Lua value/value_hex surface.
             let mut value_bytes = [0u8; 8];
-            value_bytes[..bytes.len()].copy_from_slice(bytes);
+            let len = bytes.len().min(8);
+            value_bytes[..len].copy_from_slice(&bytes[..len]);
             assignments.push((binding.register, u64::from_le_bytes(value_bytes)));
         }
 
