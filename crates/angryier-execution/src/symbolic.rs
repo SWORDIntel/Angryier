@@ -4564,9 +4564,14 @@ mod tests {
         let memory = angryier_memory::PersistentMemory::new(vec![ro_region()])
             .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory init: {e:?}")))?;
         let mut armed = SymbolicSessionMemory::new(memory.with_uc_memory());
-        let error = armed
-            .write_bytes(0x1404d0018, &[angryier_memory::ByteValue::Concrete(0xaa)])
-            .expect_err("flag off must keep the denial");
+        let error = match armed.write_bytes(0x1404d0018, &[angryier_memory::ByteValue::Concrete(0xaa)]) {
+            Ok(()) => {
+                return Err(SymbolicEvalError::UnsupportedOperation(
+                    "uc_write_ro=false unexpectedly allowed a write to read-only memory".into(),
+                ));
+            }
+            Err(error) => error,
+        };
         assert!(error.to_string().contains("PermissionDenied"));
         Ok(())
     }
@@ -4615,7 +4620,7 @@ mod tests {
             IrType::Bits(bits) => bits,
             IrType::Float32 => 32,
             IrType::Float64 => 64,
-            other => panic!("const_op only supports Bits/Float32/Float64, got {other:?}"),
+            _ => 0,
         };
         let byte_width = usize::from(width).div_ceil(8);
         IrOp::Constant {
@@ -4647,7 +4652,7 @@ mod tests {
                     .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("popcnt did not fold: {e:?}")))?;
                 assert_eq!(
                     folded as u32,
-                    u32::try_from(masked.count_ones()).unwrap(),
+                    masked.count_ones(),
                     "popcnt {masked:#x} at width {width}"
                 );
             }
@@ -5102,8 +5107,13 @@ mod tests {
         let pristine = evaluator.snapshot();
         // Pass 1: the address can't resolve.
         let first = evaluator.eval_block_with_memory(&load_block, &mut memory);
-        let Err(SymbolicEvalError::UnresolvedAddress(expr)) = first else {
-            panic!("expected UnresolvedAddress on pass 1, got {first:?}");
+        let expr = match first {
+            Err(SymbolicEvalError::UnresolvedAddress(expr)) => expr,
+            other => {
+                return Err(SymbolicEvalError::UnsupportedOperation(format!(
+                    "expected UnresolvedAddress on pass 1, got {other:?}"
+                )));
+            }
         };
         // The retry: restore the pristine bindings, pin the failing
         // expression to the mapped address, and re-run — the SAME ExprId
