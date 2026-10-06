@@ -1046,9 +1046,7 @@ mod tests {
             let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
             let receipt = p.emit(&ctx, &insn, &mut builder)?;
             assert_eq!(receipt.rule_id, rule_id(0x07));
-            let sealed = builder
-                .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
-                .expect("seal");
+            let sealed = builder.seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))?;
             assert_eq!(sealed.semantic_version(), SemanticVersion(1));
         }
 
@@ -1067,9 +1065,7 @@ mod tests {
             let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
             let receipt = p.emit(&ctx, &insn, &mut builder)?;
             assert_eq!(receipt.rule_id, rule_id(0x08));
-            let sealed = builder
-                .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
-                .expect("seal");
+            let sealed = builder.seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))?;
             assert_eq!(sealed.semantic_version(), SemanticVersion(1));
         }
         Ok(())
