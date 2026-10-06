@@ -190,6 +190,18 @@ The subsection prints both the complete current symbolic-register set and the pa
 
 When region forking is active, the CLI reports the number of guessed child worlds and tells the operator to inspect `region_fork_sites` before trusting a reachable path. When state pruning occurs, it prints the peak frontier against the configured cap so the next decision can distinguish “raise capacity” from “improve search policy.”
 
+Branch analysis now emits a **steering verdict** in addition to raw solver/CFG facts. The ranking policy is intentionally conservative:
+
+- an exact configured target on the chosen edge → `keep-chosen/high`;
+- alternate edge UNSAT under the exact shared prefix → `reject-alternate/high`;
+- alternate edge SAT and its immediate successor is a configured target → `prioritize-alternate/high`;
+- alternate edge SAT plus bounded-CFG preference → `prioritize-alternate/medium` or `keep-chosen/medium`;
+- equal bounded-CFG distance → `explore-both/medium`;
+- SAT without target-direction evidence → `explore-alternate/low`;
+- timeout/unknown/resource-limit/backend failure/solver-off → `unresolved/low`.
+
+CFG evidence never overrides solver infeasibility or uncertainty. This makes `branch_analysis.steering_action` suitable for external agents without requiring them to reproduce Angryier's safety/fidelity policy.
+
 ### Exit codes
 
 | Code | Cause |
@@ -248,6 +260,9 @@ Result table:
 | `branch_analysis.cfg_status` | Status of bounded static CFG recovery for target ranking (`ok`, `no-find-targets`, or `unavailable`). |
 | `branch_analysis.cfg_targets` | Per-find-target taken/not-taken/chosen/alternate static edge distances and structural preference. Missing distance means not statically reachable inside the recovery window. |
 | `branch_analysis.cfg_preference` | `chosen`, `alternate`, or `none` for the best bounded static target relation. Kept separate from solver SAT/UNSAT. |
+| `branch_analysis.steering_action` | Stable machine-readable recommendation: `prioritize-alternate`, `keep-chosen`, `reject-alternate`, `explore-both`, `explore-alternate`, or `unresolved`. |
+| `branch_analysis.steering_confidence` | `high`, `medium`, or `low`. High requires direct target/UNSAT evidence; bounded-CFG directionality is deliberately capped at medium. |
+| `branch_analysis.steering_reason` | Stable human-readable rationale for the steering action. The policy requires solver feasibility before CFG evidence can prioritize an alternate edge. |
 | `branch_analysis.model[*].value_hex` | For 64-bit register-backed solver assignments, canonical integer value suitable for replay (for example `0x000000000000002a`). Raw solver bytes remain available separately for byte-granular inputs. |
 | `found` | Number of states that reached a `find` target. |
 | `inputs` | Only with `solve = true`: one entry per solved found state, each an array of byte-strings (model bytes per symbol). Per-state model solving is capped at 10 seconds. |
