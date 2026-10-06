@@ -360,6 +360,9 @@ pub struct Process {
     pub syscalls: SyscallModel,
     /// Current program break for `brk` (initialized at the image end).
     pub program_break: u64,
+    /// Program break captured at load time. Restart/replay restores this
+    /// alongside the entry register/memory snapshot.
+    pub entry_program_break: u64,
     /// End of the mapped heap region; `brk` requests beyond it fail.
     pub heap_end: u64,
     /// Next anonymous `mmap` base — grows downward from [`MMAP_BASE`].
@@ -442,12 +445,22 @@ impl Process {
 
     /// Restarts execution from the entry state captured at load time.
     ///
-    /// The lowered-block cache and SimProcedure hooks are preserved; captured
-    /// syscall effects are cleared.
+    /// Lowered-block caches, static hooks, configured file contents, symbolic
+    /// file declarations and stdin bytes are preserved because they are part
+    /// of the analyst-supplied environment. Mutable execution cursors are
+    /// rewound so concrete replay cannot inherit stale fd/brk/mmap/stdin/PCI
+    /// state from the explored path.
     pub fn reset_to_entry(&mut self) {
         self.state = self.entry_state.clone();
         self.trace.clear();
         self.syscalls.reset();
+        self.program_break = self.entry_program_break;
+        self.mmap_next = MMAP_BASE;
+        self.open_fds.clear();
+        self.symbolic_fds.clear();
+        self.stdin_pos = 0;
+        self.next_fd = 3;
+        self.pci_config_address = 0;
         self.step_count = 0;
         self.simproc_dispatches = 0;
         self.terminated = false;
@@ -1401,6 +1414,7 @@ impl<D: Decoder> Runtime<D> {
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
             program_break: 0,
+            entry_program_break: 0,
             heap_end: 0,
             mmap_next: MMAP_BASE,
             files: BTreeMap::new(),
@@ -1559,6 +1573,7 @@ impl<D: Decoder> Runtime<D> {
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
             program_break: HEAP_BASE,
+            entry_program_break: HEAP_BASE,
             heap_end: HEAP_BASE + HEAP_SIZE,
             mmap_next: MMAP_BASE,
             files: BTreeMap::new(),
@@ -2174,6 +2189,7 @@ impl<D: Decoder> Runtime<D> {
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
             program_break: brk_base,
+            entry_program_break: brk_base,
             heap_end: brk_base + HEAP_SIZE,
             mmap_next: MMAP_BASE,
             files: BTreeMap::new(),
@@ -4794,6 +4810,7 @@ mod tests {
             trace: Vec::new(),
             syscalls: SyscallModel::new(),
             program_break: 0,
+            entry_program_break: 0,
             heap_end: 0,
             mmap_next: MMAP_BASE,
             files: BTreeMap::new(),
