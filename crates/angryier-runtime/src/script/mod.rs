@@ -60,6 +60,7 @@ fn branch_steering_verdict(
     chosen_is_find_target: bool,
     alternate_is_find_target: bool,
     cfg_preference: Option<&str>,
+    replay_status: Option<&str>,
 ) -> BranchSteeringVerdict {
     if chosen_is_find_target {
         return BranchSteeringVerdict {
@@ -75,6 +76,11 @@ fn branch_steering_verdict(
             confidence: "high",
             reason: "the alternate edge is UNSAT under the exact shared pre-branch constraint prefix",
         },
+        "Sat" if replay_status == Some("mismatch") => BranchSteeringVerdict {
+            action: "unresolved",
+            confidence: "low",
+            reason: "the symbolic alternate model was SAT but concrete replay reached the branch and did not take the predicted successor",
+        },
         "Sat" if alternate_is_find_target => BranchSteeringVerdict {
             action: "prioritize-alternate",
             confidence: "high",
@@ -83,7 +89,11 @@ fn branch_steering_verdict(
         "Sat" if cfg_preference == Some("alternate") => BranchSteeringVerdict {
             action: "prioritize-alternate",
             confidence: "medium",
-            reason: "the alternate edge is SAT and bounded CFG recovery ranks it closer to a configured find target",
+            reason: if replay_status == Some("validated") {
+                "the alternate edge is SAT, concrete replay validates the branch flip, and bounded CFG recovery ranks it closer to a configured find target"
+            } else {
+                "the alternate edge is SAT and bounded CFG recovery ranks it closer to a configured find target"
+            },
         },
         "Sat" if cfg_preference == Some("chosen") => BranchSteeringVerdict {
             action: "keep-chosen",
@@ -94,6 +104,11 @@ fn branch_steering_verdict(
             action: "explore-both",
             confidence: "medium",
             reason: "both successors have equal bounded-CFG distance to the best configured find target",
+        },
+        "Sat" if replay_status == Some("validated") => BranchSteeringVerdict {
+            action: "explore-alternate",
+            confidence: "medium",
+            reason: "the alternate edge is solver-feasible and concrete replay validates the predicted branch flip, but no target-direction evidence is available",
         },
         "Sat" => BranchSteeringVerdict {
             action: "explore-alternate",
@@ -923,6 +938,26 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                     model.set(index + 1, entry)?;
                                 }
                                 branch_out.set("model", model)?;
+
+                                let replay_out = lua.create_table()?;
+                                match session.replay_alternate_branch_model(state, &solution, steps) {
+                                    Ok(replay) => {
+                                        replay_out.set("status", replay.status)?;
+                                        replay_out.set("steps", replay.steps)?;
+                                        replay_out.set("reached_branch", replay.reached_branch)?;
+                                        replay_out.set("matched_alternate", replay.matched_alternate)?;
+                                        replay_out.set("applied_registers", replay.applied_registers)?;
+                                        replay_out.set("detail", replay.detail)?;
+                                        if let Some(observed) = replay.observed_target {
+                                            set_addr64(&replay_out, "observed_target", observed)?;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        replay_out.set("status", "error")?;
+                                        replay_out.set("detail", error.to_string())?;
+                                    }
+                                }
+                                branch_out.set("replay", replay_out)?;
                             }
                             Err(error) => {
                                 branch_out.set("solver_status", "Error")?;
@@ -938,11 +973,16 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                         .get::<String>("solver_status")
                         .unwrap_or_else(|_| "Unavailable".to_string());
                     let cfg_preference = branch_out.get::<String>("cfg_preference").ok();
+                    let replay_status = branch_out
+                        .get::<Table>("replay")
+                        .ok()
+                        .and_then(|table| table.get::<String>("status").ok());
                     let verdict = branch_steering_verdict(
                         &solver_status,
                         policy.find.contains(&chosen_target),
                         policy.find.contains(&alternate_target),
                         cfg_preference.as_deref(),
+                        replay_status.as_deref(),
                     );
                     branch_out.set("steering_action", verdict.action)?;
                     branch_out.set("steering_confidence", verdict.confidence)?;
@@ -1111,41 +1151,57 @@ mod tests {
 
     #[test]
     fn branch_steering_prefers_direct_sat_target_edge() {
-        let verdict = branch_steering_verdict("Sat", false, true, Some("alternate"));
+        let verdict = branch_steering_verdict("Sat", false, true, Some("alternate"), Some("validated"));
         assert_eq!(verdict.action, "prioritize-alternate");
         assert_eq!(verdict.confidence, "high");
     }
 
     #[test]
     fn branch_steering_rejects_unsat_alternate() {
-        let verdict = branch_steering_verdict("Unsat", false, false, Some("alternate"));
+        let verdict = branch_steering_verdict("Unsat", false, false, Some("alternate"), None);
         assert_eq!(verdict.action, "reject-alternate");
         assert_eq!(verdict.confidence, "high");
     }
 
     #[test]
     fn branch_steering_keeps_exact_chosen_target() {
-        let verdict = branch_steering_verdict("Sat", true, false, Some("alternate"));
+        let verdict = branch_steering_verdict("Sat", true, false, Some("alternate"), Some("validated"));
         assert_eq!(verdict.action, "keep-chosen");
         assert_eq!(verdict.confidence, "high");
     }
 
     #[test]
     fn branch_steering_uses_cfg_only_after_sat() {
-        let sat = branch_steering_verdict("Sat", false, false, Some("alternate"));
+        let sat = branch_steering_verdict("Sat", false, false, Some("alternate"), None);
         assert_eq!(sat.action, "prioritize-alternate");
         assert_eq!(sat.confidence, "medium");
 
-        let unknown = branch_steering_verdict("Unknown", false, false, Some("alternate"));
+        let unknown = branch_steering_verdict("Unknown", false, false, Some("alternate"), None);
         assert_eq!(unknown.action, "unresolved");
         assert_eq!(unknown.confidence, "low");
     }
 
     #[test]
     fn branch_steering_equal_cfg_keeps_both_paths_interesting() {
-        let verdict = branch_steering_verdict("Sat", false, false, Some("equal"));
+        let verdict = branch_steering_verdict("Sat", false, false, Some("equal"), None);
         assert_eq!(verdict.action, "explore-both");
         assert_eq!(verdict.confidence, "medium");
+    }
+
+    #[test]
+    fn branch_steering_replay_validation_upgrades_solver_only_flip() {
+        let verdict = branch_steering_verdict("Sat", false, false, None, Some("validated"));
+        assert_eq!(verdict.action, "explore-alternate");
+        assert_eq!(verdict.confidence, "medium");
+        assert!(verdict.reason.contains("concrete replay"));
+    }
+
+    #[test]
+    fn branch_steering_replay_mismatch_vetoes_sat_alternate() {
+        let verdict = branch_steering_verdict("Sat", false, true, Some("alternate"), Some("mismatch"));
+        assert_eq!(verdict.action, "unresolved");
+        assert_eq!(verdict.confidence, "low");
+        assert!(verdict.reason.contains("did not take the predicted successor"));
     }
 
     #[test]
