@@ -438,6 +438,51 @@ fn test_angry_run_branch_analysis_ranks_cfg_distance_to_find_target() {
 }
 
 #[test]
+fn test_angry_run_branch_analysis_merge_clears_stale_provenance() {
+    const SRC: &str = r#"
+        .global _start
+        .text
+    _start:
+        ret
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "merge_branch_provenance") else {
+        eprintln!("skipping merge provenance test: system assembler not found");
+        return;
+    };
+    let bytes = std::fs::read(&bin_path).expect("read linked fixture");
+    let runtime = angryier_runtime::Runtime::with_native_xed(
+        angryier_types::SemanticVersion(1),
+        angryier_types::TargetProfileId(1),
+    );
+    let process = runtime.load_elf(&bytes).expect("load fixture");
+    let arena = angryier_expr::ShardedExprArena::new(
+        angryier_types::ExpressionNormalizationVersion(1),
+    );
+    let mut session = angryier_runtime::SymbolicSession::new(&runtime, &arena, process);
+    let decision = angryier_runtime::SymbolicBranchDecision {
+        pc: session.states[0].process.pc().expect("pc"),
+        condition: angryier_types::ExprId(0),
+        taken: 0x1111,
+        not_taken: 0x2222,
+        chose_taken: true,
+        prefix_constraints: 0,
+    };
+    session.states[0].last_branch = Some(decision);
+    let mut sibling = session.states[0].clone();
+    sibling.id = 1;
+    sibling.last_branch = Some(decision);
+    session.states.push(sibling);
+
+    assert_eq!(session.merge_at().expect("merge"), 1);
+    assert_eq!(session.states.len(), 1);
+    assert_eq!(
+        session.states[0].last_branch, None,
+        "merged constraint lineage must invalidate pre-merge branch-prefix provenance"
+    );
+}
+
+#[test]
 fn test_lua_symbolic_and_solve() {
     const SRC: &str = r#"
         .global _start
