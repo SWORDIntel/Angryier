@@ -717,6 +717,11 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                             if let Some(name) = name_by_reg(binding.register) {
                                                 entry.set("name", name)?;
                                             }
+                                            let mut value_bytes = [0u8; 8];
+                                            let len = bytes.len().min(8);
+                                            value_bytes[..len].copy_from_slice(&bytes[..len]);
+                                            let value = u64::from_le_bytes(value_bytes);
+                                            set_addr64(&entry, "value", value)?;
                                         } else {
                                             entry.set("source_kind", "byte-symbol")?;
                                         }
