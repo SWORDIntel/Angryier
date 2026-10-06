@@ -341,7 +341,11 @@ fn run(args: &[String]) -> i32 {
             #[cfg(not(feature = "run"))]
             {
                 eprintln!(
-                    "error: 'run' requires the `run` feature\n\nRebuild with: cargo build -p angryier-cli --features run"
+                    "error: 'run' requires the `run` feature\n\n\
+                     Why: this build excludes the runtime/XED/Lua execution stack.\n\
+                     Rebuild: cargo build -p angryier-cli --features run\n\
+                     Or run directly: cargo run -p angryier-cli --features run -- run <binary>\n\
+                     Hint: use 'angryier help' after rebuilding to inspect supported run flags."
                 );
                 1
             }
@@ -505,6 +509,100 @@ mod run_cmd {
         })
     }
 
+    /// Human-readable execution plan printed before any runtime work starts.
+    ///
+    /// The CLI is an operator interface, not just a machine-readable wrapper:
+    /// make effective mode, limits, symbolic inputs, targets, and ignored
+    /// options explicit before execution so a surprising result can be
+    /// diagnosed from the transcript alone.
+    fn run_plan_output(config: &RunConfig) -> String {
+        let frontend = match &config.script {
+            Some(script) => format!("custom Lua script ({script})"),
+            None => "generated Lua driver".to_string(),
+        };
+        let mode = if config.driver {
+            "PE32+ kernel-driver execution (direct Rust runtime + kernel models)"
+        } else if config.dynamic {
+            "symbolic/concolic execution with dynamic-linking environment model"
+        } else {
+            "symbolic/concolic execution with static image entry"
+        };
+        let symbolic = if config.symbolic.is_empty() {
+            "none".to_string()
+        } else {
+            config.symbolic.join(", ")
+        };
+        let find = if config.find.is_empty() {
+            "none".to_string()
+        } else {
+            config
+                .find
+                .iter()
+                .map(|address| format!("{address:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let argv = config
+            .argv
+            .map(|bytes| format!("{bytes} symbolic byte(s) in argv[0]"))
+            .unwrap_or_else(|| "disabled".to_string());
+        let note = if config.driver {
+            "\n  note           : --driver bypasses Lua; --script/--symbolic/--find/--argv/--dynamic are not applied"
+        } else if config.script.is_some() {
+            "\n  note           : a custom Lua script owns execution; parsed symbolic/find/argv/dynamic flags are not injected automatically"
+        } else {
+            ""
+        };
+
+        format!(
+            "[angryier][plan] execution configuration\n\
+             \x20 target         : {}\n\
+             \x20 frontend       : {}\n\
+             \x20 mode           : {}\n\
+             \x20 step budget    : {}\n\
+             \x20 state budget   : {}\n\
+             \x20 symbolic regs  : {}\n\
+             \x20 find targets   : {}\n\
+             \x20 symbolic argv  : {}{}",
+            config.path,
+            frontend,
+            mode,
+            config.steps,
+            angryier_runtime::script::DEFAULT_MAX_STATES,
+            symbolic,
+            find,
+            argv,
+            note
+        )
+    }
+
+    /// Format one PE-driver execution outcome so a trace line explains what
+    /// happened rather than only reporting an opaque step number.
+    fn driver_step_output(step_index: u64, outcome: &angryier_runtime::StepOutcome) -> String {
+        match outcome {
+            angryier_runtime::StepOutcome::Stepped {
+                pc,
+                next_pc,
+                length,
+                form_id,
+            } => format!(
+                "[angryier][trace] step {step_index}: instruction executed; pc={pc:#x} -> {next_pc:#x}, length={length} byte(s), semantic_form={form_id:#x}"
+            ),
+            angryier_runtime::StepOutcome::SimProcedure { address, name } => format!(
+                "[angryier][trace] step {step_index}: modeled function dispatched; address={address:#x}, model={name}"
+            ),
+            angryier_runtime::StepOutcome::Syscall { pc, number } => format!(
+                "[angryier][trace] step {step_index}: modeled syscall dispatched; pc={pc:#x}, syscall_number={number}"
+            ),
+            angryier_runtime::StepOutcome::Terminated { pc } => format!(
+                "[angryier][trace] step {step_index}: execution terminated; final_pc={pc:#x}"
+            ),
+            angryier_runtime::StepOutcome::Trap { pc, vector } => format!(
+                "[angryier][trace] step {step_index}: trap raised; pc={pc:#x}, vector={vector:#x}"
+            ),
+        }
+    }
+
     /// The synthesized driver evaluated when `--script` is absent: the
     /// parsed flags mapped onto one `angry.run` call. Extracted from
     /// `execute` so the generated Lua is unit-testable.
@@ -521,7 +619,17 @@ mod run_cmd {
         let escaped_path = config.path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
             r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = {steps}, states = {states} }})
-print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.steps, r.forks, r.merges, r.terminated, r.found))"#,
+print("[angryier][result] symbolic/concolic exploration completed")
+print(string.format("  exploration steps : %d (engine work units executed)", r.steps))
+print(string.format("  forks             : %d (new execution states created at branches)", r.forks))
+print(string.format("  merges            : %d (compatible states recombined)", r.merges))
+print(string.format("  terminated states : %d (states that reached a terminal condition)", r.terminated))
+print(string.format("  find hits         : %d (configured target-address hits)", r.found))
+if r.found == 0 then
+    print("  target status     : no configured find target was reached in this run")
+else
+    print("  target status     : one or more configured find targets were reached")
+end"#,
             path = escaped_path,
             steps = config.steps,
             states = angryier_runtime::script::DEFAULT_MAX_STATES
@@ -529,31 +637,65 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
     }
 
     pub fn execute(config: &RunConfig) -> i32 {
+        println!("{}", run_plan_output(config));
+
         // Driver mode: direct Rust execution with kernel models, no Lua.
         if config.driver {
             return execute_driver_mode(config);
         }
 
+        println!("[angryier][init] initializing embedded Lua 5.4 scripting runtime");
         let lua = mlua::Lua::new();
         if let Err(e) = angryier_runtime::script::register(&lua) {
-            eprintln!("script init: {e}");
+            eprintln!("[angryier][init][error] failed to register the Angryier Lua API: {e}");
+            eprintln!(
+                "[angryier][hint] the execution engine did not start; verify the build includes the run/script features and inspect the initialization error above"
+            );
             return 1;
         }
+        println!("[angryier][init] Lua runtime ready; Angryier API registered");
+
         let driver = if let Some(script) = &config.script {
+            println!("[angryier][input] loading custom Lua driver: {script}");
             match std::fs::read_to_string(script) {
-                Ok(s) => s,
+                Ok(s) => {
+                    println!(
+                        "[angryier][input] custom Lua driver loaded: {} byte(s)",
+                        s.len()
+                    );
+                    s
+                }
                 Err(e) => {
-                    eprintln!("read {script}: {e}");
+                    eprintln!("[angryier][input][error] cannot read Lua driver '{script}': {e}");
+                    eprintln!(
+                        "[angryier][hint] check that the path exists, is readable, and is relative to the current working directory as intended"
+                    );
                     return 1;
                 }
             }
         } else {
+            println!(
+                "[angryier][input] synthesizing default exploration driver from CLI flags"
+            );
             default_driver_lua(config)
         };
+
+        let source = config
+            .script
+            .as_deref()
+            .map(|path| format!("custom Lua script '{path}'"))
+            .unwrap_or_else(|| "generated default Lua driver".to_string());
+        println!("[angryier][exec] starting {source}");
         match lua.load(&driver).eval::<mlua::Value>() {
-            Ok(_) => 0,
+            Ok(_) => {
+                println!("[angryier][exec] {source} completed without a Lua/runtime error");
+                0
+            }
             Err(e) => {
-                eprintln!("script: {e}");
+                eprintln!("[angryier][exec][error] {source} failed: {e}");
+                eprintln!(
+                    "[angryier][hint] execution stopped at the reported Lua/runtime error; inspect the preceding plan and result lines to confirm mode, limits, and symbolic inputs"
+                );
                 1
             }
         }
@@ -565,69 +707,159 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
         use angryier_runtime::Runtime;
         use angryier_types::{SemanticVersion, TargetProfileId};
 
+        println!("[angryier][load] reading PE driver image: {}", config.path);
         let bytes = match std::fs::read(&config.path) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("read {}: {e}", config.path);
+                eprintln!(
+                    "[angryier][load][error] cannot read driver image '{}': {e}",
+                    config.path
+                );
+                eprintln!(
+                    "[angryier][hint] verify the path, permissions, and that the target is the intended PE32+ driver image"
+                );
                 return 1;
             }
         };
-        println!("driver: {} ({} bytes)", config.path, bytes.len());
+        println!(
+            "[angryier][load] input read successfully: {} byte(s)",
+            bytes.len()
+        );
 
+        println!(
+            "[angryier][init] constructing native-XED runtime (semantic_version=1, target_profile=1)"
+        );
         let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
         let mut process = match runtime.load_pe_driver(&bytes) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("load_pe_driver failed: {e:?}");
+                eprintln!("[angryier][load][error] PE driver mapping/initialization failed: {e}");
+                eprintln!(
+                    "[angryier][hint] confirm the file is a supported PE32+ driver and inspect the loader error for the rejected structure or mapping"
+                );
                 return 1;
             }
         };
+
         let tracker = std::sync::Arc::new(angryier_models::KernelPoolTracker::new());
         if let Err(e) = runtime.attach_kernel_pool_model(&mut process, tracker.clone()) {
-            eprintln!("attach_kernel_pool_model failed: {e:?}");
+            eprintln!("[angryier][model][error] failed to attach the kernel pool model: {e}");
+            eprintln!(
+                "[angryier][hint] execution has not started; pool allocation/free events would be unreliable without this model, so Angryier stops fail-closed"
+            );
             return 1;
         }
+        println!(
+            "[angryier][model] kernel pool model attached; allocations, frees, and double-free events will be tracked"
+        );
 
         let imports: Vec<_> = process.pe_imports().collect();
-        println!(
-            "entry={:#x}, imports={}, hooks={}",
-            process.pc().unwrap_or(0),
-            imports.len(),
-            imports.len()
-        );
+        println!("[angryier][load] PE driver initialized");
+        println!("  entry pc       : {:#x}", process.pc().unwrap_or(0));
+        println!("  imports        : {}", imports.len());
+        println!("  modeled hooks  : {}", imports.len());
+        if imports.is_empty() {
+            println!("  import preview : none");
+        } else {
+            println!("  import preview : first {} entr{}", imports.len().min(12), if imports.len().min(12) == 1 { "y" } else { "ies" });
+            for (address, dll, name) in imports.iter().take(12) {
+                println!("    {:#x} -> {}!{}", **address, dll, name);
+            }
+            if imports.len() > 12 {
+                println!(
+                    "    ... {} additional import(s) omitted from the preview",
+                    imports.len() - 12
+                );
+            }
+        }
 
         let budget = config.steps;
         let mut steps: u64 = 0;
-        loop {
-            if steps >= budget {
-                println!("step budget exhausted ({budget})");
-                break;
-            }
-            match runtime.step(&mut process) {
-                Ok(_) => steps += 1,
-                Err(e) => {
-                    eprintln!("blocked at step {steps} pc={:#x}: {e:?}", process.pc().unwrap_or(0));
-                    break;
-                }
-            }
-            if process.terminated {
-                println!("terminated cleanly at step {steps}");
-                break;
-            }
-        }
-
-        println!("steps={steps}, simproc_dispatches={}", process.simproc_dispatches);
-        let report = tracker.snapshot();
         println!(
-            "pool: allocs={} frees={} double_frees={}",
-            report.allocs,
-            report.frees,
-            report.double_frees.len()
+            "[angryier][exec] entering DriverEntry execution loop; budget={budget} runtime step(s)"
         );
-        if !report.double_frees.is_empty() {
-            println!("DOUBLE-FREE EVENTS:");
-            for event in &report.double_frees {
-                println!("  ptr={:#x} caller={:#x}", event.pointer, event.caller);
+        println!(
+            "[angryier][trace] the first 12 ordinary instruction steps are shown in full; modeled calls/traps/termination remain visible afterwards"
+        );
+
+        let stop_reason = loop {
+            if steps >= budget {
+                println!(
+                    "[angryier][exec] stop condition reached: step budget exhausted ({steps}/{budget})"
+                );
+                break format!("step budget exhausted at {steps}/{budget}");
+            }
+
+            let outcome = match runtime.step(&mut process) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    let pc = process.pc().unwrap_or(0);
+                    eprintln!(
+                        "[angryier][exec][blocked] runtime could not execute the next step; completed_steps={steps}, pc={pc:#x}, reason={e}"
+                    );
+                    eprintln!(
+                        "[angryier][hint] common causes are an unsupported instruction semantic, unresolved environment behavior, invalid memory/register state, or a model boundary; the PC above is the first place to inspect"
+                    );
+                    break format!("runtime blocked at pc={pc:#x}: {e}");
+                }
+            };
+            steps += 1;
+
+            let ordinary_instruction =
+                matches!(&outcome, angryier_runtime::StepOutcome::Stepped { .. });
+            if steps <= 12 || !ordinary_instruction {
+                println!("{}", driver_step_output(steps, &outcome));
+            } else if steps == 13 {
+                println!(
+                    "[angryier][trace] routine per-instruction lines suppressed after step 12 to avoid turning long analyses into I/O-bound runs; high-signal events are still printed"
+                );
+            }
+
+            if steps > 12 && steps % 1000 == 0 {
+                println!(
+                    "[angryier][progress] steps={steps}/{budget}, pc={:#x}, simproc_dispatches={}",
+                    process.pc().unwrap_or(0),
+                    process.simproc_dispatches
+                );
+            }
+
+            if process.terminated {
+                println!(
+                    "[angryier][exec] process marked terminated after {steps} step(s); final_pc={:#x}",
+                    process.pc().unwrap_or(0)
+                );
+                break format!("process terminated after {steps} step(s)");
+            }
+        };
+
+        let report = tracker.snapshot();
+        println!("[angryier][result] PE driver execution summary");
+        println!("  stop reason         : {stop_reason}");
+        println!("  steps completed     : {steps}");
+        println!("  configured budget   : {budget}");
+        println!("  final pc            : {:#x}", process.pc().unwrap_or(0));
+        println!("  process terminated  : {}", if process.terminated { "yes" } else { "no" });
+        println!("  simproc dispatches  : {}", process.simproc_dispatches);
+        println!("  pool allocations    : {}", report.allocs);
+        println!("  pool frees          : {}", report.frees);
+        println!("  double-free events  : {}", report.double_frees.len());
+
+        if report.double_frees.is_empty() {
+            println!(
+                "[angryier][verdict] no double-free event was observed by the kernel pool model during this run"
+            );
+        } else {
+            println!(
+                "[angryier][verdict][warning] {} double-free event(s) observed:",
+                report.double_frees.len()
+            );
+            for (index, event) in report.double_frees.iter().enumerate() {
+                println!(
+                    "  event #{:02}: pointer={:#x}, caller={:#x}",
+                    index + 1,
+                    event.pointer,
+                    event.caller
+                );
             }
         }
         0
@@ -867,6 +1099,45 @@ print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d", r.step
                 Err("invalid --find address 'zzz' (expected hex, 0x prefix optional)".to_string())
             );
         }
+
+        #[test]
+        fn run_plan_explains_effective_configuration() {
+            let cfg = config(
+                "./sample",
+                None,
+                &["rdi", "rsi"],
+                &[0x401000, 0x402000],
+                Some(8),
+                4096,
+                true,
+            );
+            let plan = run_plan_output(&cfg);
+            assert!(plan.contains("target         : ./sample"));
+            assert!(plan.contains("dynamic-linking environment model"));
+            assert!(plan.contains("step budget    : 4096"));
+            assert!(plan.contains("symbolic regs  : rdi, rsi"));
+            assert!(plan.contains("find targets   : 0x401000, 0x402000"));
+            assert!(plan.contains("8 symbolic byte(s) in argv[0]"));
+        }
+
+        #[test]
+        fn driver_step_output_explains_instruction_transition() {
+            let line = driver_step_output(
+                7,
+                &angryier_runtime::StepOutcome::Stepped {
+                    pc: 0x140001000,
+                    next_pc: 0x140001005,
+                    length: 5,
+                    form_id: 0x1234,
+                },
+            );
+            assert!(line.contains("step 7"));
+            assert!(line.contains("instruction executed"));
+            assert!(line.contains("0x140001000"));
+            assert!(line.contains("0x140001005"));
+            assert!(line.contains("length=5"));
+            assert!(line.contains("semantic_form=0x1234"));
+        }
     }
 }
 
@@ -876,7 +1147,11 @@ fn run_subcommand(args: &[String]) -> i32 {
         Ok(config) => run_cmd::execute(&config),
         Err(msg) => {
             eprintln!("error: {msg}");
+            eprintln!();
             eprintln!("{}", run_cmd::usage());
+            eprintln!(
+                "hint: fix the argument named above; repeatable flags are --symbolic and --find, while <binary>, --script, --argv, --steps, --dynamic, and --driver may only be supplied once"
+            );
             1
         }
     }
