@@ -181,7 +181,18 @@ To execute a binary symbolically using the CLI:
 cargo build --release
 
 # Symbolically execute target, marking RDI as symbolic
-./target/release/angryier run ./tests/fixtures/symbolic_branch --symbolic rdi --find 0x401006
+./target/release/angryier run ./tests/fixtures/symbolic_branch \
+  --symbolic rdi --find 0x401006
+
+# Target-directed exploration with explicit search economics and a witness
+./target/release/angryier run ./tests/fixtures/symbolic_branch \
+  --symbolic rdi \
+  --find 0x401006 --avoid 0x401012 \
+  --fork --dfs --states 64 --steps 4096 --timeout 120 --solve
+
+# Branch diagnostics can emit replay-ready seeds such as:
+#   --reg rdi=0x000000000000002a
+# Omit the matching --symbolic rdi for a concrete replay.
 ```
 
 ### Embedded Lua Scripting
@@ -202,9 +213,17 @@ local report = angry.run("./tests/fixtures/symbolic_branch", opts)
 
 print("Steps executed: " .. report.steps)
 print("Forks encountered: " .. report.forks)
-if report.inputs and report.inputs.rdi then
-    print("Solved input for RDI: " .. string.format("0x%x", report.inputs.rdi))
+print("Find hits: " .. report.found)
+
+-- solve=true populates one model table per found state. Each model contains
+-- raw byte strings for the symbolic leaves participating in that state.
+for model_index, model in ipairs(report.inputs or {}) do
+    print(string.format("Solved model %d contains %d symbolic value(s)", model_index, #model))
 end
+
+-- The normal generated CLI driver additionally enables branch_analysis and
+-- prints predicate dependencies, alternate-edge SAT/UNSAT, CFG target
+-- direction, and replay-ready register seeds.
 ```
 
 Run via CLI:
@@ -219,20 +238,27 @@ angryier run ./tests/fixtures/symbolic_branch --script script.lua
 use angryier::{Engine, RunOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let engine = Engine::new();
-    let image = engine.load_file("./tests/fixtures/symbolic_branch")?;
-    
+    let engine = Engine::new()?;
+    let image = engine.load("./tests/fixtures/symbolic_branch")?;
+
     let mut options = RunOptions::default();
     options.steps = 500;
     options.find.push(0x401006);
-    options.symbolic.insert("rdi".to_string(), 64);
+    options.symbolic.push(("rdi".to_string(), 64));
     options.solve = true;
 
     let report = engine.run(&image, &options)?;
-    println!("Exploration finished in {} steps. Found PCs: {:?}", report.steps, report.found_pcs);
-    
-    if let Some(rdi_val) = report.inputs.get("rdi") {
-        println!("Solution found: RDI = {:#x}", rdi_val);
+    println!(
+        "Exploration finished in {} steps. Found PCs: {:?}",
+        report.steps, report.found_pcs
+    );
+
+    for (model_index, model) in report.inputs.iter().enumerate() {
+        println!(
+            "model {} contains {} symbolic value(s)",
+            model_index + 1,
+            model.len()
+        );
     }
     Ok(())
 }
@@ -240,7 +266,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-## 🗺️ Repository Structure (42 Crates)
+## 🗺️ Repository Structure (43 Crates)
 
 ```text
 crates/
