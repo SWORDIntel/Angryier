@@ -348,17 +348,24 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
             b.solver_status,
             b.prefix_constraints,
             #b.dependencies,
-            #(b.model or {{}})
+            #(b.model or {{}}),
+            b.steering_action,
+            b.steering_confidence,
+            b.steering_reason
         "#
     );
 
-    let (status, solver_status, prefix_constraints, dependency_count, model_count): (
-        String,
-        String,
-        usize,
-        usize,
-        usize,
-    ) = lua.load(&script).eval().expect("branch analysis");
+    let (
+        status,
+        solver_status,
+        prefix_constraints,
+        dependency_count,
+        model_count,
+        steering_action,
+        steering_confidence,
+        steering_reason,
+    ): (String, String, usize, usize, usize, String, String, String) =
+        lua.load(&script).eval().expect("branch analysis");
 
     assert_eq!(status, "recorded");
     // There is only one branch. The selected state already contains its
@@ -369,6 +376,12 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
     assert_eq!(solver_status, "Sat");
     assert!(dependency_count >= 1, "branch predicate should depend on rdi");
     assert!(model_count >= 1, "SAT alternate edge should produce a candidate model");
+    assert_eq!(steering_action, "explore-alternate");
+    assert_eq!(steering_confidence, "low");
+    assert!(
+        steering_reason.contains("solver-feasible"),
+        "unexpected steering reason: {steering_reason}"
+    );
 }
 
 #[test]
