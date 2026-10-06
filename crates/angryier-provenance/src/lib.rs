@@ -383,7 +383,7 @@ impl TraceGovernor for AdaptiveTraceGovernor {
         if active > 0 {
             let _ = self
                 .capture_window
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |w| Some(w.saturating_sub(1)));
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |w| Some(w.saturating_sub(1)));
             return ProvenanceTier::Tier2;
         }
 
