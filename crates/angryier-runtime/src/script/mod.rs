@@ -675,6 +675,100 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     branch_out.set("chosen_is_find_target", policy.find.contains(&chosen_target))?;
                     branch_out.set("alternate_is_find_target", policy.find.contains(&alternate_target))?;
 
+                    // Static target directionality: recover only a bounded
+                    // executable window rooted at this branch and compare
+                    // graph-edge distances from each successor to configured
+                    // find targets. This is structural guidance, never raw
+                    // numeric address proximity.
+                    if policy.find.is_empty() {
+                        branch_out.set("cfg_status", "no-find-targets")?;
+                    } else {
+                        match runtime.recover_cfg_window(&state.process, decision.pc, 16 * 1024 * 1024) {
+                            Ok(cfg) => {
+                                branch_out.set("cfg_status", "ok")?;
+                                let target_tbl = lua.create_table()?;
+                                let mut best_alternate: Option<(u64, usize, Option<usize>)> = None;
+                                let mut best_chosen: Option<(u64, usize, Option<usize>)> = None;
+                                for (index, target) in policy.find.iter().copied().enumerate() {
+                                    let taken_distance = cfg.shortest_static_distance(decision.taken, target, 128);
+                                    let not_taken_distance =
+                                        cfg.shortest_static_distance(decision.not_taken, target, 128);
+                                    let chosen_distance = if decision.chose_taken {
+                                        taken_distance
+                                    } else {
+                                        not_taken_distance
+                                    };
+                                    let alternate_distance = if decision.chose_taken {
+                                        not_taken_distance
+                                    } else {
+                                        taken_distance
+                                    };
+
+                                    let entry = lua.create_table()?;
+                                    set_addr64(&entry, "target", target)?;
+                                    if let Some(distance) = taken_distance {
+                                        entry.set("taken_distance", distance)?;
+                                    }
+                                    if let Some(distance) = not_taken_distance {
+                                        entry.set("not_taken_distance", distance)?;
+                                    }
+                                    if let Some(distance) = chosen_distance {
+                                        entry.set("chosen_distance", distance)?;
+                                    }
+                                    if let Some(distance) = alternate_distance {
+                                        entry.set("alternate_distance", distance)?;
+                                    }
+                                    let preference = match (chosen_distance, alternate_distance) {
+                                        (None, Some(_)) => "alternate",
+                                        (Some(chosen), Some(alternate)) if alternate < chosen => "alternate",
+                                        (Some(_), None) => "chosen",
+                                        (Some(chosen), Some(alternate)) if chosen < alternate => "chosen",
+                                        (Some(_), Some(_)) => "equal",
+                                        (None, None) => "unreachable-in-window",
+                                    };
+                                    entry.set("preference", preference)?;
+                                    target_tbl.set(index + 1, entry)?;
+
+                                    if preference == "alternate"
+                                        && let Some(alternate) = alternate_distance
+                                        && best_alternate
+                                            .as_ref()
+                                            .is_none_or(|(_, best, _)| alternate < *best)
+                                    {
+                                        best_alternate = Some((target, alternate, chosen_distance));
+                                    } else if preference == "chosen"
+                                        && let Some(chosen) = chosen_distance
+                                        && best_chosen.as_ref().is_none_or(|(_, best, _)| chosen < *best)
+                                    {
+                                        best_chosen = Some((target, chosen, alternate_distance));
+                                    }
+                                }
+                                branch_out.set("cfg_targets", target_tbl)?;
+                                if let Some((target, alternate, chosen)) = best_alternate {
+                                    branch_out.set("cfg_preference", "alternate")?;
+                                    set_addr64(&branch_out, "cfg_find_target", target)?;
+                                    branch_out.set("cfg_alternate_distance", alternate)?;
+                                    if let Some(chosen) = chosen {
+                                        branch_out.set("cfg_chosen_distance", chosen)?;
+                                    }
+                                } else if let Some((target, chosen, alternate)) = best_chosen {
+                                    branch_out.set("cfg_preference", "chosen")?;
+                                    set_addr64(&branch_out, "cfg_find_target", target)?;
+                                    branch_out.set("cfg_chosen_distance", chosen)?;
+                                    if let Some(alternate) = alternate {
+                                        branch_out.set("cfg_alternate_distance", alternate)?;
+                                    }
+                                } else {
+                                    branch_out.set("cfg_preference", "none")?;
+                                }
+                            }
+                            Err(error) => {
+                                branch_out.set("cfg_status", "unavailable")?;
+                                branch_out.set("cfg_error", error.to_string())?;
+                            }
+                        }
+                    }
+
                     let dep_tbl = lua.create_table()?;
                     if let Some(summary) = arena.dependency_summary(decision.condition) {
                         for (index, source_id) in summary.symbolic_sources.iter().enumerate() {
