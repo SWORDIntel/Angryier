@@ -385,6 +385,18 @@ mod run_cmd {
         /// Instruction-step budget threaded into the synthesized driver.
         /// Defaults to the Lua API's own default so the two cannot drift.
         pub steps: u64,
+        /// Maximum simultaneous live symbolic states.
+        pub states: usize,
+        /// Whole-run wall-clock budget for symbolic exploration.
+        pub timeout_secs: u64,
+        /// Per-query budget for post-run alternate-branch solving.
+        pub branch_timeout_ms: u64,
+        /// Extract concrete models for states that hit --find targets.
+        pub solve: bool,
+        /// Fork-aggressive symbolic exploration instead of concolic folding.
+        pub fork: bool,
+        /// Depth-first state selection.
+        pub dfs: bool,
         pub dynamic: bool,
         /// PE driver mode: load via `load_pe_driver`, attach kernel models,
         /// execute DriverEntry, and report pool/kernel events.
@@ -392,9 +404,10 @@ mod run_cmd {
     }
 
     pub fn usage() -> String {
-        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--argv N] [--steps N] [--dynamic] [--driver]\n\
+        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver]\n\
          note: --reg is repeatable; VALUE accepts decimal or 0x-prefixed hexadecimal\n\
          note: --find ADDR is hexadecimal, 0x prefix optional\n\
+         note: --fork enables fork-aggressive symbolic exploration; --dfs prioritizes the newest/deepest state\n\
          note: --driver loads PE32+ drivers with kernel models and reports pool events"
             .to_string()
     }
@@ -443,6 +456,12 @@ mod run_cmd {
         let mut find = Vec::new();
         let mut argv = None;
         let mut steps: Option<u64> = None;
+        let mut states: Option<usize> = None;
+        let mut timeout_secs: Option<u64> = None;
+        let mut branch_timeout_ms: Option<u64> = None;
+        let mut solve = false;
+        let mut fork = false;
+        let mut dfs = false;
         let mut dynamic = false;
         let mut driver = false;
         let mut i = 0;
@@ -505,6 +524,65 @@ mod run_cmd {
                         ));
                     }
                 }
+            } else if arg == "--states" {
+                let raw = value(args, &mut i, arg)?;
+                match raw.parse::<usize>() {
+                    Ok(n) if n > 0 => {
+                        if states.replace(n).is_some() {
+                            return Err(format!("duplicate --states value '{raw}' (flag may only be given once)"));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "invalid --states value '{raw}' (expected an integer greater than zero)"
+                        ));
+                    }
+                }
+            } else if arg == "--timeout" {
+                let raw = value(args, &mut i, arg)?;
+                match raw.parse::<u64>() {
+                    Ok(n) if n > 0 => {
+                        if timeout_secs.replace(n).is_some() {
+                            return Err(format!("duplicate --timeout value '{raw}' (flag may only be given once)"));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "invalid --timeout value '{raw}' (expected seconds greater than zero)"
+                        ));
+                    }
+                }
+            } else if arg == "--branch-timeout-ms" {
+                let raw = value(args, &mut i, arg)?;
+                match raw.parse::<u64>() {
+                    Ok(n) if (1..=10_000).contains(&n) => {
+                        if branch_timeout_ms.replace(n).is_some() {
+                            return Err(format!(
+                                "duplicate --branch-timeout-ms value '{raw}' (flag may only be given once)"
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "invalid --branch-timeout-ms value '{raw}' (expected 1..=10000)"
+                        ));
+                    }
+                }
+            } else if arg == "--solve" {
+                if solve {
+                    return Err("duplicate --solve flag (may only be given once)".to_string());
+                }
+                solve = true;
+            } else if arg == "--fork" {
+                if fork {
+                    return Err("duplicate --fork flag (may only be given once)".to_string());
+                }
+                fork = true;
+            } else if arg == "--dfs" {
+                if dfs {
+                    return Err("duplicate --dfs flag (may only be given once)".to_string());
+                }
+                dfs = true;
             } else if arg == "--dynamic" {
                 if dynamic {
                     return Err("duplicate --dynamic flag (may only be given once)".to_string());
@@ -534,8 +612,16 @@ mod run_cmd {
             regs,
             find,
             argv,
-            // Default shared with the Lua API (`angry.run` opts.steps).
+            // Defaults are shared with the Lua API so CLI and script runs do
+            // not silently diverge.
             steps: steps.unwrap_or(angryier_runtime::script::DEFAULT_STEPS),
+            states: states.unwrap_or(angryier_runtime::script::DEFAULT_MAX_STATES),
+            timeout_secs: timeout_secs.unwrap_or(angryier_runtime::script::DEFAULT_TIMEOUT_SECS),
+            branch_timeout_ms: branch_timeout_ms
+                .unwrap_or(angryier_runtime::script::DEFAULT_BRANCH_TIMEOUT_MS),
+            solve,
+            fork,
+            dfs,
             dynamic,
             driver,
         })
@@ -589,9 +675,9 @@ mod run_cmd {
             .map(|bytes| format!("{bytes} symbolic byte(s) in argv[0]"))
             .unwrap_or_else(|| "disabled".to_string());
         let note = if config.driver {
-            "\n  note           : --driver bypasses Lua; --reg seeds are applied directly, while --script/--symbolic/--find/--argv/--dynamic are not applied"
+            "\n  note           : --driver bypasses Lua; --reg and --steps apply directly, while symbolic search flags (--symbolic/--find/--argv/--states/--timeout/--branch-timeout-ms/--solve/--fork/--dfs/--dynamic) are not applied"
         } else if config.script.is_some() {
-            "\n  note           : a custom Lua script owns execution; parsed symbolic/reg/find/argv/dynamic flags are not injected automatically"
+            "\n  note           : a custom Lua script owns execution; parsed symbolic/reg/find/argv/budget/search flags are not injected automatically"
         } else {
             ""
         };
@@ -603,6 +689,11 @@ mod run_cmd {
              \x20 mode           : {}\n\
              \x20 step budget    : {}\n\
              \x20 state budget   : {}\n\
+             \x20 wall timeout   : {} s\n\
+             \x20 branch timeout : {} ms\n\
+             \x20 exploration    : {}\n\
+             \x20 search order   : {}\n\
+             \x20 solve targets  : {}\n\
              \x20 symbolic regs  : {}\n\
              \x20 concrete regs  : {}\n\
              \x20 find targets   : {}\n\
@@ -611,7 +702,12 @@ mod run_cmd {
             frontend,
             mode,
             config.steps,
-            angryier_runtime::script::DEFAULT_MAX_STATES,
+            config.states,
+            config.timeout_secs,
+            config.branch_timeout_ms,
+            if config.fork { "fork-aggressive" } else { "concolic/default" },
+            if config.dfs { "depth-first" } else { "round-robin/coverage policy" },
+            if config.solve { "yes" } else { "no" },
             symbolic,
             concrete_regs,
             find,
@@ -677,9 +773,12 @@ mod run_cmd {
         };
         let argv_opt = config.argv.map(|n| format!("argv = {n},")).unwrap_or_default();
         let dyn_opt = if config.dynamic { "dynamic = true," } else { "" };
+        let solve_opt = if config.solve { "solve = true," } else { "" };
+        let fork_opt = if config.fork { "exploration = \"fork\"," } else { "" };
+        let dfs_opt = if config.dfs { "search = \"dfs\"," } else { "" };
         let escaped_path = config.path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
-            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, {regs_opt} find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = {steps}, states = {states}, branch_analysis = true }})
+            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, {regs_opt} find = {{ {find_table} }}, {argv_opt} {dyn_opt} {solve_opt} {fork_opt} {dfs_opt} steps = {steps}, states = {states}, timeout_secs = {timeout_secs}, branch_analysis = true, branch_timeout_ms = {branch_timeout_ms} }})
 
 local function yn(v)
     if v then return "yes" end
@@ -994,7 +1093,7 @@ if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
     elseif b.solver_status == "Unsat" then
         idea("The opposite edge of the most recent symbolic branch is UNSAT under the shared pre-branch prefix. Do not waste budget repeatedly trying to flip that decision without changing an earlier path constraint or symbolic source.")
     elseif b.solver_status == "Unknown" then
-        idea("The alternate edge was solver-UNKNOWN within the branch-analysis budget. Treat it as unresolved: try a longer branch_timeout_ms, another solver/backend, or simplify the predicate by concretizing irrelevant sources.")
+        idea("The alternate edge was solver-UNKNOWN within the branch-analysis budget. Treat it as unresolved: try a larger --branch-timeout-ms value, another solver/backend, or simplify the predicate by concretizing irrelevant sources.")
     elseif b.solver_status == "Unavailable" then
         idea("Branch inversion was not checked because the solver is disabled. Re-enable the solver before treating the alternate edge as feasible.")
     elseif b.solver_status == "Error" then
@@ -1013,15 +1112,15 @@ end
 if (r.forks or 0) == 0 and ({symbolic_count} > 0 or {argv_enabled} > 0) then
     idea("Symbolic data produced no forks. That usually means the chosen source has not reached a conditional yet, was overwritten/concretized, or execution ended too early; inspect the trace and move the symbolic source closer to the decision point.")
 elseif (r.forks or 0) > 0 and (r.live_states or 0) > 0 then
-    idea("Forking is active and live states remain. A larger step budget may expose deeper branches; if the state cap is the limiter, switch to a custom Lua run and raise states selectively rather than globally.")
+    idea("Forking is active and live states remain. A larger --steps budget may expose deeper branches; if the state cap is the limiter, raise --states selectively and pair it with target/avoid guidance rather than only widening breadth.")
 end
 
 if (r.live_states or 0) >= {states} then
-    idea("Live-state count reached the default state budget. The next useful experiment is a custom Lua driver with a larger states value, plus tighter find/avoid policy so extra capacity goes to promising branches instead of blind breadth.")
+    idea("Live-state count reached the configured state budget. Re-run with a larger --states value, but pair the extra capacity with tighter targets/search policy so it does not only preserve expensive duplicate paths.")
 end
 
 if r.timed_out then
-    idea("The run timed out. Increasing wall time alone is low-value: first narrow symbolic sources, add target/avoid guidance, use intermediate waypoints, or solve only states near the interesting branch.")
+    idea("The run timed out. Increasing --timeout alone is low-value: first narrow symbolic sources, add target/avoid guidance, use intermediate waypoints, --dfs for a deep target dive, or --fork when concolic folding is suppressing useful path diversity.")
 end
 
 if (r.failed or 0) > 0 then
@@ -1073,8 +1172,13 @@ end
 print("[angryier][ideas] treat these as evidence-driven hypotheses, not automatic proof; validate interesting paths with solved inputs and concrete replay.")"#,
             path = escaped_path,
             regs_opt = regs_opt,
+            solve_opt = solve_opt,
+            fork_opt = fork_opt,
+            dfs_opt = dfs_opt,
             steps = config.steps,
-            states = angryier_runtime::script::DEFAULT_MAX_STATES,
+            states = config.states,
+            timeout_secs = config.timeout_secs,
+            branch_timeout_ms = config.branch_timeout_ms,
             symbolic_count = config.symbolic.len(),
             argv_enabled = usize::from(config.argv.is_some()),
             find_count = config.find.len()
@@ -1340,6 +1444,12 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 find: find.to_vec(),
                 argv,
                 steps,
+                states: angryier_runtime::script::DEFAULT_MAX_STATES,
+                timeout_secs: angryier_runtime::script::DEFAULT_TIMEOUT_SECS,
+                branch_timeout_ms: angryier_runtime::script::DEFAULT_BRANCH_TIMEOUT_MS,
+                solve: false,
+                fork: false,
+                dfs: false,
                 dynamic,
                 driver: false,
             }
@@ -1453,6 +1563,61 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
             let lua = default_driver_lua(&cfg);
             assert!(lua.contains("rdi = 42"), "{lua}");
             assert!(lua.contains(r#"r15_hex = \"0xffffffffffffffff\""#), "{lua}");
+        }
+
+        #[test]
+        fn parses_symbolic_search_controls() {
+            let cfg = parse(&args(&[
+                "./bin",
+                "--states",
+                "64",
+                "--timeout",
+                "300",
+                "--branch-timeout-ms",
+                "5000",
+                "--solve",
+                "--fork",
+                "--dfs",
+            ]))
+            .expect("valid search controls");
+            assert_eq!(cfg.states, 64);
+            assert_eq!(cfg.timeout_secs, 300);
+            assert_eq!(cfg.branch_timeout_ms, 5000);
+            assert!(cfg.solve);
+            assert!(cfg.fork);
+            assert!(cfg.dfs);
+        }
+
+        #[test]
+        fn symbolic_search_controls_reject_bad_values() {
+            assert!(parse(&args(&["./bin", "--states", "0"])).is_err());
+            assert!(parse(&args(&["./bin", "--timeout", "0"])).is_err());
+            assert!(parse(&args(&["./bin", "--branch-timeout-ms", "10001"])).is_err());
+            assert!(parse(&args(&["./bin", "--solve", "--solve"])).is_err());
+            assert!(parse(&args(&["./bin", "--fork", "--fork"])).is_err());
+            assert!(parse(&args(&["./bin", "--dfs", "--dfs"])).is_err());
+        }
+
+        #[test]
+        fn default_driver_threads_search_controls_into_lua() {
+            let mut cfg = config("./bin", None, &["rdi"], &[0x401000], None, 4096, false);
+            cfg.states = 64;
+            cfg.timeout_secs = 300;
+            cfg.branch_timeout_ms = 5000;
+            cfg.solve = true;
+            cfg.fork = true;
+            cfg.dfs = true;
+            let lua = default_driver_lua(&cfg);
+            for expected in [
+                "states = 64",
+                "timeout_secs = 300",
+                "branch_timeout_ms = 5000",
+                "solve = true",
+                "exploration = \"fork\"",
+                "search = \"dfs\"",
+            ] {
+                assert!(lua.contains(expected), "missing search control {expected}: {lua}");
+            }
         }
 
         #[test]
@@ -1649,6 +1814,9 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
             assert!(plan.contains("target         : ./sample"));
             assert!(plan.contains("dynamic-linking environment model"));
             assert!(plan.contains("step budget    : 4096"));
+            assert!(plan.contains("state budget   : 16"));
+            assert!(plan.contains("wall timeout   : 120 s"));
+            assert!(plan.contains("branch timeout : 1000 ms"));
             assert!(plan.contains("symbolic regs  : rdi, rsi"));
             assert!(plan.contains("find targets   : 0x401000, 0x402000"));
             assert!(plan.contains("8 symbolic byte(s) in argv[0]"));
@@ -1684,7 +1852,7 @@ fn run_subcommand(args: &[String]) -> i32 {
             eprintln!();
             eprintln!("{}", run_cmd::usage());
             eprintln!(
-                "hint: fix the argument named above; repeatable flags are --symbolic, --reg, and --find, while <binary>, --script, --argv, --steps, --dynamic, and --driver may only be supplied once"
+                "hint: fix the argument named above; repeatable flags are --symbolic, --reg, and --find, while <binary>, --script, --argv, --steps, --states, --timeout, --branch-timeout-ms, --solve, --fork, --dfs, --dynamic, and --driver may only be supplied once"
             );
             1
         }
