@@ -692,10 +692,45 @@ if r.frontier ~= nil then
     print(string.format("  path constraints        : %d", f.constraints or 0))
     print(string.format("  bound symbols           : %d", f.bound_symbols or 0))
     print(string.format("  symbolic registers      : %d", f.symbolic_registers or 0))
+    local current_regs = f.registers
+    local current_reg_count = count_table(current_regs)
+    if current_reg_count > 0 then
+        local labels = {{}}
+        for i = 1, current_reg_count do
+            local reg = current_regs[i]
+            if reg ~= nil then
+                labels[#labels + 1] = tostring(reg.name or reg.register or "?")
+            end
+        end
+        print("  symbolic register set   : " .. table.concat(labels, ", "))
+    end
     local deps = f.constraint_dependencies
     local dep_count = count_table(deps)
     print(string.format("  constraint dependencies : %d symbolic source(s) occur in retained path predicates", dep_count))
     if dep_count > 0 then
+        local dep_reg_set = {{}}
+        local dep_reg_labels = {{}}
+        for i = 1, dep_count do
+            local dep = deps[i]
+            if dep ~= nil and dep.source_kind == "register" and dep.name ~= nil and not dep_reg_set[dep.name] then
+                dep_reg_set[dep.name] = true
+                dep_reg_labels[#dep_reg_labels + 1] = dep.name
+            end
+        end
+        if #dep_reg_labels > 0 then
+            print("  path-relevant registers : " .. table.concat(dep_reg_labels, ", "))
+        end
+        local irrelevant = {{}}
+        for i = 1, current_reg_count do
+            local reg = current_regs[i]
+            local name = reg ~= nil and reg.name or nil
+            if name ~= nil and not dep_reg_set[name] then
+                irrelevant[#irrelevant + 1] = name
+            end
+        end
+        if #irrelevant > 0 then
+            print("  non-predicate symbolic  : " .. table.concat(irrelevant, ", ") .. " (candidates to concretize unless needed by later trace/taint evidence)")
+        end
         local shown = math.min(dep_count, 12)
         for i = 1, shown do
             local dep = deps[i]
@@ -1257,6 +1292,9 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "frontier block",
                 "[angryier][analysis] symbolic frontier",
                 "constraint dependencies",
+                "symbolic register set",
+                "path-relevant registers",
+                "non-predicate symbolic",
                 "Retained path predicates currently depend on register source(s)",
                 "[angryier][ideas] next symbolic-analysis moves",
                 "ABI-controlled inputs",
