@@ -5134,6 +5134,26 @@ pub struct AlternateBranchSolution {
     pub solver_elapsed: Duration,
 }
 
+/// Concrete validation of an alternate-branch solver model.
+///
+/// Replay is intentionally conservative: only models whose entries all map
+/// to 64-bit architectural register input bindings are replayed. Symbolic
+/// memory/argv/file bytes require a dedicated input-materialization path and
+/// therefore report `unsupported-model` rather than being silently ignored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlternateBranchReplay {
+    /// Stable status for scripting/frontends: `validated`, `mismatch`,
+    /// `budget-exhausted`, `terminated-before-branch`,
+    /// `unsupported-model`, `stateful-kernel-model`, or `not-sat`.
+    pub status: &'static str,
+    pub steps: u64,
+    pub reached_branch: bool,
+    pub observed_target: Option<Address>,
+    pub matched_alternate: bool,
+    pub applied_registers: usize,
+    pub detail: String,
+}
+
 /// A symbolic execution state: the concrete [`Process`] (decode source,
 /// concrete fallbacks, environment model) plus the symbolic register
 /// bindings, path constraints, and symbolic byte store that make this the
@@ -7850,6 +7870,158 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             outcome: result.outcome,
             model: result.model,
             solver_elapsed: result.elapsed,
+        })
+    }
+
+    /// Replays a SAT alternate-branch model concretely from the process entry
+    /// and checks whether it reaches the recorded branch and takes the exact
+    /// alternate successor.
+    ///
+    /// This is a validation layer, not another symbolic proof. It refuses
+    /// stateful kernel-pool runs because the pool tracker is shared through an
+    /// `Arc` and `Process::reset_to_entry` intentionally does not rewind
+    /// external model state. It also refuses non-register model leaves rather
+    /// than dropping symbolic memory assignments.
+    pub fn replay_alternate_branch_model(
+        &self,
+        state: &SymbolicState,
+        solution: &AlternateBranchSolution,
+        max_steps: u64,
+    ) -> Result<AlternateBranchReplay, RuntimeError> {
+        if solution.outcome != SolverOutcomeKind::Sat {
+            return Ok(AlternateBranchReplay {
+                status: "not-sat",
+                steps: 0,
+                reached_branch: false,
+                observed_target: None,
+                matched_alternate: false,
+                applied_registers: 0,
+                detail: format!("solver outcome is {:?}", solution.outcome),
+            });
+        }
+        if state.process.kernel_pool.is_some() {
+            return Ok(AlternateBranchReplay {
+                status: "stateful-kernel-model",
+                steps: 0,
+                reached_branch: false,
+                observed_target: None,
+                matched_alternate: false,
+                applied_registers: 0,
+                detail: "kernel pool model state is externally shared and cannot be safely rewound for post-run replay"
+                    .to_string(),
+            });
+        }
+
+        let mut assignments = Vec::<(u32, u64)>::new();
+        for (expression, bytes) in &solution.model {
+            let Some(binding) = state
+                .symbols
+                .iter()
+                .find(|binding| u64::from(binding.expression.0) == *expression)
+            else {
+                return Ok(AlternateBranchReplay {
+                    status: "unsupported-model",
+                    steps: 0,
+                    reached_branch: false,
+                    observed_target: None,
+                    matched_alternate: false,
+                    applied_registers: assignments.len(),
+                    detail: format!(
+                        "solver model expression {expression} is not a register-backed symbolic input"
+                    ),
+                });
+            };
+            if binding.width != 64 || bytes.len() > 8 {
+                return Ok(AlternateBranchReplay {
+                    status: "unsupported-model",
+                    steps: 0,
+                    reached_branch: false,
+                    observed_target: None,
+                    matched_alternate: false,
+                    applied_registers: assignments.len(),
+                    detail: format!(
+                        "solver model expression {expression} is {} bits / {} byte(s), not a replayable 64-bit GPR",
+                        binding.width,
+                        bytes.len()
+                    ),
+                });
+            }
+            let mut value_bytes = [0u8; 8];
+            value_bytes[..bytes.len()].copy_from_slice(bytes);
+            assignments.push((binding.register, u64::from_le_bytes(value_bytes)));
+        }
+
+        if assignments.is_empty() {
+            return Ok(AlternateBranchReplay {
+                status: "unsupported-model",
+                steps: 0,
+                reached_branch: false,
+                observed_target: None,
+                matched_alternate: false,
+                applied_registers: 0,
+                detail: "SAT alternate model contained no replayable register assignments".to_string(),
+            });
+        }
+
+        let mut process = state.process.clone();
+        process.reset_to_entry();
+        for (register, value) in &assignments {
+            process.write_register(*register, *value)?;
+        }
+
+        let budget = max_steps.max(1);
+        let mut steps = 0u64;
+        while steps < budget && !process.terminated {
+            let pc = process.pc()?;
+            if pc == solution.decision.pc {
+                let _ = self.runtime.step(&mut process)?;
+                steps += 1;
+                let observed = process.pc().ok();
+                let matched = observed == Some(solution.alternate_target);
+                return Ok(AlternateBranchReplay {
+                    status: if matched { "validated" } else { "mismatch" },
+                    steps,
+                    reached_branch: true,
+                    observed_target: observed,
+                    matched_alternate: matched,
+                    applied_registers: assignments.len(),
+                    detail: if matched {
+                        "concrete replay reached the recorded branch and took the solver-predicted alternate successor"
+                            .to_string()
+                    } else {
+                        format!(
+                            "concrete replay reached the recorded branch but observed successor {:?}, expected {:#x}",
+                            observed, solution.alternate_target
+                        )
+                    },
+                });
+            }
+            let _ = self.runtime.step(&mut process)?;
+            steps += 1;
+        }
+
+        Ok(AlternateBranchReplay {
+            status: if process.terminated {
+                "terminated-before-branch"
+            } else {
+                "budget-exhausted"
+            },
+            steps,
+            reached_branch: false,
+            observed_target: process.pc().ok(),
+            matched_alternate: false,
+            applied_registers: assignments.len(),
+            detail: if process.terminated {
+                format!(
+                    "concrete replay terminated before reaching recorded branch {:#x}",
+                    solution.decision.pc
+                )
+            } else {
+                format!(
+                    "concrete replay exhausted {budget} step(s) before reaching recorded branch {:#x}",
+                    solution.decision.pc
+                )
+            },
         })
     }
 
