@@ -381,6 +381,8 @@ mod run_cmd {
         /// Concrete GPR seeds supplied as repeatable --reg REG=VALUE.
         pub regs: Vec<(String, u64)>,
         pub find: Vec<u64>,
+        /// PCs whose states are intentionally pruned before stepping.
+        pub avoid: Vec<u64>,
         pub argv: Option<u64>,
         /// Instruction-step budget threaded into the synthesized driver.
         /// Defaults to the Lua API's own default so the two cannot drift.
@@ -404,9 +406,9 @@ mod run_cmd {
     }
 
     pub fn usage() -> String {
-        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver]\n\
+        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver]\n\
          note: --reg is repeatable; VALUE accepts decimal or 0x-prefixed hexadecimal\n\
-         note: --find ADDR is hexadecimal, 0x prefix optional\n\
+         note: --find/--avoid ADDR are repeatable hexadecimal addresses, 0x prefix optional\n\
          note: --fork enables fork-aggressive symbolic exploration; --dfs prioritizes the newest/deepest state\n\
          note: --driver loads PE32+ drivers with kernel models and reports pool events"
             .to_string()
@@ -454,6 +456,7 @@ mod run_cmd {
         let mut symbolic = Vec::new();
         let mut regs = Vec::new();
         let mut find = Vec::new();
+        let mut avoid = Vec::new();
         let mut argv = None;
         let mut steps: Option<u64> = None;
         let mut states: Option<usize> = None;
@@ -493,6 +496,16 @@ mod run_cmd {
                     None => {
                         return Err(format!(
                             "invalid --find address '{raw}' (expected hex, 0x prefix optional)"
+                        ));
+                    }
+                }
+            } else if arg == "--avoid" {
+                let raw = value(args, &mut i, arg)?;
+                match parse_addr(raw) {
+                    Some(addr) => avoid.push(addr),
+                    None => {
+                        return Err(format!(
+                            "invalid --avoid address '{raw}' (expected hex, 0x prefix optional)"
                         ));
                     }
                 }
@@ -611,6 +624,7 @@ mod run_cmd {
             symbolic,
             regs,
             find,
+            avoid,
             argv,
             // Defaults are shared with the Lua API so CLI and script runs do
             // not silently diverge.
@@ -670,14 +684,24 @@ mod run_cmd {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let avoid = if config.avoid.is_empty() {
+            "none".to_string()
+        } else {
+            config
+                .avoid
+                .iter()
+                .map(|address| format!("{address:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let argv = config
             .argv
             .map(|bytes| format!("{bytes} symbolic byte(s) in argv[0]"))
             .unwrap_or_else(|| "disabled".to_string());
         let note = if config.driver {
-            "\n  note           : --driver bypasses Lua; --reg and --steps apply directly, while symbolic search flags (--symbolic/--find/--argv/--states/--timeout/--branch-timeout-ms/--solve/--fork/--dfs/--dynamic) are not applied"
+            "\n  note           : --driver bypasses Lua; --reg and --steps apply directly, while symbolic search flags (--symbolic/--find/--avoid/--argv/--states/--timeout/--branch-timeout-ms/--solve/--fork/--dfs/--dynamic) are not applied"
         } else if config.script.is_some() {
-            "\n  note           : a custom Lua script owns execution; parsed symbolic/reg/find/argv/budget/search flags are not injected automatically"
+            "\n  note           : a custom Lua script owns execution; parsed symbolic/reg/find/avoid/argv/budget/search flags are not injected automatically"
         } else {
             ""
         };
@@ -697,6 +721,7 @@ mod run_cmd {
              \x20 symbolic regs  : {}\n\
              \x20 concrete regs  : {}\n\
              \x20 find targets   : {}\n\
+             \x20 avoid targets  : {}\n\
              \x20 symbolic argv  : {}{}",
             config.path,
             frontend,
@@ -711,6 +736,7 @@ mod run_cmd {
             symbolic,
             concrete_regs,
             find,
+            avoid,
             argv,
             note
         )
@@ -754,6 +780,7 @@ mod run_cmd {
             .collect::<Vec<_>>()
             .join(",");
         let find_table = config.find.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        let avoid_table = config.avoid.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
         let regs_opt = if config.regs.is_empty() {
             String::new()
         } else {
@@ -778,7 +805,7 @@ mod run_cmd {
         let dfs_opt = if config.dfs { "search = \"dfs\"," } else { "" };
         let escaped_path = config.path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
-            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, {regs_opt} find = {{ {find_table} }}, {argv_opt} {dyn_opt} {solve_opt} {fork_opt} {dfs_opt} steps = {steps}, states = {states}, timeout_secs = {timeout_secs}, branch_analysis = true, branch_timeout_ms = {branch_timeout_ms} }})
+            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, {regs_opt} find = {{ {find_table} }}, avoid = {{ {avoid_table} }}, {argv_opt} {dyn_opt} {solve_opt} {fork_opt} {dfs_opt} steps = {steps}, states = {states}, timeout_secs = {timeout_secs}, branch_analysis = true, branch_timeout_ms = {branch_timeout_ms} }})
 
 local function yn(v)
     if v then return "yes" end
@@ -974,6 +1001,13 @@ if r.branch_analysis ~= nil then
         print(string.format("  taken target            : %s", tostring(b.taken_target_hex or b.taken_target or "?")))
         print(string.format("  not-taken target        : %s", tostring(b.not_taken_target_hex or b.not_taken_target or "?")))
         print(string.format("  alternate target        : %s", tostring(b.alternate_target_hex or b.alternate_target or "?")))
+        if b.chosen_is_find_target then
+            print("  target relation         : chosen successor exactly matches a configured --find target")
+        elseif b.alternate_is_find_target then
+            print("  target relation         : alternate successor exactly matches a configured --find target")
+        else
+            print("  target relation         : neither immediate successor is an exact configured --find target")
+        end
         print(string.format("  condition expression    : %s", tostring(b.condition or "?")))
         print(string.format("  common prefix constraints: %s", tostring(b.prefix_constraints or 0)))
         print(string.format("  alternate solver status : %s", tostring(b.solver_status or "not-run")))
@@ -1088,7 +1122,9 @@ end
 
 if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
     local b = r.branch_analysis
-    if b.solver_status == "Sat" then
+    if b.solver_status == "Sat" and b.alternate_is_find_target then
+        idea("HIGH-VALUE NEXT RUN: the opposite edge is SAT and its immediate successor exactly matches a configured --find target. Replay the reported model with --reg seeds (or keep the inputs symbolic for a seeded rerun); this is direct target-edge evidence, though concrete replay should still validate the model.")
+    elseif b.solver_status == "Sat" then
         idea("The opposite edge of the most recent symbolic branch is SAT under the exact pre-branch path prefix. Use the reported alternate model as a mutation/seed candidate, then concretely replay it; SAT proves solver feasibility for the modeled prefix, not that the full alternate path reaches your target.")
     elseif b.solver_status == "Unsat" then
         idea("The opposite edge of the most recent symbolic branch is UNSAT under the shared pre-branch prefix. Do not waste budget repeatedly trying to flip that decision without changing an earlier path constraint or symbolic source.")
@@ -1172,6 +1208,7 @@ end
 print("[angryier][ideas] treat these as evidence-driven hypotheses, not automatic proof; validate interesting paths with solved inputs and concrete replay.")"#,
             path = escaped_path,
             regs_opt = regs_opt,
+            avoid_table = avoid_table,
             solve_opt = solve_opt,
             fork_opt = fork_opt,
             dfs_opt = dfs_opt,
@@ -1442,6 +1479,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 symbolic: symbolic.iter().map(|s| s.to_string()).collect(),
                 regs: Vec::new(),
                 find: find.to_vec(),
+                avoid: Vec::new(),
                 argv,
                 steps,
                 states: angryier_runtime::script::DEFAULT_MAX_STATES,
@@ -1566,6 +1604,34 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
         }
 
         #[test]
+        fn parses_repeatable_avoid_targets() {
+            let cfg = parse(&args(&[
+                "./bin",
+                "--avoid",
+                "0x401000",
+                "--avoid",
+                "402000",
+            ]))
+            .expect("valid avoid targets");
+            assert_eq!(cfg.avoid, vec![0x401000, 0x402000]);
+        }
+
+        #[test]
+        fn invalid_avoid_target_is_descriptive() {
+            let error = parse(&args(&["./bin", "--avoid", "not-an-address"]))
+                .expect_err("bad avoid address must fail");
+            assert!(error.contains("invalid --avoid address"), "{error}");
+        }
+
+        #[test]
+        fn default_driver_threads_avoid_targets_into_lua() {
+            let mut cfg = config("./bin", None, &[], &[], None, 256, false);
+            cfg.avoid = vec![0x401000, 0x402000];
+            let lua = default_driver_lua(&cfg);
+            assert!(lua.contains("avoid = { 4198400,4202496 }"), "{lua}");
+        }
+
+        #[test]
         fn parses_symbolic_search_controls() {
             let cfg = parse(&args(&[
                 "./bin",
@@ -1681,6 +1747,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "[angryier][analysis] symbolic frontier",
                 "[angryier][branch-analysis] most recent symbolic branch",
                 "alternate solver status",
+                "target relation",
                 "branch_analysis = true",
                 "constraint dependencies",
                 "symbolic register set",
@@ -1852,7 +1919,7 @@ fn run_subcommand(args: &[String]) -> i32 {
             eprintln!();
             eprintln!("{}", run_cmd::usage());
             eprintln!(
-                "hint: fix the argument named above; repeatable flags are --symbolic, --reg, and --find, while <binary>, --script, --argv, --steps, --states, --timeout, --branch-timeout-ms, --solve, --fork, --dfs, --dynamic, and --driver may only be supplied once"
+                "hint: fix the argument named above; repeatable flags are --symbolic, --reg, --find, and --avoid, while <binary>, --script, --argv, --steps, --states, --timeout, --branch-timeout-ms, --solve, --fork, --dfs, --dynamic, and --driver may only be supplied once"
             );
             1
         }
