@@ -116,6 +116,30 @@ PE driver mode additionally reports:
 
 Routine per-instruction lines are intentionally suppressed after the first 12 driver steps so verbose diagnostics do not turn a long analysis into an I/O-bound workload.
 
+### Evidence-driven next-step ideas
+
+The generated driver now ends with an `[angryier][ideas]` section. These are conditional hypotheses derived from the run report rather than static tips.
+
+Examples include:
+
+- **No symbolic source:** suggest ABI-controlled argument registers (`rdi/rsi/rdx/rcx/r8/r9`) or symbolic argv instead of symbolizing the whole machine.
+- **Symbolic source but zero forks:** flag likely overwrite/concretization, insufficient depth, or a source that never reaches a conditional.
+- **No `--find` target:** suggest adding an accept/success block, vulnerable call site, allocator/free site, error bypass, or other semantically useful waypoint.
+- **Target not reached:** recommend an intermediate waypoint near the last stable trace region instead of blindly multiplying the step budget.
+- **Target reached:** recommend a custom Lua rerun with `solve=true`, followed by concrete replay of the recovered satisfying input.
+- **Live-state saturation:** recommend selectively increasing `states` and tightening find/avoid policy.
+- **Timeout:** recommend reducing symbolic breadth, adding intermediate targets, or solver-gating only near interesting branches before increasing wall time.
+- **Failed states:** direct the operator to `last_error` plus `trace_hex` to classify semantic, model, memory, or solver debt.
+- **Concretization retries:** suggest tightening pointer provenance, symbolic source placement, region constraints, or object/allocator models.
+- **Unsupported-form debt:** prioritize `unsupported_sites` by reachability/frequency because additional raw steps cannot recover semantic fidelity.
+- **Under-constrained memory:** inspect `unmapped_sites` and replace fabricated memory with real mappings, symbolic buffers, modeled API results, or region constraints.
+- **Read-only write relaxation:** inspect `ro_write_reverts` and classify loader-protection drift, self-modification, model error, or invalid paths.
+- **Vector debt:** warn that SAT/reachability conclusions depending on under-constrained vector values need stronger semantics first.
+- **Heavy forking with no merges:** suggest convergence-aware exploration, loop summaries, or function summaries.
+- **Useful retained trace:** use the last stable block before divergence as the next breakpoint/find waypoint.
+
+The CLI explicitly labels these as **hypotheses, not proof**. Interesting paths should be validated with solved inputs and concrete replay.
+
 ### Exit codes
 
 | Code | Cause |
