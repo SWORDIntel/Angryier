@@ -1028,6 +1028,11 @@ if r.branch_analysis ~= nil then
         if b.cfg_error ~= nil then
             print(string.format("  CFG analysis detail     : %s", tostring(b.cfg_error)))
         end
+        if b.steering_action ~= nil then
+            print(string.format("  steering action         : %s", tostring(b.steering_action)))
+            print(string.format("  steering confidence     : %s", tostring(b.steering_confidence or "?")))
+            print(string.format("  steering reason         : %s", tostring(b.steering_reason or "?")))
+        end
         print(string.format("  condition expression    : %s", tostring(b.condition or "?")))
         print(string.format("  common prefix constraints: %s", tostring(b.prefix_constraints or 0)))
         print(string.format("  alternate solver status : %s", tostring(b.solver_status or "not-run")))
@@ -1142,22 +1147,21 @@ end
 
 if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
     local b = r.branch_analysis
-    if b.solver_status == "Sat" and b.alternate_is_find_target then
-        idea("HIGH-VALUE NEXT RUN: the opposite edge is SAT and its immediate successor exactly matches a configured --find target. Replay the reported model with --reg seeds (or keep the inputs symbolic for a seeded rerun); this is direct target-edge evidence, though concrete replay should still validate the model.")
-    elseif b.solver_status == "Sat" and b.cfg_preference == "alternate" then
-        idea("TARGET-DIRECTED NEXT RUN: the alternate edge is SAT and the recovered CFG places that successor on a shorter static path to a configured --find target than the chosen successor. Replay the reported model first. CFG distance is structural guidance only; unresolved indirect edges or incomplete recovery can hide other routes.")
-    elseif b.solver_status == "Sat" and b.cfg_preference == "chosen" then
-        idea("The alternate edge is SAT, but the recovered CFG currently ranks the chosen successor closer to a configured --find target. Keep the alternate model as a coverage seed, but do not prioritize it over the chosen path solely for target reachability.")
-    elseif b.solver_status == "Sat" then
-        idea("The opposite edge of the most recent symbolic branch is SAT under the exact pre-branch path prefix. Use the reported alternate model as a mutation/seed candidate, then concretely replay it; SAT proves solver feasibility for the modeled prefix, not that the full alternate path reaches your target.")
-    elseif b.solver_status == "Unsat" then
-        idea("The opposite edge of the most recent symbolic branch is UNSAT under the shared pre-branch prefix. Do not waste budget repeatedly trying to flip that decision without changing an earlier path constraint or symbolic source.")
-    elseif b.solver_status == "Unknown" then
-        idea("The alternate edge was solver-UNKNOWN within the branch-analysis budget. Treat it as unresolved: try a larger --branch-timeout-ms value, another solver/backend, or simplify the predicate by concretizing irrelevant sources.")
-    elseif b.solver_status == "Unavailable" then
-        idea("Branch inversion was not checked because the solver is disabled. Re-enable the solver before treating the alternate edge as feasible.")
-    elseif b.solver_status == "Error" then
-        idea("Alternate-edge solving failed. Inspect the branch-analysis error before changing exploration budgets; this is a solver/query construction problem, not evidence that the edge is infeasible.")
+    local action = b.steering_action
+    if action == "prioritize-alternate" then
+        idea("TARGET-DIRECTED NEXT RUN: Angryier ranks the alternate edge as the best next branch (" .. tostring(b.steering_confidence or "?") .. " confidence). " .. tostring(b.steering_reason or "") .. ". Replay the reported model first, then validate the resulting path concretely before treating target reachability as established.")
+    elseif action == "keep-chosen" then
+        idea("KEEP CURRENT DIRECTION: Angryier currently ranks the chosen edge above the alternate (" .. tostring(b.steering_confidence or "?") .. " confidence). " .. tostring(b.steering_reason or "") .. ". Preserve the alternate model as a coverage seed if it is SAT, but do not spend target-directed budget on it first.")
+    elseif action == "reject-alternate" then
+        idea("PRUNE THIS FLIP: Angryier proved the alternate edge UNSAT under the exact shared pre-branch prefix. Do not retry this branch inversion unless an earlier constraint or symbolic source changes.")
+    elseif action == "explore-both" then
+        idea("EXPLORE BOTH EDGES: solver feasibility is available but bounded CFG evidence does not distinguish the two successors. Keep both paths alive if budget allows, or use coverage novelty / later predicates to break the tie.")
+    elseif action == "explore-alternate" then
+        idea("COVERAGE CANDIDATE: the alternate edge is solver-feasible but lacks strong target-direction evidence. Use the model as a secondary seed and concretely replay it before promoting it to a target-directed path.")
+    elseif action == "unresolved" then
+        idea("BRANCH STEERING UNRESOLVED: " .. tostring(b.steering_reason or "insufficient evidence") .. ". Inspect solver status/error and increase --branch-timeout-ms only if the predicate is genuinely worth solving; otherwise simplify the symbolic frontier first.")
+    elseif b.solver_status == "Unknown" or b.solver_status == "Timeout" or b.solver_status == "ResourceLimit" then
+        idea("The alternate edge was not resolved within the branch-analysis solver budget. Treat it as unknown, not infeasible.")
     end
 end
 
@@ -1766,6 +1770,10 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "alternate solver status",
                 "target relation",
                 "CFG target analysis",
+                "steering action",
+                "steering confidence",
+                "steering reason",
+                "TARGET-DIRECTED NEXT RUN",
                 "branch_analysis = true",
                 "constraint dependencies",
                 "symbolic register set",
