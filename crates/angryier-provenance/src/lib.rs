@@ -20,8 +20,8 @@ pub use triggers::*;
 
 use angryier_types::{ContentId, ProvenanceNodeId, ProvenanceSeq, ProvenanceTier, StateId};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Provenance event model
@@ -381,11 +381,9 @@ impl TraceGovernor for AdaptiveTraceGovernor {
         // Active trigger capture window forces promotion to Tier-2.
         let active = self.capture_window.load(Ordering::SeqCst);
         if active > 0 {
-            let _ = self.capture_window.fetch_update(
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-                |w| Some(w.saturating_sub(1)),
-            );
+            let _ = self
+                .capture_window
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |w| Some(w.saturating_sub(1)));
             return ProvenanceTier::Tier2;
         }
 
@@ -509,11 +507,7 @@ impl FlightRecorder {
     }
 
     /// Evaluates a trigger and, if fired, immediately captures a Tier-2 snapshot.
-    pub fn check_and_capture(
-        &self,
-        trigger: &mut dyn Tier2Trigger,
-        context: &TriggerContext,
-    ) -> Option<Tier2Snapshot> {
+    pub fn check_and_capture(&self, trigger: &mut dyn Tier2Trigger, context: &TriggerContext) -> Option<Tier2Snapshot> {
         match trigger.evaluate(context) {
             TriggerDecision::Fire { reason, .. } => Some(self.capture_tier2_snapshot(reason)),
             TriggerDecision::Ignore => None,
@@ -577,11 +571,7 @@ pub struct TriggeredFlightRecorder {
 }
 
 impl TriggeredFlightRecorder {
-    pub fn new(
-        capacity: usize,
-        config: RepetitionConfig,
-        triggers: Vec<Box<dyn Tier2Trigger>>,
-    ) -> Self {
+    pub fn new(capacity: usize, config: RepetitionConfig, triggers: Vec<Box<dyn Tier2Trigger>>) -> Self {
         Self {
             recorder: FlightRecorder::new(capacity),
             summarizer: StructuralRepetitionSummarizer::new(config),
@@ -1204,24 +1194,30 @@ mod trigger_tests {
     #[test]
     fn flight_recorder_check_and_capture_snapshot() {
         let mut rec = FlightRecorder::new(10);
-        assert!(rec.record(ProvenanceEvent {
-            id: ProvenanceNodeId(1),
-            sequence: ProvenanceSeq(1),
-            state: StateId(1),
-            tier: ProvenanceTier::Tier1,
-            kind: ProvenanceEventKind::StateFork,
-            semantic_content: None,
-            parents: Vec::new(),
-        }).is_ok());
-        assert!(rec.record(ProvenanceEvent {
-            id: ProvenanceNodeId(2),
-            sequence: ProvenanceSeq(2),
-            state: StateId(1),
-            tier: ProvenanceTier::Tier2,
-            kind: ProvenanceEventKind::Branch,
-            semantic_content: None,
-            parents: Vec::new(),
-        }).is_ok());
+        assert!(
+            rec.record(ProvenanceEvent {
+                id: ProvenanceNodeId(1),
+                sequence: ProvenanceSeq(1),
+                state: StateId(1),
+                tier: ProvenanceTier::Tier1,
+                kind: ProvenanceEventKind::StateFork,
+                semantic_content: None,
+                parents: Vec::new(),
+            })
+            .is_ok()
+        );
+        assert!(
+            rec.record(ProvenanceEvent {
+                id: ProvenanceNodeId(2),
+                sequence: ProvenanceSeq(2),
+                state: StateId(1),
+                tier: ProvenanceTier::Tier2,
+                kind: ProvenanceEventKind::Branch,
+                semantic_content: None,
+                parents: Vec::new(),
+            })
+            .is_ok()
+        );
 
         let mut trigger = ForkBurstTrigger::new(1, 4, 0);
         let mut context = TriggerContext::new();
@@ -1230,10 +1226,11 @@ mod trigger_tests {
         let snapshot = rec.check_and_capture(&mut trigger, &context);
         assert!(snapshot.is_some());
         if let Some(snap) = snapshot {
-        assert_eq!(snap.total_events, 2);
-        assert_eq!(snap.tier1_count, 1);
-        assert_eq!(snap.tier2_count, 1);
-        assert_eq!(snap.captured_at_sequence, ProvenanceSeq(2)); }
+            assert_eq!(snap.total_events, 2);
+            assert_eq!(snap.tier1_count, 1);
+            assert_eq!(snap.tier2_count, 1);
+            assert_eq!(snap.captured_at_sequence, ProvenanceSeq(2));
+        }
     }
 
     #[test]
@@ -1262,11 +1259,7 @@ mod trigger_tests {
     #[test]
     fn triggered_flight_recorder_end_to_end() {
         let trigger = Box::new(ForkBurstTrigger::new(2, 5, 0));
-        let mut t_rec = TriggeredFlightRecorder::new(
-            20,
-            RepetitionConfig::default(),
-            vec![trigger],
-        );
+        let mut t_rec = TriggeredFlightRecorder::new(20, RepetitionConfig::default(), vec![trigger]);
 
         // Record 2 StateFork events -> should trigger capture
         let e1 = ProvenanceEvent {

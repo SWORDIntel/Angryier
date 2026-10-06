@@ -11,15 +11,15 @@ pub enum Endianness {
 
 /// Boundary/interesting 8-bit integer values.
 pub const INTERESTING_8: [u8; 9] = [
-    0,     // 0
-    1,     // 1
-    0xFF,  // -1
-    0x7F,  // 127 (i8::MAX)
-    0x80,  // -128 (i8::MIN)
-    2,     // 2
-    0xFE,  // -2
-    16,    // 16
-    32,    // 32
+    0,    // 0
+    1,    // 1
+    0xFF, // -1
+    0x7F, // 127 (i8::MAX)
+    0x80, // -128 (i8::MIN)
+    2,    // 2
+    0xFE, // -2
+    16,   // 16
+    32,   // 32
 ];
 
 /// Boundary/interesting 16-bit integer values.
@@ -547,11 +547,7 @@ impl Mutator {
 
     /// Mutates the input seed, producing a new non-empty byte vector.
     pub fn mutate(&mut self, input: &[u8], secondary: Option<&[u8]>) -> Vec<u8> {
-        let mut buf = if input.is_empty() {
-            vec![0]
-        } else {
-            input.to_vec()
-        };
+        let mut buf = if input.is_empty() { vec![0] } else { input.to_vec() };
 
         // Try up to 5 times to produce an altered input
         for _ in 0..5 {
@@ -568,11 +564,7 @@ impl Mutator {
 
     /// Havoc stage: applies a sequence of multiple random mutations in place.
     pub fn havoc_mutate(&mut self, input: &[u8], secondary: Option<&[u8]>, steps: usize) -> Vec<u8> {
-        let mut buf = if input.is_empty() {
-            vec![0]
-        } else {
-            input.to_vec()
-        };
+        let mut buf = if input.is_empty() { vec![0] } else { input.to_vec() };
 
         let count = steps.max(1);
         for _ in 0..count {

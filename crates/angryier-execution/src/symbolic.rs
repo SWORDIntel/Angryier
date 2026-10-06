@@ -571,9 +571,7 @@ impl<'a> SymbolicEvaluator<'a> {
                             let (lo, w) = (*bit_offset, *width_bits);
                             let span = lo.saturating_add(w);
                             if lo % 8 != 0 || w % 8 != 0 || w == 0 || bit_width(ty)? != w {
-                                return Err(SymbolicEvalError::UnsupportedOperation(
-                                    "partial register write".into(),
-                                ));
+                                return Err(SymbolicEvalError::UnsupportedOperation("partial register write".into()));
                             }
                             let tracked_width = self
                                 .registers
@@ -828,9 +826,9 @@ impl<'a> SymbolicEvaluator<'a> {
         if let Some(exact) = self.exact_float_result(op, ty, inputs)? {
             return Ok((exact, ty));
         }
-        let width = float_width(ty).or_else(|| bit_width(ty).ok()).ok_or_else(|| {
-            SymbolicEvalError::UnsupportedType(format!("float primitive result {ty:?}"))
-        })?;
+        let width = float_width(ty)
+            .or_else(|| bit_width(ty).ok())
+            .ok_or_else(|| SymbolicEvalError::UnsupportedType(format!("float primitive result {ty:?}")))?;
         let expression = self.fresh_symbol(width)?;
         self.record_debt(op, ty);
         Ok((expression, ty))
@@ -912,9 +910,9 @@ impl<'a> SymbolicEvaluator<'a> {
         let Some(value) = result else {
             return Ok(None);
         };
-        let width = float_width(ty).or_else(|| bit_width(ty).ok()).ok_or_else(|| {
-            SymbolicEvalError::UnsupportedType(format!("float primitive result {ty:?}"))
-        })?;
+        let width = float_width(ty)
+            .or_else(|| bit_width(ty).ok())
+            .ok_or_else(|| SymbolicEvalError::UnsupportedType(format!("float primitive result {ty:?}")))?;
         let byte_width = usize::from(width).div_ceil(8);
         let expression = self.intern(
             ExprSort::BitVec(width),
@@ -1405,7 +1403,9 @@ fn popcount_masks(width: u16) -> Option<(u64, u64, u64, u64, u64)> {
 /// consed.
 fn lower_popcount(arena: &SymbolicArena, input: ExprId, width: u16) -> Result<ExprId, SymbolicEvalError> {
     let Some((m1, m2, m4, _, final_mask)) = popcount_masks(width) else {
-        return Err(SymbolicEvalError::UnsupportedOperation(format!("popcount width {width}")));
+        return Err(SymbolicEvalError::UnsupportedOperation(format!(
+            "popcount width {width}"
+        )));
     };
     let c = |value: u64| bv_constant(arena, width, value);
     let x = input;
@@ -1415,18 +1415,36 @@ fn lower_popcount(arena: &SymbolicArena, input: ExprId, width: u16) -> Result<Ex
         ExprOp::Sub,
         width,
         x,
-        bv_binop(arena, ExprOp::And, width, bv_binop(arena, ExprOp::LShr, width, x, c(1)?)?, c(m1)?)?,
+        bv_binop(
+            arena,
+            ExprOp::And,
+            width,
+            bv_binop(arena, ExprOp::LShr, width, x, c(1)?)?,
+            c(m1)?,
+        )?,
     )?;
     // x = (x & m2) + ((x >> 2) & m2): each 4-bit field holds its bit count.
     let low = bv_binop(arena, ExprOp::And, width, x, c(m2)?)?;
-    let high = bv_binop(arena, ExprOp::And, width, bv_binop(arena, ExprOp::LShr, width, x, c(2)?)?, c(m2)?)?;
+    let high = bv_binop(
+        arena,
+        ExprOp::And,
+        width,
+        bv_binop(arena, ExprOp::LShr, width, x, c(2)?)?,
+        c(m2)?,
+    )?;
     let x = bv_binop(arena, ExprOp::Add, width, low, high)?;
     // Nibble fold: (x + (x >> 4)) & m4 — each byte holds its bit count.
     let x = bv_binop(
         arena,
         ExprOp::And,
         width,
-        bv_binop(arena, ExprOp::Add, width, x, bv_binop(arena, ExprOp::LShr, width, x, c(4)?)?)?,
+        bv_binop(
+            arena,
+            ExprOp::Add,
+            width,
+            x,
+            bv_binop(arena, ExprOp::LShr, width, x, c(4)?)?,
+        )?,
         c(m4)?,
     )?;
     // Cumulative folds so the low byte/half/word accumulates the full
@@ -1434,7 +1452,13 @@ fn lower_popcount(arena: &SymbolicArena, input: ExprId, width: u16) -> Result<Ex
     let mut x = x;
     for shift in [8u64, 16, 32] {
         if shift < u64::from(width) {
-            x = bv_binop(arena, ExprOp::Add, width, x, bv_binop(arena, ExprOp::LShr, width, x, c(shift)?)?)?;
+            x = bv_binop(
+                arena,
+                ExprOp::Add,
+                width,
+                x,
+                bv_binop(arena, ExprOp::LShr, width, x, c(shift)?)?,
+            )?;
         }
     }
     bv_binop(arena, ExprOp::And, width, x, c(final_mask)?)
@@ -1491,7 +1515,9 @@ fn lower_crc32(
 ) -> Result<ExprId, SymbolicEvalError> {
     const POLY: u32 = 0x82F63B78;
     if !data_bits.is_multiple_of(8) || data_bits == 0 || data_bits > 64 {
-        return Err(SymbolicEvalError::UnsupportedOperation(format!("crc32 input width {data_bits}")));
+        return Err(SymbolicEvalError::UnsupportedOperation(format!(
+            "crc32 input width {data_bits}"
+        )));
     }
     let poly = bv_constant(arena, 32, u64::from(POLY))?;
     let zero = bv_constant(arena, 32, 0)?;
@@ -2812,7 +2838,8 @@ impl<'a> ConcolicEvaluator<'a> {
         if op == ExprOp::Constant {
             if let Some(node) = self.arena.get(value) {
                 for (offset, byte) in node.immediate.iter().enumerate().take(byte_width) {
-                    self.memory.insert(base.wrapping_add(offset as u64), ByteValue::Concrete(*byte));
+                    self.memory
+                        .insert(base.wrapping_add(offset as u64), ByteValue::Concrete(*byte));
                 }
                 return Ok(());
             }
@@ -2820,7 +2847,8 @@ impl<'a> ConcolicEvaluator<'a> {
         }
         for offset in 0..byte_width {
             let byte_expr = self.extract(value, offset as u16 * 8, 8)?;
-            self.memory.insert(base.wrapping_add(offset as u64), ByteValue::Symbolic(byte_expr));
+            self.memory
+                .insert(base.wrapping_add(offset as u64), ByteValue::Symbolic(byte_expr));
         }
         Ok(())
     }
@@ -3308,12 +3336,11 @@ pub fn merge_snapshots(
                     // register (movq's zero-extended write vs a whole-vector
                     // move) are the same sort and merge cleanly under the
                     // left side's type.
-                    let same_width =
-                        match (bit_width(left_ty), bit_width(right_ty)) {
-                            (Ok(left_width), Ok(right_width)) => left_width == right_width,
-                            (Err(_), Err(_)) => left_ty == right_ty,
-                            _ => false,
-                        };
+                    let same_width = match (bit_width(left_ty), bit_width(right_ty)) {
+                        (Ok(left_width), Ok(right_width)) => left_width == right_width,
+                        (Err(_), Err(_)) => left_ty == right_ty,
+                        _ => false,
+                    };
                     if !same_width {
                         return Err(SymbolicEvalError::UnsupportedOperation(format!(
                             "merge type mismatch on register {register}: {left_ty:?} vs {right_ty:?}"
@@ -3871,16 +3898,15 @@ mod tests {
             .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("memory init: {e:?}")))?,
         );
         let payload: Vec<u8> = (0x10u8..0x20).collect();
-        let concrete_bytes: Vec<angryier_memory::ByteValue> =
-            payload.iter().map(|byte| angryier_memory::ByteValue::Concrete(*byte)).collect();
+        let concrete_bytes: Vec<angryier_memory::ByteValue> = payload
+            .iter()
+            .map(|byte| angryier_memory::ByteValue::Concrete(*byte))
+            .collect();
         memory.write_bytes(0x2000, &concrete_bytes)?;
 
         // MOVDQU-shaped load: 16 bytes into xmm0 through the shadow.
         let load_block = block(vec![
-            with_result(
-                0,
-                const_bytes(bits(64), 0x2000u64.to_le_bytes().to_vec()),
-            ),
+            with_result(0, const_bytes(bits(64), 0x2000u64.to_le_bytes().to_vec())),
             with_result(
                 1,
                 IrInstruction {
@@ -3906,16 +3932,19 @@ mod tests {
             .register_value(ZMM0)
             .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
         assert_eq!(arena.sort_of(loaded), Some(ExprSort::BitVec(128)));
-        let node = arena.get(loaded).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
-        assert_eq!(node.op, ExprOp::Constant, "all-concrete vector load folds to one constant");
+        let node = arena
+            .get(loaded)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
+        assert_eq!(
+            node.op,
+            ExprOp::Constant,
+            "all-concrete vector load folds to one constant"
+        );
         assert_eq!(node.immediate, payload);
 
         // Store it back out (MOVUPS-shaped) and verify byte-exact round-trip.
         let store_block = block(vec![
-            with_result(
-                0,
-                const_bytes(bits(64), 0x3000u64.to_le_bytes().to_vec()),
-            ),
+            with_result(0, const_bytes(bits(64), 0x3000u64.to_le_bytes().to_vec())),
             with_result(
                 1,
                 IrInstruction {
@@ -3947,14 +3976,10 @@ mod tests {
 
         // One symbolic source byte: the reload must stay a symbolic 128-bit
         // expression, not fold.
-        let sym = symbol(&arena, 8)
-            .map_err(SymbolicEvalError::UnsupportedOperation)?;
+        let sym = symbol(&arena, 8).map_err(SymbolicEvalError::UnsupportedOperation)?;
         memory.write_bytes(0x2008, &[angryier_memory::ByteValue::Symbolic(sym)])?;
         let reload_block = block(vec![
-            with_result(
-                0,
-                const_bytes(bits(64), 0x2000u64.to_le_bytes().to_vec()),
-            ),
+            with_result(0, const_bytes(bits(64), 0x2000u64.to_le_bytes().to_vec())),
             with_result(
                 1,
                 IrInstruction {
@@ -3979,7 +4004,11 @@ mod tests {
             .register_value(ZMM0 + 2)
             .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
         assert_eq!(arena.sort_of(mixed), Some(ExprSort::BitVec(128)));
-        assert_ne!(arena.op_of(mixed), Some(ExprOp::Constant), "symbolic byte must keep the load symbolic");
+        assert_ne!(
+            arena.op_of(mixed),
+            Some(ExprOp::Constant),
+            "symbolic byte must keep the load symbolic"
+        );
         Ok(())
     }
 
@@ -4015,14 +4044,26 @@ mod tests {
         assert_eq!(node.op, ExprOp::Concat);
         // Little-endian concat: operands[0] is the written low 64 bits,
         // operands[1] the preserved high 448 bits.
-        let low = arena.get(node.operands[0]).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        let low = arena
+            .get(node.operands[0])
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
         assert_eq!(low.op, ExprOp::Constant);
         assert_eq!(low.immediate, 0x42u64.to_le_bytes().to_vec());
-        let high = arena.get(node.operands[1]).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        let high = arena
+            .get(node.operands[1])
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
         assert_eq!(high.op, ExprOp::Extract);
         // Extract immediate = [start:u16 LE][width:u16 LE].
-        let start = high.immediate.get(..2).and_then(|b| <[u8; 2]>::try_from(b).ok()).map(u16::from_le_bytes);
-        let width = high.immediate.get(2..4).and_then(|b| <[u8; 2]>::try_from(b).ok()).map(u16::from_le_bytes);
+        let start = high
+            .immediate
+            .get(..2)
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .map(u16::from_le_bytes);
+        let width = high
+            .immediate
+            .get(2..4)
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .map(u16::from_le_bytes);
         assert_eq!(start, Some(64));
         assert_eq!(width, Some(448));
         assert_eq!(high.sort, ExprSort::BitVec(448));
@@ -4074,10 +4115,20 @@ mod tests {
         // The 64-bit view is Extract(splice, 0, 64) — the high 448 bits are
         // a fresh symbol, so the extract cannot fold to a constant, but its
         // window and operand must be exact.
-        let low_node = arena.get(low_view).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        let low_node = arena
+            .get(low_view)
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
         assert_eq!(low_node.op, ExprOp::Extract);
-        let start = low_node.immediate.get(..2).and_then(|b| <[u8; 2]>::try_from(b).ok()).map(u16::from_le_bytes);
-        let width = low_node.immediate.get(2..4).and_then(|b| <[u8; 2]>::try_from(b).ok()).map(u16::from_le_bytes);
+        let start = low_node
+            .immediate
+            .get(..2)
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .map(u16::from_le_bytes);
+        let width = low_node
+            .immediate
+            .get(2..4)
+            .and_then(|b| <[u8; 2]>::try_from(b).ok())
+            .map(u16::from_le_bytes);
         assert_eq!(start, Some(0));
         assert_eq!(width, Some(64));
         assert_eq!(low_node.operands, vec![expr]);
@@ -4179,14 +4230,21 @@ mod tests {
         let expr = evaluator
             .register_value(ZMM0 + 4)
             .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
-        assert_eq!(arena.op_of(expr), Some(ExprOp::Symbol), "lane add falls back to a fresh symbol");
+        assert_eq!(
+            arena.op_of(expr),
+            Some(ExprOp::Symbol),
+            "lane add falls back to a fresh symbol"
+        );
         assert_eq!(arena.sort_of(expr), Some(ExprSort::BitVec(128)));
         assert_eq!(evaluator.debt_total(), 1);
-        assert_eq!(evaluator.debt_sites(), &[SymbolicDebtSite {
-            op: IrPrimitive::VecLaneAdd,
-            width_bits: 128,
-            lane_bits: 8,
-        }]);
+        assert_eq!(
+            evaluator.debt_sites(),
+            &[SymbolicDebtSite {
+                op: IrPrimitive::VecLaneAdd,
+                width_bits: 128,
+                lane_bits: 8,
+            }]
+        );
 
         // A second, different primitive adds a site; repeating the first
         // only moves the total (sites dedupe, total counts every hit).
@@ -4228,7 +4286,9 @@ mod tests {
         fn read_bytes(&self, address: u64, length: usize) -> Option<Vec<angryier_memory::ByteValue>> {
             let mut out = Vec::with_capacity(length);
             for offset in 0..length as u64 {
-                out.push(angryier_memory::ByteValue::Concrete(*self.mem.get(&(address + offset))?));
+                out.push(angryier_memory::ByteValue::Concrete(
+                    *self.mem.get(&(address + offset))?,
+                ));
             }
             Some(out)
         }
@@ -4302,7 +4362,10 @@ mod tests {
             .iter()
             .enumerate()
             .fold(0u128, |acc, (index, byte)| acc | (u128::from(*byte) << (8 * index)));
-        assert_eq!(evaluator.register_concretes().get(&(ZMM0 + 5)), Some(&Some(expected_tag)));
+        assert_eq!(
+            evaluator.register_concretes().get(&(ZMM0 + 5)),
+            Some(&Some(expected_tag))
+        );
         assert_eq!(evaluator.debt_total(), 0);
 
         // A lane op on the concolic path records visible debt and yields an
@@ -4432,7 +4495,11 @@ mod tests {
                 angryier_memory::ByteValue::Symbolic(_) => None,
             })
             .collect();
-        assert_eq!(moved.as_deref(), Some(b"UCMEM".as_slice()), "store must land byte-exact");
+        assert_eq!(
+            moved.as_deref(),
+            Some(b"UCMEM".as_slice()),
+            "store must land byte-exact"
+        );
 
         // Debt is in the shared ledger, reachable through any handle.
         let inner = memory.memory.inner();
@@ -4614,9 +4681,8 @@ mod tests {
                     let expression = evaluator
                         .register_value(SINK)
                         .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
-                    let folded = constant_value(&arena, expression).map_err(|e| {
-                        SymbolicEvalError::UnsupportedOperation(format!("{op:?} did not fold: {e:?}"))
-                    })?;
+                    let folded = constant_value(&arena, expression)
+                        .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("{op:?} did not fold: {e:?}")))?;
                     assert_eq!(folded as u32, expected, "{op:?} {masked:#x} at width {width}");
                 }
             }
@@ -4663,7 +4729,11 @@ mod tests {
                 let byte = ((data >> (byte_idx * 8)) & 0xFF) as u8;
                 crc ^= u32::from(byte);
                 for _ in 0..8 {
-                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0x82F63B78 } else { crc >> 1 };
+                    crc = if crc & 1 != 0 {
+                        (crc >> 1) ^ 0x82F63B78
+                    } else {
+                        crc >> 1
+                    };
                 }
             }
             crc
@@ -4745,7 +4815,10 @@ mod tests {
         let node = arena
             .get(expression)
             .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
-        assert!(node.op != ExprOp::Constant, "crc32 over symbolic input must stay symbolic");
+        assert!(
+            node.op != ExprOp::Constant,
+            "crc32 over symbolic input must stay symbolic"
+        );
         assert!(matches!(node.sort, ExprSort::BitVec(32)));
         Ok(())
     }
@@ -4819,9 +4892,9 @@ mod tests {
         // (left, right, expected flags) — CF=0/PF=2/ZF=6, NaN unordered
         // triple, exactly the concrete interpreter's encoding.
         let cases: &[(f64, f64, u64)] = &[
-            (1.0, 2.0, 1u64 << 0),  // below → CF
-            (2.0, 1.0, 0),          // above → none
-            (2.0, 2.0, 1u64 << 6),  // equal → ZF
+            (1.0, 2.0, 1u64 << 0),                           // below → CF
+            (2.0, 1.0, 0),                                   // above → none
+            (2.0, 2.0, 1u64 << 6),                           // equal → ZF
             (f64::NAN, 1.0, (1 << 6) | (1 << 2) | (1 << 0)), // unordered
         ];
         for (left, right, expected) in cases {
@@ -4919,10 +4992,7 @@ mod tests {
         block(vec![
             IrInstruction {
                 result: Some(IrValueId(0)),
-                op: IrOp::ReadRegister {
-                    register,
-                    ty: bits(64),
-                },
+                op: IrOp::ReadRegister { register, ty: bits(64) },
             },
             write_sink(0),
         ])
@@ -5052,4 +5122,3 @@ mod tests {
         Ok(())
     }
 }
-

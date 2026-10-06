@@ -13,9 +13,8 @@
 //! - Vector min/max: VPMINSD, VPMINUD, VPMAXSD, VPMAXUD
 
 use angryier_semantics::{
-    DecodedInstructionView, PrimitiveOp, ScalarType, SemanticBuilder, SemanticContext,
-    SemanticError, SemanticOp, SemanticOrigin, SemanticProvider, SemanticReceipt,
-    SemanticType, ValueId, VectorOp,
+    DecodedInstructionView, PrimitiveOp, ScalarType, SemanticBuilder, SemanticContext, SemanticError, SemanticOp,
+    SemanticOrigin, SemanticProvider, SemanticReceipt, SemanticType, ValueId, VectorOp,
 };
 use angryier_types::SemanticRuleId;
 use std::sync::Arc;
@@ -290,13 +289,41 @@ macro_rules! lanewise_ymm {
                 let right = out.read_operand(src2_idx, $full_ty)?;
                 let off0 = const_u64(out, 0)?;
                 let off128 = const_u64(out, 128)?;
-                let left_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[left, off0])?;
-                let left_hi = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[left, off128])?;
-                let right_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[right, off0])?;
-                let right_hi = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[right, off128])?;
-                let res_lo = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $slice_ty, &[left_lo, right_lo])?;
-                let res_hi = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $slice_ty, &[left_hi, right_hi])?;
-                let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $full_ty, &[res_lo, res_hi])?;
+                let left_lo = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[left, off0],
+                )?;
+                let left_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[left, off128],
+                )?;
+                let right_lo = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[right, off0],
+                )?;
+                let right_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[right, off128],
+                )?;
+                let res_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise($op)),
+                    $slice_ty,
+                    &[left_lo, right_lo],
+                )?;
+                let res_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise($op)),
+                    $slice_ty,
+                    &[left_hi, right_hi],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    $full_ty,
+                    &[res_lo, res_hi],
+                )?;
                 let final_res = apply_evex_mask(insn, out, $full_ty, None, result)?;
                 out.write_operand(0, final_res)?;
                 fall_through(out, insn)?;
@@ -334,20 +361,76 @@ macro_rules! lanewise_zmm {
                 let off128 = const_u64(out, 128)?;
                 let off256 = const_u64(out, 256)?;
                 let off384 = const_u64(out, 384)?;
-                let left_0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[left, off0])?;
-                let left_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[left, off128])?;
-                let left_2 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[left, off256])?;
-                let left_3 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[left, off384])?;
-                let right_0 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[right, off0])?;
-                let right_1 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[right, off128])?;
-                let right_2 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[right, off256])?;
-                let right_3 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), $slice_ty, &[right, off384])?;
-                let res_0 = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $slice_ty, &[left_0, right_0])?;
-                let res_1 = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $slice_ty, &[left_1, right_1])?;
-                let res_2 = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $slice_ty, &[left_2, right_2])?;
-                let res_3 = out.emit(SemanticOp::Vector(VectorOp::LaneWise($op)), $slice_ty, &[left_3, right_3])?;
-                let lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $mid_ty, &[res_0, res_1])?;
-                let hi = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $mid_ty, &[res_2, res_3])?;
+                let left_0 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[left, off0],
+                )?;
+                let left_1 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[left, off128],
+                )?;
+                let left_2 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[left, off256],
+                )?;
+                let left_3 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[left, off384],
+                )?;
+                let right_0 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[right, off0],
+                )?;
+                let right_1 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[right, off128],
+                )?;
+                let right_2 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[right, off256],
+                )?;
+                let right_3 = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $slice_ty,
+                    &[right, off384],
+                )?;
+                let res_0 = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise($op)),
+                    $slice_ty,
+                    &[left_0, right_0],
+                )?;
+                let res_1 = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise($op)),
+                    $slice_ty,
+                    &[left_1, right_1],
+                )?;
+                let res_2 = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise($op)),
+                    $slice_ty,
+                    &[left_2, right_2],
+                )?;
+                let res_3 = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWise($op)),
+                    $slice_ty,
+                    &[left_3, right_3],
+                )?;
+                let lo = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    $mid_ty,
+                    &[res_0, res_1],
+                )?;
+                let hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    $mid_ty,
+                    &[res_2, res_3],
+                )?;
                 let result = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $full_ty, &[lo, hi])?;
                 let final_res = apply_evex_mask(insn, out, $full_ty, None, result)?;
                 out.write_operand(0, final_res)?;
@@ -435,41 +518,209 @@ macro_rules! andn_evex {
 // 1. Vector addition (VPADDB, VPADDW, VPADDD, VPADDQ)
 // ---------------------------------------------------------------------------
 
-lanewise_xmm!(VpaddbXmmXmmXmm, forms::VPADDB_XMM_XMM_XMM, PrimitiveOp::Add, I8X16, 0x00);
-lanewise_ymm!(VpaddbYmmYmmYmm, forms::VPADDB_YMM_YMM_YMM, PrimitiveOp::Add, I8X16, I8X32, 0x01);
-lanewise_zmm!(VpaddbZmmZmmZmm, forms::VPADDB_ZMM_ZMM_ZMM, PrimitiveOp::Add, I8X16, I8X32, I8X64, 0x02);
+lanewise_xmm!(
+    VpaddbXmmXmmXmm,
+    forms::VPADDB_XMM_XMM_XMM,
+    PrimitiveOp::Add,
+    I8X16,
+    0x00
+);
+lanewise_ymm!(
+    VpaddbYmmYmmYmm,
+    forms::VPADDB_YMM_YMM_YMM,
+    PrimitiveOp::Add,
+    I8X16,
+    I8X32,
+    0x01
+);
+lanewise_zmm!(
+    VpaddbZmmZmmZmm,
+    forms::VPADDB_ZMM_ZMM_ZMM,
+    PrimitiveOp::Add,
+    I8X16,
+    I8X32,
+    I8X64,
+    0x02
+);
 
-lanewise_xmm!(VpaddwXmmXmmXmm, forms::VPADDW_XMM_XMM_XMM, PrimitiveOp::Add, I16X8, 0x03);
-lanewise_ymm!(VpaddwYmmYmmYmm, forms::VPADDW_YMM_YMM_YMM, PrimitiveOp::Add, I16X8, I16X16, 0x04);
-lanewise_zmm!(VpaddwZmmZmmZmm, forms::VPADDW_ZMM_ZMM_ZMM, PrimitiveOp::Add, I16X8, I16X16, I16X32, 0x05);
+lanewise_xmm!(
+    VpaddwXmmXmmXmm,
+    forms::VPADDW_XMM_XMM_XMM,
+    PrimitiveOp::Add,
+    I16X8,
+    0x03
+);
+lanewise_ymm!(
+    VpaddwYmmYmmYmm,
+    forms::VPADDW_YMM_YMM_YMM,
+    PrimitiveOp::Add,
+    I16X8,
+    I16X16,
+    0x04
+);
+lanewise_zmm!(
+    VpaddwZmmZmmZmm,
+    forms::VPADDW_ZMM_ZMM_ZMM,
+    PrimitiveOp::Add,
+    I16X8,
+    I16X16,
+    I16X32,
+    0x05
+);
 
-lanewise_xmm!(VpadddXmmXmmXmm, forms::VPADDD_XMM_XMM_XMM, PrimitiveOp::Add, I32X4, 0x06);
-lanewise_ymm!(VpadddYmmYmmYmm, forms::VPADDD_YMM_YMM_YMM, PrimitiveOp::Add, I32X4, I32X8, 0x07);
-lanewise_zmm!(VpadddZmmZmmZmm, forms::VPADDD_ZMM_ZMM_ZMM, PrimitiveOp::Add, I32X4, I32X8, I32X16, 0x08);
+lanewise_xmm!(
+    VpadddXmmXmmXmm,
+    forms::VPADDD_XMM_XMM_XMM,
+    PrimitiveOp::Add,
+    I32X4,
+    0x06
+);
+lanewise_ymm!(
+    VpadddYmmYmmYmm,
+    forms::VPADDD_YMM_YMM_YMM,
+    PrimitiveOp::Add,
+    I32X4,
+    I32X8,
+    0x07
+);
+lanewise_zmm!(
+    VpadddZmmZmmZmm,
+    forms::VPADDD_ZMM_ZMM_ZMM,
+    PrimitiveOp::Add,
+    I32X4,
+    I32X8,
+    I32X16,
+    0x08
+);
 
-lanewise_xmm!(VpaddqXmmXmmXmm, forms::VPADDQ_XMM_XMM_XMM, PrimitiveOp::Add, I64X2, 0x09);
-lanewise_ymm!(VpaddqYmmYmmYmm, forms::VPADDQ_YMM_YMM_YMM, PrimitiveOp::Add, I64X2, I64X4, 0x0A);
-lanewise_zmm!(VpaddqZmmZmmZmm, forms::VPADDQ_ZMM_ZMM_ZMM, PrimitiveOp::Add, I64X2, I64X4, I64X8, 0x0B);
+lanewise_xmm!(
+    VpaddqXmmXmmXmm,
+    forms::VPADDQ_XMM_XMM_XMM,
+    PrimitiveOp::Add,
+    I64X2,
+    0x09
+);
+lanewise_ymm!(
+    VpaddqYmmYmmYmm,
+    forms::VPADDQ_YMM_YMM_YMM,
+    PrimitiveOp::Add,
+    I64X2,
+    I64X4,
+    0x0A
+);
+lanewise_zmm!(
+    VpaddqZmmZmmZmm,
+    forms::VPADDQ_ZMM_ZMM_ZMM,
+    PrimitiveOp::Add,
+    I64X2,
+    I64X4,
+    I64X8,
+    0x0B
+);
 
 // ---------------------------------------------------------------------------
 // 2. Vector subtraction (VPSUBB, VPSUBW, VPSUBD, VPSUBQ)
 // ---------------------------------------------------------------------------
 
-lanewise_xmm!(VpsubbXmmXmmXmm, forms::VPSUBB_XMM_XMM_XMM, PrimitiveOp::Sub, I8X16, 0x0C);
-lanewise_ymm!(VpsubbYmmYmmYmm, forms::VPSUBB_YMM_YMM_YMM, PrimitiveOp::Sub, I8X16, I8X32, 0x0D);
-lanewise_zmm!(VpsubbZmmZmmZmm, forms::VPSUBB_ZMM_ZMM_ZMM, PrimitiveOp::Sub, I8X16, I8X32, I8X64, 0x0E);
+lanewise_xmm!(
+    VpsubbXmmXmmXmm,
+    forms::VPSUBB_XMM_XMM_XMM,
+    PrimitiveOp::Sub,
+    I8X16,
+    0x0C
+);
+lanewise_ymm!(
+    VpsubbYmmYmmYmm,
+    forms::VPSUBB_YMM_YMM_YMM,
+    PrimitiveOp::Sub,
+    I8X16,
+    I8X32,
+    0x0D
+);
+lanewise_zmm!(
+    VpsubbZmmZmmZmm,
+    forms::VPSUBB_ZMM_ZMM_ZMM,
+    PrimitiveOp::Sub,
+    I8X16,
+    I8X32,
+    I8X64,
+    0x0E
+);
 
-lanewise_xmm!(VpsubwXmmXmmXmm, forms::VPSUBW_XMM_XMM_XMM, PrimitiveOp::Sub, I16X8, 0x0F);
-lanewise_ymm!(VpsubwYmmYmmYmm, forms::VPSUBW_YMM_YMM_YMM, PrimitiveOp::Sub, I16X8, I16X16, 0x10);
-lanewise_zmm!(VpsubwZmmZmmZmm, forms::VPSUBW_ZMM_ZMM_ZMM, PrimitiveOp::Sub, I16X8, I16X16, I16X32, 0x11);
+lanewise_xmm!(
+    VpsubwXmmXmmXmm,
+    forms::VPSUBW_XMM_XMM_XMM,
+    PrimitiveOp::Sub,
+    I16X8,
+    0x0F
+);
+lanewise_ymm!(
+    VpsubwYmmYmmYmm,
+    forms::VPSUBW_YMM_YMM_YMM,
+    PrimitiveOp::Sub,
+    I16X8,
+    I16X16,
+    0x10
+);
+lanewise_zmm!(
+    VpsubwZmmZmmZmm,
+    forms::VPSUBW_ZMM_ZMM_ZMM,
+    PrimitiveOp::Sub,
+    I16X8,
+    I16X16,
+    I16X32,
+    0x11
+);
 
-lanewise_xmm!(VpsubdXmmXmmXmm, forms::VPSUBD_XMM_XMM_XMM, PrimitiveOp::Sub, I32X4, 0x12);
-lanewise_ymm!(VpsubdYmmYmmYmm, forms::VPSUBD_YMM_YMM_YMM, PrimitiveOp::Sub, I32X4, I32X8, 0x13);
-lanewise_zmm!(VpsubdZmmZmmZmm, forms::VPSUBD_ZMM_ZMM_ZMM, PrimitiveOp::Sub, I32X4, I32X8, I32X16, 0x14);
+lanewise_xmm!(
+    VpsubdXmmXmmXmm,
+    forms::VPSUBD_XMM_XMM_XMM,
+    PrimitiveOp::Sub,
+    I32X4,
+    0x12
+);
+lanewise_ymm!(
+    VpsubdYmmYmmYmm,
+    forms::VPSUBD_YMM_YMM_YMM,
+    PrimitiveOp::Sub,
+    I32X4,
+    I32X8,
+    0x13
+);
+lanewise_zmm!(
+    VpsubdZmmZmmZmm,
+    forms::VPSUBD_ZMM_ZMM_ZMM,
+    PrimitiveOp::Sub,
+    I32X4,
+    I32X8,
+    I32X16,
+    0x14
+);
 
-lanewise_xmm!(VpsubqXmmXmmXmm, forms::VPSUBQ_XMM_XMM_XMM, PrimitiveOp::Sub, I64X2, 0x15);
-lanewise_ymm!(VpsubqYmmYmmYmm, forms::VPSUBQ_YMM_YMM_YMM, PrimitiveOp::Sub, I64X2, I64X4, 0x16);
-lanewise_zmm!(VpsubqZmmZmmZmm, forms::VPSUBQ_ZMM_ZMM_ZMM, PrimitiveOp::Sub, I64X2, I64X4, I64X8, 0x17);
+lanewise_xmm!(
+    VpsubqXmmXmmXmm,
+    forms::VPSUBQ_XMM_XMM_XMM,
+    PrimitiveOp::Sub,
+    I64X2,
+    0x15
+);
+lanewise_ymm!(
+    VpsubqYmmYmmYmm,
+    forms::VPSUBQ_YMM_YMM_YMM,
+    PrimitiveOp::Sub,
+    I64X2,
+    I64X4,
+    0x16
+);
+lanewise_zmm!(
+    VpsubqZmmZmmZmm,
+    forms::VPSUBQ_ZMM_ZMM_ZMM,
+    PrimitiveOp::Sub,
+    I64X2,
+    I64X4,
+    I64X8,
+    0x17
+);
 
 // ---------------------------------------------------------------------------
 // 3. Vector bitwise logic (VPANDD, VPANDQ, VPANDND, VPANDNQ, VPORD, VPORQ, VPXORD, VPXORQ)
@@ -511,21 +762,105 @@ logic_evex!(VpxorqZmmZmmZmm, forms::VPXORQ_ZMM_ZMM_ZMM, Xor, I64X8, 0x2F);
 // 4. Vector min/max (VPMINSD, VPMINUD, VPMAXSD, VPMAXUD)
 // ---------------------------------------------------------------------------
 
-lanewise_xmm!(VpminsdXmmXmmXmm, forms::VPMINSD_XMM_XMM_XMM, PrimitiveOp::MinS, I32X4, 0x30);
-lanewise_ymm!(VpminsdYmmYmmYmm, forms::VPMINSD_YMM_YMM_YMM, PrimitiveOp::MinS, I32X4, I32X8, 0x31);
-lanewise_zmm!(VpminsdZmmZmmZmm, forms::VPMINSD_ZMM_ZMM_ZMM, PrimitiveOp::MinS, I32X4, I32X8, I32X16, 0x32);
+lanewise_xmm!(
+    VpminsdXmmXmmXmm,
+    forms::VPMINSD_XMM_XMM_XMM,
+    PrimitiveOp::MinS,
+    I32X4,
+    0x30
+);
+lanewise_ymm!(
+    VpminsdYmmYmmYmm,
+    forms::VPMINSD_YMM_YMM_YMM,
+    PrimitiveOp::MinS,
+    I32X4,
+    I32X8,
+    0x31
+);
+lanewise_zmm!(
+    VpminsdZmmZmmZmm,
+    forms::VPMINSD_ZMM_ZMM_ZMM,
+    PrimitiveOp::MinS,
+    I32X4,
+    I32X8,
+    I32X16,
+    0x32
+);
 
-lanewise_xmm!(VpminudXmmXmmXmm, forms::VPMINUD_XMM_XMM_XMM, PrimitiveOp::MinU, I32X4, 0x33);
-lanewise_ymm!(VpminudYmmYmmYmm, forms::VPMINUD_YMM_YMM_YMM, PrimitiveOp::MinU, I32X4, I32X8, 0x34);
-lanewise_zmm!(VpminudZmmZmmZmm, forms::VPMINUD_ZMM_ZMM_ZMM, PrimitiveOp::MinU, I32X4, I32X8, I32X16, 0x35);
+lanewise_xmm!(
+    VpminudXmmXmmXmm,
+    forms::VPMINUD_XMM_XMM_XMM,
+    PrimitiveOp::MinU,
+    I32X4,
+    0x33
+);
+lanewise_ymm!(
+    VpminudYmmYmmYmm,
+    forms::VPMINUD_YMM_YMM_YMM,
+    PrimitiveOp::MinU,
+    I32X4,
+    I32X8,
+    0x34
+);
+lanewise_zmm!(
+    VpminudZmmZmmZmm,
+    forms::VPMINUD_ZMM_ZMM_ZMM,
+    PrimitiveOp::MinU,
+    I32X4,
+    I32X8,
+    I32X16,
+    0x35
+);
 
-lanewise_xmm!(VpmaxsdXmmXmmXmm, forms::VPMAXSD_XMM_XMM_XMM, PrimitiveOp::MaxS, I32X4, 0x36);
-lanewise_ymm!(VpmaxsdYmmYmmYmm, forms::VPMAXSD_YMM_YMM_YMM, PrimitiveOp::MaxS, I32X4, I32X8, 0x37);
-lanewise_zmm!(VpmaxsdZmmZmmZmm, forms::VPMAXSD_ZMM_ZMM_ZMM, PrimitiveOp::MaxS, I32X4, I32X8, I32X16, 0x38);
+lanewise_xmm!(
+    VpmaxsdXmmXmmXmm,
+    forms::VPMAXSD_XMM_XMM_XMM,
+    PrimitiveOp::MaxS,
+    I32X4,
+    0x36
+);
+lanewise_ymm!(
+    VpmaxsdYmmYmmYmm,
+    forms::VPMAXSD_YMM_YMM_YMM,
+    PrimitiveOp::MaxS,
+    I32X4,
+    I32X8,
+    0x37
+);
+lanewise_zmm!(
+    VpmaxsdZmmZmmZmm,
+    forms::VPMAXSD_ZMM_ZMM_ZMM,
+    PrimitiveOp::MaxS,
+    I32X4,
+    I32X8,
+    I32X16,
+    0x38
+);
 
-lanewise_xmm!(VpmaxudXmmXmmXmm, forms::VPMAXUD_XMM_XMM_XMM, PrimitiveOp::MaxU, I32X4, 0x39);
-lanewise_ymm!(VpmaxudYmmYmmYmm, forms::VPMAXUD_YMM_YMM_YMM, PrimitiveOp::MaxU, I32X4, I32X8, 0x3A);
-lanewise_zmm!(VpmaxudZmmZmmZmm, forms::VPMAXUD_ZMM_ZMM_ZMM, PrimitiveOp::MaxU, I32X4, I32X8, I32X16, 0x3B);
+lanewise_xmm!(
+    VpmaxudXmmXmmXmm,
+    forms::VPMAXUD_XMM_XMM_XMM,
+    PrimitiveOp::MaxU,
+    I32X4,
+    0x39
+);
+lanewise_ymm!(
+    VpmaxudYmmYmmYmm,
+    forms::VPMAXUD_YMM_YMM_YMM,
+    PrimitiveOp::MaxU,
+    I32X4,
+    I32X8,
+    0x3A
+);
+lanewise_zmm!(
+    VpmaxudZmmZmmZmm,
+    forms::VPMAXUD_ZMM_ZMM_ZMM,
+    PrimitiveOp::MaxU,
+    I32X4,
+    I32X8,
+    I32X16,
+    0x3B
+);
 
 // ---------------------------------------------------------------------------
 // Provider slice registration
@@ -608,14 +943,14 @@ pub fn avx10_providers() -> Vec<Arc<dyn SemanticProvider>> {
 mod tests {
     use super::*;
     use angryier_arch::{
-        AccessKind, DecodedInstruction, InstructionModifiers, Operand, OperandKind,
-        OperandVisibility, PredicateMask, PredicateMode, RegisterId, RegisterView,
+        AccessKind, DecodedInstruction, InstructionModifiers, Operand, OperandKind, OperandVisibility, PredicateMask,
+        PredicateMode, RegisterId, RegisterView,
     };
     use angryier_semantic_contracts::SealedSemanticBlock;
     use angryier_semantics::{SemanticBlockBuilder, SemanticContext};
     use angryier_types::{
-        ContentIdentitySchemaVersion, FidelityProfile, SemanticFingerprintSchemaVersion,
-        SemanticVersion, TargetProfileId,
+        ContentIdentitySchemaVersion, FidelityProfile, SemanticFingerprintSchemaVersion, SemanticVersion,
+        TargetProfileId,
     };
 
     fn test_context() -> SemanticContext {
@@ -629,11 +964,7 @@ mod tests {
         }
     }
 
-    fn make_test_decoded(
-        form: u32,
-        operands: Vec<Operand>,
-        modifiers: InstructionModifiers,
-    ) -> DecodedInstruction {
+    fn make_test_decoded(form: u32, operands: Vec<Operand>, modifiers: InstructionModifiers) -> DecodedInstruction {
         DecodedInstruction {
             address: 0x4000,
             length: 4,

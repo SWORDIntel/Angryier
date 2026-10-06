@@ -731,9 +731,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
 
                                     if preference == "alternate"
                                         && let Some(alternate) = alternate_distance
-                                        && best_alternate
-                                            .as_ref()
-                                            .is_none_or(|(_, best, _)| alternate < *best)
+                                        && best_alternate.as_ref().is_none_or(|(_, best, _)| alternate < *best)
                                     {
                                         best_alternate = Some((target, alternate, chosen_distance));
                                     } else if preference == "chosen"
@@ -963,9 +961,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // per-state tables mapping symbol index → byte-string. Feasibility
     // checking during exploration still uses the backend regardless of this
     // flag; model extraction is the expensive optional post-run operation.
-    if solve_models
-        && let Some(backend) = backend.as_mut()
-    {
+    if solve_models && let Some(backend) = backend.as_mut() {
         let inputs = lua.create_table()?;
         for found in report.found.iter() {
             session.states.push(found.clone());

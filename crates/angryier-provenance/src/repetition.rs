@@ -9,8 +9,8 @@
 //! records and suppresses redundant Tier-2 events, preventing diagnostic history from being
 //! prematurely evicted while strictly preserving structural lineage.
 
-use angryier_types::{ContentId, ProvenanceNodeId, ProvenanceSeq, ProvenanceTier, StateId};
 use crate::{ProvenanceEvent, ProvenanceEventKind};
+use angryier_types::{ContentId, ProvenanceNodeId, ProvenanceSeq, ProvenanceTier, StateId};
 
 /// Structural equivalence key for provenance events.
 ///
@@ -426,10 +426,7 @@ impl StructuralRepetitionSummarizer {
                 tier: event.tier,
             }],
             RepetitionAction::CycleBroken { summary, new_event } => {
-                vec![
-                    SummarizerOutput::Summary(summary),
-                    SummarizerOutput::Event(new_event),
-                ]
+                vec![SummarizerOutput::Summary(summary), SummarizerOutput::Event(new_event)]
             }
         }
     }
@@ -455,7 +452,11 @@ impl StructuralRepetitionSummarizer {
             let mut best_match: Option<(usize, usize)> = None; // (period, repetitions)
             let mut best_saved = 0;
 
-            let max_p = self.detector.config.max_period.min((n - i) / self.detector.config.min_repetitions.max(1));
+            let max_p = self
+                .detector
+                .config
+                .max_period
+                .min((n - i) / self.detector.config.min_repetitions.max(1));
 
             for p in 1..=max_p {
                 let required = match p.checked_mul(self.detector.config.min_repetitions) {

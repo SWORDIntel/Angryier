@@ -92,11 +92,7 @@ impl<B: FuzzBridge> FuzzSession<B> {
             };
 
             let (bytes, origin_state, validity) = match self.corpus.get(primary_id) {
-                Some(entry) => (
-                    entry.seed.bytes.clone(),
-                    entry.seed.origin_state,
-                    entry.seed.validity,
-                ),
+                Some(entry) => (entry.seed.bytes.clone(), entry.seed.origin_state, entry.seed.validity),
                 None => break,
             };
 
@@ -112,9 +108,7 @@ impl<B: FuzzBridge> FuzzSession<B> {
                 None
             };
 
-            let mutated_bytes = self
-                .mutator
-                .mutate(&bytes, secondary_bytes.as_deref());
+            let mutated_bytes = self.mutator.mutate(&bytes, secondary_bytes.as_deref());
 
             let candidate = FuzzSeed {
                 bytes: if mutated_bytes.is_empty() {
@@ -146,14 +140,8 @@ impl<B: FuzzBridge> FuzzSession<B> {
     ) -> Result<Option<CorpusId>, B::Error> {
         let _ = self.bridge.publish_coverage(delta.clone());
 
-        let has_new_blocks = delta
-            .blocks
-            .iter()
-            .any(|b| !self.corpus.global_blocks().contains(b));
-        let has_new_edges = delta
-            .edges
-            .iter()
-            .any(|e| !self.corpus.global_edges().contains(e));
+        let has_new_blocks = delta.blocks.iter().any(|b| !self.corpus.global_blocks().contains(b));
+        let has_new_edges = delta.edges.iter().any(|e| !self.corpus.global_edges().contains(e));
 
         if has_new_blocks || has_new_edges {
             let new_id = self.corpus.add_seed(candidate.clone(), Some(parent_id));
@@ -249,14 +237,7 @@ mod tests {
         assert!(promo_new.is_some());
         let new_id = promo_new.ok_or("expected promotion")?;
         assert_eq!(session.corpus().len(), 2);
-        assert_eq!(
-            session
-                .corpus()
-                .get(new_id)
-                .ok_or("missing new seed")?
-                .generation,
-            1
-        );
+        assert_eq!(session.corpus().get(new_id).ok_or("missing new seed")?.generation, 1);
         assert_eq!(session.bridge().coverage_block_count(), 1);
         assert_eq!(session.bridge().coverage_edge_count(), 1);
 
@@ -269,10 +250,7 @@ mod tests {
         assert_eq!(session.corpus().len(), 3);
         assert_eq!(session.bridge().hint_count(), 1);
 
-        let hint_entry = session
-            .corpus()
-            .get(hint_seed_id)
-            .ok_or("missing hint seed")?;
+        let hint_entry = session.corpus().get(hint_seed_id).ok_or("missing hint seed")?;
         assert_eq!(hint_entry.generation, 0);
         assert!(hint_entry.energy >= 200); // boosted priority
         Ok(())

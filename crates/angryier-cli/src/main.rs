@@ -444,9 +444,8 @@ mod run_cmd {
                 "invalid --reg register '{name}' (valid: rax rcx rdx rbx rsp rbp rsi rdi r8-r15)"
             ));
         }
-        let value = parse_u64_value(value).ok_or_else(|| {
-            format!("invalid --reg value '{raw}' (VALUE must be decimal or 0x-prefixed hexadecimal)")
-        })?;
+        let value = parse_u64_value(value)
+            .ok_or_else(|| format!("invalid --reg value '{raw}' (VALUE must be decimal or 0x-prefixed hexadecimal)"))?;
         Ok((name.to_string(), value))
     }
 
@@ -542,7 +541,9 @@ mod run_cmd {
                 match raw.parse::<usize>() {
                     Ok(n) if n > 0 => {
                         if states.replace(n).is_some() {
-                            return Err(format!("duplicate --states value '{raw}' (flag may only be given once)"));
+                            return Err(format!(
+                                "duplicate --states value '{raw}' (flag may only be given once)"
+                            ));
                         }
                     }
                     _ => {
@@ -556,7 +557,9 @@ mod run_cmd {
                 match raw.parse::<u64>() {
                     Ok(n) if n > 0 => {
                         if timeout_secs.replace(n).is_some() {
-                            return Err(format!("duplicate --timeout value '{raw}' (flag may only be given once)"));
+                            return Err(format!(
+                                "duplicate --timeout value '{raw}' (flag may only be given once)"
+                            ));
                         }
                     }
                     _ => {
@@ -631,8 +634,7 @@ mod run_cmd {
             steps: steps.unwrap_or(angryier_runtime::script::DEFAULT_STEPS),
             states: states.unwrap_or(angryier_runtime::script::DEFAULT_MAX_STATES),
             timeout_secs: timeout_secs.unwrap_or(angryier_runtime::script::DEFAULT_TIMEOUT_SECS),
-            branch_timeout_ms: branch_timeout_ms
-                .unwrap_or(angryier_runtime::script::DEFAULT_BRANCH_TIMEOUT_MS),
+            branch_timeout_ms: branch_timeout_ms.unwrap_or(angryier_runtime::script::DEFAULT_BRANCH_TIMEOUT_MS),
             solve,
             fork,
             dfs,
@@ -730,8 +732,16 @@ mod run_cmd {
             config.states,
             config.timeout_secs,
             config.branch_timeout_ms,
-            if config.fork { "fork-aggressive" } else { "concolic/default" },
-            if config.dfs { "depth-first" } else { "round-robin/coverage policy" },
+            if config.fork {
+                "fork-aggressive"
+            } else {
+                "concolic/default"
+            },
+            if config.dfs {
+                "depth-first"
+            } else {
+                "round-robin/coverage policy"
+            },
             if config.solve { "yes" } else { "no" },
             symbolic,
             concrete_regs,
@@ -1344,7 +1354,10 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
         );
 
         if !config.regs.is_empty() {
-            println!("[angryier][input] applying {} concrete register seed(s)", config.regs.len());
+            println!(
+                "[angryier][input] applying {} concrete register seed(s)",
+                config.regs.len()
+            );
             for (name, value) in &config.regs {
                 let Some(register) = angryier_runtime::script::reg_by_name(name) else {
                     eprintln!("[angryier][input][error] validated register '{name}' could not be resolved");
@@ -1608,10 +1621,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
         #[test]
         fn default_driver_threads_register_seeds_into_lua() {
             let mut cfg = config("./bin", None, &[], &[], None, 256, false);
-            cfg.regs = vec![
-                ("rdi".to_string(), 42),
-                ("r15".to_string(), u64::MAX),
-            ];
+            cfg.regs = vec![("rdi".to_string(), 42), ("r15".to_string(), u64::MAX)];
             let lua = default_driver_lua(&cfg);
             assert!(lua.contains("rdi = 42"), "{lua}");
             assert!(lua.contains(r#"r15_hex = \"0xffffffffffffffff\""#), "{lua}");
@@ -1619,21 +1629,14 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
 
         #[test]
         fn parses_repeatable_avoid_targets() {
-            let cfg = parse(&args(&[
-                "./bin",
-                "--avoid",
-                "0x401000",
-                "--avoid",
-                "402000",
-            ]))
-            .expect("valid avoid targets");
+            let cfg =
+                parse(&args(&["./bin", "--avoid", "0x401000", "--avoid", "402000"])).expect("valid avoid targets");
             assert_eq!(cfg.avoid, vec![0x401000, 0x402000]);
         }
 
         #[test]
         fn invalid_avoid_target_is_descriptive() {
-            let error = parse(&args(&["./bin", "--avoid", "not-an-address"]))
-                .expect_err("bad avoid address must fail");
+            let error = parse(&args(&["./bin", "--avoid", "not-an-address"])).expect_err("bad avoid address must fail");
             assert!(error.contains("invalid --avoid address"), "{error}");
         }
 

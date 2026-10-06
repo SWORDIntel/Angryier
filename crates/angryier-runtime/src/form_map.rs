@@ -4230,14 +4230,38 @@ mod tests {
         assert_eq!(mapped(&[0xC5, 0xF5, 0xE5, 0xC2])?, Some(forms::VPMULHW_YMM_YMM_YMM));
         assert_eq!(mapped(&[0xC5, 0xF5, 0xF5, 0xC2])?, Some(forms::VPMADDWD_YMM_YMM_YMM));
         // vpsllw $7, %ymm1, %ymm0 and count-register forms
-        assert_eq!(mapped(&[0xC5, 0xFD, 0x71, 0xF1, 0x07])?, Some(forms::VPSLLW_YMM_YMM_IMM8));
-        assert_eq!(mapped(&[0xC5, 0xFD, 0x72, 0xF1, 0x07])?, Some(forms::VPSLLD_YMM_YMM_IMM8));
-        assert_eq!(mapped(&[0xC5, 0xFD, 0x73, 0xF1, 0x07])?, Some(forms::VPSLLQ_YMM_YMM_IMM8));
-        assert_eq!(mapped(&[0xC5, 0xFD, 0x71, 0xD1, 0x07])?, Some(forms::VPSRLW_YMM_YMM_IMM8));
-        assert_eq!(mapped(&[0xC5, 0xFD, 0x72, 0xD1, 0x07])?, Some(forms::VPSRLD_YMM_YMM_IMM8));
-        assert_eq!(mapped(&[0xC5, 0xFD, 0x73, 0xD1, 0x07])?, Some(forms::VPSRLQ_YMM_YMM_IMM8));
-        assert_eq!(mapped(&[0xC5, 0xFD, 0x71, 0xE1, 0x07])?, Some(forms::VPSRAW_YMM_YMM_IMM8));
-        assert_eq!(mapped(&[0xC5, 0xFD, 0x72, 0xE1, 0x07])?, Some(forms::VPSRAD_YMM_YMM_IMM8));
+        assert_eq!(
+            mapped(&[0xC5, 0xFD, 0x71, 0xF1, 0x07])?,
+            Some(forms::VPSLLW_YMM_YMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0xC5, 0xFD, 0x72, 0xF1, 0x07])?,
+            Some(forms::VPSLLD_YMM_YMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0xC5, 0xFD, 0x73, 0xF1, 0x07])?,
+            Some(forms::VPSLLQ_YMM_YMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0xC5, 0xFD, 0x71, 0xD1, 0x07])?,
+            Some(forms::VPSRLW_YMM_YMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0xC5, 0xFD, 0x72, 0xD1, 0x07])?,
+            Some(forms::VPSRLD_YMM_YMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0xC5, 0xFD, 0x73, 0xD1, 0x07])?,
+            Some(forms::VPSRLQ_YMM_YMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0xC5, 0xFD, 0x71, 0xE1, 0x07])?,
+            Some(forms::VPSRAW_YMM_YMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0xC5, 0xFD, 0x72, 0xE1, 0x07])?,
+            Some(forms::VPSRAD_YMM_YMM_IMM8)
+        );
         assert_eq!(mapped(&[0xC5, 0xF5, 0xF1, 0xC2])?, Some(forms::VPSLLW_YMM_YMM_XMM));
         assert_eq!(mapped(&[0xC5, 0xF5, 0xF2, 0xC2])?, Some(forms::VPSLLD_YMM_YMM_XMM));
         assert_eq!(mapped(&[0xC5, 0xF5, 0xF3, 0xC2])?, Some(forms::VPSLLQ_YMM_YMM_XMM));
@@ -4247,8 +4271,14 @@ mod tests {
         assert_eq!(mapped(&[0xC5, 0xF5, 0xE1, 0xC2])?, Some(forms::VPSRAW_YMM_YMM_XMM));
         assert_eq!(mapped(&[0xC5, 0xF5, 0xE2, 0xC2])?, Some(forms::VPSRAD_YMM_YMM_XMM));
         // vpshufd $0x1b, %ymm1, %ymm0 / vpshufb %ymm2, %ymm1, %ymm0
-        assert_eq!(mapped(&[0xC5, 0xFD, 0x70, 0xC1, 0x1B])?, Some(forms::VPSHUFD_YMM_YMM_IMM8));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x75, 0x00, 0xC2])?, Some(forms::VPSHUFB_YMM_YMM_YMM));
+        assert_eq!(
+            mapped(&[0xC5, 0xFD, 0x70, 0xC1, 0x1B])?,
+            Some(forms::VPSHUFD_YMM_YMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x00, 0xC2])?,
+            Some(forms::VPSHUFB_YMM_YMM_YMM)
+        );
         // vpunpckl/h families
         assert_eq!(mapped(&[0xC5, 0xF5, 0x60, 0xC2])?, Some(forms::VPUNPCKLBW_YMM_YMM_YMM));
         assert_eq!(mapped(&[0xC5, 0xF5, 0x61, 0xC2])?, Some(forms::VPUNPCKLWD_YMM_YMM_YMM));
@@ -4260,23 +4290,56 @@ mod tests {
         assert_eq!(mapped(&[0xC5, 0xF5, 0x6D, 0xC2])?, Some(forms::VPUNPCKHQDQ_YMM_YMM_YMM));
         // vpmin/vpmax families (imm8-free)
         assert_eq!(mapped(&[0xC5, 0xF5, 0xDA, 0xC2])?, Some(forms::VPMINUB_YMM_YMM_YMM));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x75, 0x38, 0xC2])?, Some(forms::VPMINSB_YMM_YMM_YMM));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x75, 0x3A, 0xC2])?, Some(forms::VPMINUW_YMM_YMM_YMM));
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x38, 0xC2])?,
+            Some(forms::VPMINSB_YMM_YMM_YMM)
+        );
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x3A, 0xC2])?,
+            Some(forms::VPMINUW_YMM_YMM_YMM)
+        );
         assert_eq!(mapped(&[0xC5, 0xF5, 0xEA, 0xC2])?, Some(forms::VPMINSW_YMM_YMM_YMM));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x75, 0x3B, 0xC2])?, Some(forms::VPMINUD_YMM_YMM_YMM));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x75, 0x39, 0xC2])?, Some(forms::VPMINSD_YMM_YMM_YMM));
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x3B, 0xC2])?,
+            Some(forms::VPMINUD_YMM_YMM_YMM)
+        );
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x39, 0xC2])?,
+            Some(forms::VPMINSD_YMM_YMM_YMM)
+        );
         assert_eq!(mapped(&[0xC5, 0xF5, 0xDE, 0xC2])?, Some(forms::VPMAXUB_YMM_YMM_YMM));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x75, 0x3C, 0xC2])?, Some(forms::VPMAXSB_YMM_YMM_YMM));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x75, 0x3E, 0xC2])?, Some(forms::VPMAXUW_YMM_YMM_YMM));
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x3C, 0xC2])?,
+            Some(forms::VPMAXSB_YMM_YMM_YMM)
+        );
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x3E, 0xC2])?,
+            Some(forms::VPMAXUW_YMM_YMM_YMM)
+        );
         assert_eq!(mapped(&[0xC5, 0xF5, 0xEE, 0xC2])?, Some(forms::VPMAXSW_YMM_YMM_YMM));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x75, 0x3F, 0xC2])?, Some(forms::VPMAXUD_YMM_YMM_YMM));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x75, 0x3D, 0xC2])?, Some(forms::VPMAXSD_YMM_YMM_YMM));
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x3F, 0xC2])?,
+            Some(forms::VPMAXUD_YMM_YMM_YMM)
+        );
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x3D, 0xC2])?,
+            Some(forms::VPMAXSD_YMM_YMM_YMM)
+        );
         // vpbroadcastw/vpbroadcastd %xmm1, %ymm0
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x7D, 0x79, 0xC1])?, Some(forms::VPBROADCASTW_YMM_XMM));
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x7D, 0x58, 0xC1])?, Some(forms::VPBROADCASTD_YMM_XMM));
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x7D, 0x79, 0xC1])?,
+            Some(forms::VPBROADCASTW_YMM_XMM)
+        );
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x7D, 0x58, 0xC1])?,
+            Some(forms::VPBROADCASTD_YMM_XMM)
+        );
         // The VEX GPR-source broadcast decodes as an XMM source operand;
         // it must map to the wired XMM-source form, not the EVEX-only R32 form.
-        assert_eq!(mapped(&[0xC4, 0xE2, 0x7D, 0x78, 0xC0])?, Some(forms::VPBROADCASTB_YMM_XMM));
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x7D, 0x78, 0xC0])?,
+            Some(forms::VPBROADCASTB_YMM_XMM)
+        );
 
         // Legacy SSE packed float.
         assert_eq!(mapped(&[0x0F, 0x58, 0xC1])?, Some(forms::ADDPS_XMM_XMM));
@@ -4294,7 +4357,10 @@ mod tests {
         assert_eq!(mapped(&[0xF2, 0x0F, 0x7D, 0xC1])?, Some(forms::HSUBPS_XMM_XMM));
         assert_eq!(mapped(&[0x66, 0x0F, 0x7D, 0xC1])?, Some(forms::HSUBPD_XMM_XMM));
         assert_eq!(mapped(&[0x0F, 0xC2, 0xC1, 0x01])?, Some(forms::CMPPS_XMM_XMM_IMM8));
-        assert_eq!(mapped(&[0x66, 0x0F, 0xC2, 0xC1, 0x01])?, Some(forms::CMPPD_XMM_XMM_IMM8));
+        assert_eq!(
+            mapped(&[0x66, 0x0F, 0xC2, 0xC1, 0x01])?,
+            Some(forms::CMPPD_XMM_XMM_IMM8)
+        );
         assert_eq!(mapped(&[0x66, 0x0F, 0x28, 0xC1])?, Some(forms::MOVAPD_XMM_XMM));
         assert_eq!(mapped(&[0x66, 0x0F, 0x10, 0xC1])?, Some(forms::MOVUPD_XMM_XMM));
 
@@ -4338,13 +4404,34 @@ mod tests {
         assert_eq!(mapped(&[0x66, 0x0F, 0x38, 0x0A, 0xC1])?, Some(forms::PSIGND_XMM_XMM));
         assert_eq!(mapped(&[0x66, 0x0F, 0x38, 0x0B, 0xC1])?, Some(forms::PMULHRSW_XMM_XMM));
         assert_eq!(mapped(&[0x66, 0x0F, 0x38, 0x28, 0xC1])?, Some(forms::PMULDQ_XMM_XMM));
-        assert_eq!(mapped(&[0x66, 0x0F, 0x3A, 0x0E, 0xC1, 0x0F])?, Some(forms::PBLENDW_XMM_XMM_IMM8));
-        assert_eq!(mapped(&[0x66, 0x0F, 0x3A, 0x0C, 0xC1, 0x0F])?, Some(forms::BLENDPS_XMM_XMM_IMM8));
-        assert_eq!(mapped(&[0x66, 0x0F, 0x3A, 0x0D, 0xC1, 0x0F])?, Some(forms::BLENDPD_XMM_XMM_IMM8));
-        assert_eq!(mapped(&[0x66, 0x0F, 0x3A, 0x40, 0xC1, 0x0F])?, Some(forms::DPPS_XMM_XMM_IMM8));
-        assert_eq!(mapped(&[0x66, 0x0F, 0x3A, 0x41, 0xC1, 0x0F])?, Some(forms::DPPD_XMM_XMM_IMM8));
-        assert_eq!(mapped(&[0x66, 0x0F, 0x3A, 0x14, 0xC8, 0x03])?, Some(forms::PEXTRB_R32_XMM_IMM8));
-        assert_eq!(mapped(&[0x66, 0x0F, 0x38, 0x41, 0xC1])?, Some(forms::PHMINPOSUW_XMM_XMM));
+        assert_eq!(
+            mapped(&[0x66, 0x0F, 0x3A, 0x0E, 0xC1, 0x0F])?,
+            Some(forms::PBLENDW_XMM_XMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0x66, 0x0F, 0x3A, 0x0C, 0xC1, 0x0F])?,
+            Some(forms::BLENDPS_XMM_XMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0x66, 0x0F, 0x3A, 0x0D, 0xC1, 0x0F])?,
+            Some(forms::BLENDPD_XMM_XMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0x66, 0x0F, 0x3A, 0x40, 0xC1, 0x0F])?,
+            Some(forms::DPPS_XMM_XMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0x66, 0x0F, 0x3A, 0x41, 0xC1, 0x0F])?,
+            Some(forms::DPPD_XMM_XMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0x66, 0x0F, 0x3A, 0x14, 0xC8, 0x03])?,
+            Some(forms::PEXTRB_R32_XMM_IMM8)
+        );
+        assert_eq!(
+            mapped(&[0x66, 0x0F, 0x38, 0x41, 0xC1])?,
+            Some(forms::PHMINPOSUW_XMM_XMM)
+        );
 
         // Misc: SETcc-mem, CMPXCHG 16/8-bit, XADD 16/8-bit, CRC32 variants,
         // TEST m64/r64, BSF memory sources, CMOV r32 stragglers.
@@ -4366,11 +4453,20 @@ mod tests {
         assert_eq!(mapped(&[0x66, 0x0F, 0xC1, 0xC0])?, Some(forms::XADD_R16_R16));
         assert_eq!(mapped(&[0x0F, 0xC0, 0xC0])?, Some(forms::XADD_R8_R8));
         assert_eq!(mapped(&[0xF2, 0x0F, 0x38, 0xF1, 0x00])?, Some(forms::CRC32_R32_MEM32));
-        assert_eq!(mapped(&[0xF2, 0x48, 0x0F, 0x38, 0xF1, 0x00])?, Some(forms::CRC32_R64_MEM64));
+        assert_eq!(
+            mapped(&[0xF2, 0x48, 0x0F, 0x38, 0xF1, 0x00])?,
+            Some(forms::CRC32_R64_MEM64)
+        );
         assert_eq!(mapped(&[0xF2, 0x0F, 0x38, 0xF0, 0xC0])?, Some(forms::CRC32_R32_R8));
         assert_eq!(mapped(&[0xF2, 0x0F, 0x38, 0xF0, 0x00])?, Some(forms::CRC32_R32_MEM8));
-        assert_eq!(mapped(&[0xF2, 0x48, 0x0F, 0x38, 0xF0, 0xC0])?, Some(forms::CRC32_R64_R8));
-        assert_eq!(mapped(&[0xF2, 0x48, 0x0F, 0x38, 0xF0, 0x00])?, Some(forms::CRC32_R64_MEM8));
+        assert_eq!(
+            mapped(&[0xF2, 0x48, 0x0F, 0x38, 0xF0, 0xC0])?,
+            Some(forms::CRC32_R64_R8)
+        );
+        assert_eq!(
+            mapped(&[0xF2, 0x48, 0x0F, 0x38, 0xF0, 0x00])?,
+            Some(forms::CRC32_R64_MEM8)
+        );
         assert_eq!(mapped(&[0x48, 0x85, 0x00])?, Some(forms::TEST_MEM64_R64));
         assert_eq!(mapped(&[0x48, 0x0F, 0xBC, 0x00])?, Some(forms::BSF_R64_MEM64));
         assert_eq!(mapped(&[0x0F, 0xBC, 0x00])?, Some(forms::BSF_R32_MEM32));

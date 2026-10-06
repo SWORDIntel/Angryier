@@ -1595,15 +1595,9 @@ impl<D: Decoder> Runtime<D> {
             .memory
             .regions()
             .iter()
-            .find(|region| {
-                region.executable
-                    && entry >= region.base
-                    && entry < region.base.saturating_add(region.size)
-            })
+            .find(|region| region.executable && entry >= region.base && entry < region.base.saturating_add(region.size))
             .ok_or_else(|| {
-                RuntimeError::Execution(format!(
-                    "no executable memory region contains CFG entry {entry:#x}"
-                ))
+                RuntimeError::Execution(format!("no executable memory region contains CFG entry {entry:#x}"))
             })?;
 
         let region_end = region.base.saturating_add(region.size);
@@ -1626,12 +1620,11 @@ impl<D: Decoder> Runtime<D> {
         }
 
         let bytes = read_concrete_bytes(process, window_base, window_size)?;
-        angryier_cfg::recover(&self.decoder, window_base, &bytes, entry, |insn| insn.form_id)
-            .map_err(|error| {
-                RuntimeError::Execution(format!(
-                    "CFG recovery from {entry:#x} in {window_base:#x}..{window_end:#x} failed: {error:?}"
-                ))
-            })
+        angryier_cfg::recover(&self.decoder, window_base, &bytes, entry, |insn| insn.form_id).map_err(|error| {
+            RuntimeError::Execution(format!(
+                "CFG recovery from {entry:#x} in {window_base:#x}..{window_end:#x} failed: {error:?}"
+            ))
+        })
     }
 
     /// Recovers the image CFG and extracts pure induction loops — a
@@ -7484,10 +7477,10 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             id: left.id,
                             expr_concrete: snapshot.expr_concrete.clone(),
                             // A merge rewrites path constraints into a combined snapshot.
-                    // The stored branch-prefix index belonged to a pre-merge
-                    // append-only constraint vector, so preserving it would
-                    // make alternate-edge solving potentially unsound.
-                    last_branch: None,
+                            // The stored branch-prefix index belonged to a pre-merge
+                            // append-only constraint vector, so preserving it would
+                            // make alternate-edge solving potentially unsound.
+                            last_branch: None,
                         },
                     );
                     report.merges += 1;

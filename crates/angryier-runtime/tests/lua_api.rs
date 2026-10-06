@@ -352,8 +352,13 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
         "#
     );
 
-    let (status, solver_status, prefix_constraints, dependency_count, model_count):
-        (String, String, usize, usize, usize) = lua.load(&script).eval().expect("branch analysis");
+    let (status, solver_status, prefix_constraints, dependency_count, model_count): (
+        String,
+        String,
+        usize,
+        usize,
+        usize,
+    ) = lua.load(&script).eval().expect("branch analysis");
 
     assert_eq!(status, "recorded");
     // There is only one branch. The selected state already contains its
@@ -424,9 +429,13 @@ fn test_angry_run_branch_analysis_ranks_cfg_distance_to_find_target() {
         "#
     );
 
-    let (cfg_status, preference, ranked_target, chosen_distance, alternate_distance):
-        (String, String, String, String, String) =
-        lua.load(&script).eval().expect("CFG-ranked branch analysis");
+    let (cfg_status, preference, ranked_target, chosen_distance, alternate_distance): (
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = lua.load(&script).eval().expect("CFG-ranked branch analysis");
 
     assert_eq!(cfg_status, "ok");
     assert!(preference == "chosen" || preference == "alternate", "{preference}");
@@ -456,9 +465,7 @@ fn test_angry_run_branch_analysis_merge_clears_stale_provenance() {
         angryier_types::TargetProfileId(1),
     );
     let process = runtime.load_elf(&bytes).expect("load fixture");
-    let arena = angryier_expr::ShardedExprArena::new(
-        angryier_types::ExpressionNormalizationVersion(1),
-    );
+    let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
     let mut session = angryier_runtime::SymbolicSession::new(&runtime, &arena, process);
     let decision = angryier_runtime::SymbolicBranchDecision {
         pc: session.states[0].process.pc().expect("pc"),
@@ -524,8 +531,7 @@ fn test_lua_symbolic_and_solve() {
         "#
     );
 
-    let (states_ok, cc_ok, sol_ok): (bool, bool, bool) =
-        lua.load(&script).eval().expect("eval symbolic and solve");
+    let (states_ok, cc_ok, sol_ok): (bool, bool, bool) = lua.load(&script).eval().expect("eval symbolic and solve");
 
     assert!(states_ok);
     assert!(cc_ok);
@@ -622,8 +628,7 @@ fn test_lua_hook_termination_and_unhook() {
         "#
     );
 
-    let (outcome, unhooked): (String, bool) =
-        lua.load(&script).eval().expect("eval hook termination and unhook");
+    let (outcome, unhooked): (String, bool) = lua.load(&script).eval().expect("eval hook termination and unhook");
 
     assert_eq!(outcome, "hook_terminated");
     assert!(unhooked);
@@ -673,4 +678,3 @@ fn test_lua_eval_symbolic_solution() {
     // rdi must satisfy either == 0x1337 or != 0x1337
     assert!(solved == 0x1337 || solved != 0x1337);
 }
-

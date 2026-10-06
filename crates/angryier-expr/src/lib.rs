@@ -257,7 +257,9 @@ impl ShardedExprArena {
             0 => {}
             1 => {
                 let (shard_idx, local) = decode_id(node.operands[0]);
-                let shard = self.shards[shard_idx].read().map_err(|_| ExprArenaError::LockPoisoned)?;
+                let shard = self.shards[shard_idx]
+                    .read()
+                    .map_err(|_| ExprArenaError::LockPoisoned)?;
                 let record = shard
                     .records
                     .get(local)
@@ -312,7 +314,9 @@ impl ShardedExprArena {
             _ => {
                 for (i, &operand) in node.operands.iter().enumerate() {
                     let (shard_idx, local) = decode_id(operand);
-                    let shard = self.shards[shard_idx].read().map_err(|_| ExprArenaError::LockPoisoned)?;
+                    let shard = self.shards[shard_idx]
+                        .read()
+                        .map_err(|_| ExprArenaError::LockPoisoned)?;
                     let record = shard
                         .records
                         .get(local)
@@ -349,18 +353,9 @@ impl ShardedExprArena {
             }
         };
 
-        let key = compute_dependency_key(
-            &self.prefix,
-            node.sort,
-            node.op,
-            &node.immediate,
-            child_keys,
-        );
+        let key = compute_dependency_key(&self.prefix, node.sort, node.op, &node.immediate, child_keys);
 
-        Ok(DependencySummary {
-            key,
-            symbolic_sources,
-        })
+        Ok(DependencySummary { key, symbolic_sources })
     }
 
     fn fold_constants(&self, node: ExprNode) -> Result<ExprNode, ExprArenaError> {

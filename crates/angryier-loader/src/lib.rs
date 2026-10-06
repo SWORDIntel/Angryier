@@ -1102,8 +1102,7 @@ fn parse_pe_imports(
                 let by_name_rva = (thunk & 0xFFFF_FFFF) as u32;
                 let by_name_off = rva_to_file(by_name_rva).ok_or(LoaderError::TruncatedImportTable)?;
                 let name_off = by_name_off.checked_add(2).ok_or(LoaderError::TruncatedImportTable)?;
-                let (name, _) =
-                    read_pe_asciz(bytes, name_off).map_err(|_| LoaderError::TruncatedImportTable)?;
+                let (name, _) = read_pe_asciz(bytes, name_off).map_err(|_| LoaderError::TruncatedImportTable)?;
                 PeImportKind::Name(name)
             };
             imports.push(PeImport {
@@ -1169,21 +1168,14 @@ fn parse_pe_exports(
     let dir_end = dir_off
         .checked_add(PE_EXPORT_DIRECTORY_SIZE)
         .ok_or(LoaderError::TruncatedExportTable)?;
-    bytes
-        .get(dir_off..dir_end)
-        .ok_or(LoaderError::TruncatedExportTable)?;
+    bytes.get(dir_off..dir_end).ok_or(LoaderError::TruncatedExportTable)?;
     let ordinal_base = read_u32_le(bytes, dir_off + 0x10)?;
     let number_of_functions = read_u32_le(bytes, dir_off + 0x14)?;
     let number_of_names = read_u32_le(bytes, dir_off + 0x18)?;
     let functions_rva = read_u32_le(bytes, dir_off + 0x1C)?;
     let names_rva = read_u32_le(bytes, dir_off + 0x20)?;
     let ordinals_rva = read_u32_le(bytes, dir_off + 0x24)?;
-    if number_of_functions == 0
-        || number_of_names == 0
-        || functions_rva == 0
-        || names_rva == 0
-        || ordinals_rva == 0
-    {
+    if number_of_functions == 0 || number_of_names == 0 || functions_rva == 0 || names_rva == 0 || ordinals_rva == 0 {
         // Degenerate directory: nothing name-resolvable to enumerate.
         return Ok(Vec::new());
     }
@@ -2244,7 +2236,10 @@ mod pe_exports_tests {
             Ok(image) => image,
             Err(e) => return assert_eq!(format!("{e:?}"), "expected load to succeed"),
         };
-        assert!(image.pe_exports().unwrap_or(&[]).is_empty(), "forwarded export must be skipped");
+        assert!(
+            image.pe_exports().unwrap_or(&[]).is_empty(),
+            "forwarded export must be skipped"
+        );
         assert_eq!(image.export_address("RtlFoo"), None);
     }
 
@@ -2313,8 +2308,7 @@ mod pe_exports_tests {
         let Ok(home) = std::env::var("HOME") else {
             return;
         };
-        let bin_dir = std::path::Path::new(&home)
-            .join("Documents/byovd-harness/ghidra_pipeline/fixtures/bin");
+        let bin_dir = std::path::Path::new(&home).join("Documents/byovd-harness/ghidra_pipeline/fixtures/bin");
         let Ok(entries) = std::fs::read_dir(&bin_dir) else {
             return;
         };

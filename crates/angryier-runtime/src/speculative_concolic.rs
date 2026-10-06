@@ -112,11 +112,7 @@ pub enum FastPathInsn {
     /// Unconditional jump to `target`.
     Jump { target: u64 },
     /// Conditional branch based on `cond_reg`: if `!= 0` branch to `taken`, else `not_taken`.
-    Branch {
-        cond_reg: u32,
-        taken: u64,
-        not_taken: u64,
-    },
+    Branch { cond_reg: u32, taken: u64, not_taken: u64 },
     /// No operation.
     Nop,
 }
@@ -415,7 +411,12 @@ impl SpeculativeConcolicState {
                 }
                 self.pc = next_sequential_pc;
             }
-            FastPathInsn::Load { dst, addr_reg, offset, size } => {
+            FastPathInsn::Load {
+                dst,
+                addr_reg,
+                offset,
+                size,
+            } => {
                 let base = self.read_register(addr_reg);
                 let addr = base.wrapping_add(offset as u64);
                 let val = self.read_memory_u64(addr, size);
@@ -427,7 +428,12 @@ impl SpeculativeConcolicState {
                 }
                 self.pc = next_sequential_pc;
             }
-            FastPathInsn::Store { addr_reg, offset, src, size } => {
+            FastPathInsn::Store {
+                addr_reg,
+                offset,
+                src,
+                size,
+            } => {
                 let base = self.read_register(addr_reg);
                 let addr = base.wrapping_add(offset as u64);
                 let val = self.read_register(src);
@@ -442,7 +448,11 @@ impl SpeculativeConcolicState {
             FastPathInsn::Jump { target } => {
                 self.pc = target;
             }
-            FastPathInsn::Branch { cond_reg, taken, not_taken } => {
+            FastPathInsn::Branch {
+                cond_reg,
+                taken,
+                not_taken,
+            } => {
                 let cond = self.read_register(cond_reg);
                 self.pc = if cond != 0 { taken } else { not_taken };
             }
@@ -563,20 +573,30 @@ impl SpeculativeConcolicBatcher {
                         None
                     }
                 }
-                FastPathInsn::Load { addr_reg, offset, size, .. } => {
+                FastPathInsn::Load {
+                    addr_reg, offset, size, ..
+                } => {
                     if state.is_register_tainted(*addr_reg) {
                         Some(TaintedOperand::Register(*addr_reg))
                     } else {
                         let base = state.read_register(*addr_reg);
                         let addr = base.wrapping_add(*offset as u64);
                         if state.is_memory_tainted(addr, *size) {
-                            Some(TaintedOperand::MemoryAddress { address: addr, size: *size })
+                            Some(TaintedOperand::MemoryAddress {
+                                address: addr,
+                                size: *size,
+                            })
                         } else {
                             None
                         }
                     }
                 }
-                FastPathInsn::Store { addr_reg, offset, src, size } => {
+                FastPathInsn::Store {
+                    addr_reg,
+                    offset,
+                    src,
+                    size,
+                } => {
                     if state.is_register_tainted(*addr_reg) {
                         Some(TaintedOperand::Register(*addr_reg))
                     } else if state.is_register_tainted(*src) {
@@ -585,7 +605,10 @@ impl SpeculativeConcolicBatcher {
                         let base = state.read_register(*addr_reg);
                         let addr = base.wrapping_add(*offset as u64);
                         if state.is_memory_tainted(addr, *size) {
-                            Some(TaintedOperand::MemoryAddress { address: addr, size: *size })
+                            Some(TaintedOperand::MemoryAddress {
+                                address: addr,
+                                size: *size,
+                            })
                         } else {
                             None
                         }
@@ -642,14 +665,24 @@ impl SpeculativeConcolicBatcher {
                     state.set_register(dst, res);
                     state.pc = next_seq_pc;
                 }
-                FastPathInsn::Load { dst, addr_reg, offset, size } => {
+                FastPathInsn::Load {
+                    dst,
+                    addr_reg,
+                    offset,
+                    size,
+                } => {
                     let base = state.read_register(addr_reg);
                     let addr = base.wrapping_add(offset as u64);
                     let val = state.read_memory_u64(addr, size);
                     state.set_register(dst, val);
                     state.pc = next_seq_pc;
                 }
-                FastPathInsn::Store { addr_reg, offset, src, size } => {
+                FastPathInsn::Store {
+                    addr_reg,
+                    offset,
+                    src,
+                    size,
+                } => {
                     let base = state.read_register(addr_reg);
                     let addr = base.wrapping_add(offset as u64);
                     let val = state.read_register(src);
@@ -659,7 +692,11 @@ impl SpeculativeConcolicBatcher {
                 FastPathInsn::Jump { target } => {
                     state.pc = target;
                 }
-                FastPathInsn::Branch { cond_reg, taken, not_taken } => {
+                FastPathInsn::Branch {
+                    cond_reg,
+                    taken,
+                    not_taken,
+                } => {
                     let cond = state.read_register(cond_reg);
                     state.pc = if cond != 0 { taken } else { not_taken };
                 }
@@ -732,8 +769,8 @@ impl SpeculativeConcolicBatcher {
         }
         const SHADOW_OVERHEAD: f64 = 5.0;
         let baseline_cost = (total as f64) * SHADOW_OVERHEAD;
-        let actual_cost = (self.instructions_fast_pathed as f64) * 1.0
-            + (self.instructions_aborted as f64) * (1.0 + SHADOW_OVERHEAD);
+        let actual_cost =
+            (self.instructions_fast_pathed as f64) * 1.0 + (self.instructions_aborted as f64) * (1.0 + SHADOW_OVERHEAD);
         baseline_cost / actual_cost
     }
 }
@@ -974,14 +1011,86 @@ mod tests {
             s.set_register(10, 0x4000); // base pointer
 
             // 8 clean instructions mixing arithmetic, stores, loads, branches
-            s.add_instruction(0x2000, FastPathInsn::BinOpImm { op: FastPathOp::Add, dst: 1, src: 1, imm: 50 }, 4); // r1 = 150
-            s.add_instruction(0x2004, FastPathInsn::BinOp { op: FastPathOp::Sub, dst: 3, src1: 2, src2: 1 }, 4); // r3 = 200 - 150 = 50
-            s.add_instruction(0x2008, FastPathInsn::Store { addr_reg: 10, offset: 0, src: 3, size: 4 }, 4); // [0x4000] = 50
-            s.add_instruction(0x200C, FastPathInsn::Store { addr_reg: 10, offset: 8, src: 1, size: 4 }, 4); // [0x4008] = 150
-            s.add_instruction(0x2010, FastPathInsn::Load { dst: 4, addr_reg: 10, offset: 0, size: 4 }, 4); // r4 = 50
-            s.add_instruction(0x2014, FastPathInsn::Load { dst: 5, addr_reg: 10, offset: 8, size: 4 }, 4); // r5 = 150
-            s.add_instruction(0x2018, FastPathInsn::BinOp { op: FastPathOp::Mul, dst: 6, src1: 4, src2: 5 }, 4); // r6 = 50 * 150 = 7500
-            s.add_instruction(0x201C, FastPathInsn::BinOpImm { op: FastPathOp::Xor, dst: 7, src: 6, imm: 0xFF }, 4); // r7 = 7500 ^ 255 = 7435
+            s.add_instruction(
+                0x2000,
+                FastPathInsn::BinOpImm {
+                    op: FastPathOp::Add,
+                    dst: 1,
+                    src: 1,
+                    imm: 50,
+                },
+                4,
+            ); // r1 = 150
+            s.add_instruction(
+                0x2004,
+                FastPathInsn::BinOp {
+                    op: FastPathOp::Sub,
+                    dst: 3,
+                    src1: 2,
+                    src2: 1,
+                },
+                4,
+            ); // r3 = 200 - 150 = 50
+            s.add_instruction(
+                0x2008,
+                FastPathInsn::Store {
+                    addr_reg: 10,
+                    offset: 0,
+                    src: 3,
+                    size: 4,
+                },
+                4,
+            ); // [0x4000] = 50
+            s.add_instruction(
+                0x200C,
+                FastPathInsn::Store {
+                    addr_reg: 10,
+                    offset: 8,
+                    src: 1,
+                    size: 4,
+                },
+                4,
+            ); // [0x4008] = 150
+            s.add_instruction(
+                0x2010,
+                FastPathInsn::Load {
+                    dst: 4,
+                    addr_reg: 10,
+                    offset: 0,
+                    size: 4,
+                },
+                4,
+            ); // r4 = 50
+            s.add_instruction(
+                0x2014,
+                FastPathInsn::Load {
+                    dst: 5,
+                    addr_reg: 10,
+                    offset: 8,
+                    size: 4,
+                },
+                4,
+            ); // r5 = 150
+            s.add_instruction(
+                0x2018,
+                FastPathInsn::BinOp {
+                    op: FastPathOp::Mul,
+                    dst: 6,
+                    src1: 4,
+                    src2: 5,
+                },
+                4,
+            ); // r6 = 50 * 150 = 7500
+            s.add_instruction(
+                0x201C,
+                FastPathInsn::BinOpImm {
+                    op: FastPathOp::Xor,
+                    dst: 7,
+                    src: 6,
+                    imm: 0xFF,
+                },
+                4,
+            ); // r7 = 7500 ^ 255 = 7435
             s
         }
 
@@ -999,10 +1108,16 @@ mod tests {
         }
 
         // Assert exact, bit-for-bit architectural state equivalence
-        assert_eq!(state_bulk.registers, state_step.registers, "Registers must match identically");
+        assert_eq!(
+            state_bulk.registers, state_step.registers,
+            "Registers must match identically"
+        );
         assert_eq!(state_bulk.memory, state_step.memory, "Memory must match identically");
         assert_eq!(state_bulk.pc, state_step.pc, "PC must match identically");
-        assert_eq!(state_bulk.step_count, state_step.step_count, "Step count must match identically");
+        assert_eq!(
+            state_bulk.step_count, state_step.step_count,
+            "Step count must match identically"
+        );
     }
 
     /// Test 5: Metrics accumulate correctly across multiple chunks.

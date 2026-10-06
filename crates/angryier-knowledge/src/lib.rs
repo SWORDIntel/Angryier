@@ -105,9 +105,18 @@ pub fn cosine_similarity_f32(a: &[f32], b: &[f32]) -> f32 {
 pub fn modality_scores(query: &SemanticFingerprint, candidate: &SemanticFingerprint) -> Vec<(&'static str, f32)> {
     vec![
         (MODALITY_IR, cosine_similarity_bytes(&query.0[0..8], &candidate.0[0..8])),
-        (MODALITY_CFG, cosine_similarity_bytes(&query.0[8..16], &candidate.0[8..16])),
-        (MODALITY_CONSTRAINTS, cosine_similarity_bytes(&query.0[16..24], &candidate.0[16..24])),
-        (MODALITY_TAINT, cosine_similarity_bytes(&query.0[24..32], &candidate.0[24..32])),
+        (
+            MODALITY_CFG,
+            cosine_similarity_bytes(&query.0[8..16], &candidate.0[8..16]),
+        ),
+        (
+            MODALITY_CONSTRAINTS,
+            cosine_similarity_bytes(&query.0[16..24], &candidate.0[16..24]),
+        ),
+        (
+            MODALITY_TAINT,
+            cosine_similarity_bytes(&query.0[24..32], &candidate.0[24..32]),
+        ),
     ]
 }
 
@@ -516,9 +525,7 @@ impl InMemoryKnowledgeStore {
                 .filter(|(id, _)| !stale.contains(id))
                 .map(|(id, fp)| {
                     let exact_validated = match entries.get(id) {
-                        Some((envelope, _)) => {
-                            !envelope.dependencies.iter().any(|d| stale.contains(&ContentId(d.0)))
-                        }
+                        Some((envelope, _)) => !envelope.dependencies.iter().any(|d| stale.contains(&ContentId(d.0))),
                         None => false,
                     };
                     (*id, *fp, exact_validated)
@@ -1139,7 +1146,11 @@ mod tests {
             .filter(|h| h.artifact == id_advisory)
             .map(|h| h.exact_validated)
             .collect::<Vec<_>>();
-        assert_eq!(adv_validated, vec![false], "advisory artifact must not be exact-validated");
+        assert_eq!(
+            adv_validated,
+            vec![false],
+            "advisory artifact must not be exact-validated"
+        );
 
         // Querying exact artifact: exact_validated should be true
         let hits_exact = store.similar(fp_exact, 10)?;

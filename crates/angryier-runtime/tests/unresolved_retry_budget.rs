@@ -45,7 +45,13 @@ fn temp_dir(name: &str) -> Option<PathBuf> {
 }
 
 fn assemble(source: &Path, object: &Path) -> Option<()> {
-    let output = Command::new("as").arg("--64").arg("-o").arg(object).arg(source).output().ok()?;
+    let output = Command::new("as")
+        .arg("--64")
+        .arg("-o")
+        .arg(object)
+        .arg(source)
+        .output()
+        .ok()?;
     output.status.success().then_some(())
 }
 
@@ -101,7 +107,11 @@ fn default_retry_budget_pins_symbolic_load_and_counts_attempts() -> Result<(), B
     // The exit syscall is dispatched through the SimProc hook.
     let mut backend = angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as Arc<dyn angryier_expr::ExprReader>)?;
     {
-        let exit = session.states[0].process.symbol("exit").expect("missing exit symbol").address;
+        let exit = session.states[0]
+            .process
+            .symbol("exit")
+            .expect("missing exit symbol")
+            .address;
         session.states[0].process.hook_simproc(exit, "exit");
     }
     let policy = ExplorationPolicy::default();
@@ -137,7 +147,11 @@ fn zero_retry_budget_keeps_the_unresolved_address_failure() -> Result<(), Box<dy
 
     let mut backend = angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as Arc<dyn angryier_expr::ExprReader>)?;
     {
-        let exit = session.states[0].process.symbol("exit").expect("missing exit symbol").address;
+        let exit = session.states[0]
+            .process
+            .symbol("exit")
+            .expect("missing exit symbol")
+            .address;
         session.states[0].process.hook_simproc(exit, "exit");
     }
     let policy = ExplorationPolicy::default();
@@ -149,7 +163,10 @@ fn zero_retry_budget_keeps_the_unresolved_address_failure() -> Result<(), Box<dy
     );
     assert_eq!(report.failed, 1, "the load must stay unresolved");
     assert!(
-        report.last_error.as_deref().is_some_and(|e| e.contains("UnresolvedAddress")),
+        report
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("UnresolvedAddress")),
         "last_error must name UnresolvedAddress, got {:?}",
         report.last_error
     );

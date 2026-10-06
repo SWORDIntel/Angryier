@@ -2,8 +2,8 @@
 
 use std::fmt;
 
-use angryier_types::fx::FxHashSet;
 use angryier_types::Address;
+use angryier_types::fx::FxHashSet;
 
 use crate::rng::FastRng;
 use crate::{CoverageDelta, FuzzSeed};
@@ -235,10 +235,7 @@ impl FuzzCorpus {
 
     /// Deterministically returns the seed ID with the highest scheduling weight.
     pub fn highest_priority_seed(&self) -> Option<CorpusId> {
-        self.entries
-            .iter()
-            .max_by_key(|e| e.scheduling_weight())
-            .map(|e| e.id)
+        self.entries.iter().max_by_key(|e| e.scheduling_weight()).map(|e| e.id)
     }
 }
 

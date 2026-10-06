@@ -164,13 +164,7 @@ impl SpeculativeStateTarget for crate::SymbolicState {
     }
 }
 
-impl SpeculativeStateTarget
-    for (
-        &mut BTreeMap<u32, u64>,
-        &mut BTreeMap<u32, (ExprId, IrType)>,
-        &mut u64,
-    )
-{
+impl SpeculativeStateTarget for (&mut BTreeMap<u32, u64>, &mut BTreeMap<u32, (ExprId, IrType)>, &mut u64) {
     fn pc(&self) -> u64 {
         *self.2
     }
@@ -232,11 +226,7 @@ impl CandidateSummary {
     }
 
     /// Creates a candidate summary with concrete register values only.
-    pub fn from_concrete(
-        summary: FunctionSummary,
-        concrete_effects: BTreeMap<u32, u64>,
-        ret_addr: u64,
-    ) -> Self {
+    pub fn from_concrete(summary: FunctionSummary, concrete_effects: BTreeMap<u32, u64>, ret_addr: u64) -> Self {
         Self {
             summary,
             template: None,
@@ -246,11 +236,7 @@ impl CandidateSummary {
     }
 
     /// Creates a candidate summary with an expression template.
-    pub fn from_template(
-        summary: FunctionSummary,
-        template: FunctionTemplate,
-        ret_addr: u64,
-    ) -> Self {
+    pub fn from_template(summary: FunctionSummary, template: FunctionTemplate, ret_addr: u64) -> Self {
         Self {
             summary,
             template: Some(template),
@@ -458,11 +444,7 @@ impl SpeculativeSummaryApplier {
         if let Some(template) = &candidate_summary.template {
             for &(reg, expr, ty) in &template.effects {
                 state.write_symbolic(reg, expr, ty);
-                let concrete_val = candidate_summary
-                    .concrete_effects
-                    .get(&reg)
-                    .copied()
-                    .unwrap_or(0);
+                let concrete_val = candidate_summary.concrete_effects.get(&reg).copied().unwrap_or(0);
                 if candidate_summary.concrete_effects.contains_key(&reg) {
                     state.write_concrete(reg, concrete_val);
                 }
@@ -536,11 +518,7 @@ impl SpeculativeSummaryApplier {
     }
 
     /// Restores state from the lightweight checkpoint if verification fails or purity is violated.
-    pub fn rollback<S: SpeculativeStateTarget>(
-        &self,
-        state: &mut S,
-        checkpoint: &SpeculativeCheckpoint,
-    ) {
+    pub fn rollback<S: SpeculativeStateTarget>(&self, state: &mut S, checkpoint: &SpeculativeCheckpoint) {
         for (&reg, &value) in &checkpoint.saved_concrete {
             state.write_concrete(reg, value);
         }
@@ -561,8 +539,8 @@ impl SpeculativeSummaryApplier {
 mod tests {
     use super::*;
     use angryier_arch::{
-        AccessKind, DecodedInstruction, InstructionModifiers, Operand, OperandKind,
-        OperandVisibility, RegisterId, RegisterView,
+        AccessKind, DecodedInstruction, InstructionModifiers, Operand, OperandKind, OperandVisibility, RegisterId,
+        RegisterView,
     };
     use angryier_arch_intel64::register_id;
     use angryier_semantics_intel64::forms as f;

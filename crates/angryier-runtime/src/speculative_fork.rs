@@ -28,8 +28,8 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use angryier_solver::SolverOutcomeKind;
 use angryier_types::StateId;
@@ -272,18 +272,14 @@ impl SpeculativeForkExecutor {
         };
 
         checkpoint.speculative_steps += 1;
-        self.metrics
-            .speculative_steps_executed
-            .fetch_add(1, Ordering::Relaxed);
+        self.metrics.speculative_steps_executed.fetch_add(1, Ordering::Relaxed);
 
         if checkpoint.budget_exceeded(record.budget) {
             Err(state_id)
         } else {
             // Count this step as hidden solver latency (it ran while the
             // solver query was conceptually in-flight).
-            self.metrics
-                .solver_latency_hidden_steps
-                .fetch_add(1, Ordering::Relaxed);
+            self.metrics.solver_latency_hidden_steps.fetch_add(1, Ordering::Relaxed);
             Ok(true)
         }
     }
@@ -297,11 +293,7 @@ impl SpeculativeForkExecutor {
     ///
     /// Returns a [`CommitOutcome`] describing which state ids were kept and
     /// which were pruned, or `None` when `state_id` is not tracked.
-    pub fn commit_feasible(
-        &mut self,
-        state_id: StateId,
-        sat_outcome: SolverOutcomeKind,
-    ) -> Option<CommitOutcome> {
+    pub fn commit_feasible(&mut self, state_id: StateId, sat_outcome: SolverOutcomeKind) -> Option<CommitOutcome> {
         let key = self.fork_key_for(state_id)?;
         let record = self.forks.remove(&key)?;
 
@@ -632,14 +624,8 @@ mod tests {
     fn shared_metrics_aggregate_across_executors() {
         let shared = Arc::new(AtomicSpeculativeMetrics::default());
 
-        let mut exec_a = SpeculativeForkExecutor::with_shared_metrics(
-            SpeculativeForkPolicy::EagerDual,
-            shared.clone(),
-        );
-        let mut exec_b = SpeculativeForkExecutor::with_shared_metrics(
-            SpeculativeForkPolicy::EagerDual,
-            shared.clone(),
-        );
+        let mut exec_a = SpeculativeForkExecutor::with_shared_metrics(SpeculativeForkPolicy::EagerDual, shared.clone());
+        let mut exec_b = SpeculativeForkExecutor::with_shared_metrics(SpeculativeForkPolicy::EagerDual, shared.clone());
 
         exec_a.speculate_branch(branch(80, 81, 10), 0, 0, 10);
         exec_b.speculate_branch(branch(82, 83, 11), 0, 0, 10);

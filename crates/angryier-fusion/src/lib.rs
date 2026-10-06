@@ -67,10 +67,7 @@ pub struct FusedEmbedding {
 impl FusedEmbedding {
     /// Returns the contribution weight for a given modality, if present.
     pub fn contribution(&self, modality: Modality) -> Option<f32> {
-        self.contributions
-            .iter()
-            .find(|(m, _)| *m == modality)
-            .map(|(_, w)| *w)
+        self.contributions.iter().find(|(m, _)| *m == modality).map(|(_, w)| *w)
     }
 
     /// Returns the dimension of the fused embedding.
@@ -383,7 +380,12 @@ impl CfgSpecialistEncoder {
     }
 
     /// Convenience helper to encode the core three topological features.
-    pub fn encode_topology(&self, node_count: usize, cyclomatic_complexity: usize, loop_count: usize) -> ModalityVector {
+    pub fn encode_topology(
+        &self,
+        node_count: usize,
+        cyclomatic_complexity: usize,
+        loop_count: usize,
+    ) -> ModalityVector {
         let feat = CfgFeatures::new(node_count, cyclomatic_complexity, loop_count);
         self.encode(&feat)
     }
@@ -553,8 +555,16 @@ impl SpecialistEncoder for ConstraintSpecialistEncoder {
             Some(SolverOutcomeKind::BackendError) => 6.0,
         };
 
-        let assertion_density = if input.variable_count > 0 { assertions / vars } else { 0.0 };
-        let conflict_ratio = if input.decisions > 0 { conflicts / decisions } else { 0.0 };
+        let assertion_density = if input.variable_count > 0 {
+            assertions / vars
+        } else {
+            0.0
+        };
+        let conflict_ratio = if input.decisions > 0 {
+            conflicts / decisions
+        } else {
+            0.0
+        };
 
         let features = [
             assertions,

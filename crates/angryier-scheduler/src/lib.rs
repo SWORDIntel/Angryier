@@ -697,11 +697,7 @@ impl<T: Send> OsWorkerPool<T> {
     /// - `pressure_threshold`: available-memory threshold in bytes below which
     ///   cross-group stealing is throttled. Use
     ///   [`DEFAULT_PRESSURE_THRESHOLD_BYTES`] for the default 512 MiB.
-    pub fn with_options(
-        worker_count: u32,
-        numa_groups: Vec<Vec<usize>>,
-        pressure_threshold: u64,
-    ) -> Self {
+    pub fn with_options(worker_count: u32, numa_groups: Vec<Vec<usize>>, pressure_threshold: u64) -> Self {
         let count = worker_count.max(1) as usize;
 
         let mut group_of = vec![0usize; count];
@@ -908,22 +904,23 @@ impl<T: Send + 'static> OsWorkerPool<T> {
             for worker in 0..self.worker_count {
                 let pool = Arc::clone(&pool);
                 let handler = &handler;
-                scope.spawn(move || loop {
-                    match pool.next(worker) {
-                        Some(item) => {
-                            let pool2 = Arc::clone(&pool);
-                            let enqueue = move |child: T| pool2.push(worker, child);
-                            handler(worker, item, &enqueue);
-                            pool.completed.fetch_add(1, Ordering::Relaxed);
-                            pool.per_worker[usize::try_from(worker).unwrap_or(0)]
-                                .fetch_add(1, Ordering::Relaxed);
-                            pool.inflight.fetch_sub(1, Ordering::Relaxed);
-                        }
-                        None => {
-                            if pool.finished() {
-                                return;
+                scope.spawn(move || {
+                    loop {
+                        match pool.next(worker) {
+                            Some(item) => {
+                                let pool2 = Arc::clone(&pool);
+                                let enqueue = move |child: T| pool2.push(worker, child);
+                                handler(worker, item, &enqueue);
+                                pool.completed.fetch_add(1, Ordering::Relaxed);
+                                pool.per_worker[usize::try_from(worker).unwrap_or(0)].fetch_add(1, Ordering::Relaxed);
+                                pool.inflight.fetch_sub(1, Ordering::Relaxed);
                             }
-                            std::thread::yield_now();
+                            None => {
+                                if pool.finished() {
+                                    return;
+                                }
+                                std::thread::yield_now();
+                            }
                         }
                     }
                 });
@@ -1208,7 +1205,7 @@ mod tests {
         assert_eq!(GreedyScore::priority(&zero), 0.0);
     }
 
-        // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
     // OsWorkerPool: group assignment tests
     // -----------------------------------------------------------------------
 
@@ -1216,11 +1213,8 @@ mod tests {
     #[test]
     fn numa_group_assignment_two_groups() {
         // 4 workers split 0-1 into group 0 and 2-3 into group 1.
-        let pool: OsWorkerPool<u32> = OsWorkerPool::with_options(
-            4,
-            vec![vec![0, 1], vec![2, 3]],
-            DEFAULT_PRESSURE_THRESHOLD_BYTES,
-        );
+        let pool: OsWorkerPool<u32> =
+            OsWorkerPool::with_options(4, vec![vec![0, 1], vec![2, 3]], DEFAULT_PRESSURE_THRESHOLD_BYTES);
 
         assert_eq!(pool.group_count(), 2);
 
@@ -1240,11 +1234,8 @@ mod tests {
     fn numa_group_unmentioned_workers_fall_into_group_zero() {
         // Explicitly list workers 1 and 3 in group 1; workers 0 and 2 are not
         // mentioned and must land in group 0.
-        let pool: OsWorkerPool<u32> = OsWorkerPool::with_options(
-            4,
-            vec![vec![], vec![1, 3]],
-            DEFAULT_PRESSURE_THRESHOLD_BYTES,
-        );
+        let pool: OsWorkerPool<u32> =
+            OsWorkerPool::with_options(4, vec![vec![], vec![1, 3]], DEFAULT_PRESSURE_THRESHOLD_BYTES);
 
         assert_eq!(pool.group_of(0), 0, "worker 0 should fall into group 0");
         assert_eq!(pool.group_of(1), 1);
@@ -1315,11 +1306,7 @@ mod tests {
     fn cross_numa_steal_counter_increments() {
         // Worker 0 in group 0, worker 1 in group 1 — different NUMA nodes.
         // pressure_threshold = 0 -> is_under_pressure(0) is always false.
-        let pool = OsWorkerPool::<u32>::with_options(
-            2,
-            vec![vec![0], vec![1]],
-            0,
-        );
+        let pool = OsWorkerPool::<u32>::with_options(2, vec![vec![0], vec![1]], 0);
 
         // Load work only onto worker 1 (group 1).
         pool.push(1, 200u32);
@@ -1335,10 +1322,7 @@ mod tests {
 
         let (same, cross, _throttle) = pool.steal_counts();
         assert!(popped >= 1, "worker 0 should have stolen at least one item");
-        assert!(
-            cross >= 1,
-            "expected >=1 cross-NUMA steal, got {cross}"
-        );
+        assert!(cross >= 1, "expected >=1 cross-NUMA steal, got {cross}");
         assert_eq!(same, 0, "no same-NUMA steals expected");
     }
 
@@ -1348,11 +1332,7 @@ mod tests {
     fn memory_pressure_throttling_increments_counter() {
         // Worker 0 in group 0, worker 1 in group 1.
         // Set threshold to u64::MAX so is_under_pressure is guaranteed true on Linux.
-        let pool = OsWorkerPool::<u32>::with_options(
-            2,
-            vec![vec![0], vec![1]],
-            u64::MAX,
-        );
+        let pool = OsWorkerPool::<u32>::with_options(2, vec![vec![0], vec![1]], u64::MAX);
 
         pool.push(1, 300u32);
 
@@ -1362,10 +1342,7 @@ mod tests {
 
         let (_same, cross, throttle) = pool.steal_counts();
         assert_eq!(cross, 1);
-        assert!(
-            throttle >= 1,
-            "expected >=1 pressure throttle event, got {throttle}"
-        );
+        assert!(throttle >= 1, "expected >=1 pressure throttle event, got {throttle}");
     }
 
     // -----------------------------------------------------------------------

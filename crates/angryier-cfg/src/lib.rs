@@ -109,10 +109,7 @@ impl Cfg {
         }
         self.blocks
             .values()
-            .filter(|bl| {
-                (bl.start..bl.end).contains(&insn)
-                    || bl.instructions.iter().any(|i| i.address == insn)
-            })
+            .filter(|bl| (bl.start..bl.end).contains(&insn) || bl.instructions.iter().any(|i| i.address == insn))
             .map(|bl| bl.start)
             .max()
     }
@@ -125,12 +122,7 @@ impl Cfg {
     /// Returns the number of edges in the shortest path, `Some(0)` when
     /// both addresses resolve to the same block, and `None` when the
     /// target is not reachable within `max_depth`.
-    pub fn shortest_static_distance(
-        &self,
-        from: Address,
-        target: Address,
-        max_depth: usize,
-    ) -> Option<usize> {
+    pub fn shortest_static_distance(&self, from: Address, target: Address, max_depth: usize) -> Option<usize> {
         let from = self.block_of_insn(from)?;
         let target = self.block_of_insn(target)?;
         if from == target {
@@ -552,11 +544,7 @@ impl DominatorTree {
     /// Computes the least fixed point of repeatedly unioning dominance
     /// frontiers until convergence — the set of blocks that need φ-functions
     /// for any variable defined in `starting_nodes`.
-    pub fn iterated_dominance_frontier(
-        &self,
-        cfg: &Cfg,
-        starting_nodes: &BTreeSet<Address>,
-    ) -> BTreeSet<Address> {
+    pub fn iterated_dominance_frontier(&self, cfg: &Cfg, starting_nodes: &BTreeSet<Address>) -> BTreeSet<Address> {
         let df = self.dominance_frontiers(cfg);
         let mut result: BTreeSet<Address> = BTreeSet::new();
         let mut worklist: Vec<Address> = starting_nodes.iter().copied().collect();
@@ -593,10 +581,7 @@ impl Cfg {
     }
 
     /// Iterated dominance frontier of `starting_nodes` (DF⁺).
-    pub fn iterated_dominance_frontier(
-        &self,
-        starting_nodes: &BTreeSet<Address>,
-    ) -> BTreeSet<Address> {
+    pub fn iterated_dominance_frontier(&self, starting_nodes: &BTreeSet<Address>) -> BTreeSet<Address> {
         self.dominator_tree().iterated_dominance_frontier(self, starting_nodes)
     }
 
@@ -1158,12 +1143,36 @@ mod tests {
             entry: 0x1000,
             blocks,
             edges: vec![
-                CfgEdge { from: 0x1000, to: Some(0x2000), kind: EdgeKind::ConditionalTaken },
-                CfgEdge { from: 0x1000, to: Some(0x3000), kind: EdgeKind::FallThrough },
-                CfgEdge { from: 0x2000, to: Some(0x4000), kind: EdgeKind::Unconditional },
-                CfgEdge { from: 0x3000, to: Some(0x3500), kind: EdgeKind::Unconditional },
-                CfgEdge { from: 0x3500, to: Some(0x4000), kind: EdgeKind::Unconditional },
-                CfgEdge { from: 0x4000, to: None, kind: EdgeKind::Return },
+                CfgEdge {
+                    from: 0x1000,
+                    to: Some(0x2000),
+                    kind: EdgeKind::ConditionalTaken,
+                },
+                CfgEdge {
+                    from: 0x1000,
+                    to: Some(0x3000),
+                    kind: EdgeKind::FallThrough,
+                },
+                CfgEdge {
+                    from: 0x2000,
+                    to: Some(0x4000),
+                    kind: EdgeKind::Unconditional,
+                },
+                CfgEdge {
+                    from: 0x3000,
+                    to: Some(0x3500),
+                    kind: EdgeKind::Unconditional,
+                },
+                CfgEdge {
+                    from: 0x3500,
+                    to: Some(0x4000),
+                    kind: EdgeKind::Unconditional,
+                },
+                CfgEdge {
+                    from: 0x4000,
+                    to: None,
+                    kind: EdgeKind::Return,
+                },
             ],
         };
 
@@ -1185,11 +1194,31 @@ mod tests {
             entry: 0x1000,
             blocks,
             edges: vec![
-                CfgEdge { from: 0x1000, to: Some(0x2000), kind: EdgeKind::ConditionalTaken },
-                CfgEdge { from: 0x1000, to: Some(0x3000), kind: EdgeKind::FallThrough },
-                CfgEdge { from: 0x2000, to: Some(0x4000), kind: EdgeKind::Unconditional },
-                CfgEdge { from: 0x3000, to: Some(0x3500), kind: EdgeKind::Unconditional },
-                CfgEdge { from: 0x3500, to: Some(0x4000), kind: EdgeKind::Unconditional },
+                CfgEdge {
+                    from: 0x1000,
+                    to: Some(0x2000),
+                    kind: EdgeKind::ConditionalTaken,
+                },
+                CfgEdge {
+                    from: 0x1000,
+                    to: Some(0x3000),
+                    kind: EdgeKind::FallThrough,
+                },
+                CfgEdge {
+                    from: 0x2000,
+                    to: Some(0x4000),
+                    kind: EdgeKind::Unconditional,
+                },
+                CfgEdge {
+                    from: 0x3000,
+                    to: Some(0x3500),
+                    kind: EdgeKind::Unconditional,
+                },
+                CfgEdge {
+                    from: 0x3500,
+                    to: Some(0x4000),
+                    kind: EdgeKind::Unconditional,
+                },
             ],
         };
         let branch = cfg.blocks.get(&0x1000).expect("branch block");
@@ -1217,12 +1246,36 @@ mod tests {
         blocks.insert(0x5000, make_test_block(0x5000, 0x5005, EdgeKind::Return));
 
         let edges = vec![
-            CfgEdge { from: 0x1000, to: Some(0x2000), kind: EdgeKind::ConditionalTaken },
-            CfgEdge { from: 0x1000, to: Some(0x3000), kind: EdgeKind::FallThrough },
-            CfgEdge { from: 0x2000, to: Some(0x4000), kind: EdgeKind::Unconditional },
-            CfgEdge { from: 0x3000, to: Some(0x4000), kind: EdgeKind::Unconditional },
-            CfgEdge { from: 0x4000, to: Some(0x5000), kind: EdgeKind::FallThrough },
-            CfgEdge { from: 0x5000, to: None, kind: EdgeKind::Return },
+            CfgEdge {
+                from: 0x1000,
+                to: Some(0x2000),
+                kind: EdgeKind::ConditionalTaken,
+            },
+            CfgEdge {
+                from: 0x1000,
+                to: Some(0x3000),
+                kind: EdgeKind::FallThrough,
+            },
+            CfgEdge {
+                from: 0x2000,
+                to: Some(0x4000),
+                kind: EdgeKind::Unconditional,
+            },
+            CfgEdge {
+                from: 0x3000,
+                to: Some(0x4000),
+                kind: EdgeKind::Unconditional,
+            },
+            CfgEdge {
+                from: 0x4000,
+                to: Some(0x5000),
+                kind: EdgeKind::FallThrough,
+            },
+            CfgEdge {
+                from: 0x5000,
+                to: None,
+                kind: EdgeKind::Return,
+            },
         ];
 
         let cfg = Cfg {
@@ -1274,14 +1327,46 @@ mod tests {
         blocks.insert(0x60, make_test_block(0x60, 0x65, EdgeKind::Return));
 
         let edges = vec![
-            CfgEdge { from: 0x10, to: Some(0x20), kind: EdgeKind::FallThrough },
-            CfgEdge { from: 0x20, to: Some(0x30), kind: EdgeKind::ConditionalTaken },
-            CfgEdge { from: 0x20, to: Some(0x40), kind: EdgeKind::FallThrough },
-            CfgEdge { from: 0x30, to: Some(0x50), kind: EdgeKind::Unconditional },
-            CfgEdge { from: 0x40, to: Some(0x50), kind: EdgeKind::Unconditional },
-            CfgEdge { from: 0x50, to: Some(0x20), kind: EdgeKind::ConditionalTaken },
-            CfgEdge { from: 0x50, to: Some(0x60), kind: EdgeKind::FallThrough },
-            CfgEdge { from: 0x60, to: None, kind: EdgeKind::Return },
+            CfgEdge {
+                from: 0x10,
+                to: Some(0x20),
+                kind: EdgeKind::FallThrough,
+            },
+            CfgEdge {
+                from: 0x20,
+                to: Some(0x30),
+                kind: EdgeKind::ConditionalTaken,
+            },
+            CfgEdge {
+                from: 0x20,
+                to: Some(0x40),
+                kind: EdgeKind::FallThrough,
+            },
+            CfgEdge {
+                from: 0x30,
+                to: Some(0x50),
+                kind: EdgeKind::Unconditional,
+            },
+            CfgEdge {
+                from: 0x40,
+                to: Some(0x50),
+                kind: EdgeKind::Unconditional,
+            },
+            CfgEdge {
+                from: 0x50,
+                to: Some(0x20),
+                kind: EdgeKind::ConditionalTaken,
+            },
+            CfgEdge {
+                from: 0x50,
+                to: Some(0x60),
+                kind: EdgeKind::FallThrough,
+            },
+            CfgEdge {
+                from: 0x60,
+                to: None,
+                kind: EdgeKind::Return,
+            },
         ];
 
         let cfg = Cfg {
@@ -1314,13 +1399,41 @@ mod tests {
         blocks.insert(0x50, make_test_block(0x50, 0x55, EdgeKind::Return));
 
         let edges = vec![
-            CfgEdge { from: 0x10, to: Some(0x20), kind: EdgeKind::FallThrough },
-            CfgEdge { from: 0x10, to: Some(0x40), kind: EdgeKind::ConditionalTaken },
-            CfgEdge { from: 0x20, to: Some(0x30), kind: EdgeKind::FallThrough },
-            CfgEdge { from: 0x20, to: Some(0x50), kind: EdgeKind::ConditionalTaken },
-            CfgEdge { from: 0x30, to: Some(0x10), kind: EdgeKind::Unconditional },
-            CfgEdge { from: 0x40, to: None, kind: EdgeKind::Return },
-            CfgEdge { from: 0x50, to: None, kind: EdgeKind::Return },
+            CfgEdge {
+                from: 0x10,
+                to: Some(0x20),
+                kind: EdgeKind::FallThrough,
+            },
+            CfgEdge {
+                from: 0x10,
+                to: Some(0x40),
+                kind: EdgeKind::ConditionalTaken,
+            },
+            CfgEdge {
+                from: 0x20,
+                to: Some(0x30),
+                kind: EdgeKind::FallThrough,
+            },
+            CfgEdge {
+                from: 0x20,
+                to: Some(0x50),
+                kind: EdgeKind::ConditionalTaken,
+            },
+            CfgEdge {
+                from: 0x30,
+                to: Some(0x10),
+                kind: EdgeKind::Unconditional,
+            },
+            CfgEdge {
+                from: 0x40,
+                to: None,
+                kind: EdgeKind::Return,
+            },
+            CfgEdge {
+                from: 0x50,
+                to: None,
+                kind: EdgeKind::Return,
+            },
         ];
 
         let cfg = Cfg {

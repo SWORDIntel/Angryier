@@ -6,8 +6,7 @@ use mlua::{Lua, LuaString, Table};
 pub fn reg_by_name(name: &str) -> Option<u32> {
     let lower = name.to_ascii_lowercase();
     let gprs = [
-        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
-        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
     ];
     if let Some(pos) = gprs.iter().position(|&n| n == lower) {
         return Some(angryier_arch_intel64::register_id::GPR_BASE + pos as u32);
@@ -32,10 +31,8 @@ pub fn reg_by_name(name: &str) -> Option<u32> {
 /// Reverse-maps an architectural register ID to its canonical GPR or special register name.
 pub fn name_by_reg(reg: u32) -> Option<&'static str> {
     let gprs = [
-        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
-        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-        "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
-        "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31",
+        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+        "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23", "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31",
     ];
     let base = angryier_arch_intel64::register_id::GPR_BASE;
     if reg >= base && reg < base + 32 {
@@ -80,14 +77,17 @@ pub fn register_utils(lua: &Lua, lib: &Table) -> mlua::Result<()> {
         "unhex",
         lua.create_function(|lua, hex_str: String| {
             let clean = hex_str.trim().replace([' ', '\n', '\t', '_'], "");
-            let clean = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X")).unwrap_or(&clean);
+            let clean = clean
+                .strip_prefix("0x")
+                .or_else(|| clean.strip_prefix("0X"))
+                .unwrap_or(&clean);
             if !clean.len().is_multiple_of(2) {
                 return Err(mlua::Error::external("unhex: hex string must have an even length"));
             }
             let mut bytes = Vec::with_capacity(clean.len() / 2);
             for chunk in clean.as_bytes().chunks(2) {
-                let s = std::str::from_utf8(chunk)
-                    .map_err(|e| mlua::Error::external(format!("unhex: utf8 error: {e}")))?;
+                let s =
+                    std::str::from_utf8(chunk).map_err(|e| mlua::Error::external(format!("unhex: utf8 error: {e}")))?;
                 let b = u8::from_str_radix(s, 16)
                     .map_err(|e| mlua::Error::external(format!("unhex: invalid hex character: {e}")))?;
                 bytes.push(b);
@@ -99,9 +99,7 @@ pub fn register_utils(lua: &Lua, lib: &Table) -> mlua::Result<()> {
     // angry.pack64(integer) -> 8 bytes little-endian string
     lib.set(
         "pack64",
-        lua.create_function(|lua, val: u64| {
-            lua.create_string(val.to_le_bytes())
-        })?,
+        lua.create_function(|lua, val: u64| lua.create_string(val.to_le_bytes()))?,
     )?;
 
     // angry.unpack64(bytes) -> integer
@@ -122,9 +120,7 @@ pub fn register_utils(lua: &Lua, lib: &Table) -> mlua::Result<()> {
     // angry.pack32(integer) -> 4 bytes little-endian string
     lib.set(
         "pack32",
-        lua.create_function(|lua, val: u32| {
-            lua.create_string(val.to_le_bytes())
-        })?,
+        lua.create_function(|lua, val: u32| lua.create_string(val.to_le_bytes()))?,
     )?;
 
     // angry.unpack32(bytes) -> integer

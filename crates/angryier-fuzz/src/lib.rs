@@ -12,10 +12,10 @@ use angryier_types::{Address, DependencyKey, StateId};
 
 pub use corpus::{CorpusEntry, CorpusId, FuzzCorpus};
 pub use mutator::{
-    arith_u16, arith_u32, arith_u8, block_delete, block_insert, block_replace, flip_bit, flip_byte,
-    flip_four_bits, flip_four_bytes, flip_two_bits, flip_two_bytes, inject_token_insert,
-    inject_token_overwrite, insert_interest_u16, insert_interest_u32, insert_interest_u8, splice,
-    Endianness, Mutator, DEFAULT_MAX_INPUT_SIZE, INTERESTING_16, INTERESTING_32, INTERESTING_8,
+    DEFAULT_MAX_INPUT_SIZE, Endianness, INTERESTING_8, INTERESTING_16, INTERESTING_32, Mutator, arith_u8, arith_u16,
+    arith_u32, block_delete, block_insert, block_replace, flip_bit, flip_byte, flip_four_bits, flip_four_bytes,
+    flip_two_bits, flip_two_bytes, inject_token_insert, inject_token_overwrite, insert_interest_u8,
+    insert_interest_u16, insert_interest_u32, splice,
 };
 pub use rng::FastRng;
 pub use session::FuzzSession;
@@ -65,9 +65,7 @@ impl fmt::Display for FuzzError {
         match self {
             Self::Poisoned => f.write_str("fuzz bridge mutex is poisoned"),
             Self::EmptySeed => f.write_str("submitted seed is empty"),
-            Self::StageViolation => {
-                f.write_str("operation is not permitted in the current integration stage")
-            }
+            Self::StageViolation => f.write_str("operation is not permitted in the current integration stage"),
         }
     }
 }
@@ -109,17 +107,11 @@ impl InMemoryFuzzBridge {
     }
 
     pub fn coverage_block_count(&self) -> usize {
-        self.coverage_blocks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.coverage_blocks.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub fn coverage_edge_count(&self) -> usize {
-        self.coverage_edges
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.coverage_edges.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     pub fn hint_count(&self) -> usize {
@@ -144,14 +136,8 @@ impl FuzzBridge for InMemoryFuzzBridge {
         match self.stage {
             FuzzIntegrationStage::SeedsOnly => Err(FuzzError::StageViolation),
             FuzzIntegrationStage::SeedsAndCoverage | FuzzIntegrationStage::Bidirectional => {
-                let mut blocks = self
-                    .coverage_blocks
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                let mut edges = self
-                    .coverage_edges
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut blocks = self.coverage_blocks.lock().unwrap_or_else(|e| e.into_inner());
+                let mut edges = self.coverage_edges.lock().unwrap_or_else(|e| e.into_inner());
                 blocks.extend(delta.blocks);
                 edges.extend(delta.edges);
                 Ok(())
@@ -161,9 +147,7 @@ impl FuzzBridge for InMemoryFuzzBridge {
 
     fn publish_hint(&self, hint: ConstraintHint) -> Result<(), Self::Error> {
         match self.stage {
-            FuzzIntegrationStage::SeedsOnly | FuzzIntegrationStage::SeedsAndCoverage => {
-                Err(FuzzError::StageViolation)
-            }
+            FuzzIntegrationStage::SeedsOnly | FuzzIntegrationStage::SeedsAndCoverage => Err(FuzzError::StageViolation),
             FuzzIntegrationStage::Bidirectional => {
                 let mut hints = self.hints.lock().unwrap_or_else(|e| e.into_inner());
                 hints.push(hint);
@@ -276,10 +260,7 @@ mod tests {
             bridge
                 .publish_coverage(CoverageDelta {
                     blocks: vec![0x4000],
-                    edges: vec![
-                        (0x4000, 0x5000),
-                        (0x5000, 0x6000),
-                    ],
+                    edges: vec![(0x4000, 0x5000), (0x5000, 0x6000),],
                 })
                 .is_ok()
         );

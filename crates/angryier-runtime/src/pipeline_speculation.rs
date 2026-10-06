@@ -178,13 +178,8 @@ impl SpeculativeDecodePipeline {
 
     /// Pre-decodes up to `depth` instructions using pre-recovered CFG blocks,
     /// without requiring an explicit raw memory region slice.
-    pub fn prefetch_ahead_from_cfg<D>(
-        &mut self,
-        current_pc: Address,
-        cfg: &Cfg,
-        decoder: &D,
-        depth: usize,
-    ) where
+    pub fn prefetch_ahead_from_cfg<D>(&mut self, current_pc: Address, cfg: &Cfg, decoder: &D, depth: usize)
+    where
         D: Decoder,
     {
         self.prefetch_ahead(current_pc, cfg, decoder, &[], 0, depth);
@@ -199,12 +194,7 @@ impl SpeculativeDecodePipeline {
     /// decoded instruction is also inserted into the ring buffer.
     ///
     /// Returns `Err(e)` only when the decoder itself fails on a miss.
-    pub fn poll_or_decode<D>(
-        &mut self,
-        pc: Address,
-        decoder: &D,
-        bytes: &[u8],
-    ) -> Result<DecodedInstruction, D::Error>
+    pub fn poll_or_decode<D>(&mut self, pc: Address, decoder: &D, bytes: &[u8]) -> Result<DecodedInstruction, D::Error>
     where
         D: Decoder,
     {
@@ -434,7 +424,11 @@ mod tests {
         let cfg = Cfg {
             entry: base,
             blocks,
-            edges: vec![CfgEdge { from: ret_addr, to: None, kind: EdgeKind::Return }],
+            edges: vec![CfgEdge {
+                from: ret_addr,
+                to: None,
+                kind: EdgeKind::Return,
+            }],
         };
         (cfg, code)
     }
@@ -464,7 +458,10 @@ mod tests {
 
         // All `n_nops` nops should have been hits (prefetched before query).
         assert_eq!(pipeline.pipeline_queries, n_nops as u64);
-        assert_eq!(pipeline.pipeline_hits, n_nops as u64, "expected all queries to be cache hits");
+        assert_eq!(
+            pipeline.pipeline_hits, n_nops as u64,
+            "expected all queries to be cache hits"
+        );
         assert_eq!(pipeline.pipeline_flushes, 0, "linear execution must not flush");
     }
 
@@ -473,13 +470,13 @@ mod tests {
     #[test]
     fn misprediction_triggers_flush_and_fallback() {
         let code: Vec<u8> = vec![
-            0x90,       // [0] 0x1000 nop
+            0x90, // [0] 0x1000 nop
             0x75, 0x04, // [1] 0x1001 jnz +4 (target: 0x1003 + 4 = 0x1007)
-            0x90,       // [3] 0x1003 nop (fall-through block)
-            0xC3,       // [4] 0x1004 ret
+            0x90, // [3] 0x1003 nop (fall-through block)
+            0xC3, // [4] 0x1004 ret
             0x90, 0x90, // [5..6] padding
-            0x90,       // [7] 0x1007 nop (taken block)
-            0xC3,       // [8] 0x1008 ret
+            0x90, // [7] 0x1007 nop (taken block)
+            0xC3, // [8] 0x1008 ret
         ];
         let base: Address = 0x1000;
         let decoder = MinimalDecoder;
@@ -518,13 +515,33 @@ mod tests {
         blocks.insert(0x1007, block_c);
 
         let edges = vec![
-            CfgEdge { from: 0x1001, to: Some(0x1003), kind: EdgeKind::FallThrough },
-            CfgEdge { from: 0x1001, to: Some(0x1007), kind: EdgeKind::ConditionalTaken },
-            CfgEdge { from: 0x1004, to: None, kind: EdgeKind::Return },
-            CfgEdge { from: 0x1008, to: None, kind: EdgeKind::Return },
+            CfgEdge {
+                from: 0x1001,
+                to: Some(0x1003),
+                kind: EdgeKind::FallThrough,
+            },
+            CfgEdge {
+                from: 0x1001,
+                to: Some(0x1007),
+                kind: EdgeKind::ConditionalTaken,
+            },
+            CfgEdge {
+                from: 0x1004,
+                to: None,
+                kind: EdgeKind::Return,
+            },
+            CfgEdge {
+                from: 0x1008,
+                to: None,
+                kind: EdgeKind::Return,
+            },
         ];
 
-        let cfg = Cfg { entry: 0x1000, blocks, edges };
+        let cfg = Cfg {
+            entry: 0x1000,
+            blocks,
+            edges,
+        };
 
         let mut pipeline = SpeculativeDecodePipeline::new();
 
@@ -566,9 +583,7 @@ mod tests {
 
         for i in 0..n {
             let pc = base.wrapping_add(i as u64);
-            pipeline
-                .poll_or_decode(pc, &decoder, &code[i..])
-                .unwrap();
+            pipeline.poll_or_decode(pc, &decoder, &code[i..]).unwrap();
         }
 
         assert!(
@@ -589,7 +604,11 @@ mod tests {
             "newest entry must still be in the ring"
         );
 
-        assert_eq!(pipeline.ring.len(), pipeline.index.len(), "ring and index must be in sync");
+        assert_eq!(
+            pipeline.ring.len(),
+            pipeline.index.len(),
+            "ring and index must be in sync"
+        );
     }
 
     // ── Test: prefetch_depth_avg metric ─────────────────────────────────────

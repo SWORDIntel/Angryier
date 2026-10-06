@@ -5552,11 +5552,7 @@ pub(crate) fn emit_memory_rotate_carry(
     }
     if width == 8 {
         let nine = const_u64(out, 9)?;
-        let quotient = out.emit(
-            SemanticOp::Primitive(PrimitiveOp::UnsignedDiv),
-            U64,
-            &[count, nine],
-        )?;
+        let quotient = out.emit(SemanticOp::Primitive(PrimitiveOp::UnsignedDiv), U64, &[count, nine])?;
         let product = out.emit(SemanticOp::Primitive(PrimitiveOp::Mul), U64, &[quotient, nine])?;
         count = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[count, product])?;
     }
@@ -5903,15 +5899,8 @@ impl UnsupportedFallthrough {
     /// `(total hits, first-seen (pc, form) sites)` — sites capped at 128
     /// entries so a pathological image cannot grow the log unbounded.
     pub fn snapshot(&self) -> (usize, Vec<(u64, u32)>) {
-        let sites = self
-            .sites
-            .lock()
-            .map(|sites| sites.clone())
-            .unwrap_or_default();
-        (
-            self.hits.load(std::sync::atomic::Ordering::Relaxed),
-            sites,
-        )
+        let sites = self.sites.lock().map(|sites| sites.clone()).unwrap_or_default();
+        (self.hits.load(std::sync::atomic::Ordering::Relaxed), sites)
     }
 }
 

@@ -18,8 +18,7 @@
 use std::path::PathBuf;
 
 use angryier::{
-    ApiError, Engine, ImageKind, RunOptions, StepKind, DEFAULT_MAX_STATES, DEFAULT_STEPS, GPRS,
-    SYMBOLIC_GPR_WIDTH,
+    ApiError, DEFAULT_MAX_STATES, DEFAULT_STEPS, Engine, GPRS, ImageKind, RunOptions, SYMBOLIC_GPR_WIDTH, StepKind,
 };
 
 /// Resolves a test fixture path using strictly relative or dynamic paths.
@@ -234,10 +233,7 @@ fn test_session_stepping_registers_and_states() {
 
     // Validate that all standard 64-bit GPR names are inspectable
     for &reg_name in &GPRS {
-        assert!(
-            session.reg(reg_name).is_some(),
-            "GPR '{reg_name}' should be readable"
-        );
+        assert!(session.reg(reg_name).is_some(), "GPR '{reg_name}' should be readable");
     }
 
     // Invalid register names return None
@@ -255,7 +251,9 @@ fn test_symbolic_registration_and_validation_errors() {
     // Valid 64-bit marks are accepted
     session.symbolic("rdi", 64).expect("64-bit rdi mark accepted");
     session.symbolic("rax", 64).expect("64-bit rax mark accepted");
-    session.symbolic("rcx", SYMBOLIC_GPR_WIDTH).expect("constant width accepted");
+    session
+        .symbolic("rcx", SYMBOLIC_GPR_WIDTH)
+        .expect("constant width accepted");
 
     // Sub-64-bit widths must be rejected with ApiError::InvalidArgument
     for bad_width in [8, 16, 32, 128] {
@@ -264,10 +262,7 @@ fn test_symbolic_registration_and_validation_errors() {
             .expect_err("non-64-bit width must fail");
         match err {
             ApiError::InvalidArgument(msg) => {
-                assert!(
-                    msg.contains("must be 64 bits"),
-                    "unexpected error message: {msg}"
-                );
+                assert!(msg.contains("must be 64 bits"), "unexpected error message: {msg}");
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
@@ -275,15 +270,10 @@ fn test_symbolic_registration_and_validation_errors() {
 
     // Unknown register names must be rejected with ApiError::InvalidArgument
     for bad_name in ["unknown_reg", "rip", "flags", "", "xmm0"] {
-        let err = session
-            .symbolic(bad_name, 64)
-            .expect_err("bad register name must fail");
+        let err = session.symbolic(bad_name, 64).expect_err("bad register name must fail");
         match err {
             ApiError::InvalidArgument(msg) => {
-                assert!(
-                    msg.contains("bad register"),
-                    "unexpected error message: {msg}"
-                );
+                assert!(msg.contains("bad register"), "unexpected error message: {msg}");
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
@@ -311,10 +301,7 @@ fn test_symbolic_registration_and_validation_errors() {
         engine.run(&image, &bad_opts_reg),
         Err(ApiError::InvalidArgument(_))
     ));
-    assert!(matches!(
-        session.run(&bad_opts_reg),
-        Err(ApiError::InvalidArgument(_))
-    ));
+    assert!(matches!(session.run(&bad_opts_reg), Err(ApiError::InvalidArgument(_))));
 
     let bad_opts_seed = RunOptions {
         regs: vec![("invalid".to_string(), 42)],
@@ -324,10 +311,7 @@ fn test_symbolic_registration_and_validation_errors() {
         engine.run(&image, &bad_opts_seed),
         Err(ApiError::InvalidArgument(_))
     ));
-    assert!(matches!(
-        session.run(&bad_opts_seed),
-        Err(ApiError::InvalidArgument(_))
-    ));
+    assert!(matches!(session.run(&bad_opts_seed), Err(ApiError::InvalidArgument(_))));
 }
 
 #[test]
@@ -396,10 +380,7 @@ fn test_symbolic_solving_input_generation() {
     let report = engine.run(&image, &opts).expect("run with solve");
     assert_eq!(report.found_pcs, vec![0x401006]);
     assert_eq!(report.inputs.len(), 1, "one model per found state");
-    assert!(
-        !report.inputs[0].is_empty(),
-        "input model contains solved symbols"
-    );
+    assert!(!report.inputs[0].is_empty(), "input model contains solved symbols");
 
     let rax_bytes = &report.inputs[0][0];
     assert!(
@@ -408,10 +389,7 @@ fn test_symbolic_solving_input_generation() {
         rax_bytes.len()
     );
     let solved_rax = u64::from_le_bytes(rax_bytes[..8].try_into().unwrap());
-    assert_eq!(
-        solved_rax, 42,
-        "solved input reaching ok_path must have RAX = 42"
-    );
+    assert_eq!(solved_rax, 42, "solved input reaching ok_path must have RAX = 42");
 
     // Verify identical solving capability via Session::run
     let mut session = engine.open(&image).expect("open session");
@@ -467,9 +445,7 @@ fn test_concrete_seeding_poke_and_entry_override() {
     // 0x40100c: jne 0x40101a (fail_path)
     // 0x40100e: ok_path (mov $60, %rax; xor %rdi, %rdi; syscall)
     // 0x40101a: fail_path (mov $60, %rax; mov $1, %rdi; syscall)
-    let poke_image = engine
-        .load(fixture_path("data_poke"))
-        .expect("load data_poke");
+    let poke_image = engine.load(fixture_path("data_poke")).expect("load data_poke");
 
     let opts_poke_ok = RunOptions {
         poke: vec![(0x402000, 42)],
@@ -516,10 +492,7 @@ fn test_exploration_budgets_and_pruning() {
     };
     let rep_cap1 = engine.run(&branch_image, &opts_cap1).expect("run cap 1");
     assert_eq!(rep_cap1.forks, 1);
-    assert!(
-        rep_cap1.pruned_states >= 1,
-        "max_states cap must prune surplus state"
-    );
+    assert!(rep_cap1.pruned_states >= 1, "max_states cap must prune surplus state");
 }
 
 #[test]
@@ -557,9 +530,7 @@ fn test_driver_fixture_when_available() {
     assert_eq!(image.kind(), ImageKind::PeDriver);
 
     let mut session = engine.open(&image).expect("open driver session");
-    session
-        .symbolic("rdi", 64)
-        .expect("mark 64-bit rdi symbolic in driver");
+    session.symbolic("rdi", 64).expect("mark 64-bit rdi symbolic in driver");
 
     let report = session
         .run(&RunOptions {

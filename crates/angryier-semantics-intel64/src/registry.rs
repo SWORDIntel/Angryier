@@ -1425,10 +1425,7 @@ impl Intel64CorpusRegistry {
     /// provider itself debt-recording each hit) instead of failing the state.
     /// Never armed by default — census and differential tests rely on exact
     /// coverage.
-    pub fn set_unsupported_fallback(
-        &mut self,
-        provider: Arc<dyn angryier_semantics::SemanticProvider>,
-    ) {
+    pub fn set_unsupported_fallback(&mut self, provider: Arc<dyn angryier_semantics::SemanticProvider>) {
         self.unsupported_fallback = Some(provider);
     }
 

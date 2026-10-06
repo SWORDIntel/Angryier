@@ -8,8 +8,8 @@
 //! the governor or flight recorder to capture a high-fidelity Tier-2 snapshot and
 //! open a post-trigger diagnostic capture window.
 
-use angryier_types::ProvenanceSeq;
 use crate::{ProvenanceEvent, ProvenanceEventKind, TraceInterest};
+use angryier_types::ProvenanceSeq;
 
 /// Outcome of evaluating a [`Tier2Trigger`].
 #[derive(Clone, Debug, PartialEq)]
@@ -172,7 +172,10 @@ impl Tier2Trigger for ForkBurstTrigger {
 
     fn evaluate(&mut self, context: &TriggerContext) -> TriggerDecision {
         if context.forks_in_window >= self.burst_threshold {
-            if self.last_fired_at.is_some_and(|last| context.event_count.saturating_sub(last) < self.cooldown) {
+            if self
+                .last_fired_at
+                .is_some_and(|last| context.event_count.saturating_sub(last) < self.cooldown)
+            {
                 return TriggerDecision::Ignore;
             }
             self.last_fired_at = Some(context.event_count);
@@ -238,7 +241,10 @@ impl Tier2Trigger for SolverEscalationTrigger {
                 >= self.budget_delta_threshold;
 
         if cost_exceeded || cost_jumped || budget_jumped {
-            if self.last_fired_at.is_some_and(|last| context.event_count.saturating_sub(last) < self.cooldown) {
+            if self
+                .last_fired_at
+                .is_some_and(|last| context.event_count.saturating_sub(last) < self.cooldown)
+            {
                 return TriggerDecision::Ignore;
             }
             self.last_fired_at = Some(context.event_count);
@@ -286,12 +292,7 @@ pub struct NoveltySpikeTrigger {
 }
 
 impl NoveltySpikeTrigger {
-    pub fn new(
-        spike_threshold: f32,
-        delta_threshold: f32,
-        capture_window: usize,
-        cooldown: u64,
-    ) -> Self {
+    pub fn new(spike_threshold: f32, delta_threshold: f32, capture_window: usize, cooldown: u64) -> Self {
         Self {
             spike_threshold,
             delta_threshold,
@@ -312,7 +313,10 @@ impl Tier2Trigger for NoveltySpikeTrigger {
         let delta_high = (context.novelty_score - context.average_novelty) >= self.delta_threshold;
 
         if absolute_high || delta_high {
-            if self.last_fired_at.is_some_and(|last| context.event_count.saturating_sub(last) < self.cooldown) {
+            if self
+                .last_fired_at
+                .is_some_and(|last| context.event_count.saturating_sub(last) < self.cooldown)
+            {
                 return TriggerDecision::Ignore;
             }
             self.last_fired_at = Some(context.event_count);
@@ -359,7 +363,10 @@ impl Tier2Trigger for CrashProximityTrigger {
 
     fn evaluate(&mut self, context: &TriggerContext) -> TriggerDecision {
         if context.crash_proximity >= self.proximity_threshold {
-            if self.last_fired_at.is_some_and(|last| context.event_count.saturating_sub(last) < self.cooldown) {
+            if self
+                .last_fired_at
+                .is_some_and(|last| context.event_count.saturating_sub(last) < self.cooldown)
+            {
                 return TriggerDecision::Ignore;
             }
             self.last_fired_at = Some(context.event_count);

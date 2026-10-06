@@ -635,9 +635,9 @@ impl PersistentMemory {
     /// Total accesses resolved through the under-constrained policy
     /// (uncapped), or 0 when the policy is off.
     pub fn uc_memory_total(&self) -> u64 {
-        self.uc.as_ref().map_or(0, |ledger| {
-            ledger.lock().unwrap_or_else(|p| p.into_inner()).total()
-        })
+        self.uc
+            .as_ref()
+            .map_or(0, |ledger| ledger.lock().unwrap_or_else(|p| p.into_inner()).total())
     }
 
     /// First-seen under-constrained access sites (capped, deduplicated per
@@ -2951,10 +2951,7 @@ mod tests {
         .with_uc_write_ro(true);
         let written = memory.write(0x1404d0ffe, &[ByteValue::Concrete(0xaa); 4])?;
         // RO part relaxed, writable part written normally.
-        assert_eq!(
-            written.read(0x1404d0ffe, 4)?,
-            vec![ByteValue::Concrete(0xaa); 4]
-        );
+        assert_eq!(written.read(0x1404d0ffe, 4)?, vec![ByteValue::Concrete(0xaa); 4]);
         assert_eq!(written.uc_memory_ro_write_total(), 1);
         assert_eq!(written.uc_memory_sites().len(), 1);
         Ok(())

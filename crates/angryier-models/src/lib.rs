@@ -727,9 +727,7 @@ impl DeterministicClockTracker {
     /// Advances simulated time monotonically by the configured tick increment and returns the new timestamp.
     pub fn advance(&self) -> u64 {
         let tick = self.tick_ns.load(Ordering::SeqCst);
-        self.current_ns
-            .fetch_add(tick, Ordering::SeqCst)
-            .wrapping_add(tick)
+        self.current_ns.fetch_add(tick, Ordering::SeqCst).wrapping_add(tick)
     }
 
     /// Reads the current simulated time in nanoseconds without advancing.
@@ -924,10 +922,7 @@ impl FutexTracker {
         let waiter_id = self.next_waiter_id.fetch_add(1, Ordering::SeqCst);
         let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         st.total_waits += 1;
-        st.queues
-            .entry(uaddr)
-            .or_default()
-            .push(FutexWaiter { tid, waiter_id });
+        st.queues.entry(uaddr).or_default().push(FutexWaiter { tid, waiter_id });
         waiter_id
     }
 
@@ -1052,11 +1047,7 @@ impl SimProcedure for FutexWaitProcedure {
             // Word mismatch: Linux returns -EAGAIN
             SimResult::Return(0u64.wrapping_sub(11))
         } else {
-            let tid = if state.get_arg(5) != 0 {
-                state.get_arg(5)
-            } else {
-                1
-            };
+            let tid = if state.get_arg(5) != 0 { state.get_arg(5) } else { 1 };
             self.tracker.wait(uaddr, tid);
             SimResult::Return(0)
         }
@@ -1496,7 +1487,10 @@ impl KernelPoolTracker {
     /// address — the query surface the runtime iterates when wiring
     /// per-address SimProcedures.
     pub fn internal_bindings(&self) -> BTreeMap<u64, PoolRoutine> {
-        self.internal.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+        self.internal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Returns the routine bound at `address`, if any.
@@ -1510,7 +1504,10 @@ impl KernelPoolTracker {
 
     /// Number of internal bindings currently registered.
     pub fn internal_binding_count(&self) -> usize {
-        self.internal.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len()
+        self.internal
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 }
 
@@ -2009,9 +2006,8 @@ pub mod syscall {
     }
 
     use crate::{
-        ClockGettimeProcedure, DeterministicClockTracker, EnvironmentModelVersion, ExitProcedure,
-        FutexProcedure, FutexTracker, PthreadCreateProcedure, SimProcedure, SimResult, SimState,
-        ThreadTracker,
+        ClockGettimeProcedure, DeterministicClockTracker, EnvironmentModelVersion, ExitProcedure, FutexProcedure,
+        FutexTracker, PthreadCreateProcedure, SimProcedure, SimResult, SimState, ThreadTracker,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -2039,22 +2035,10 @@ pub mod syscall {
             let futex_tracker = Arc::new(FutexTracker::default());
             let thread_tracker = Arc::new(ThreadTracker::default());
 
-            table.register(
-                CLOCK_GETTIME,
-                Arc::new(ClockGettimeProcedure::new(clock_tracker)),
-            );
-            table.register(
-                FUTEX,
-                Arc::new(FutexProcedure::new(futex_tracker)),
-            );
-            table.register(
-                CLONE,
-                Arc::new(PthreadCreateProcedure::new(thread_tracker)),
-            );
-            table.register(
-                EXIT,
-                Arc::new(ExitProcedure),
-            );
+            table.register(CLOCK_GETTIME, Arc::new(ClockGettimeProcedure::new(clock_tracker)));
+            table.register(FUTEX, Arc::new(FutexProcedure::new(futex_tracker)));
+            table.register(CLONE, Arc::new(PthreadCreateProcedure::new(thread_tracker)));
+            table.register(EXIT, Arc::new(ExitProcedure));
             table
         }
 
@@ -2702,7 +2686,7 @@ mod tests {
 
         let mut state = SimState::new();
         state.set_arg(0, 0x2000); // uaddr
-        state.set_arg(1, 0x42);   // expected val
+        state.set_arg(1, 0x42); // expected val
         state.write_memory(0x2000, 0x99u32.to_le_bytes().to_vec()); // actual val in memory = 0x99
 
         // Word mismatch: memory has 0x99, expected 0x42
@@ -2787,8 +2771,8 @@ mod tests {
         let proc = PthreadCreateProcedure::new(tracker.clone());
 
         let mut state = SimState::new();
-        state.set_arg(0, 0x6000);   // pthread_t*
-        state.set_arg(1, 0);        // attr (NULL)
+        state.set_arg(0, 0x6000); // pthread_t*
+        state.set_arg(1, 0); // attr (NULL)
         state.set_arg(2, 0x401000); // start_routine
         state.set_arg(3, 0xDEADBEEF); // arg
 
@@ -2927,8 +2911,12 @@ mod tests {
 
         // The import-path SimProcedures behave identically with bindings
         // present: fresh distinct pointers, void-free modeled as 0.
-        let alloc = KernelAllocProcedure { tracker: tracker.clone() };
-        let free = KernelFreeProcedure { tracker: tracker.clone() };
+        let alloc = KernelAllocProcedure {
+            tracker: tracker.clone(),
+        };
+        let free = KernelFreeProcedure {
+            tracker: tracker.clone(),
+        };
         let state = SimState::new();
         let (p1, p2) = match (alloc.apply(&state), alloc.apply(&state)) {
             (SimResult::Return(first), SimResult::Return(second)) => (first, second),
@@ -2953,6 +2941,9 @@ mod tests {
         assert!(report.uaf_writes.is_empty());
         // Pool activity leaves the binding table untouched.
         assert_eq!(tracker.internal_binding_count(), 2);
-        assert_eq!(tracker.internal_routine(0xFFFF_F800_0000_1000), Some(PoolRoutine::Alloc));
+        assert_eq!(
+            tracker.internal_routine(0xFFFF_F800_0000_1000),
+            Some(PoolRoutine::Alloc)
+        );
     }
 }
