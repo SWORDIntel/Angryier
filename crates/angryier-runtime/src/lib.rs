@@ -4375,6 +4375,7 @@ impl<'a, D: Decoder> ConcolicSession<'a, D> {
             concrete_registers,
             id,
             expr_concrete,
+            branch_history: Vec::new(),
             last_branch: None,
         }
     }
@@ -5188,6 +5189,12 @@ pub struct SymbolicBranchDecision {
     pub prefix_constraints: usize,
 }
 
+/// Maximum symbolic branch decisions retained per state. The ledger is
+/// intentionally small and clone-friendly: forked states inherit the common
+/// prefix history, while merges clear it because merged constraint vectors no
+/// longer preserve the original per-branch prefix indices.
+pub const SYMBOLIC_BRANCH_HISTORY_CAP: usize = 64;
+
 /// Solver result for flipping a state's most recent symbolic branch while
 /// preserving only the constraints shared before that branch.
 #[derive(Clone, Debug)]
@@ -5251,9 +5258,21 @@ pub struct SymbolicState {
     /// Concrete value each load-derived expression stands for (pointer
     /// provenance for address concretization).
     pub expr_concrete: BTreeMap<ExprId, u64>,
+    /// Bounded branch-decision provenance in execution order.
+    pub branch_history: Vec<SymbolicBranchDecision>,
     /// Most recent conditional-branch decision on this state. This is
     /// execution evidence, not reconstructed from numeric PC proximity.
     pub last_branch: Option<SymbolicBranchDecision>,
+}
+
+impl SymbolicState {
+    fn record_branch_decision(&mut self, decision: SymbolicBranchDecision) {
+        if self.branch_history.len() >= SYMBOLIC_BRANCH_HISTORY_CAP {
+            self.branch_history.remove(0);
+        }
+        self.branch_history.push(decision);
+        self.last_branch = Some(decision);
+    }
 }
 
 /// A summarized loop's operand (counter or bound) as resolved in one state:
@@ -5485,6 +5504,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             concrete_registers,
             id: 0,
             expr_concrete: BTreeMap::new(),
+            branch_history: Vec::new(),
             last_branch: None,
         };
         Self {
@@ -7012,7 +7032,10 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             let state = &mut self.states[index];
             let prefix_constraints = state.constraints.len();
             if taken_feasible && other_feasible {
-                state.last_branch = Some(SymbolicBranchDecision {
+                // Clone the common pre-branch state before recording either
+                // edge so both histories inherit the exact same prefix.
+                let mut child = state.clone();
+                state.record_branch_decision(SymbolicBranchDecision {
                     pc,
                     condition,
                     taken: branch.taken,
@@ -7022,9 +7045,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 });
                 state.constraints.push(condition);
                 let _ = state.process.write_pc(branch.taken);
-                let mut child = state.clone();
-                child.constraints.pop();
-                child.last_branch = Some(SymbolicBranchDecision {
+                child.record_branch_decision(SymbolicBranchDecision {
                     pc,
                     condition,
                     taken: branch.taken,
@@ -7072,7 +7093,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             } else {
                 (not_cond, branch.not_taken, false)
             };
-            state.last_branch = Some(SymbolicBranchDecision {
+            state.record_branch_decision(SymbolicBranchDecision {
                 pc,
                 condition,
                 taken: branch.taken,
@@ -7382,9 +7403,10 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     id: left.id,
                     expr_concrete: snapshot.expr_concrete.clone(),
                     // A merge rewrites path constraints into a combined snapshot.
-                    // The stored branch-prefix index belonged to a pre-merge
-                    // append-only constraint vector, so preserving it would
-                    // make alternate-edge solving potentially unsound.
+                    // Stored branch-prefix indices belonged to pre-merge
+                    // append-only constraint vectors, so preserving branch
+                    // provenance would make alternate-edge solving unsound.
+                    branch_history: Vec::new(),
                     last_branch: None,
                 };
                 self.states.insert(a, merged_state);
@@ -7571,9 +7593,10 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             id: left.id,
                             expr_concrete: snapshot.expr_concrete.clone(),
                             // A merge rewrites path constraints into a combined snapshot.
-                            // The stored branch-prefix index belonged to a pre-merge
-                            // append-only constraint vector, so preserving it would
-                            // make alternate-edge solving potentially unsound.
+                            // Stored branch-prefix indices belonged to pre-merge
+                            // append-only constraint vectors, so preserving branch
+                            // provenance would make alternate-edge solving unsound.
+                            branch_history: Vec::new(),
                             last_branch: None,
                         },
                     );
