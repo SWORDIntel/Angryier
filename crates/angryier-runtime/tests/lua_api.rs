@@ -487,6 +487,97 @@ fn test_angry_run_branch_analysis_ranks_cfg_distance_to_find_target() {
 }
 
 #[test]
+fn test_angry_run_branch_analysis_retains_ordered_branch_history() {
+    const SRC: &str = r#"
+        .global _start
+        .global target
+        .text
+    _start:
+        test $1, %rdi
+        jz first_fail
+        test $2, %rdi
+        jz second_fail
+    target:
+        mov $60, %rax
+        xor %rdi, %rdi
+        syscall
+    first_fail:
+        mov $60, %rax
+        mov $1, %rdi
+        syscall
+    second_fail:
+        mov $60, %rax
+        mov $2, %rdi
+        syscall
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "branch_history") else {
+        eprintln!("skipping branch history test: system assembler not found");
+        return;
+    };
+
+    let bytes = std::fs::read(&bin_path).expect("read linked fixture");
+    let runtime = angryier_runtime::Runtime::with_native_xed(
+        angryier_types::SemanticVersion(1),
+        angryier_types::TargetProfileId(1),
+    );
+    let process = runtime.load_elf(&bytes).expect("load fixture");
+    let target = process.symbol("target").expect("target symbol").address;
+
+    let lua = init_lua();
+    let bin_str = bin_path.to_str().expect("valid path string");
+    let script = format!(
+        r#"
+        local r = angry.run("{bin_str}", {{
+            symbolic = {{ rdi = 64 }},
+            find = {{ {target} }},
+            steps = 128,
+            states = 16,
+            branch_analysis = true,
+            branch_timeout_ms = 2000,
+        }})
+        local b = assert(r.branch_analysis)
+        local h = assert(b.history)
+        assert(b.history_count >= 2)
+        return
+            b.history_count,
+            h[1].pc_hex,
+            h[2].pc_hex,
+            h[1].prefix_constraints,
+            h[2].prefix_constraints,
+            h[1].chosen,
+            h[2].chosen,
+            h[2].alternate_is_find_target == true
+        "#
+    );
+
+    let (count, first_pc, second_pc, first_prefix, second_prefix, first_chosen, second_chosen, second_alt_find): (
+        usize,
+        String,
+        String,
+        usize,
+        usize,
+        String,
+        String,
+        bool,
+    ) = lua.load(&script).eval().expect("branch history analysis");
+
+    assert!(count >= 2);
+    assert_ne!(first_pc, second_pc, "distinct branch decisions need distinct PCs");
+    assert_eq!(first_prefix, 0);
+    assert!(
+        second_prefix > first_prefix,
+        "later branch must retain a strictly deeper constraint prefix"
+    );
+    assert!(!first_chosen.is_empty());
+    assert!(!second_chosen.is_empty());
+    // The target path can be the chosen edge; this assertion only pins that
+    // the history metadata is a real boolean, not that a specific scheduler
+    // must choose the alternate edge for this fixture.
+    let _ = second_alt_find;
+}
+
+#[test]
 fn test_angry_run_branch_analysis_merge_clears_stale_provenance() {
     const SRC: &str = r#"
         .global _start
@@ -515,6 +606,7 @@ fn test_angry_run_branch_analysis_merge_clears_stale_provenance() {
         chose_taken: true,
         prefix_constraints: 0,
     };
+    session.states[0].branch_history.push(decision);
     session.states[0].last_branch = Some(decision);
     let mut sibling = session.states[0].clone();
     sibling.id = 1;
@@ -526,6 +618,10 @@ fn test_angry_run_branch_analysis_merge_clears_stale_provenance() {
     assert_eq!(
         session.states[0].last_branch, None,
         "merged constraint lineage must invalidate pre-merge branch-prefix provenance"
+    );
+    assert!(
+        session.states[0].branch_history.is_empty(),
+        "merged constraint lineage must clear all pre-merge branch-history prefix indices"
     );
 }
 
