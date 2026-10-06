@@ -1571,6 +1571,69 @@ impl<D: Decoder> Runtime<D> {
         })
     }
 
+    /// Recovers a bounded static CFG window starting at `entry`.
+    ///
+    /// The window is cut from the executable memory region containing the
+    /// requested entry. Small regions are recovered in full; large regions
+    /// keep some context before `entry` while reserving most of the budget
+    /// for forward reachability. This is intended for local branch-to-target
+    /// guidance, not whole-program completeness. Unknown indirect targets
+    /// remain graph exits.
+    pub fn recover_cfg_window(
+        &self,
+        process: &Process,
+        entry: Address,
+        max_bytes: u64,
+    ) -> Result<angryier_cfg::Cfg, RuntimeError> {
+        if max_bytes == 0 {
+            return Err(RuntimeError::Execution(
+                "CFG recovery window must be greater than zero bytes".into(),
+            ));
+        }
+        let region = process
+            .state
+            .memory
+            .regions()
+            .iter()
+            .find(|region| {
+                region.executable
+                    && entry >= region.base
+                    && entry < region.base.saturating_add(region.size)
+            })
+            .ok_or_else(|| {
+                RuntimeError::Execution(format!(
+                    "no executable memory region contains CFG entry {entry:#x}"
+                ))
+            })?;
+
+        let region_end = region.base.saturating_add(region.size);
+        let window_size = region.size.min(max_bytes);
+        let window_base = if region.size <= max_bytes {
+            region.base
+        } else {
+            // Keep up to one quarter of the window behind the current
+            // decision so short back-edges/loop headers remain visible while
+            // leaving most of the budget for forward target guidance.
+            let behind = max_bytes / 4;
+            let preferred = entry.saturating_sub(behind).max(region.base);
+            preferred.min(region_end.saturating_sub(window_size))
+        };
+        let window_end = window_base.saturating_add(window_size);
+        if entry < window_base || entry >= window_end {
+            return Err(RuntimeError::Execution(format!(
+                "CFG entry {entry:#x} lies outside bounded recovery window {window_base:#x}..{window_end:#x}"
+            )));
+        }
+
+        let bytes = read_concrete_bytes(process, window_base, window_size)?;
+        angryier_cfg::recover(&self.decoder, window_base, &bytes, entry, |insn| insn.form_id)
+            .map_err(|error| {
+                RuntimeError::Execution(format!(
+                    "CFG recovery from {entry:#x} in {window_base:#x}..{window_end:#x} failed: {error:?}"
+                ))
+            })
+    }
+
     /// Recovers the image CFG and extracts pure induction loops — a
     /// straight-line body (one block, or a chain of blocks linked only by
     /// unconditional jumps or adjacency) whose only state effects are
