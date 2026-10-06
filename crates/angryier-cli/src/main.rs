@@ -378,6 +378,8 @@ mod run_cmd {
         pub path: String,
         pub script: Option<String>,
         pub symbolic: Vec<String>,
+        /// Concrete GPR seeds supplied as repeatable --reg REG=VALUE.
+        pub regs: Vec<(String, u64)>,
         pub find: Vec<u64>,
         pub argv: Option<u64>,
         /// Instruction-step budget threaded into the synthesized driver.
@@ -390,7 +392,8 @@ mod run_cmd {
     }
 
     pub fn usage() -> String {
-        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--steps N] [--dynamic] [--driver]\n\
+        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--argv N] [--steps N] [--dynamic] [--driver]\n\
+         note: --reg is repeatable; VALUE accepts decimal or 0x-prefixed hexadecimal\n\
          note: --find ADDR is hexadecimal, 0x prefix optional\n\
          note: --driver loads PE32+ drivers with kernel models and reports pool events"
             .to_string()
@@ -409,10 +412,34 @@ mod run_cmd {
         u64::from_str_radix(raw.strip_prefix("0x").unwrap_or(raw), 16).ok()
     }
 
+    fn parse_u64_value(raw: &str) -> Option<u64> {
+        if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+            u64::from_str_radix(hex, 16).ok()
+        } else {
+            raw.parse::<u64>().ok()
+        }
+    }
+
+    fn parse_reg_seed(raw: &str) -> Result<(String, u64), String> {
+        let (name, value) = raw
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --reg value '{raw}' (expected REG=VALUE, e.g. rdi=42 or rdi=0x2a)"))?;
+        if !GPRS.contains(&name) {
+            return Err(format!(
+                "invalid --reg register '{name}' (valid: rax rcx rdx rbx rsp rbp rsi rdi r8-r15)"
+            ));
+        }
+        let value = parse_u64_value(value).ok_or_else(|| {
+            format!("invalid --reg value '{raw}' (VALUE must be decimal or 0x-prefixed hexadecimal)")
+        })?;
+        Ok((name.to_string(), value))
+    }
+
     pub fn parse(args: &[String]) -> Result<RunConfig, String> {
         let mut path = None;
         let mut script = None;
         let mut symbolic = Vec::new();
+        let mut regs = Vec::new();
         let mut find = Vec::new();
         let mut argv = None;
         let mut steps: Option<u64> = None;
@@ -436,6 +463,10 @@ mod run_cmd {
                     ));
                 }
                 symbolic.push(reg.to_string());
+            } else if arg == "--reg" {
+                let raw = value(args, &mut i, arg)?;
+                let seed = parse_reg_seed(raw)?;
+                regs.push(seed);
             } else if arg == "--find" {
                 let raw = value(args, &mut i, arg)?;
                 match parse_addr(raw) {
@@ -500,6 +531,7 @@ mod run_cmd {
             path,
             script,
             symbolic,
+            regs,
             find,
             argv,
             // Default shared with the Lua API (`angry.run` opts.steps).
@@ -532,6 +564,16 @@ mod run_cmd {
         } else {
             config.symbolic.join(", ")
         };
+        let concrete_regs = if config.regs.is_empty() {
+            "none".to_string()
+        } else {
+            config
+                .regs
+                .iter()
+                .map(|(name, value)| format!("{name}={value:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let find = if config.find.is_empty() {
             "none".to_string()
         } else {
@@ -547,9 +589,9 @@ mod run_cmd {
             .map(|bytes| format!("{bytes} symbolic byte(s) in argv[0]"))
             .unwrap_or_else(|| "disabled".to_string());
         let note = if config.driver {
-            "\n  note           : --driver bypasses Lua; --script/--symbolic/--find/--argv/--dynamic are not applied"
+            "\n  note           : --driver bypasses Lua; --reg seeds are applied directly, while --script/--symbolic/--find/--argv/--dynamic are not applied"
         } else if config.script.is_some() {
-            "\n  note           : a custom Lua script owns execution; parsed symbolic/find/argv/dynamic flags are not injected automatically"
+            "\n  note           : a custom Lua script owns execution; parsed symbolic/reg/find/argv/dynamic flags are not injected automatically"
         } else {
             ""
         };
@@ -562,6 +604,7 @@ mod run_cmd {
              \x20 step budget    : {}\n\
              \x20 state budget   : {}\n\
              \x20 symbolic regs  : {}\n\
+             \x20 concrete regs  : {}\n\
              \x20 find targets   : {}\n\
              \x20 symbolic argv  : {}{}",
             config.path,
@@ -570,6 +613,7 @@ mod run_cmd {
             config.steps,
             angryier_runtime::script::DEFAULT_MAX_STATES,
             symbolic,
+            concrete_regs,
             find,
             argv,
             note
@@ -614,11 +658,28 @@ mod run_cmd {
             .collect::<Vec<_>>()
             .join(",");
         let find_table = config.find.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        let regs_opt = if config.regs.is_empty() {
+            String::new()
+        } else {
+            let entries = config
+                .regs
+                .iter()
+                .map(|(name, value)| {
+                    if *value <= i64::MAX as u64 {
+                        format!("{name} = {value}")
+                    } else {
+                        format!("{name}_hex = \"{value:#018x}\"")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("regs = {{ {entries} }},")
+        };
         let argv_opt = config.argv.map(|n| format!("argv = {n},")).unwrap_or_default();
         let dyn_opt = if config.dynamic { "dynamic = true," } else { "" };
         let escaped_path = config.path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
-            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = {steps}, states = {states}, branch_analysis = true }})
+            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, {regs_opt} find = {{ {find_table} }}, {argv_opt} {dyn_opt} steps = {steps}, states = {states}, branch_analysis = true }})
 
 local function yn(v)
     if v then return "yes" end
@@ -853,10 +914,10 @@ if r.branch_analysis ~= nil then
                 local assignment = model[i]
                 if assignment ~= nil and assignment.source_kind == "register" then
                     print(string.format(
-                        "    model[%02d] %s = 0x%s",
+                        "    model[%02d] %s = %s",
                         i,
                         tostring(assignment.name or assignment.register or "?"),
-                        tostring(assignment.hex or "")
+                        tostring(assignment.value_hex or ("0x" .. tostring(assignment.hex or "")))
                     ))
                 elseif assignment ~= nil then
                     print(string.format(
@@ -867,6 +928,19 @@ if r.branch_analysis ~= nil then
                         tostring(assignment.hex or "")
                     ))
                 end
+            end
+            local seed_flags = {{}}
+            for i = 1, model_count do
+                local assignment = model[i]
+                if assignment ~= nil and assignment.source_kind == "register"
+                    and assignment.name ~= nil and assignment.value_hex ~= nil
+                then
+                    seed_flags[#seed_flags + 1] = "--reg " .. assignment.name .. "=" .. assignment.value_hex
+                end
+            end
+            if #seed_flags > 0 then
+                print("  candidate seed flags    : " .. table.concat(seed_flags, " "))
+                print("  replay note             : omit matching --symbolic REG flags for a concrete replay; keep them for a seeded symbolic rerun")
             end
         end
         if b.error ~= nil then
@@ -998,6 +1072,7 @@ end
 
 print("[angryier][ideas] treat these as evidence-driven hypotheses, not automatic proof; validate interesting paths with solved inputs and concrete replay.")"#,
             path = escaped_path,
+            regs_opt = regs_opt,
             steps = config.steps,
             states = angryier_runtime::script::DEFAULT_MAX_STATES,
             symbolic_count = config.symbolic.len(),
@@ -1112,6 +1187,21 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
         println!(
             "[angryier][model] kernel pool model attached; allocations, frees, and double-free events will be tracked"
         );
+
+        if !config.regs.is_empty() {
+            println!("[angryier][input] applying {} concrete register seed(s)", config.regs.len());
+            for (name, value) in &config.regs {
+                let Some(register) = angryier_runtime::script::reg_by_name(name) else {
+                    eprintln!("[angryier][input][error] validated register '{name}' could not be resolved");
+                    return 1;
+                };
+                if let Err(error) = process.write_register(register, *value) {
+                    eprintln!("[angryier][input][error] failed to seed {name}={value:#x}: {error}");
+                    return 1;
+                }
+                println!("  {name:<4} = {value:#018x}");
+            }
+        }
 
         let imports: Vec<_> = process.pe_imports().collect();
         println!("[angryier][load] PE driver initialized");
@@ -1246,6 +1336,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 path: path.to_string(),
                 script: script.map(|s| s.to_string()),
                 symbolic: symbolic.iter().map(|s| s.to_string()).collect(),
+                regs: Vec::new(),
                 find: find.to_vec(),
                 argv,
                 steps,
@@ -1318,6 +1409,50 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 parse(&args(&["./bin", "--steps", "4096"])),
                 Ok(config("./bin", None, &[], &[], None, 4096, false))
             );
+        }
+
+        #[test]
+        fn parses_repeatable_concrete_register_seeds() {
+            let cfg = parse(&args(&[
+                "./bin",
+                "--reg",
+                "rdi=42",
+                "--reg",
+                "rsi=0x1337",
+                "--reg",
+                "r15=0xffffffffffffffff",
+            ]))
+            .expect("valid register seeds");
+            assert_eq!(
+                cfg.regs,
+                vec![
+                    ("rdi".to_string(), 42),
+                    ("rsi".to_string(), 0x1337),
+                    ("r15".to_string(), u64::MAX),
+                ]
+            );
+        }
+
+        #[test]
+        fn invalid_concrete_register_seed_is_descriptive() {
+            let bad_shape = parse(&args(&["./bin", "--reg", "rdi"])).expect_err("missing equals must fail");
+            assert!(bad_shape.contains("REG=VALUE"), "{bad_shape}");
+            let bad_reg = parse(&args(&["./bin", "--reg", "xmm0=1"])).expect_err("unsupported register must fail");
+            assert!(bad_reg.contains("invalid --reg register 'xmm0'"), "{bad_reg}");
+            let bad_value = parse(&args(&["./bin", "--reg", "rdi=nope"])).expect_err("bad value must fail");
+            assert!(bad_value.contains("decimal or 0x-prefixed hexadecimal"), "{bad_value}");
+        }
+
+        #[test]
+        fn default_driver_threads_register_seeds_into_lua() {
+            let mut cfg = config("./bin", None, &[], &[], None, 256, false);
+            cfg.regs = vec![
+                ("rdi".to_string(), 42),
+                ("r15".to_string(), u64::MAX),
+            ];
+            let lua = default_driver_lua(&cfg);
+            assert!(lua.contains("rdi = 42"), "{lua}");
+            assert!(lua.contains(r#"r15_hex = \"0xffffffffffffffff\""#), "{lua}");
         }
 
         #[test]
@@ -1549,7 +1684,7 @@ fn run_subcommand(args: &[String]) -> i32 {
             eprintln!();
             eprintln!("{}", run_cmd::usage());
             eprintln!(
-                "hint: fix the argument named above; repeatable flags are --symbolic and --find, while <binary>, --script, --argv, --steps, --dynamic, and --driver may only be supplied once"
+                "hint: fix the argument named above; repeatable flags are --symbolic, --reg, and --find, while <binary>, --script, --argv, --steps, --dynamic, and --driver may only be supplied once"
             );
             1
         }
