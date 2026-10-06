@@ -146,6 +146,8 @@ The analysis layer deliberately does **not** call the last trace block “closes
 
 The `[angryier][analysis] symbolic frontier` subsection reports which symbolic sources are present in the selected path's accumulated constraints. This is narrower than “all symbols created during execution”: a register source that does not appear in the retained constraint dependency union has not contributed to a retained path predicate on that diagnostic state. The CLI therefore recommends preserving path-relevant sources first and concretizing unrelated inputs unless trace/taint evidence justifies keeping them symbolic.
 
+The subsection prints both the complete current symbolic-register set and the path-relevant register subset. Registers present in the first set but absent from the second are labeled **non-predicate symbolic** and treated as concretization candidates, not automatically discarded inputs: they may still matter to later code, memory addressing, or data-only effects that have not yet entered a branch predicate.
+
 When region forking is active, the CLI reports the number of guessed child worlds and tells the operator to inspect `region_fork_sites` before trusting a reachable path. When state pruning occurs, it prints the peak frontier against the configured cap so the next decision can distinguish “raise capacity” from “improve search policy.”
 
 ### Exit codes
