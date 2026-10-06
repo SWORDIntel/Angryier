@@ -5080,7 +5080,11 @@ mod tests {
         assert_eq!(process.mmap_next, MMAP_BASE);
         assert!(process.open_fds.is_empty());
         assert!(process.symbolic_fds.is_empty());
-        assert_eq!(process.stdin, vec![1, 2, 3, 4], "configured input bytes survive restart");
+        assert_eq!(
+            process.stdin,
+            vec![1, 2, 3, 4],
+            "configured input bytes survive restart"
+        );
         assert_eq!(process.stdin_pos, 0);
         assert_eq!(process.next_fd, 3);
         assert_eq!(process.pci_config_address, 0);
@@ -8006,9 +8010,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     observed_target: None,
                     matched_alternate: false,
                     applied_registers: assignments.len(),
-                    detail: format!(
-                        "solver model expression {expression} is not a register-backed symbolic input"
-                    ),
+                    detail: format!("solver model expression {expression} is not a register-backed symbolic input"),
                 });
             };
             if binding.width != 64 || bytes.len() > 8 {
