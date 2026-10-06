@@ -10,7 +10,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use angryier_arch::{DecodedInstruction, Decoder, OperandKind};
 use angryier_semantics_intel64::forms;
@@ -115,6 +115,73 @@ impl Cfg {
             })
             .map(|bl| bl.start)
             .max()
+    }
+
+    /// Bounded shortest-path distance between two statically recovered
+    /// blocks. Instruction addresses are normalized to their containing
+    /// blocks; only known CFG edges participate, so an indirect jump/call
+    /// that has no resolved target cannot manufacture reachability.
+    ///
+    /// Returns the number of edges in the shortest path, `Some(0)` when
+    /// both addresses resolve to the same block, and `None` when the
+    /// target is not reachable within `max_depth`.
+    pub fn shortest_static_distance(
+        &self,
+        from: Address,
+        target: Address,
+        max_depth: usize,
+    ) -> Option<usize> {
+        let from = self.block_of_insn(from)?;
+        let target = self.block_of_insn(target)?;
+        if from == target {
+            return Some(0);
+        }
+
+        let mut visited = BTreeSet::from([from]);
+        let mut queue = VecDeque::from([(from, 0usize)]);
+        while let Some((pc, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            let Some(block) = self.blocks.get(&pc) else {
+                continue;
+            };
+            for successor in self.successors(block) {
+                let next_depth = depth + 1;
+                if successor == target {
+                    return Some(next_depth);
+                }
+                if visited.insert(successor) {
+                    queue.push_back((successor, next_depth));
+                }
+            }
+        }
+        None
+    }
+
+    /// Ranks a branch's statically-known successors by bounded graph
+    /// distance to `target`. Reachable successors sort first (shortest
+    /// distance first); unreachable/unknown successors sort last.
+    ///
+    /// This is structural guidance only. It never substitutes numeric
+    /// address proximity for reachability and cannot see unresolved dynamic
+    /// targets.
+    pub fn successor_distances_to_target(
+        &self,
+        branch: &BasicBlock,
+        target: Address,
+        max_depth: usize,
+    ) -> Vec<(Address, Option<usize>)> {
+        let mut ranked: Vec<_> = self
+            .successors(branch)
+            .into_iter()
+            .map(|successor| {
+                let distance = self.shortest_static_distance(successor, target, max_depth);
+                (successor, distance)
+            })
+            .collect();
+        ranked.sort_by_key(|(address, distance)| (distance.is_none(), distance.unwrap_or(usize::MAX), *address));
+        ranked
     }
 
     /// The nearest static address reachable from BOTH successors of a
@@ -1076,6 +1143,60 @@ mod tests {
             instructions: Vec::new(),
             terminator,
         }
+    }
+
+    #[test]
+    fn shortest_static_distance_is_bounded_and_block_aware() {
+        // A -> {B,C}; B -> D; C -> E -> D
+        let mut blocks = BTreeMap::new();
+        blocks.insert(0x1000, make_test_block(0x1000, 0x1005, EdgeKind::ConditionalTaken));
+        blocks.insert(0x2000, make_test_block(0x2000, 0x2005, EdgeKind::Unconditional));
+        blocks.insert(0x3000, make_test_block(0x3000, 0x3005, EdgeKind::Unconditional));
+        blocks.insert(0x3500, make_test_block(0x3500, 0x3505, EdgeKind::Unconditional));
+        blocks.insert(0x4000, make_test_block(0x4000, 0x4005, EdgeKind::Return));
+        let cfg = Cfg {
+            entry: 0x1000,
+            blocks,
+            edges: vec![
+                CfgEdge { from: 0x1000, to: Some(0x2000), kind: EdgeKind::ConditionalTaken },
+                CfgEdge { from: 0x1000, to: Some(0x3000), kind: EdgeKind::FallThrough },
+                CfgEdge { from: 0x2000, to: Some(0x4000), kind: EdgeKind::Unconditional },
+                CfgEdge { from: 0x3000, to: Some(0x3500), kind: EdgeKind::Unconditional },
+                CfgEdge { from: 0x3500, to: Some(0x4000), kind: EdgeKind::Unconditional },
+                CfgEdge { from: 0x4000, to: None, kind: EdgeKind::Return },
+            ],
+        };
+
+        assert_eq!(cfg.shortest_static_distance(0x1000, 0x4000, 8), Some(2));
+        assert_eq!(cfg.shortest_static_distance(0x3000, 0x4000, 8), Some(2));
+        assert_eq!(cfg.shortest_static_distance(0x3000, 0x4000, 1), None);
+        assert_eq!(cfg.shortest_static_distance(0x4001, 0x4004, 0), Some(0));
+    }
+
+    #[test]
+    fn successor_distance_ranking_prefers_structurally_shorter_path() {
+        let mut blocks = BTreeMap::new();
+        blocks.insert(0x1000, make_test_block(0x1000, 0x1005, EdgeKind::ConditionalTaken));
+        blocks.insert(0x2000, make_test_block(0x2000, 0x2005, EdgeKind::Unconditional));
+        blocks.insert(0x3000, make_test_block(0x3000, 0x3005, EdgeKind::Unconditional));
+        blocks.insert(0x3500, make_test_block(0x3500, 0x3505, EdgeKind::Unconditional));
+        blocks.insert(0x4000, make_test_block(0x4000, 0x4005, EdgeKind::Return));
+        let cfg = Cfg {
+            entry: 0x1000,
+            blocks,
+            edges: vec![
+                CfgEdge { from: 0x1000, to: Some(0x2000), kind: EdgeKind::ConditionalTaken },
+                CfgEdge { from: 0x1000, to: Some(0x3000), kind: EdgeKind::FallThrough },
+                CfgEdge { from: 0x2000, to: Some(0x4000), kind: EdgeKind::Unconditional },
+                CfgEdge { from: 0x3000, to: Some(0x3500), kind: EdgeKind::Unconditional },
+                CfgEdge { from: 0x3500, to: Some(0x4000), kind: EdgeKind::Unconditional },
+            ],
+        };
+        let branch = cfg.blocks.get(&0x1000).expect("branch block");
+        assert_eq!(
+            cfg.successor_distances_to_target(branch, 0x4000, 8),
+            vec![(0x2000, Some(1)), (0x3000, Some(2))]
+        );
     }
 
     #[test]
