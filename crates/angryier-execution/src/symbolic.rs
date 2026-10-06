@@ -4615,18 +4615,22 @@ mod tests {
         ])
     }
 
-    fn const_op(ty: IrType, value: u64) -> IrOp {
+    fn const_op(ty: IrType, value: u64) -> Result<IrOp, SymbolicEvalError> {
         let width = match ty {
             IrType::Bits(bits) => bits,
             IrType::Float32 => 32,
             IrType::Float64 => 64,
-            _ => 0,
+            other => {
+                return Err(SymbolicEvalError::UnsupportedOperation(format!(
+                    "const_op only supports Bits/Float32/Float64, got {other:?}"
+                )));
+            }
         };
         let byte_width = usize::from(width).div_ceil(8);
-        IrOp::Constant {
+        Ok(IrOp::Constant {
             ty,
             bytes_le: value.to_le_bytes()[..byte_width].to_vec(),
-        }
+        })
     }
 
     fn mask64(width: u16) -> u64 {
@@ -4643,7 +4647,7 @@ mod tests {
                 evaluator.eval_block(&bitcount_block(
                     IrPrimitive::Popcnt,
                     bits(width),
-                    const_op(bits(width), masked),
+                    const_op(bits(width), masked)?,
                 ))?;
                 let expression = evaluator
                     .register_value(SINK)
@@ -4682,7 +4686,7 @@ mod tests {
                 };
                 for (op, expected) in [(IrPrimitive::Clz, expected_clz), (IrPrimitive::Ctz, expected_ctz)] {
                     let mut evaluator = SymbolicEvaluator::new(&arena);
-                    evaluator.eval_block(&bitcount_block(op, bits(width), const_op(bits(width), masked)))?;
+                    evaluator.eval_block(&bitcount_block(op, bits(width), const_op(bits(width), masked)?))?;
                     let expression = evaluator
                         .register_value(SINK)
                         .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(1)))?;
@@ -4754,11 +4758,11 @@ mod tests {
                 evaluator.eval_block(&block(vec![
                     IrInstruction {
                         result: Some(IrValueId(0)),
-                        op: const_op(bits(32), crc_in),
+                        op: const_op(bits(32), crc_in)?,
                     },
                     IrInstruction {
                         result: Some(IrValueId(1)),
-                        op: const_op(bits(data_bits), data & mask64(data_bits)),
+                        op: const_op(bits(data_bits), data & mask64(data_bits))?,
                     },
                     IrInstruction {
                         result: Some(IrValueId(2)),
@@ -4838,11 +4842,11 @@ mod tests {
         evaluator.eval_block(&block(vec![
             IrInstruction {
                 result: Some(IrValueId(0)),
-                op: const_op(IrType::Float64, (1.5f64).to_bits()),
+                op: const_op(IrType::Float64, (1.5f64).to_bits())?,
             },
             IrInstruction {
                 result: Some(IrValueId(1)),
-                op: const_op(IrType::Float64, (2.25f64).to_bits()),
+                op: const_op(IrType::Float64, (2.25f64).to_bits())?,
             },
             IrInstruction {
                 result: Some(IrValueId(2)),
@@ -4866,11 +4870,11 @@ mod tests {
         evaluator.eval_block(&block(vec![
             IrInstruction {
                 result: Some(IrValueId(0)),
-                op: const_op(IrType::Float32, u64::from(1.0f32.to_bits())),
+                op: const_op(IrType::Float32, u64::from(1.0f32.to_bits()))?,
             },
             IrInstruction {
                 result: Some(IrValueId(1)),
-                op: const_op(IrType::Float32, u64::from(3.0f32.to_bits())),
+                op: const_op(IrType::Float32, u64::from(3.0f32.to_bits()))?,
             },
             IrInstruction {
                 result: Some(IrValueId(2)),
@@ -4907,11 +4911,11 @@ mod tests {
             evaluator.eval_block(&block(vec![
                 IrInstruction {
                     result: Some(IrValueId(0)),
-                    op: const_op(IrType::Float64, left.to_bits()),
+                    op: const_op(IrType::Float64, left.to_bits())?,
                 },
                 IrInstruction {
                     result: Some(IrValueId(1)),
-                    op: const_op(IrType::Float64, right.to_bits()),
+                    op: const_op(IrType::Float64, right.to_bits())?,
                 },
                 IrInstruction {
                     result: Some(IrValueId(2)),
@@ -4956,7 +4960,7 @@ mod tests {
                 },
                 IrInstruction {
                     result: Some(IrValueId(1)),
-                    op: const_op(IrType::Float64, (2.0f64).to_bits()),
+                    op: const_op(IrType::Float64, (2.0f64).to_bits())?,
                 },
                 IrInstruction {
                     result: Some(IrValueId(2)),
