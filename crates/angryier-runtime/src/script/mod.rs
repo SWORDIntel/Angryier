@@ -660,6 +660,20 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     branch_out.set("chosen", if decision.chose_taken { "taken" } else { "not_taken" })?;
                     branch_out.set("condition", decision.condition.0)?;
                     branch_out.set("prefix_constraints", decision.prefix_constraints)?;
+                    let chosen_target = if decision.chose_taken {
+                        decision.taken
+                    } else {
+                        decision.not_taken
+                    };
+                    let alternate_target = if decision.chose_taken {
+                        decision.not_taken
+                    } else {
+                        decision.taken
+                    };
+                    set_addr64(&branch_out, "chosen_target", chosen_target)?;
+                    set_addr64(&branch_out, "alternate_target", alternate_target)?;
+                    branch_out.set("chosen_is_find_target", policy.find.contains(&chosen_target))?;
+                    branch_out.set("alternate_is_find_target", policy.find.contains(&alternate_target))?;
 
                     let dep_tbl = lua.create_table()?;
                     if let Some(summary) = arena.dependency_summary(decision.condition) {
@@ -703,7 +717,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                         ) {
                             Ok(solution) => {
                                 branch_out.set("solver_status", format!("{:?}", solution.outcome))?;
-                                set_addr64(&branch_out, "alternate_target", solution.alternate_target)?;
+                                debug_assert_eq!(solution.alternate_target, alternate_target);
                                 branch_out.set("solver_elapsed_us", solution.solver_elapsed.as_micros() as u64)?;
                                 let model = lua.create_table()?;
                                 for (index, (expression, bytes)) in solution.model.iter().enumerate() {
