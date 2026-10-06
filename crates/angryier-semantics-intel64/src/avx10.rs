@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vpaddd_xmm_ymm_zmm_unmasked() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_vpaddd_xmm_ymm_zmm_unmasked() -> Result<(), angryier_semantics::SemanticError> {
         let ctx = test_context();
 
         // XMM 128
@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vpsubq_opmask_merging() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_vpsubq_opmask_merging() -> Result<(), angryier_semantics::SemanticError> {
         let ctx = test_context();
         // 4 operands: [dst, opmask k1, src1, src2]
         let insn = make_test_decoded(
@@ -1109,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vpandd_opmask_zeroing() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_vpandd_opmask_zeroing() -> Result<(), angryier_semantics::SemanticError> {
         let ctx = test_context();
         let modifiers = InstructionModifiers {
             predicate: Some(PredicateMask {
@@ -1150,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_min_max_and_logic_providers_emit_cleanly() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_min_max_and_logic_providers_emit_cleanly() -> Result<(), angryier_semantics::SemanticError> {
         let ctx = test_context();
 
         // VPMINSD YMM
