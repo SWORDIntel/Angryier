@@ -188,7 +188,7 @@ fn deep_chain(arena: &ShardedExprArena, seed: ExprId, step: usize) -> Result<Exp
             immediate: Vec::new(),
         })?;
         acc = if round % 3 == 2 {
-            let amount = ((salt >> 16) % 64) as u128;
+            let amount = (salt >> 16) % 64;
             make_binop(arena, ExprOp::RotL, 64, joined, make_const(arena, 8, amount)?)?
         } else {
             make_binop(arena, ExprOp::Shl, 64, joined, make_const(arena, 64, (salt >> 16) % 4)?)?
