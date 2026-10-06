@@ -140,6 +140,15 @@ Examples include:
 
 The CLI explicitly labels these as **hypotheses, not proof**. Interesting paths should be validated with solved inputs and concrete replay.
 
+### Alternate-branch inversion
+
+The generated CLI driver enables post-run branch analysis. Each symbolic state records its latest conditional decision as execution evidence: branch PC, canonical Boolean condition, taken/not-taken successors, selected edge, and the number of constraints that existed **before** that branch.
+
+To test the opposite edge, Angryier asserts only that shared pre-branch prefix plus the opposite predicate. It intentionally excludes the chosen-edge constraint and every constraint accumulated after divergence. This prevents the common mistake of asking the solver to satisfy both sides of the same branch.
+
+When the alternate edge is SAT, the CLI prints candidate model assignments and, for whole-register values, replay-ready `--reg REG=0x...` flags. For a concrete replay, omit the matching `--symbolic REG`; for a seeded symbolic rerun, keep it. SAT means the alternate edge is feasible under Angryier's current model and prefix—not that the remainder of that path reaches the analyst's target.
+
+
 The generated driver also prints an `[angryier][analysis]` section before the recommendation list. It includes the retained path tail, the last retained frontier block, a fidelity/evidence-quality classification, and a single primary limiter chosen from timeout, state pruning, state failure, unsupported semantics, under-constrained memory/address handling, vector semantic debt, step-budget exhaustion, absent symbolic influence, or unresolved target reachability.
 
 The analysis layer deliberately does **not** call the last trace block “closest to target” unless CFG evidence exists. A final trace PC is only the last retained frontier observation; numeric address proximity is not meaningful reachability evidence.
@@ -179,6 +188,8 @@ Options table (all fields optional):
 | `steps` | integer | `256` | Instruction-step budget. The default is the shared constant `angryier_runtime::script::DEFAULT_STEPS`, which the CLI's `--steps` flag also uses. |
 | `states` | integer | `16` | Maximum live states (`DEFAULT_MAX_STATES`). |
 | `solve` | boolean | `false` | Solve each found state with the native Z3 backend and populate `inputs`. |
+| `branch_analysis` | boolean | `false` | Solve the edge opposite the selected frontier state's most recent symbolic branch using only the constraints shared before that branch. The generated CLI driver enables this automatically. |
+| `branch_timeout_ms` | integer | `1000` | Per-query budget for alternate-branch analysis, clamped to 1–10000 ms. |
 | `dynamic` | boolean | `false` | Dynamic-linking load path instead of static (ELF only; PE images always load in driver mode). |
 | `argv` | integer | — | Symbolize `argv[0]` as this many bytes. |
 | `files` | table name → `true` | — | Paths whose opens are backed by symbolic bytes (reads yield symbols instead of hitting the host). |
@@ -198,6 +209,8 @@ Result table:
 | `region_fork_sites` | Capped ledger of region-fork sites with PC, expression id, pinned address, region base and size. |
 | `frontier` | Diagnostic state selected from first found state, else first live state, else most recent dead state. Contains state id, PC/PC hex, path-constraint count, bound-symbol count, current symbolic-register set, and `constraint_dependencies`. |
 | `frontier.constraint_dependencies` | Union of symbolic leaf IDs that actually occur in the selected state's retained path constraints. Register-backed leaves include register id/name, width and expression id; unbound leaves stay explicitly labeled and may represent symbolic memory or fallback/free symbols. |
+| `branch_analysis` | Present when `branch_analysis = true`. Describes the selected state's most recent symbolic branch: exact branch PC, taken/not-taken successors, chosen edge, predicate expression, shared pre-branch constraint count, dependency sources, alternate target, solver outcome/time, and candidate model. |
+| `branch_analysis.model[*].value_hex` | For 64-bit register-backed solver assignments, canonical integer value suitable for replay (for example `0x000000000000002a`). Raw solver bytes remain available separately for byte-granular inputs. |
 | `found` | Number of states that reached a `find` target. |
 | `inputs` | Only with `solve = true`: one entry per solved found state, each an array of byte-strings (model bytes per symbol). Per-state model solving is capped at 10 seconds. |
 | `regs` | Only when at least one state was found: the first found state's register bindings, keyed by engine register ID (rax = 0 … r15 = 15), values are integers for concretely-bound registers. |
