@@ -351,7 +351,11 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
             #(b.model or {{}}),
             b.steering_action,
             b.steering_confidence,
-            b.steering_reason
+            b.steering_reason,
+            b.replay.status,
+            b.replay.matched_alternate,
+            b.replay.applied_registers,
+            b.replay.observed_target_hex
         "#
     );
 
@@ -364,8 +368,24 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
         steering_action,
         steering_confidence,
         steering_reason,
-    ): (String, String, usize, usize, usize, String, String, String) =
-        lua.load(&script).eval().expect("branch analysis");
+        replay_status,
+        replay_matched,
+        replay_registers,
+        replay_target,
+    ): (
+        String,
+        String,
+        usize,
+        usize,
+        usize,
+        String,
+        String,
+        String,
+        String,
+        bool,
+        usize,
+        String,
+    ) = lua.load(&script).eval().expect("branch analysis");
 
     assert_eq!(status, "recorded");
     // There is only one branch. The selected state already contains its
@@ -376,10 +396,14 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
     assert_eq!(solver_status, "Sat");
     assert!(dependency_count >= 1, "branch predicate should depend on rdi");
     assert!(model_count >= 1, "SAT alternate edge should produce a candidate model");
+    assert_eq!(replay_status, "validated");
+    assert!(replay_matched);
+    assert!(replay_registers >= 1);
+    assert!(!replay_target.is_empty());
     assert_eq!(steering_action, "explore-alternate");
-    assert_eq!(steering_confidence, "low");
+    assert_eq!(steering_confidence, "medium");
     assert!(
-        steering_reason.contains("solver-feasible"),
+        steering_reason.contains("concrete replay"),
         "unexpected steering reason: {steering_reason}"
     );
 }
