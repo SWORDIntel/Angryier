@@ -367,6 +367,77 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
 }
 
 #[test]
+fn test_angry_run_branch_analysis_ranks_cfg_distance_to_find_target() {
+    const SRC: &str = r#"
+        .global _start
+        .global target
+        .text
+    _start:
+        cmp $42, %rdi
+        jne slow_path
+    fast_path:
+        jmp target
+    slow_path:
+        nop
+        jmp detour
+    detour:
+        nop
+        jmp target
+    target:
+        mov $60, %rax
+        xor %rdi, %rdi
+        syscall
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "branch_cfg_target") else {
+        eprintln!("skipping branch CFG target test: system assembler not found");
+        return;
+    };
+
+    let bytes = std::fs::read(&bin_path).expect("read linked fixture");
+    let runtime = angryier_runtime::Runtime::with_native_xed(
+        angryier_types::SemanticVersion(1),
+        angryier_types::TargetProfileId(1),
+    );
+    let process = runtime.load_elf(&bytes).expect("load fixture");
+    let target = process.symbol("target").expect("target symbol").address;
+
+    let lua = init_lua();
+    let bin_str = bin_path.to_str().expect("valid path string");
+    let script = format!(
+        r#"
+        local r = angry.run("{bin_str}", {{
+            symbolic = {{ rdi = 64 }},
+            find = {{ {target} }},
+            steps = 128,
+            states = 8,
+            branch_analysis = true,
+            branch_timeout_ms = 2000,
+        }})
+        local b = assert(r.branch_analysis)
+        return
+            b.cfg_status,
+            b.cfg_preference,
+            b.cfg_find_target_hex,
+            tostring(b.cfg_chosen_distance or "none"),
+            tostring(b.cfg_alternate_distance or "none")
+        "#
+    );
+
+    let (cfg_status, preference, ranked_target, chosen_distance, alternate_distance):
+        (String, String, String, String, String) =
+        lua.load(&script).eval().expect("CFG-ranked branch analysis");
+
+    assert_eq!(cfg_status, "ok");
+    assert!(preference == "chosen" || preference == "alternate", "{preference}");
+    assert_eq!(ranked_target, format!("{target:#018x}"));
+
+    let mut distances = vec![chosen_distance, alternate_distance];
+    distances.sort();
+    assert_eq!(distances, vec!["1".to_string(), "2".to_string()]);
+}
+
+#[test]
 fn test_lua_symbolic_and_solve() {
     const SRC: &str = r#"
         .global _start
