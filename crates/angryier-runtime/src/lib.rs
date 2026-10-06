@@ -7294,11 +7294,11 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     concrete_registers: left.concrete_registers.clone(),
                     id: left.id,
                     expr_concrete: snapshot.expr_concrete.clone(),
-                    last_branch: if left.last_branch == right.last_branch {
-                        left.last_branch
-                    } else {
-                        None
-                    },
+                    // A merge rewrites path constraints into a combined snapshot.
+                    // The stored branch-prefix index belonged to a pre-merge
+                    // append-only constraint vector, so preserving it would
+                    // make alternate-edge solving potentially unsound.
+                    last_branch: None,
                 };
                 self.states.insert(a, merged_state);
                 merged += 1;
@@ -7483,11 +7483,11 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             concrete_registers: left.concrete_registers,
                             id: left.id,
                             expr_concrete: snapshot.expr_concrete.clone(),
-                            last_branch: if left.last_branch == right.last_branch {
-                                left.last_branch
-                            } else {
-                                None
-                            },
+                            // A merge rewrites path constraints into a combined snapshot.
+                    // The stored branch-prefix index belonged to a pre-merge
+                    // append-only constraint vector, so preserving it would
+                    // make alternate-edge solving potentially unsound.
+                    last_branch: None,
                         },
                     );
                     report.merges += 1;
