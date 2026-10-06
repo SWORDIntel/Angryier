@@ -310,6 +310,63 @@ fn test_lua_session_breakpoints_and_hooks() {
 }
 
 #[test]
+fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() {
+    const SRC: &str = r#"
+        .global _start
+        .text
+    _start:
+        cmp $42, %rdi
+        jne fail
+        mov $60, %rax
+        xor %rdi, %rdi
+        syscall
+    fail:
+        mov $60, %rax
+        mov $1, %rdi
+        syscall
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "branch_analysis") else {
+        eprintln!("skipping branch-analysis test: system assembler not found");
+        return;
+    };
+
+    let lua = init_lua();
+    let bin_str = bin_path.to_str().expect("valid path string");
+    let script = format!(
+        r#"
+        local r = angry.run("{bin_str}", {{
+            symbolic = {{ rdi = 64 }},
+            steps = 64,
+            states = 8,
+            branch_analysis = true,
+            branch_timeout_ms = 2000,
+        }})
+        local b = assert(r.branch_analysis)
+        return
+            b.status,
+            b.solver_status,
+            b.prefix_constraints,
+            #b.dependencies,
+            #(b.model or {{}})
+        "#
+    );
+
+    let (status, solver_status, prefix_constraints, dependency_count, model_count):
+        (String, String, usize, usize, usize) = lua.load(&script).eval().expect("branch analysis");
+
+    assert_eq!(status, "recorded");
+    // There is only one branch. The selected state already contains its
+    // chosen-edge predicate, but alternate solving must remove that predicate
+    // and solve under the empty common prefix. Keeping the full state path
+    // would make the opposite edge contradictory and return UNSAT.
+    assert_eq!(prefix_constraints, 0);
+    assert_eq!(solver_status, "Sat");
+    assert!(dependency_count >= 1, "branch predicate should depend on rdi");
+    assert!(model_count >= 1, "SAT alternate edge should produce a candidate model");
+}
+
+#[test]
 fn test_lua_symbolic_and_solve() {
     const SRC: &str = r#"
         .global _start
