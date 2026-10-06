@@ -202,6 +202,20 @@ Branch analysis now emits a **steering verdict** in addition to raw solver/CFG f
 
 CFG evidence never overrides solver infeasibility or uncertainty. This makes `branch_analysis.steering_action` suitable for external agents without requiring them to reproduce Angryier's safety/fidelity policy.
 
+### Concrete alternate-branch replay
+
+For a SAT alternate model whose leaves all map to 64-bit architectural register inputs, Angryier performs a concrete replay from the captured entry state. It resets mutable execution cursors (register/memory state, syscall capture, `brk`, `mmap`, fd state, symbolic-fd state, stdin cursor, PCI config selector, counters), applies the solver's register assignments, runs under the existing `steps` budget, and checks the exact recorded branch successor.
+
+A `validated` replay means **the immediate branch flip was reproduced concretely in Angryier's modeled environment**. It does not prove that a later `find` target is reachable. Bounded CFG evidence remains structural guidance only.
+
+Replay is deliberately refused when:
+
+- the solver model contains memory/argv/file/free-symbol leaves that cannot yet be materialized as GPR seeds (`unsupported-model`);
+- kernel pool state is attached and externally shared (`stateful-kernel-model`);
+- a stateful SimProcedure has already executed on the diagnostic path (`stateful-environment`).
+
+A `mismatch` is treated as a fidelity warning: SAT symbolic evidence exists, but concrete replay contradicted the predicted immediate successor. Steering is downgraded to `unresolved/low` until that divergence is explained.
+
 ### Exit codes
 
 | Code | Cause |
@@ -263,6 +277,11 @@ Result table:
 | `branch_analysis.steering_action` | Stable machine-readable recommendation: `prioritize-alternate`, `keep-chosen`, `reject-alternate`, `explore-both`, `explore-alternate`, or `unresolved`. |
 | `branch_analysis.steering_confidence` | `high`, `medium`, or `low`. High requires direct target/UNSAT evidence; bounded-CFG directionality is deliberately capped at medium. |
 | `branch_analysis.steering_reason` | Stable human-readable rationale for the steering action. The policy requires solver feasibility before CFG evidence can prioritize an alternate edge. |
+| `branch_analysis.replay` | Concrete validation result for SAT alternate models when every model leaf is a replayable 64-bit GPR input and the environment is rewind-safe. |
+| `branch_analysis.replay.status` | `validated`, `mismatch`, `budget-exhausted`, `terminated-before-branch`, `unsupported-model`, `stateful-kernel-model`, `stateful-environment`, `not-sat`, or `error`. |
+| `branch_analysis.replay.matched_alternate` | True only when concrete execution restarted from entry, reached the recorded branch PC, and stepped to the solver-predicted alternate successor. |
+| `branch_analysis.replay.observed_target_hex` | Exact successor observed after replaying the branch, when available. |
+| `branch_analysis.replay.detail` | Human-readable explanation of validation, refusal, mismatch, or budget exhaustion. |
 | `branch_analysis.model[*].value_hex` | For 64-bit register-backed solver assignments, canonical integer value suitable for replay (for example `0x000000000000002a`). Raw solver bytes remain available separately for byte-granular inputs. |
 | `found` | Number of states that reached a `find` target. |
 | `inputs` | Only with `solve = true`: one entry per solved found state, each an array of byte-strings (model bytes per symbol). Per-state model solving is capped at 10 seconds. |
