@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vpaddd_xmm_ymm_zmm_unmasked() {
+    fn test_vpaddd_xmm_ymm_zmm_unmasked() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = test_context();
 
         // XMM 128
@@ -1025,11 +1025,9 @@ mod tests {
             );
             let p = VpadddXmmXmmXmm;
             let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
-            let receipt = p.emit(&ctx, &insn, &mut builder).expect("emit VPADDD XMM");
+            let receipt = p.emit(&ctx, &insn, &mut builder)?;
             assert_eq!(receipt.rule_id, rule_id(0x06));
-            let sealed = builder
-                .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
-                .expect("seal");
+            let sealed = builder.seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))?;
             assert_eq!(sealed.semantic_version(), SemanticVersion(1));
         }
 
@@ -1046,7 +1044,7 @@ mod tests {
             );
             let p = VpadddYmmYmmYmm;
             let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
-            let receipt = p.emit(&ctx, &insn, &mut builder).expect("emit VPADDD YMM");
+            let receipt = p.emit(&ctx, &insn, &mut builder)?;
             assert_eq!(receipt.rule_id, rule_id(0x07));
             let sealed = builder
                 .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
@@ -1067,17 +1065,18 @@ mod tests {
             );
             let p = VpadddZmmZmmZmm;
             let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
-            let receipt = p.emit(&ctx, &insn, &mut builder).expect("emit VPADDD ZMM");
+            let receipt = p.emit(&ctx, &insn, &mut builder)?;
             assert_eq!(receipt.rule_id, rule_id(0x08));
             let sealed = builder
                 .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
                 .expect("seal");
             assert_eq!(sealed.semantic_version(), SemanticVersion(1));
         }
+        Ok(())
     }
 
     #[test]
-    fn test_vpsubq_opmask_merging() {
+    fn test_vpsubq_opmask_merging() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = test_context();
         // 4 operands: [dst, opmask k1, src1, src2]
         let insn = make_test_decoded(
@@ -1092,7 +1091,7 @@ mod tests {
         );
         let p = VpsubqXmmXmmXmm;
         let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
-        let receipt = p.emit(&ctx, &insn, &mut builder).expect("emit VPSUBQ with k1");
+        let receipt = p.emit(&ctx, &insn, &mut builder)?;
         assert_eq!(receipt.rule_id, rule_id(0x15));
 
         // Verify MaskMerge is present in values
@@ -1106,16 +1105,19 @@ mod tests {
             )
         });
         assert!(has_mask_merge, "expected MaskMerge operation");
+        Ok(())
     }
 
     #[test]
-    fn test_vpandd_opmask_zeroing() {
+    fn test_vpandd_opmask_zeroing() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = test_context();
-        let mut modifiers = InstructionModifiers::default();
-        modifiers.predicate = Some(PredicateMask {
-            register: RegisterView::full(RegisterId(0x0142), 64),
-            mode: PredicateMode::Zero,
-        });
+        let modifiers = InstructionModifiers {
+            predicate: Some(PredicateMask {
+                register: RegisterView::full(RegisterId(0x0142), 64),
+                mode: PredicateMode::Zero,
+            }),
+            ..Default::default()
+        };
 
         // 4 operands: [dst, opmask k2, src1, src2]
         let insn = make_test_decoded(
@@ -1130,7 +1132,7 @@ mod tests {
         );
         let p = VpanddYmmYmmYmm;
         let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
-        let receipt = p.emit(&ctx, &insn, &mut builder).expect("emit VPANDD with k2{z}");
+        let receipt = p.emit(&ctx, &insn, &mut builder)?;
         assert_eq!(receipt.rule_id, rule_id(0x19));
 
         // Verify MaskZero is present in values
@@ -1144,10 +1146,11 @@ mod tests {
             )
         });
         assert!(has_mask_zero, "expected MaskZero operation");
+        Ok(())
     }
 
     #[test]
-    fn test_min_max_and_logic_providers_emit_cleanly() {
+    fn test_min_max_and_logic_providers_emit_cleanly() -> Result<(), Box<dyn std::error::Error>> {
         let ctx = test_context();
 
         // VPMINSD YMM
@@ -1162,7 +1165,7 @@ mod tests {
                 InstructionModifiers::default(),
             );
             let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
-            let receipt = VpminsdYmmYmmYmm.emit(&ctx, &insn, &mut builder).expect("emit VPMINSD");
+            let receipt = VpminsdYmmYmmYmm.emit(&ctx, &insn, &mut builder)?;
             assert_eq!(receipt.rule_id, rule_id(0x31));
         }
 
@@ -1178,7 +1181,7 @@ mod tests {
                 InstructionModifiers::default(),
             );
             let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
-            let receipt = VpmaxudZmmZmmZmm.emit(&ctx, &insn, &mut builder).expect("emit VPMAXUD");
+            let receipt = VpmaxudZmmZmmZmm.emit(&ctx, &insn, &mut builder)?;
             assert_eq!(receipt.rule_id, rule_id(0x3B));
         }
 
@@ -1194,7 +1197,7 @@ mod tests {
                 InstructionModifiers::default(),
             );
             let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
-            let receipt = VpandndXmmXmmXmm.emit(&ctx, &insn, &mut builder).expect("emit VPANDND");
+            let receipt = VpandndXmmXmmXmm.emit(&ctx, &insn, &mut builder)?;
             assert_eq!(receipt.rule_id, rule_id(0x1E));
         }
 
@@ -1210,8 +1213,9 @@ mod tests {
                 InstructionModifiers::default(),
             );
             let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
-            let receipt = VpxorqZmmZmmZmm.emit(&ctx, &insn, &mut builder).expect("emit VPXORQ");
+            let receipt = VpxorqZmmZmmZmm.emit(&ctx, &insn, &mut builder)?;
             assert_eq!(receipt.rule_id, rule_id(0x2F));
         }
+        Ok(())
     }
 }
