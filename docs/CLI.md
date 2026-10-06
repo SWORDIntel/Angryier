@@ -140,6 +140,12 @@ Examples include:
 
 The CLI explicitly labels these as **hypotheses, not proof**. Interesting paths should be validated with solved inputs and concrete replay.
 
+The generated driver also prints an `[angryier][analysis]` section before the recommendation list. It includes the retained path tail, the last retained frontier block, a fidelity/evidence-quality classification, and a single primary limiter chosen from timeout, state pruning, state failure, unsupported semantics, under-constrained memory/address handling, vector semantic debt, step-budget exhaustion, absent symbolic influence, or unresolved target reachability.
+
+The analysis layer deliberately does **not** call the last trace block “closest to target” unless CFG evidence exists. A final trace PC is only the last retained frontier observation; numeric address proximity is not meaningful reachability evidence.
+
+When region forking is active, the CLI reports the number of guessed child worlds and tells the operator to inspect `region_fork_sites` before trusting a reachable path. When state pruning occurs, it prints the peak frontier against the configured cap so the next decision can distinguish “raise capacity” from “improve search policy.”
+
 ### Exit codes
 
 | Code | Cause |
@@ -178,8 +184,14 @@ Result table:
 
 | Field | Meaning |
 |---|---|
-| `steps`, `forks`, `merges`, `terminated`, `failed` | Run counters. |
+| `steps`, `forks`, `merges`, `terminated`, `failed` | Core run counters. |
+| `pruned_states` | States discarded by avoid policy or state-cap economics. |
 | `live_states` | States still live when the budget/limits ended the run. |
+| `dead_states` | Terminated/failed/pruned states retained by the session for inspection. |
+| `peak_states` | Maximum simultaneous live-state frontier observed during the run. |
+| `concretization_retries` | Solver-assisted unresolved-address recovery attempts. |
+| `region_fork_children` | Guessed address-world child states created when unresolved pointers are forked across mapped RW regions. Non-zero is fidelity debt, not free coverage. |
+| `region_fork_sites` | Capped ledger of region-fork sites with PC, expression id, pinned address, region base and size. |
 | `found` | Number of states that reached a `find` target. |
 | `inputs` | Only with `solve = true`: one entry per solved found state, each an array of byte-strings (model bytes per symbol). Per-state model solving is capped at 10 seconds. |
 | `regs` | Only when at least one state was found: the first found state's register bindings, keyed by engine register ID (rax = 0 … r15 = 15), values are integers for concretely-bound registers. |
