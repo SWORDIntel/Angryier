@@ -2,7 +2,7 @@
 
 > Binary: `angryier` (crate `angryier-cli`). The default build includes the `run` subcommand (symbolic/concolic execution, optionally driven by an embedded Lua script, plus PE driver mode) with native decoding (Intel XED) and solver (Z3) dependencies. A dependency-free metadata-only build (`version`, `status`, `crates`, `help`) is available via `--no-default-features` and works anywhere Rust compiles.
 >
-> Source of truth: `crates/angryier-cli/src/main.rs` (argument parsing) and `crates/angryier-runtime/src/script.rs` (the Lua surface).
+> Source of truth: `crates/angryier-cli/src/main.rs` (argument parsing) and `crates/angryier-runtime/src/script/mod.rs` (the Lua surface).
 
 ---
 
@@ -46,7 +46,7 @@ Commands:
 | Command | Output | Exit |
 |---|---|---|
 | `version` | `Angryier 0.1.0` | 0 |
-| `status` | Workspace summary: 39 crates (37 implemented, 2 scaffolded), historical test totals | 0 |
+| `status` | Workspace summary: 43 crates (41 implemented, 2 scaffolded), historical test totals | 0 |
 | `crates` | One line per workspace crate: name, `Implemented`/`Scaffolded`, short description | 0 |
 | `help`, `-h`, `--help` | The usage text above | 0 |
 | *(none)* | One-line brief (version + tagline) | 0 |
@@ -60,8 +60,10 @@ Note: `help` always lists `run`. In builds without the feature its line reads `N
 ## `angryier run` — execute a binary symbolically
 
 ```
-usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--steps N] [--dynamic] [--driver]
-note: --find ADDR is hexadecimal, 0x prefix optional
+usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver]
+note: --reg is repeatable; VALUE accepts decimal or 0x-prefixed hexadecimal
+note: --find/--avoid ADDR are repeatable hexadecimal addresses, 0x prefix optional
+note: --fork enables fork-aggressive symbolic exploration; --dfs prioritizes the newest/deepest state
 ```
 
 Loads an ELF64 or PE32+ image into the engine and runs it concretely/symbolically. The loader is chosen by magic bytes: ELF loads statically by default (`load_elf`), with `--dynamic` the dynamic-linking environment model is used (`load_elf_dynamic`), and an `MZ` image loads in **driver mode** (`load_pe_driver`: sections mapped, IAT resolved to import stubs, DriverEntry entry state — `dynamic` is ignored for PE).
@@ -73,38 +75,51 @@ Loads an ELF64 or PE32+ image into the engine and runs it concretely/symbolicall
 | `<binary>` (positional) | — | Path to the ELF64 or PE32+ image to execute. Required, even when `--script` is given (the script chooses whether to reference it). A second positional operand exits 1 with an error. |
 | `--script f.lua` | no | Lua driver script (see the Lua API below). When set, the script has full control; the other flags are still validated but their values are unused. |
 | `--symbolic REG` | yes | Mark a general-purpose register symbolic before execution. `REG` is one of `rax rcx rdx rbx rsp rbp rsi rdi r8`–`r15`; other names exit 1 with an error. Always marked 64 bits wide. |
-| `--find ADDR` | yes | Add a target address (hexadecimal, `0x` prefix optional) to the exploration policy's find set. Non-hex values exit 1 with an error. |
-| `--argv N` | no | Symbolize `argv[0]` as `N` bytes (the model materializes `N` bytes, NUL-terminated, on the initial stack). Non-numeric values exit 1 with an error. |
-| `--steps N` | no | Instruction-step budget for the synthesized driver. Defaults to `256` — the same value as the Lua API's `opts.steps` default (the two share one constant, `angryier_runtime::script::DEFAULT_STEPS`, so they cannot drift). Non-numeric values exit 1 with an error. |
+| `--reg REG=VALUE` | yes | Seed a concrete GPR. `VALUE` accepts decimal or `0x`-prefixed hexadecimal, including the full `u64` range. Useful for replaying alternate-branch models. |
+| `--find ADDR` | yes | Add a target address (hexadecimal, `0x` prefix optional) to the exploration policy's find set. |
+| `--avoid ADDR` | yes | Add an address to the exploration policy's avoid set; a state reaching it is pruned before further stepping. |
+| `--argv N` | no | Symbolize `argv[0]` as `N` bytes (the model materializes `N` bytes, NUL-terminated, on the initial stack). |
+| `--steps N` | no | Total symbolic instruction-step budget. Default `256` (`DEFAULT_STEPS`). |
+| `--states N` | no | Maximum simultaneous live states. Must be > 0. Default `16` (`DEFAULT_MAX_STATES`). |
+| `--timeout SECS` | no | Whole-run symbolic exploration wall budget. Must be > 0. Default `120` seconds (`DEFAULT_TIMEOUT_SECS`). |
+| `--branch-timeout-ms N` | no | Post-run alternate-branch solver budget, 1–10000 ms. Default `1000` (`DEFAULT_BRANCH_TIMEOUT_MS`). |
+| `--solve` | no | Extract concrete models for states that hit a `--find` target. Solver feasibility-gating during exploration remains enabled without this flag. |
+| `--fork` | no | Fork-aggressive symbolic exploration: do not let concretization pins collapse a symbolic branch to one direction when both solver-checked directions are feasible. |
+| `--dfs` | no | Select the newest/deepest live state first instead of the default scheduler, favoring deep target dives over breadth. |
 | `--dynamic` | no | Load via the dynamic-linking path (`__libc_start_main` hook, `main(argc, argv)` entry) instead of static `_start`. |
-| `--driver` | no | Force direct PE32+ kernel-driver execution through the Rust runtime. Lua is bypassed; kernel pool tracking is attached; `--script`, `--symbolic`, `--find`, `--argv`, and `--dynamic` are parsed but not applied in this mode. |
+| `--driver` | no | Force direct PE32+ kernel-driver execution through the Rust runtime. Lua is bypassed; `--reg` seeds and `--steps` apply directly. Symbolic-search flags are parsed but not applied. |
 
-"Repeatable: no" is enforced: a repeated `<binary>` positional, `--script`, `--argv`, `--steps`, `--dynamic`, or `--driver` exits 1 with a `duplicate ...` error naming the second value instead of silently taking the last one.
+`--symbolic`, `--reg`, `--find`, and `--avoid` are repeatable. Other option flags are single-use; duplicates fail explicitly instead of silently taking the last value.
 
-Address parsing for `--find` is hexadecimal with an optional `0x` prefix: `--find 0x40102a` and `--find 40102a` are equivalent, and `--find 1234` means address `0x1234`.
+Address parsing for `--find` and `--avoid` is hexadecimal with an optional `0x` prefix: `--find 0x40102a` and `--find 40102a` are equivalent, and `--find 1234` means address `0x1234`.
 
 ### The default driver
 
 Without `--script`, the CLI synthesizes this Lua driver and evaluates it:
 
 ```lua
-local r = angry.run("<binary>", { symbolic = { <regs marked 64-bit> },
-                                  find = { <find addresses> },
-                                  [argv = N,] [dynamic = true,]
-                                  steps = <steps>, states = 16 })
-print("[angryier][result] symbolic/concolic exploration completed")
-print(string.format("  exploration steps : %d (engine work units executed)", r.steps))
-print(string.format("  forks             : %d (new execution states created at branches)", r.forks))
-print(string.format("  merges            : %d (compatible states recombined)", r.merges))
-print(string.format("  terminated states : %d (states that reached a terminal condition)", r.terminated))
-print(string.format("  find hits         : %d (configured target-address hits)", r.found))
+local r = angry.run("<binary>", {
+    symbolic = { <regs marked 64-bit> },
+    regs = { <optional concrete seeds> },
+    find = { <find addresses> },
+    avoid = { <avoid addresses> },
+    [argv = N,] [dynamic = true,]
+    [solve = true,] [exploration = "fork",] [search = "dfs",]
+    steps = <steps>,
+    states = <states>,
+    timeout_secs = <timeout>,
+    branch_analysis = true,
+    branch_timeout_ms = <branch timeout>,
+})
+-- The generated driver then prints result, evidence-quality, frontier,
+-- branch/CFG analysis, replay seeds, and evidence-driven next actions.
 ```
 
-`steps` is the `--steps` value (default `256`, shared with the Lua API's own `opts.steps` default — previously the CLI hardcoded `1024`, silently overshooting scripts by 4×). `states = 16` likewise matches the Lua API default (`angryier_runtime::script::DEFAULT_MAX_STATES`). Solver stays off (found targets are counted, not solved — use `--script` with `solve = true` to get models).
+`steps`, `states`, and timeout values come directly from the CLI flags and share the runtime's default constants. Z3 feasibility-gating remains enabled during normal exploration even without `--solve`; `--solve` controls the additional post-run extraction of concrete models for found states. Alternate-branch analysis is enabled by the generated driver by default.
 
 ### Operator-facing diagnostics
 
-Before execution starts, the CLI now prints a structured **execution plan** containing the target, frontend, effective mode, step/state budgets, symbolic registers, find targets, and symbolic argv settings. If a custom Lua script or `--driver` makes other CLI flags ineffective, that is stated explicitly rather than silently ignored.
+Before execution starts, the CLI now prints a structured **execution plan** containing the target, frontend, effective mode, step/state/wall/branch budgets, search mode, target-model extraction setting, symbolic/concrete registers, find/avoid targets, and symbolic argv settings. If a custom Lua script or `--driver` makes other CLI flags ineffective, that is stated explicitly rather than silently ignored.
 
 PE driver mode additionally reports:
 
@@ -126,8 +141,8 @@ Examples include:
 - **Symbolic source but zero forks:** flag likely overwrite/concretization, insufficient depth, or a source that never reaches a conditional.
 - **No `--find` target:** suggest adding an accept/success block, vulnerable call site, allocator/free site, error bypass, or other semantically useful waypoint.
 - **Target not reached:** recommend an intermediate waypoint near the last stable trace region instead of blindly multiplying the step budget.
-- **Target reached:** recommend a custom Lua rerun with `solve=true`, followed by concrete replay of the recovered satisfying input.
-- **Live-state saturation:** recommend selectively increasing `states` and tightening find/avoid policy.
+- **Target reached:** recommend `--solve` to extract a concrete witness, followed by concrete replay.
+- **Live-state saturation:** recommend selectively increasing `--states` and tightening find/avoid policy.
 - **Timeout:** recommend reducing symbolic breadth, adding intermediate targets, or solver-gating only near interesting branches before increasing wall time.
 - **Failed states:** direct the operator to `last_error` plus `trace_hex` to classify semantic, model, memory, or solver debt.
 - **Concretization retries:** suggest tightening pointer provenance, symbolic source placement, region constraints, or object/allocator models.
@@ -147,6 +162,8 @@ The generated CLI driver enables post-run branch analysis. Each symbolic state r
 To test the opposite edge, Angryier asserts only that shared pre-branch prefix plus the opposite predicate. It intentionally excludes the chosen-edge constraint and every constraint accumulated after divergence. This prevents the common mistake of asking the solver to satisfy both sides of the same branch.
 
 When the alternate edge is SAT, the CLI prints candidate model assignments and, for whole-register values, replay-ready `--reg REG=0x...` flags. For a concrete replay, omit the matching `--symbolic REG`; for a seeded symbolic rerun, keep it. SAT means the alternate edge is feasible under Angryier's current model and prefix—not that the remainder of that path reaches the analyst's target.
+
+Branch analysis also performs a **bounded static CFG recovery** rooted at the recorded decision when one or more find targets exist. It reports the graph-edge distance from each successor to each statically reachable find target and whether the chosen or alternate successor is structurally closer. An alternate edge is promoted to a target-directed recommendation only when solver feasibility and CFG directionality agree. Indirect/unresolved control-flow remains a graph exit, so CFG ranking is guidance rather than proof.
 
 ### Search controls from the CLI
 
@@ -178,7 +195,7 @@ When region forking is active, the CLI reports the number of guessed child world
 | Code | Cause |
 |---|---|
 | 0 | Driver/script evaluated successfully. |
-| 1 | Missing or duplicate `<binary>` positional; unknown flag (e.g. a typo); a flag missing its value; invalid `--symbolic` register; non-numeric `--argv`; non-numeric `--steps`; non-hex `--find`; a repeated non-repeatable flag (`--script`, `--argv`, `--steps`, `--dynamic`, `--driver`); `--script` file unreadable; Lua init/eval error (including an unsupported symbolic width in the opts table); driver load/model initialization failure; or the binary was built without the `run` feature. |
+| 1 | Invalid/duplicate CLI arguments (including malformed `--reg`, find/avoid addresses, state/time budgets, or repeated single-use switches); unreadable script/binary; Lua/runtime/loader/model initialization error; or a build without the `run` feature. |
 
 Argument errors are prefixed `error:` and followed by usage plus a corrective hint. Runtime diagnostics use structured prefixes such as `[angryier][plan]`, `[angryier][load]`, `[angryier][exec]`, `[angryier][trace]`, `[angryier][progress]`, `[angryier][result]`, `[angryier][verdict]`, and `[angryier][hint]` so logs remain readable and grep-friendly.
 
@@ -190,7 +207,7 @@ Every driver script — the synthesized one or a `--script` file — runs in a f
 
 ### `angry.run(path, opts) -> table`
 
-Loads `path`, applies the symbolic-input configuration, explores, and returns a report table. The exploration itself is wall-clock capped at 30 seconds.
+Loads `path`, applies the symbolic-input configuration, explores, and returns a report table. The default whole-run wall budget is 120 seconds and is configurable with `timeout_secs` / CLI `--timeout`.
 
 Options table (all fields optional):
 
@@ -199,9 +216,13 @@ Options table (all fields optional):
 | `symbolic` | table | `{}` | Registers to mark symbolic. Either `{ rdi = 64 }` or `{ "rdi" }`. The width value is validated: 64 (or omitted) is accepted, any other integer aborts the script with `symbolic register '<name>' width must be 64 bits (got N)` — narrower/wider GPR symbols would read as width-mismatched expressions. Unknown register names error (`bad reg <name>`) instead of being skipped. Valid names: the 16 GPRs listed above. |
 | `find` | array of integer | `{}` | Target PCs; reaching one records a found state. |
 | `avoid` | array of integer | `{}` | Avoid PCs for the exploration policy. |
-| `steps` | integer | `256` | Instruction-step budget. The default is the shared constant `angryier_runtime::script::DEFAULT_STEPS`, which the CLI's `--steps` flag also uses. |
+| `regs` | table | `{}` | Concrete GPR seeds; full-width kernel pointers use the documented `<reg>_hex = "0x..."` form. |
+| `steps` | integer | `256` | Instruction-step budget (`DEFAULT_STEPS`). |
 | `states` | integer | `16` | Maximum live states (`DEFAULT_MAX_STATES`). |
-| `solve` | boolean | `false` | Solve each found state with the native Z3 backend and populate `inputs`. |
+| `timeout_secs` | integer | `120` | Whole-run wall-clock budget (`DEFAULT_TIMEOUT_SECS`). |
+| `exploration` | string | default | `"fork"` enables fork-aggressive symbolic branch handling. |
+| `search` | string | default | `"dfs"` selects the newest/deepest live state first. |
+| `solve` | boolean | `false` | Extract concrete models for found states. Z3 still feasibility-checks symbolic branches when this is false. |
 | `branch_analysis` | boolean | `false` | Solve the edge opposite the selected frontier state's most recent symbolic branch using only the constraints shared before that branch. The generated CLI driver enables this automatically. |
 | `branch_timeout_ms` | integer | `1000` | Per-query budget for alternate-branch analysis, clamped to 1–10000 ms. |
 | `dynamic` | boolean | `false` | Dynamic-linking load path instead of static (ELF only; PE images always load in driver mode). |
@@ -224,6 +245,9 @@ Result table:
 | `frontier` | Diagnostic state selected from first found state, else first live state, else most recent dead state. Contains state id, PC/PC hex, path-constraint count, bound-symbol count, current symbolic-register set, and `constraint_dependencies`. |
 | `frontier.constraint_dependencies` | Union of symbolic leaf IDs that actually occur in the selected state's retained path constraints. Register-backed leaves include register id/name, width and expression id; unbound leaves stay explicitly labeled and may represent symbolic memory or fallback/free symbols. |
 | `branch_analysis` | Present when `branch_analysis = true`. Describes the selected state's most recent symbolic branch: exact branch PC, taken/not-taken successors, chosen edge, predicate expression, shared pre-branch constraint count, dependency sources, alternate target, solver outcome/time, and candidate model. |
+| `branch_analysis.cfg_status` | Status of bounded static CFG recovery for target ranking (`ok`, `no-find-targets`, or `unavailable`). |
+| `branch_analysis.cfg_targets` | Per-find-target taken/not-taken/chosen/alternate static edge distances and structural preference. Missing distance means not statically reachable inside the recovery window. |
+| `branch_analysis.cfg_preference` | `chosen`, `alternate`, or `none` for the best bounded static target relation. Kept separate from solver SAT/UNSAT. |
 | `branch_analysis.model[*].value_hex` | For 64-bit register-backed solver assignments, canonical integer value suitable for replay (for example `0x000000000000002a`). Raw solver bytes remain available separately for byte-granular inputs. |
 | `found` | Number of states that reached a `find` target. |
 | `inputs` | Only with `solve = true`: one entry per solved found state, each an array of byte-strings (model bytes per symbol). Per-state model solving is capped at 10 seconds. |
@@ -255,8 +279,8 @@ Returns the `angryier-runtime` crate version string.
 $ cargo run -p angryier-cli -- status
 Angryier 0.1.0 — Rust-native multicore symbolic/concolic execution engine
 
-Workspace: 39 crates
-Implemented: 37 crates with real logic
+Workspace: 43 crates
+Implemented: 41 crates with real logic
 Scaffolded: 2 crates (contract boundaries, fail-closed)
 
 Tests: 585 tests across 78 suites (0 failures, historical count)
