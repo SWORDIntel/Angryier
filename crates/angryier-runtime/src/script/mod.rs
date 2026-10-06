@@ -39,6 +39,10 @@ pub const DEFAULT_STEPS: u64 = 256;
 /// Default maximum live states for `angry.run` (`opts.states`). Shared with
 /// the states value the CLI's synthesized driver passes explicitly.
 pub const DEFAULT_MAX_STATES: usize = 16;
+/// Default whole-run wall-clock budget for `angry.run`.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
+/// Default post-run alternate-branch solver budget.
+pub const DEFAULT_BRANCH_TIMEOUT_MS: u64 = 1000;
 /// Bit width of GPR symbolic marks. Intel 64 GPR storage is 64-bit and the
 /// evaluator returns a register's stored expression regardless of the read
 /// width, so sub-64-bit GPR symbols would surface as width-mismatched
@@ -472,7 +476,10 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // request it.
     let solve_models = opts.get::<bool>("solve").unwrap_or(false);
     let branch_analysis = opts.get::<bool>("branch_analysis").unwrap_or(false);
-    let branch_timeout_ms = opts.get::<u64>("branch_timeout_ms").unwrap_or(1000).clamp(1, 10_000);
+    let branch_timeout_ms = opts
+        .get::<u64>("branch_timeout_ms")
+        .unwrap_or(DEFAULT_BRANCH_TIMEOUT_MS)
+        .clamp(1, 10_000);
 
     // exploration = "fork": branch folding trusts hard constants only, so
     // symbolic-condition branches fork both directions (solver-checked) —
@@ -505,7 +512,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     };
     // Wall budget per run: `timeout_secs` (default 120) bounds the whole
     // exploration; the report's `timed_out` flag says when it fired.
-    let timeout_secs = opts.get::<u64>("timeout_secs").unwrap_or(120);
+    let timeout_secs = opts.get::<u64>("timeout_secs").unwrap_or(DEFAULT_TIMEOUT_SECS);
     let report = session
         .run_with_policy(
             steps,
@@ -900,6 +907,8 @@ mod tests {
     fn shared_defaults_have_the_documented_values() {
         assert_eq!(DEFAULT_STEPS, 256);
         assert_eq!(DEFAULT_MAX_STATES, 16);
+        assert_eq!(DEFAULT_TIMEOUT_SECS, 120);
+        assert_eq!(DEFAULT_BRANCH_TIMEOUT_MS, 1000);
         assert_eq!(SYMBOLIC_GPR_WIDTH, 64);
     }
 
