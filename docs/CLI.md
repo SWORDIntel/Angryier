@@ -60,7 +60,7 @@ Note: `help` always lists `run`. In builds without the feature its line reads `N
 ## `angryier run` — execute a binary symbolically
 
 ```
-usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--steps N] [--dynamic]
+usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--find ADDR] [--argv N] [--steps N] [--dynamic] [--driver]
 note: --find ADDR is hexadecimal, 0x prefix optional
 ```
 
@@ -70,15 +70,16 @@ Loads an ELF64 or PE32+ image into the engine and runs it concretely/symbolicall
 
 | Flag | Repeatable | Meaning |
 |---|---|---|
-| `<binary>` (positional) | — | Path to the ELF64 image to execute. Required, even when `--script` is given (the script chooses whether to reference it). A second positional operand exits 1 with an error. |
+| `<binary>` (positional) | — | Path to the ELF64 or PE32+ image to execute. Required, even when `--script` is given (the script chooses whether to reference it). A second positional operand exits 1 with an error. |
 | `--script f.lua` | no | Lua driver script (see the Lua API below). When set, the script has full control; the other flags are still validated but their values are unused. |
 | `--symbolic REG` | yes | Mark a general-purpose register symbolic before execution. `REG` is one of `rax rcx rdx rbx rsp rbp rsi rdi r8`–`r15`; other names exit 1 with an error. Always marked 64 bits wide. |
 | `--find ADDR` | yes | Add a target address (hexadecimal, `0x` prefix optional) to the exploration policy's find set. Non-hex values exit 1 with an error. |
 | `--argv N` | no | Symbolize `argv[0]` as `N` bytes (the model materializes `N` bytes, NUL-terminated, on the initial stack). Non-numeric values exit 1 with an error. |
 | `--steps N` | no | Instruction-step budget for the synthesized driver. Defaults to `256` — the same value as the Lua API's `opts.steps` default (the two share one constant, `angryier_runtime::script::DEFAULT_STEPS`, so they cannot drift). Non-numeric values exit 1 with an error. |
 | `--dynamic` | no | Load via the dynamic-linking path (`__libc_start_main` hook, `main(argc, argv)` entry) instead of static `_start`. |
+| `--driver` | no | Force direct PE32+ kernel-driver execution through the Rust runtime. Lua is bypassed; kernel pool tracking is attached; `--script`, `--symbolic`, `--find`, `--argv`, and `--dynamic` are parsed but not applied in this mode. |
 
-"Repeatable: no" is enforced: a repeated `<binary>` positional, `--script`, `--argv`, `--steps`, or `--dynamic` exits 1 with a `duplicate ...` error naming the second value instead of silently taking the last one.
+"Repeatable: no" is enforced: a repeated `<binary>` positional, `--script`, `--argv`, `--steps`, `--dynamic`, or `--driver` exits 1 with a `duplicate ...` error naming the second value instead of silently taking the last one.
 
 Address parsing for `--find` is hexadecimal with an optional `0x` prefix: `--find 0x40102a` and `--find 40102a` are equivalent, and `--find 1234` means address `0x1234`.
 
@@ -91,20 +92,38 @@ local r = angry.run("<binary>", { symbolic = { <regs marked 64-bit> },
                                   find = { <find addresses> },
                                   [argv = N,] [dynamic = true,]
                                   steps = <steps>, states = 16 })
-print(string.format("steps=%d forks=%d merges=%d terminated=%d found=%d",
-                    r.steps, r.forks, r.merges, r.terminated, r.found))
+print("[angryier][result] symbolic/concolic exploration completed")
+print(string.format("  exploration steps : %d (engine work units executed)", r.steps))
+print(string.format("  forks             : %d (new execution states created at branches)", r.forks))
+print(string.format("  merges            : %d (compatible states recombined)", r.merges))
+print(string.format("  terminated states : %d (states that reached a terminal condition)", r.terminated))
+print(string.format("  find hits         : %d (configured target-address hits)", r.found))
 ```
 
 `steps` is the `--steps` value (default `256`, shared with the Lua API's own `opts.steps` default — previously the CLI hardcoded `1024`, silently overshooting scripts by 4×). `states = 16` likewise matches the Lua API default (`angryier_runtime::script::DEFAULT_MAX_STATES`). Solver stays off (found targets are counted, not solved — use `--script` with `solve = true` to get models).
+
+### Operator-facing diagnostics
+
+Before execution starts, the CLI now prints a structured **execution plan** containing the target, frontend, effective mode, step/state budgets, symbolic registers, find targets, and symbolic argv settings. If a custom Lua script or `--driver` makes other CLI flags ineffective, that is stated explicitly rather than silently ignored.
+
+PE driver mode additionally reports:
+
+- image size, entry PC, import/hook counts, and a bounded import preview;
+- the first 12 ordinary instruction transitions with PC, next PC, decoded length, and semantic form id;
+- all high-signal modeled events after that point (SimProcedure dispatches, syscalls, traps, termination);
+- progress every 1000 steps for long runs;
+- the exact stop reason, final PC, termination status, SimProcedure count, pool allocation/free counts, and double-free verdict.
+
+Routine per-instruction lines are intentionally suppressed after the first 12 driver steps so verbose diagnostics do not turn a long analysis into an I/O-bound workload.
 
 ### Exit codes
 
 | Code | Cause |
 |---|---|
 | 0 | Driver/script evaluated successfully. |
-| 1 | Missing or duplicate `<binary>` positional; unknown flag (e.g. a typo); a flag missing its value; invalid `--symbolic` register; non-numeric `--argv`; non-numeric `--steps`; non-hex `--find`; a repeated non-repeatable flag (`--script`, `--argv`, `--steps`, `--dynamic`); `--script` file unreadable; Lua init/eval error (including an unsupported symbolic width in the opts table); or the binary was built without the `run` feature. |
+| 1 | Missing or duplicate `<binary>` positional; unknown flag (e.g. a typo); a flag missing its value; invalid `--symbolic` register; non-numeric `--argv`; non-numeric `--steps`; non-hex `--find`; a repeated non-repeatable flag (`--script`, `--argv`, `--steps`, `--dynamic`, `--driver`); `--script` file unreadable; Lua init/eval error (including an unsupported symbolic width in the opts table); driver load/model initialization failure; or the binary was built without the `run` feature. |
 
-Argument errors are prefixed `error:` followed by the `usage:` text on stderr; the remaining errors are prefixed `script init:`, `read <path>:`, or `script:`.
+Argument errors are prefixed `error:` and followed by usage plus a corrective hint. Runtime diagnostics use structured prefixes such as `[angryier][plan]`, `[angryier][load]`, `[angryier][exec]`, `[angryier][trace]`, `[angryier][progress]`, `[angryier][result]`, `[angryier][verdict]`, and `[angryier][hint]` so logs remain readable and grep-friendly.
 
 ---
 
