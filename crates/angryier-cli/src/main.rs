@@ -1032,7 +1032,83 @@ if r.branch_analysis ~= nil then
                 tostring(b.history_exact_find_target_hex or b.history_exact_find_target or "?")
             ))
         end
+        if b.history_candidate_index ~= nil then
+            print(string.format(
+                "  ranked older candidate  : history[%s] pc=%s target=%s",
+                tostring(b.history_candidate_index),
+                tostring(b.history_candidate_pc_hex or b.history_candidate_pc or "?"),
+                tostring(b.history_candidate_find_target_hex or b.history_candidate_find_target or "?")
+            ))
+            print(string.format(
+                "  candidate CFG distance  : chosen=%s alternate=%s",
+                tostring(b.history_candidate_chosen_distance or "unreachable/in-window"),
+                tostring(b.history_candidate_alternate_distance or "?")
+            ))
+            if b.history_candidate_reason ~= nil then
+                print(string.format("  candidate rationale     : %s", tostring(b.history_candidate_reason)))
+            end
+        end
     end
+
+    if b.history_candidate_analysis ~= nil then
+        local hc = b.history_candidate_analysis
+        print("[angryier][branch-history] ranked older candidate analysis")
+        print(string.format("  history index           : %s", tostring(hc.index or "?")))
+        print(string.format("  branch pc               : %s", tostring(hc.pc_hex or hc.pc or "?")))
+        print(string.format("  ranked find target      : %s", tostring(hc.find_target_hex or hc.find_target or "?")))
+        print(string.format("  alternate target        : %s", tostring(hc.alternate_target_hex or hc.alternate_target or "?")))
+        print(string.format("  chosen -> target        : %s edge(s)", tostring(hc.cfg_chosen_distance or "unreachable/in-window")))
+        print(string.format("  alternate -> target     : %s edge(s)", tostring(hc.cfg_alternate_distance or "?")))
+        print(string.format("  solver status           : %s", tostring(hc.solver_status or "not-run")))
+        if hc.solver_elapsed_us ~= nil then
+            print(string.format("  solver elapsed          : %s us", tostring(hc.solver_elapsed_us)))
+        end
+        if hc.replay ~= nil then
+            print(string.format("  replay status           : %s", tostring(hc.replay.status or "?")))
+            print(string.format("  matched alternate       : %s", yn(hc.replay.matched_alternate)))
+            if hc.replay.detail ~= nil then
+                print(string.format("  replay detail           : %s", tostring(hc.replay.detail)))
+            end
+        end
+        print(string.format("  steering action         : %s", tostring(hc.steering_action or "?")))
+        print(string.format("  steering confidence     : %s", tostring(hc.steering_confidence or "?")))
+        print(string.format("  steering reason         : %s", tostring(hc.steering_reason or "?")))
+        local candidate_model = hc.model
+        local candidate_model_count = count_table(candidate_model)
+        if candidate_model_count > 0 then
+            print(string.format("  alternate model         : %d assignment(s)", candidate_model_count))
+            local seed_flags = {{}}
+            for i = 1, math.min(candidate_model_count, 12) do
+                local assignment = candidate_model[i]
+                if assignment ~= nil and assignment.source_kind == "register" then
+                    print(string.format(
+                        "    model[%02d] %s = %s",
+                        i,
+                        tostring(assignment.name or assignment.register or "?"),
+                        tostring(assignment.value_hex or ("0x" .. tostring(assignment.hex or "")))
+                    ))
+                    if assignment.name ~= nil and assignment.value_hex ~= nil then
+                        seed_flags[#seed_flags + 1] = "--reg " .. assignment.name .. "=" .. assignment.value_hex
+                    end
+                elseif assignment ~= nil then
+                    print(string.format(
+                        "    model[%02d] kind=%s expr=%s bytes=0x%s",
+                        i,
+                        tostring(assignment.source_kind or "?"),
+                        tostring(assignment.expression or "?"),
+                        tostring(assignment.hex or "")
+                    ))
+                end
+            end
+            if #seed_flags > 0 then
+                print("  candidate seed flags    : " .. table.concat(seed_flags, " "))
+            end
+        end
+        if hc.error ~= nil then
+            print(string.format("  candidate error         : %s", tostring(hc.error)))
+        end
+    end
+
     print("[angryier][branch-analysis] most recent symbolic branch")
     print(string.format("  status                  : %s", tostring(b.status or "?")))
     if b.status == "recorded" then
@@ -1192,8 +1268,17 @@ end
 
 if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
     local b = r.branch_analysis
-    if b.history_exact_find_index ~= nil and not b.alternate_is_find_target then
-        idea("EARLIER DIRECT-TARGET BRANCH: retained branch history contains an older decision whose alternate successor exactly matches a configured --find target (history[" .. tostring(b.history_exact_find_index) .. "] at " .. tostring(b.history_exact_find_pc_hex or b.history_exact_find_pc or "?") .. "). The current last-branch solver does not analyze that earlier flip yet; prioritize it for the next targeted inversion rather than assuming the newest branch is the best mutation point.")
+    if b.history_candidate_analysis ~= nil then
+        local hc = b.history_candidate_analysis
+        if hc.steering_action == "prioritize-alternate" then
+            idea("RANKED OLDER BRANCH: history[" .. tostring(hc.index or "?") .. "] is structurally better than the current path toward " .. tostring(hc.find_target_hex or hc.find_target or "the configured target") .. ", and the bounded extra solver pass ranks its alternate edge for priority (" .. tostring(hc.steering_confidence or "?") .. " confidence). Prefer this seed over blindly flipping only the newest branch.")
+        elseif hc.steering_action == "reject-alternate" then
+            idea("RANKED OLDER BRANCH REJECTED: the best CFG-ranked older mutation point is UNSAT under its exact pre-branch prefix. Keep the structural ranking as context, but do not spend further budget on that flip unless an earlier constraint changes.")
+        elseif hc.steering_action == "unresolved" then
+            idea("RANKED OLDER BRANCH UNRESOLVED: CFG structure favors an earlier mutation point, but solver/replay evidence is insufficient. Treat it as a hypothesis, not a promoted seed.")
+        end
+    elseif b.history_candidate_index ~= nil then
+        idea("An older symbolic branch is statically closer to a configured --find target, but no candidate solve result is available. Re-enable the solver or inspect history[" .. tostring(b.history_candidate_index) .. "] manually.")
     end
     local action = b.steering_action
     local replay_status = b.replay ~= nil and b.replay.status or nil
@@ -1827,8 +1912,9 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "frontier block",
                 "[angryier][analysis] symbolic frontier",
                 "[angryier][branch-history] retained symbolic decisions",
-                "earlier direct-target",
-                "EARLIER DIRECT-TARGET BRANCH",
+                "ranked older candidate",
+                "[angryier][branch-history] ranked older candidate analysis",
+                "RANKED OLDER BRANCH",
                 "[angryier][branch-analysis] most recent symbolic branch",
                 "alternate solver status",
                 "target relation",
