@@ -636,7 +636,23 @@ fn test_angry_run_branch_analysis_solves_ranked_older_candidate() {
             branch_timeout_ms = 2000,
         }})
         local b = assert(r.branch_analysis)
-        local hc = assert(b.history_candidate_analysis)
+        local hc = b.history_candidate_analysis
+        if hc == nil then
+            local parts = {}
+            for i, h in ipairs(b.history or {}) do
+                parts[#parts + 1] = string.format(
+                    "h[%d] pc=%s chosen=%s alt=%s pref=%s chosen_d=%s alt_d=%s",
+                    i,
+                    tostring(h.pc_hex or h.pc),
+                    tostring(h.chosen),
+                    tostring(h.alternate_target_hex or h.alternate_target),
+                    tostring(h.cfg_preference),
+                    tostring(h.cfg_chosen_distance),
+                    tostring(h.cfg_alternate_distance)
+                )
+            end
+            error("no ranked older candidate; history_count=" .. tostring(b.history_count) .. "; " .. table.concat(parts, "; "))
+        end
         local replay = assert(hc.replay)
         return
             b.history_count,
