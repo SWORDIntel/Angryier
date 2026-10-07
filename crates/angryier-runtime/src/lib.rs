@@ -5309,6 +5309,21 @@ mod solver_constraint_safety_tests {
         assert_eq!(assignments.get(&7), Some(&0x1234));
     }
 
+
+    #[test]
+    fn replay_memory_assignment_rejects_conflicts_but_deduplicates_equal_values() {
+        let mut assignments = BTreeMap::new();
+
+        assert_eq!(insert_replay_memory_assignment(&mut assignments, 0x4000, 0x41), Ok(()));
+        assert_eq!(insert_replay_memory_assignment(&mut assignments, 0x4000, 0x41), Ok(()));
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(
+            insert_replay_memory_assignment(&mut assignments, 0x4000, 0x42),
+            Err((0x41, 0x42))
+        );
+        assert_eq!(assignments.get(&0x4000), Some(&0x41));
+    }
+
 }
 
 /// The most recent symbolic branch decision on one state.
@@ -5379,6 +5394,21 @@ fn insert_replay_register_assignment(
     }
 }
 
+fn insert_replay_memory_assignment(
+    assignments: &mut BTreeMap<Address, u8>,
+    address: Address,
+    value: u8,
+) -> Result<(), (u8, u8)> {
+    match assignments.get(&address).copied() {
+        Some(existing) if existing == value => Ok(()),
+        Some(existing) => Err((existing, value)),
+        None => {
+            assignments.insert(address, value);
+            Ok(())
+        }
+    }
+}
+
 /// Concrete validation of an alternate-branch solver model.
 ///
 /// Replay is intentionally conservative: only models whose entries all map
@@ -5402,6 +5432,8 @@ pub struct AlternateBranchReplay {
     pub observed_target: Option<Address>,
     pub matched_alternate: bool,
     pub applied_registers: usize,
+    /// Entry-snapshot symbolic memory bytes concretized from the model.
+    pub applied_memory_bytes: usize,
     pub detail: String,
 }
 
@@ -8180,8 +8212,9 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     /// This is a validation layer, not another symbolic proof. It refuses
     /// stateful kernel-pool runs because the pool tracker is shared through an
     /// `Arc` and `Process::reset_to_entry` intentionally does not rewind
-    /// external model state. It also refuses non-register model leaves rather
-    /// than dropping symbolic memory assignments.
+    /// external model state. Register inputs and explicitly tracked
+    /// entry-snapshot symbolic memory/argv bytes can be materialized. Runtime-
+    /// generated stdin/file/free symbols remain unsupported and fail closed.
     pub fn replay_alternate_branch_model(
         &self,
         state: &SymbolicState,
@@ -8198,6 +8231,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             observed_target: None,
             matched_alternate: false,
             applied_registers: 0,
+            applied_memory_bytes: 0,
             detail,
         };
 
@@ -8228,6 +8262,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         }
 
         let mut assignments = BTreeMap::<u32, u64>::new();
+        let mut memory_assignments = BTreeMap::<Address, u8>::new();
         for (expression, bytes) in &solution.model {
             let Some(binding) = state
                 .symbols
@@ -8236,22 +8271,57 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             else {
                 let mut replay = base(
                     "unsupported-model",
-                    format!("solver model expression {expression} is not a register-backed symbolic input"),
+                    format!("solver model expression {expression} has no retained input binding"),
                 );
                 replay.applied_registers = assignments.len();
+                replay.applied_memory_bytes = memory_assignments.len();
                 return Ok(replay);
             };
+
+            if binding.width == 8 {
+                if let Some(&address) = state.replay_memory_symbols.get(&binding.expression) {
+                    if bytes.is_empty() || bytes.get(1..).is_some_and(|upper| upper.iter().any(|byte| *byte != 0)) {
+                        let mut replay = base(
+                            "unsupported-model",
+                            format!(
+                                "solver model expression {expression} is an 8-bit entry-memory input but carries {} byte(s) with non-zero/invalid upper data",
+                                bytes.len()
+                            ),
+                        );
+                        replay.applied_registers = assignments.len();
+                        replay.applied_memory_bytes = memory_assignments.len();
+                        return Ok(replay);
+                    }
+                    let value = bytes[0];
+                    if let Err((existing, conflicting)) =
+                        insert_replay_memory_assignment(&mut memory_assignments, address, value)
+                    {
+                        let mut replay = base(
+                            "ambiguous-model",
+                            format!(
+                                "solver model assigns conflicting values to entry memory {address:#018x}: {existing:#04x} vs {conflicting:#04x}; refusing model-order-dependent replay"
+                            ),
+                        );
+                        replay.applied_registers = assignments.len();
+                        replay.applied_memory_bytes = memory_assignments.len();
+                        return Ok(replay);
+                    }
+                    continue;
+                }
+            }
+
             let nonzero_upper = bytes.get(8..).is_some_and(|upper| upper.iter().any(|byte| *byte != 0));
             if binding.width != 64 || nonzero_upper {
                 let mut replay = base(
                     "unsupported-model",
                     format!(
-                        "solver model expression {expression} is {} bits / {} byte(s), not a replayable 64-bit GPR value",
+                        "solver model expression {expression} is {} bits / {} byte(s) and is not a replayable 64-bit GPR or tracked entry-memory byte",
                         binding.width,
                         bytes.len()
                     ),
                 );
                 replay.applied_registers = assignments.len();
+                replay.applied_memory_bytes = memory_assignments.len();
                 return Ok(replay);
             }
 
@@ -8270,14 +8340,15 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     ),
                 );
                 replay.applied_registers = assignments.len();
+                replay.applied_memory_bytes = memory_assignments.len();
                 return Ok(replay);
             }
         }
 
-        if assignments.is_empty() {
+        if assignments.is_empty() && memory_assignments.is_empty() {
             return Ok(base(
                 "unsupported-model",
-                "SAT alternate model contained no replayable register assignments".to_string(),
+                "SAT alternate model contained no replayable register or tracked entry-memory assignments".to_string(),
             ));
         }
 
@@ -8285,6 +8356,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         process.reset_to_entry();
         for (&register, &value) in &assignments {
             process.write_register(register, value)?;
+        }
+        for (&address, &value) in &memory_assignments {
+            process.state.memory = process
+                .state
+                .memory
+                .write(address, &[ByteValue::Concrete(value)])
+                .map_err(|error| RuntimeError::Memory(format!("replay memory {address:#x}: {error:?}")))?;
         }
 
         let budget = max_steps.max(1);
@@ -8307,6 +8385,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             observed_target: Some(pc),
                             matched_alternate: false,
                             applied_registers: assignments.len(),
+                            applied_memory_bytes: memory_assignments.len(),
                             detail: format!(
                                 "concrete replay reached dynamic visit {expected_visit} of branch {:#x}, but the entry-to-branch trace fingerprint differs (symbolic={:#018x}, replay={:#018x}); refusing to validate the wrong path context",
                                 solution.decision.pc,
@@ -8328,6 +8407,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         observed_target: observed,
                         matched_alternate: matched,
                         applied_registers: assignments.len(),
+                        applied_memory_bytes: memory_assignments.len(),
                         detail: if matched {
                             format!(
                                 "concrete replay reached dynamic visit {expected_visit} of branch {:#x} and took the solver-predicted alternate successor",
@@ -8359,6 +8439,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             observed_target: process.pc().ok(),
             matched_alternate: false,
             applied_registers: assignments.len(),
+            applied_memory_bytes: memory_assignments.len(),
             detail: if process.terminated {
                 format!(
                     "concrete replay terminated after {observed_visits} visit(s) to branch {:#x}; expected dynamic visit {expected_visit}",
