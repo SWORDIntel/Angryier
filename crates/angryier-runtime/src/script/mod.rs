@@ -198,6 +198,40 @@ pub(crate) fn set_addr64(table: &Table, key: &str, value: u64) -> mlua::Result<(
     table.set(format!("{key}_hex"), hex64(value))
 }
 
+fn annotate_symbol_source(
+    entry: &Table,
+    state: &crate::SymbolicState,
+    binding: &angryier_execution::SymbolBinding,
+) -> mlua::Result<()> {
+    entry.set("width", binding.width)?;
+    entry.set("expression", binding.expression.0)?;
+    if binding.width == 64 {
+        entry.set("source_kind", "register")?;
+        entry.set("register", binding.register)?;
+        if let Some(name) = name_by_reg(binding.register) {
+            entry.set("name", name)?;
+        }
+    } else if let Some(address) = state.replay_memory_symbols.get(&binding.expression) {
+        entry.set("source_kind", "entry-memory")?;
+        set_addr64(entry, "address", *address)?;
+    } else if let Some(origin) = state.replay_stream_symbols.get(&binding.expression) {
+        match origin {
+            crate::ReplayStreamInput::Stdin { offset } => {
+                entry.set("source_kind", "stdin")?;
+                entry.set("offset", *offset)?;
+            }
+            crate::ReplayStreamInput::File { path, offset } => {
+                entry.set("source_kind", "file")?;
+                entry.set("path", path.as_str())?;
+                entry.set("offset", *offset)?;
+            }
+        }
+    } else {
+        entry.set("source_kind", "byte-symbol")?;
+    }
+    Ok(())
+}
+
 /// Validates a symbolic-register width from the opts table / session
 /// method. `None` (the `{ "rdi" }` list form or `s:symbolic("rdi")`)
 /// defaults to [`SYMBOLIC_GPR_WIDTH`]; 64 is accepted; anything else is an
@@ -1131,17 +1165,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                     == Some(*source_id)
                             });
                             if let Some(binding) = binding {
-                                entry.set("width", binding.width)?;
-                                entry.set("expression", binding.expression.0)?;
-                                if binding.width == 64 {
-                                    entry.set("source_kind", "register")?;
-                                    entry.set("register", binding.register)?;
-                                    if let Some(name) = name_by_reg(binding.register) {
-                                        entry.set("name", name)?;
-                                    }
-                                } else {
-                                    entry.set("source_kind", "byte-symbol")?;
-                                }
+                                annotate_symbol_source(&entry, state, binding)?;
                             } else {
                                 entry.set("source_kind", "unbound-symbol")?;
                             }
@@ -1172,20 +1196,14 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                         .iter()
                                         .find(|binding| u64::from(binding.expression.0) == *expression)
                                     {
-                                        entry.set("width", binding.width)?;
+                                        annotate_symbol_source(&entry, state, binding)?;
                                         if binding.width == 64 {
-                                            entry.set("source_kind", "register")?;
-                                            entry.set("register", binding.register)?;
-                                            if let Some(name) = name_by_reg(binding.register) {
-                                                entry.set("name", name)?;
-                                            }
                                             let mut value_bytes = [0u8; 8];
                                             let len = bytes.len().min(8);
                                             value_bytes[..len].copy_from_slice(&bytes[..len]);
-                                            let value = u64::from_le_bytes(value_bytes);
-                                            set_addr64(&entry, "value", value)?;
-                                        } else {
-                                            entry.set("source_kind", "byte-symbol")?;
+                                            set_addr64(&entry, "value", u64::from_le_bytes(value_bytes))?;
+                                        } else if let Some(value) = bytes.first() {
+                                            entry.set("value_byte", *value)?;
                                         }
                                     } else {
                                         entry.set("source_kind", "unbound-symbol")?;
@@ -1312,19 +1330,14 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                             .iter()
                                             .find(|binding| u64::from(binding.expression.0) == *expression)
                                         {
-                                            entry.set("width", binding.width)?;
+                                            annotate_symbol_source(&entry, state, binding)?;
                                             if binding.width == 64 {
-                                                entry.set("source_kind", "register")?;
-                                                entry.set("register", binding.register)?;
-                                                if let Some(name) = name_by_reg(binding.register) {
-                                                    entry.set("name", name)?;
-                                                }
                                                 let mut value_bytes = [0u8; 8];
                                                 let len = bytes.len().min(8);
                                                 value_bytes[..len].copy_from_slice(&bytes[..len]);
                                                 set_addr64(&entry, "value", u64::from_le_bytes(value_bytes))?;
-                                            } else {
-                                                entry.set("source_kind", "byte-symbol")?;
+                                            } else if let Some(value) = bytes.first() {
+                                                entry.set("value_byte", *value)?;
                                             }
                                         } else {
                                             entry.set("source_kind", "unbound-symbol")?;
@@ -1345,7 +1358,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                                 replay_out.set("matched_alternate", replay.matched_alternate)?;
                                                 replay_out.set("applied_registers", replay.applied_registers)?;
                                                 replay_out.set("applied_memory_bytes", replay.applied_memory_bytes)?;
-                                        replay_out.set("applied_stream_bytes", replay.applied_stream_bytes)?;
+                                                replay_out.set("applied_stream_bytes", replay.applied_stream_bytes)?;
                                                 replay_out.set("detail", replay.detail)?;
                                                 if let Some(observed) = replay.observed_target {
                                                     set_addr64(&replay_out, "observed_target", observed)?;
