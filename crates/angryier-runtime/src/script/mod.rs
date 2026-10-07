@@ -801,6 +801,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     entry.set("prefix_constraints", recorded.prefix_constraints)?;
                     entry.set("visit_index", recorded.visit_index)?;
                     entry.set("visit_index_exact", recorded.visit_index_exact)?;
+                    entry.set("trace_fingerprint_hex", hex64(recorded.trace_fingerprint))?;
                     entry.set("chosen", if recorded.chose_taken { "taken" } else { "not_taken" })?;
                     entry.set("chosen_condition", if recorded.chose_taken { "true" } else { "false" })?;
                     set_addr64(&entry, "condition_true_target", recorded.taken)?;
@@ -947,6 +948,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     branch_out.set("prefix_constraints", decision.prefix_constraints)?;
                     branch_out.set("visit_index", decision.visit_index)?;
                     branch_out.set("visit_index_exact", decision.visit_index_exact)?;
+                    branch_out.set("trace_fingerprint_hex", hex64(decision.trace_fingerprint))?;
                     let chosen_target = if decision.chose_taken {
                         decision.taken
                     } else {
@@ -1261,6 +1263,10 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                         candidate_out.set("prefix_constraints", candidate_decision.prefix_constraints)?;
                         candidate_out.set("visit_index", candidate_decision.visit_index)?;
                         candidate_out.set("visit_index_exact", candidate_decision.visit_index_exact)?;
+                        candidate_out.set(
+                            "trace_fingerprint_hex",
+                            hex64(candidate_decision.trace_fingerprint),
+                        )?;
 
                         if let Some(backend) = backend.as_mut() {
                             match session.solve_alternate_branch_decision(
