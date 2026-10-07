@@ -799,6 +799,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     set_addr64(&entry, "pc", recorded.pc)?;
                     entry.set("condition", recorded.condition.0)?;
                     entry.set("prefix_constraints", recorded.prefix_constraints)?;
+                    entry.set("visit_index", recorded.visit_index)?;
+                    entry.set("visit_index_exact", recorded.visit_index_exact)?;
                     entry.set("chosen", if recorded.chose_taken { "taken" } else { "not_taken" })?;
                     entry.set("chosen_condition", if recorded.chose_taken { "true" } else { "false" })?;
                     set_addr64(&entry, "condition_true_target", recorded.taken)?;
@@ -865,15 +867,13 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                             // below. This candidate is specifically the best
                             // OLDER mutation point.
                             if index + 1 < state.branch_history.len() {
-                                let replace = history_candidate.as_ref().is_none_or(
-                                    |best| {
-                                        class > best.class
-                                            || (class == best.class
-                                                && (improvement > best.improvement
-                                                    || (improvement == best.improvement
-                                                        && alt_distance < best.alt_distance)))
-                                    },
-                                );
+                                let replace = history_candidate.as_ref().is_none_or(|best| {
+                                    class > best.class
+                                        || (class == best.class
+                                            && (improvement > best.improvement
+                                                || (improvement == best.improvement
+                                                    && alt_distance < best.alt_distance)))
+                                });
                                 if replace {
                                     history_candidate = Some(RankedHistoryCandidate {
                                         index: index + 1,
@@ -945,6 +945,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     branch_out.set("chosen_condition", if decision.chose_taken { "true" } else { "false" })?;
                     branch_out.set("condition", decision.condition.0)?;
                     branch_out.set("prefix_constraints", decision.prefix_constraints)?;
+                    branch_out.set("visit_index", decision.visit_index)?;
+                    branch_out.set("visit_index_exact", decision.visit_index_exact)?;
                     let chosen_target = if decision.chose_taken {
                         decision.taken
                     } else {
@@ -1177,6 +1179,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                     Ok(replay) => {
                                         replay_out.set("status", replay.status)?;
                                         replay_out.set("steps", replay.steps)?;
+                                        replay_out.set("expected_visit", replay.expected_visit)?;
+                                        replay_out.set("observed_visits", replay.observed_visits)?;
                                         replay_out.set("reached_branch", replay.reached_branch)?;
                                         replay_out.set("matched_alternate", replay.matched_alternate)?;
                                         replay_out.set("applied_registers", replay.applied_registers)?;
@@ -1255,6 +1259,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                         set_addr64(&candidate_out, "chosen_target", candidate_chosen_target)?;
                         set_addr64(&candidate_out, "alternate_target", candidate_alternate_target)?;
                         candidate_out.set("prefix_constraints", candidate_decision.prefix_constraints)?;
+                        candidate_out.set("visit_index", candidate_decision.visit_index)?;
+                        candidate_out.set("visit_index_exact", candidate_decision.visit_index_exact)?;
 
                         if let Some(backend) = backend.as_mut() {
                             match session.solve_alternate_branch_decision(
@@ -1310,6 +1316,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                             Ok(replay) => {
                                                 replay_out.set("status", replay.status)?;
                                                 replay_out.set("steps", replay.steps)?;
+                                                replay_out.set("expected_visit", replay.expected_visit)?;
+                                                replay_out.set("observed_visits", replay.observed_visits)?;
                                                 replay_out.set("reached_branch", replay.reached_branch)?;
                                                 replay_out.set("matched_alternate", replay.matched_alternate)?;
                                                 replay_out.set("applied_registers", replay.applied_registers)?;
