@@ -952,19 +952,14 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     // root) so multi-branch diagnostics never regress the
                     // historical per-last-branch behavior.
                     let shared_root_pc = state.branch_history.first().map(|recorded| recorded.pc);
-                    let latest_cfg_fallback =
-                        if !policy.find.is_empty()
-                            && analysis_cfg.as_ref().is_some_and(Result::is_err)
-                            && shared_root_pc != Some(decision.pc)
-                        {
-                            Some(runtime.recover_cfg_window(
-                                &state.process,
-                                decision.pc,
-                                16 * 1024 * 1024,
-                            ))
-                        } else {
-                            None
-                        };
+                    let latest_cfg_fallback = if !policy.find.is_empty()
+                        && analysis_cfg.as_ref().is_some_and(Result::is_err)
+                        && shared_root_pc != Some(decision.pc)
+                    {
+                        Some(runtime.recover_cfg_window(&state.process, decision.pc, 16 * 1024 * 1024))
+                    } else {
+                        None
+                    };
                     let latest_cfg = match analysis_cfg.as_ref() {
                         Some(Ok(cfg)) => {
                             branch_out.set("cfg_source", "shared-history-root")?;
