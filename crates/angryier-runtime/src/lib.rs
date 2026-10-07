@@ -150,6 +150,34 @@ const MAX_INSN_LEN: usize = 15;
 /// Maximum number of executed block addresses retained for branch solving.
 const MAX_TRACE: usize = 4096;
 
+/// Deterministic identity for an exact dynamic PC trace.
+///
+/// This is diagnostic path identity, not a cryptographic primitive: concrete
+/// replay must match the same entry-to-branch context before it can validate
+/// an alternate edge.
+fn trace_fingerprint<I>(pcs: I) -> u64
+where
+    I: IntoIterator<Item = Address>,
+{
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = OFFSET;
+    let mut count = 0u64;
+    for pc in pcs {
+        for byte in pc.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+        count = count.wrapping_add(1);
+    }
+    for byte in count.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 /// Default whole-run wall-clock budget shared by the stable Rust API and
 /// scripting/CLI frontends. Keeping this below the script feature boundary
 /// prevents public surfaces from silently drifting.
@@ -5234,6 +5262,18 @@ mod solver_constraint_safety_tests {
             "a missing constraint summary must abort the query"
         );
     }
+    #[test]
+    fn trace_fingerprint_is_order_and_length_sensitive() {
+        let a = trace_fingerprint([0x1000, 0x2000, 0x3000]);
+        let same = trace_fingerprint([0x1000, 0x2000, 0x3000]);
+        let reordered = trace_fingerprint([0x1000, 0x3000, 0x2000]);
+        let shorter = trace_fingerprint([0x1000, 0x2000]);
+
+        assert_eq!(a, same);
+        assert_ne!(a, reordered);
+        assert_ne!(a, shorter);
+    }
+
 }
 
 /// The most recent symbolic branch decision on one state.
@@ -5262,6 +5302,9 @@ pub struct SymbolicBranchDecision {
     /// false, `visit_index` is only a suffix count and replay must fail
     /// closed instead of guessing which loop visit produced the decision.
     pub visit_index_exact: bool,
+    /// Fingerprint of the exact entry-to-branch PC sequence, including this
+    /// branch PC. Meaningful only when `visit_index_exact` is true.
+    pub trace_fingerprint: u64,
 }
 
 /// Maximum symbolic branch decisions retained per state. The ledger is
@@ -5294,7 +5337,7 @@ pub struct AlternateBranchSolution {
 pub struct AlternateBranchReplay {
     /// Stable status for scripting/frontends: `validated`, `mismatch`,
     /// `budget-exhausted`, `terminated-before-branch`,
-    /// `ambiguous-branch-visit`, `unsupported-model`,
+    /// `ambiguous-branch-visit`, `path-context-mismatch`, `unsupported-model`,
     /// `stateful-kernel-model`, `stateful-environment`, or `not-sat`.
     pub status: &'static str,
     pub steps: u64,
@@ -7102,6 +7145,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             let prefix_constraints = state.constraints.len();
             let visit_index = state.process.trace.iter().filter(|&&address| address == pc).count() as u64;
             let visit_index_exact = state.process.trace.len() < MAX_TRACE;
+            let branch_trace_fingerprint = trace_fingerprint(state.process.trace.iter().copied());
             if taken_feasible && other_feasible {
                 // Clone the common pre-branch state before recording either
                 // edge so both histories inherit the exact same prefix.
@@ -7115,6 +7159,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     prefix_constraints,
                     visit_index,
                     visit_index_exact,
+                    trace_fingerprint: branch_trace_fingerprint,
                 });
                 state.constraints.push(condition);
                 let _ = state.process.write_pc(branch.taken);
@@ -7127,6 +7172,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     prefix_constraints,
                     visit_index,
                     visit_index_exact,
+                    trace_fingerprint: branch_trace_fingerprint,
                 });
                 child.constraints.push(not_cond);
                 let _ = child.process.write_pc(branch.not_taken);
@@ -7177,6 +7223,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 prefix_constraints,
                 visit_index,
                 visit_index_exact,
+                trace_fingerprint: branch_trace_fingerprint,
             });
             state.constraints.push(constraint);
             let _ = state.process.write_pc(next_pc);
@@ -8157,6 +8204,26 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             if pc == solution.decision.pc {
                 observed_visits += 1;
                 if observed_visits == expected_visit {
+                    let replay_trace_fingerprint =
+                        trace_fingerprint(process.trace.iter().copied().chain(std::iter::once(pc)));
+                    if replay_trace_fingerprint != solution.decision.trace_fingerprint {
+                        return Ok(AlternateBranchReplay {
+                            status: "path-context-mismatch",
+                            steps,
+                            expected_visit,
+                            observed_visits,
+                            reached_branch: true,
+                            observed_target: Some(pc),
+                            matched_alternate: false,
+                            applied_registers: assignments.len(),
+                            detail: format!(
+                                "concrete replay reached dynamic visit {expected_visit} of branch {:#x}, but the entry-to-branch trace fingerprint differs (symbolic={:#018x}, replay={:#018x}); refusing to validate the wrong path context",
+                                solution.decision.pc,
+                                solution.decision.trace_fingerprint,
+                                replay_trace_fingerprint
+                            ),
+                        });
+                    }
                     let _ = self.runtime.step(&mut process)?;
                     steps += 1;
                     let observed = process.pc().ok();
