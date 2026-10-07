@@ -1282,10 +1282,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                         candidate_out.set("prefix_constraints", candidate_decision.prefix_constraints)?;
                         candidate_out.set("visit_index", candidate_decision.visit_index)?;
                         candidate_out.set("visit_index_exact", candidate_decision.visit_index_exact)?;
-                        candidate_out.set(
-                            "trace_fingerprint_hex",
-                            hex64(candidate_decision.trace_fingerprint),
-                        )?;
+                        candidate_out.set("trace_fingerprint_hex", hex64(candidate_decision.trace_fingerprint))?;
 
                         if let Some(backend) = backend.as_mut() {
                             match session.solve_alternate_branch_decision(
@@ -1346,7 +1343,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                                 replay_out.set("reached_branch", replay.reached_branch)?;
                                                 replay_out.set("matched_alternate", replay.matched_alternate)?;
                                                 replay_out.set("applied_registers", replay.applied_registers)?;
-                                        replay_out.set("applied_memory_bytes", replay.applied_memory_bytes)?;
+                                                replay_out.set("applied_memory_bytes", replay.applied_memory_bytes)?;
                                                 replay_out.set("detail", replay.detail)?;
                                                 if let Some(observed) = replay.observed_target {
                                                     set_addr64(&replay_out, "observed_target", observed)?;
@@ -1611,8 +1608,7 @@ mod tests {
 
     #[test]
     fn branch_steering_path_context_mismatch_vetoes_cfg_priority() {
-        let verdict =
-            branch_steering_verdict("Sat", false, true, Some("alternate"), Some("path-context-mismatch"));
+        let verdict = branch_steering_verdict("Sat", false, true, Some("alternate"), Some("path-context-mismatch"));
         assert_eq!(verdict.action, "unresolved");
         assert_eq!(verdict.confidence, "low");
         assert!(verdict.reason.contains("different dynamic path context"));
