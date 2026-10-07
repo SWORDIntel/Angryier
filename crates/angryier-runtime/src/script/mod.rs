@@ -793,6 +793,9 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     entry.set("condition", recorded.condition.0)?;
                     entry.set("prefix_constraints", recorded.prefix_constraints)?;
                     entry.set("chosen", if recorded.chose_taken { "taken" } else { "not_taken" })?;
+                    entry.set("chosen_condition", if recorded.chose_taken { "true" } else { "false" })?;
+                    set_addr64(&entry, "condition_true_target", recorded.taken)?;
+                    set_addr64(&entry, "condition_false_target", recorded.not_taken)?;
                     let chosen = if recorded.chose_taken {
                         recorded.taken
                     } else {
@@ -917,7 +920,14 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     set_addr64(&branch_out, "pc", decision.pc)?;
                     set_addr64(&branch_out, "taken_target", decision.taken)?;
                     set_addr64(&branch_out, "not_taken_target", decision.not_taken)?;
+                    // Compatibility aliases above retain the original API;
+                    // these condition-oriented names are the preferred
+                    // operator/agent surface because they do not imply how a
+                    // source ISA mnemonic spells its architectural branch.
+                    set_addr64(&branch_out, "condition_true_target", decision.taken)?;
+                    set_addr64(&branch_out, "condition_false_target", decision.not_taken)?;
                     branch_out.set("chosen", if decision.chose_taken { "taken" } else { "not_taken" })?;
+                    branch_out.set("chosen_condition", if decision.chose_taken { "true" } else { "false" })?;
                     branch_out.set("condition", decision.condition.0)?;
                     branch_out.set("prefix_constraints", decision.prefix_constraints)?;
                     let chosen_target = if decision.chose_taken {
