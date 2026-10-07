@@ -759,9 +759,9 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                         .first()
                         .map(|decision| runtime.recover_cfg_window(&state.process, decision.pc, 16 * 1024 * 1024))
                         .or_else(|| {
-                            state
-                                .last_branch
-                                .map(|decision| runtime.recover_cfg_window(&state.process, decision.pc, 16 * 1024 * 1024))
+                            state.last_branch.map(|decision| {
+                                runtime.recover_cfg_window(&state.process, decision.pc, 16 * 1024 * 1024)
+                            })
                         })
                 };
                 // (history index, decision, target, alternate distance,
@@ -860,8 +860,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                         class > *best_class
                                             || (class == *best_class
                                                 && (improvement > *best_improvement
-                                                    || (improvement == *best_improvement
-                                                        && alt_distance < *best_alt)))
+                                                    || (improvement == *best_improvement && alt_distance < *best_alt)))
                                     },
                                 );
                                 if replace {
@@ -1027,7 +1026,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                             }
                             None => {
                                 branch_out.set("cfg_status", "unavailable")?;
-                                branch_out.set("cfg_error", "no retained branch root was available for CFG recovery")?;
+                                branch_out
+                                    .set("cfg_error", "no retained branch root was available for CFG recovery")?;
                             }
                         }
                     }
