@@ -890,6 +890,7 @@ fn test_angry_run_branch_analysis_merge_clears_stale_provenance() {
         prefix_constraints: 0,
         visit_index: 1,
         visit_index_exact: true,
+        trace_fingerprint: 0,
     };
     session.states[0].branch_history.push(decision);
     session.states[0].last_branch = Some(decision);
