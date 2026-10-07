@@ -236,6 +236,8 @@ This cap is intentional: diagnostic output should improve the next experiment wi
 
 Shared CFG recovery is an optimization, not a semantic dependency. If recovery from the earliest retained branch fails, Angryier disables older-branch CFG ranking for that run but performs one bounded recovery from the newest branch PC so the detailed newest-branch analysis keeps the behavior it had before branch-history ranking was added. The result exposes the source through `cfg_source`.
 
+The branch-analysis solver **fails closed on incomplete constraint metadata**. Every pre-branch path constraint must have an arena dependency summary; a missing summary aborts the query with the failing constraint index/expression ID. The same guarantee applies to feasibility checks and found-state model extraction. This prevents reporting SAT from a weakened path prefix. A successful symbolic SAT result is still not equivalent to concrete validation; consult `branch_analysis.replay` and the fidelity-debt fields.
+
 ### Exit codes
 
 | Code | Cause |
@@ -298,6 +300,7 @@ Result table:
 | `branch_analysis.steering_confidence` | `high`, `medium`, or `low`. High requires direct target/UNSAT evidence; bounded-CFG directionality is deliberately capped at medium. |
 | `branch_analysis.steering_reason` | Stable human-readable rationale for the steering action. The policy requires solver feasibility before CFG evidence can prioritize an alternate edge. |
 | `branch_analysis.replay` | Concrete validation result for SAT alternate models when every model leaf is a replayable 64-bit GPR input and the environment is rewind-safe. |
+| `branch_analysis.error` | Diagnostic error when exact alternate-edge solver setup fails (including unavailable path-constraint metadata). The solver is not called with a reduced path; the steering action remains unresolved. |
 | `branch_analysis.replay.status` | `validated`, `mismatch`, `budget-exhausted`, `terminated-before-branch`, `unsupported-model`, `stateful-kernel-model`, `stateful-environment`, `not-sat`, or `error`. |
 | `branch_analysis.replay.matched_alternate` | True only when concrete execution restarted from entry, reached the recorded branch PC, and stepped to the solver-predicted alternate successor. |
 | `branch_analysis.replay.observed_target_hex` | Exact successor observed after replaying the branch, when available. |
