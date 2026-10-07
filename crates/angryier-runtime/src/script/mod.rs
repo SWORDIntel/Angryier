@@ -137,6 +137,21 @@ fn branch_steering_verdict(
         },
     }
 }
+/// Ranked older branch worth a bounded alternate-edge solve.
+///
+/// Named fields prevent swapping two distances or the branch's PC and
+/// destination when selecting an older candidate from the path history.
+#[derive(Clone, Copy, Debug)]
+struct RankedHistoryCandidate {
+    index: usize,
+    decision: crate::SymbolicBranchDecision,
+    target: u64,
+    alt_distance: usize,
+    chosen_distance: Option<usize>,
+    class: u8,
+    improvement: usize,
+}
+
 /// Bit width of GPR symbolic marks. Intel 64 GPR storage is 64-bit and the
 /// evaluator returns a register's stored expression regardless of the read
 /// width, so sub-64-bit GPR symbols would surface as width-mismatched
@@ -768,15 +783,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                 // chosen distance, class, improvement). Class 2 means the
                 // alternate reaches the target while the chosen edge does
                 // not; class 1 means both reach it but alternate is shorter.
-                let mut history_candidate: Option<(
-                    usize,
-                    crate::SymbolicBranchDecision,
-                    u64,
-                    usize,
-                    Option<usize>,
-                    u8,
-                    usize,
-                )> = None;
+                let mut history_candidate: Option<RankedHistoryCandidate> = None;
 
                 // Bounded branch provenance for multi-candidate follow-up.
                 // Entries preserve execution order; the last entry is the
@@ -859,23 +866,24 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                             // OLDER mutation point.
                             if index + 1 < state.branch_history.len() {
                                 let replace = history_candidate.as_ref().is_none_or(
-                                    |(_, _, _, best_alt, _, best_class, best_improvement)| {
-                                        class > *best_class
-                                            || (class == *best_class
-                                                && (improvement > *best_improvement
-                                                    || (improvement == *best_improvement && alt_distance < *best_alt)))
+                                    |best| {
+                                        class > best.class
+                                            || (class == best.class
+                                                && (improvement > best.improvement
+                                                    || (improvement == best.improvement
+                                                        && alt_distance < best.alt_distance)))
                                     },
                                 );
                                 if replace {
-                                    history_candidate = Some((
-                                        index + 1,
-                                        recorded,
+                                    history_candidate = Some(RankedHistoryCandidate {
+                                        index: index + 1,
+                                        decision: recorded,
                                         target,
                                         alt_distance,
                                         chosen_distance,
                                         class,
                                         improvement,
-                                    ));
+                                    });
                                 }
                             }
                         }
@@ -892,8 +900,15 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     set_addr64(&branch_out, "history_exact_find_pc", recorded.pc)?;
                     set_addr64(&branch_out, "history_exact_find_target", target)?;
                 }
-                if let Some((index, recorded, target, alt_distance, chosen_distance, class, improvement)) =
-                    history_candidate
+                if let Some(RankedHistoryCandidate {
+                    index,
+                    decision: recorded,
+                    target,
+                    alt_distance,
+                    chosen_distance,
+                    class,
+                    improvement,
+                }) = history_candidate
                 {
                     branch_out.set("history_candidate_index", index)?;
                     set_addr64(&branch_out, "history_candidate_pc", recorded.pc)?;
@@ -1209,15 +1224,14 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     // At most one older branch receives a solver query. The
                     // candidate has already been ranked by the shared bounded
                     // CFG as a strictly better alternate route to --find.
-                    if let Some((
-                        candidate_index,
-                        candidate_decision,
-                        candidate_target,
-                        candidate_alt_distance,
-                        candidate_chosen_distance,
-                        _,
-                        _,
-                    )) = history_candidate
+                    if let Some(RankedHistoryCandidate {
+                        index: candidate_index,
+                        decision: candidate_decision,
+                        target: candidate_target,
+                        alt_distance: candidate_alt_distance,
+                        chosen_distance: candidate_chosen_distance,
+                        ..
+                    }) = history_candidate
                     {
                         let candidate_out = lua.create_table()?;
                         candidate_out.set("index", candidate_index)?;
