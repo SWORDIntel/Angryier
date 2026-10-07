@@ -18,6 +18,10 @@ jobs:
       - uses: actions/checkout@v7
       - name: Toolchain
         run: rustup show
+      - name: Rust dependency cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
       - name: Check CLI run frontend
         run: cargo check -p angryier-cli --all-targets
       - name: Test branch analysis regressions
