@@ -8082,7 +8082,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         if state.process.kernel_pool.is_some() {
             return Ok(base(
                 "stateful-kernel-model",
-                "kernel pool model state is externally shared and cannot be safely rewound for post-run replay".to_string(),
+                "kernel pool model state is externally shared and cannot be safely rewound for post-run replay"
+                    .to_string(),
             ));
         }
         if state.process.simproc_dispatches > 0 {
@@ -8177,9 +8178,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         } else {
                             format!(
                                 "concrete replay reached dynamic visit {expected_visit} of branch {:#x} but observed successor {:?}, expected {:#x}",
-                                solution.decision.pc,
-                                observed,
-                                solution.alternate_target
+                                solution.decision.pc, observed, solution.alternate_target
                             )
                         },
                     });
