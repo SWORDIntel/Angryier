@@ -639,8 +639,8 @@ fn test_angry_run_branch_analysis_solves_ranked_older_candidate() {
         local b = assert(r.branch_analysis)
         local hc = b.history_candidate_analysis
         if hc == nil then
-            local parts = {}
-            for i, h in ipairs(b.history or {}) do
+            local parts = {{}}
+            for i, h in ipairs(b.history or {{}}) do
                 parts[#parts + 1] = string.format(
                     "h[%d] pc=%s chosen=%s alt=%s pref=%s chosen_d=%s alt_d=%s",
                     i,
