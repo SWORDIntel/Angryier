@@ -2621,8 +2621,25 @@ mod tests {
         assert_eq!(syscall::CLOCK_GETTIME, 228);
     }
 
+    // Shared helpers keep tests fail-closed with descriptive errors rather
+    // than relying on panic/unwrap/expect (all denied by workspace Clippy).
+    fn continued_state(result: SimResult) -> Result<SimState, String> {
+        match result {
+            SimResult::Continue(state) => Ok(state),
+            other => Err(format!("expected Continue state, got {other:?}")),
+        }
+    }
+
+    fn read_test_u64(state: &SimState, address: u64) -> Result<u64, String> {
+        let bytes = state.read_bytes(address, 8);
+        let raw: [u8; 8] = bytes.try_into().map_err(|v: Vec<u8>| {
+            format!("expected 8 bytes at {address:#x}, got {}", v.len())
+        })?;
+        Ok(u64::from_le_bytes(raw))
+    }
+
     #[test]
-    fn deterministic_clock_advances_monotonically() {
+    fn deterministic_clock_advances_monotonically() -> Result<(), String> {
         let tracker = Arc::new(DeterministicClockTracker::new(1_000_000_000, 1_000_000));
         let proc = ClockGettimeProcedure::new(tracker.clone());
 
@@ -2632,25 +2649,19 @@ mod tests {
 
         // First invocation: time advances to 1.001s (1_001_000_000 ns)
         let res1 = proc.apply(&state);
-        let s1 = match res1 {
-            SimResult::Continue(s) => s,
-            other => panic!("expected Continue, got {other:?}"),
-        };
+        let s1 = continued_state(res1)?;
         assert_eq!(s1.return_value, Some(0));
         assert_eq!(s1.get_reg(0), 0);
-        let sec1 = u64::from_le_bytes(s1.read_bytes(0x5000, 8).try_into().unwrap());
-        let nsec1 = u64::from_le_bytes(s1.read_bytes(0x5008, 8).try_into().unwrap());
+        let sec1 = read_test_u64(&s1, 0x5000)?;
+        let nsec1 = read_test_u64(&s1, 0x5008)?;
         assert_eq!(sec1, 1);
         assert_eq!(nsec1, 1_000_000);
 
         // Second invocation: time advances to 1.002s (1_002_000_000 ns)
         let res2 = proc.apply(&s1);
-        let s2 = match res2 {
-            SimResult::Continue(s) => s,
-            other => panic!("expected Continue, got {other:?}"),
-        };
-        let sec2 = u64::from_le_bytes(s2.read_bytes(0x5000, 8).try_into().unwrap());
-        let nsec2 = u64::from_le_bytes(s2.read_bytes(0x5008, 8).try_into().unwrap());
+        let s2 = continued_state(res2)?;
+        let sec2 = read_test_u64(&s2, 0x5000)?;
+        let nsec2 = read_test_u64(&s2, 0x5008)?;
         assert_eq!(sec2, 1);
         assert_eq!(nsec2, 2_000_000);
 
@@ -2658,14 +2669,12 @@ mod tests {
         let det_proc = DeterministicClockProcedure::with_name(tracker, "deterministic_clock");
         assert_eq!(det_proc.name(), "deterministic_clock");
         let res3 = det_proc.apply(&s2);
-        let s3 = match res3 {
-            SimResult::Continue(s) => s,
-            other => panic!("expected Continue, got {other:?}"),
-        };
-        let sec3 = u64::from_le_bytes(s3.read_bytes(0x5000, 8).try_into().unwrap());
-        let nsec3 = u64::from_le_bytes(s3.read_bytes(0x5008, 8).try_into().unwrap());
+        let s3 = continued_state(res3)?;
+        let sec3 = read_test_u64(&s3, 0x5000)?;
+        let nsec3 = read_test_u64(&s3, 0x5008)?;
         assert_eq!(sec3, 1);
         assert_eq!(nsec3, 3_000_000);
+        Ok(())
     }
 
     #[test]
@@ -2766,7 +2775,7 @@ mod tests {
     }
 
     #[test]
-    fn pthread_create_seeds_tid_and_allocates_stack() {
+    fn pthread_create_seeds_tid_and_allocates_stack() -> Result<(), String> {
         let tracker = Arc::new(ThreadTracker::default());
         let proc = PthreadCreateProcedure::new(tracker.clone());
 
@@ -2777,18 +2786,15 @@ mod tests {
         state.set_arg(3, 0xDEADBEEF); // arg
 
         let res = proc.apply(&state);
-        let next = match res {
-            SimResult::Continue(s) => s,
-            other => panic!("expected Continue, got {other:?}"),
-        };
+        let next = continued_state(res)?;
         assert_eq!(next.return_value, Some(0));
 
         // Read thread ID written to *pthread_t
-        let tid = u64::from_le_bytes(next.read_bytes(0x6000, 8).try_into().unwrap());
+        let tid = read_test_u64(&next, 0x6000)?;
         assert_eq!(tid, 1000);
         assert_eq!(tracker.thread_count(), 1);
 
-        let desc = tracker.get_thread(tid).expect("thread descriptor exists");
+        let desc = tracker.get_thread(tid).ok_or_else(|| format!("missing thread descriptor for tid {tid}"))?;
         assert_eq!(desc.entry_point, 0x401000);
         assert_eq!(desc.arg, 0xDEADBEEF);
         assert_eq!(desc.stack.size, ThreadTracker::DEFAULT_STACK_SIZE);
@@ -2799,17 +2805,15 @@ mod tests {
         state.set_arg(2, 0x402000);
         state.set_arg(3, 0x1234);
         let res2 = proc.apply(&state);
-        let next2 = match res2 {
-            SimResult::Continue(s) => s,
-            other => panic!("expected Continue, got {other:?}"),
-        };
-        let tid2 = u64::from_le_bytes(next2.read_bytes(0x6008, 8).try_into().unwrap());
+        let next2 = continued_state(res2)?;
+        let tid2 = read_test_u64(&next2, 0x6008)?;
         assert_eq!(tid2, 1001);
         assert_eq!(tracker.thread_count(), 2);
 
-        let desc2 = tracker.get_thread(tid2).expect("second thread exists");
+        let desc2 = tracker.get_thread(tid2).ok_or_else(|| format!("missing thread descriptor for tid {tid2}"))?;
         assert_eq!(desc2.entry_point, 0x402000);
         assert_ne!(desc2.stack.base, desc.stack.base);
+        Ok(())
     }
 
     #[test]
