@@ -230,6 +230,8 @@ The post-run target-directed analysis is deliberately bounded:
 
 The older result is exposed as `branch_analysis.history_candidate_analysis`. It contains the history index, branch PC, ranked target, chosen/alternate CFG distances, solver status, model, replay result, and the same steering action/confidence/reason contract used by the newest branch.
 
+For branch-edge naming, `taken_target`, `not_taken_target`, and `chosen = taken/not_taken` remain for backward compatibility. New integrations should prefer `condition_true_target`, `condition_false_target`, `chosen_condition`, `chosen_target`, and `alternate_target`. This keeps diagnostics correct even when an instruction family represents its source-level branch sense through an inverted predicate.
+
 This cap is intentional: diagnostic output should improve the next experiment without turning every run into an unbounded retrospective SMT sweep.
 
 ### Exit codes
@@ -301,6 +303,8 @@ Result table:
 | `branch_analysis.history` | Bounded ordered branch-decision provenance for the selected diagnostic state (up to 64 decisions). |
 | `branch_analysis.history_candidate_index` | Highest-ranked older decision whose alternate edge is structurally better toward a configured `find` target. |
 | `branch_analysis.history_candidate_analysis` | At most one extra solver/replay analysis for that older decision, including CFG distances, model, replay, and steering verdict. |
+| `branch_analysis.condition_true_target[_hex]` / `condition_false_target[_hex]` | Preferred aliases for the two predicate successors. These avoid implying how the original ISA mnemonic spells its architectural jump sense. |
+| `branch_analysis.chosen_condition` | `true` or `false` for the predicate value followed by the selected diagnostic state. Prefer this over the legacy `chosen = taken/not_taken` label in operator-facing output. |
 | `branch_analysis.model[*].value_hex` | For 64-bit register-backed solver assignments, canonical integer value suitable for replay (for example `0x000000000000002a`). Raw solver bytes remain available separately for byte-granular inputs. |
 | `found` | Number of states that reached a `find` target. |
 | `inputs` | Only with `solve = true`: one entry per solved found state, each an array of byte-strings (model bytes per symbol). Per-state model solving is capped at 10 seconds. |
