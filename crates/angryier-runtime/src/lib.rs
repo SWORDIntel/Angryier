@@ -5336,6 +5336,28 @@ mod solver_constraint_safety_tests {
         );
         assert_eq!(assignments.get(&0x4000), Some(&0x41));
     }
+
+
+    #[test]
+    fn replay_stream_assignment_is_source_aware_and_rejects_conflicts() {
+        let mut assignments = BTreeMap::new();
+        let stdin = ReplayStreamInput::Stdin { offset: 3 };
+        let file = ReplayStreamInput::File {
+            path: "/symbolic".into(),
+            offset: 3,
+        };
+
+        assert_eq!(insert_replay_stream_assignment(&mut assignments, stdin.clone(), 0x41), Ok(()));
+        assert_eq!(insert_replay_stream_assignment(&mut assignments, stdin.clone(), 0x41), Ok(()));
+        assert_eq!(insert_replay_stream_assignment(&mut assignments, file.clone(), 0x41), Ok(()));
+        assert_eq!(assignments.len(), 2);
+        assert_eq!(
+            insert_replay_stream_assignment(&mut assignments, stdin.clone(), 0x42),
+            Err((0x41, 0x42))
+        );
+        assert_eq!(assignments.get(&stdin), Some(&0x41));
+        assert_eq!(assignments.get(&file), Some(&0x41));
+    }
 }
 
 /// The most recent symbolic branch decision on one state.
@@ -5421,6 +5443,21 @@ fn insert_replay_memory_assignment(
     }
 }
 
+fn insert_replay_stream_assignment(
+    assignments: &mut BTreeMap<ReplayStreamInput, u8>,
+    origin: ReplayStreamInput,
+    value: u8,
+) -> Result<(), (u8, u8)> {
+    match assignments.get(&origin).copied() {
+        Some(existing) if existing == value => Ok(()),
+        Some(existing) => Err((existing, value)),
+        None => {
+            assignments.insert(origin, value);
+            Ok(())
+        }
+    }
+}
+
 /// Concrete validation of an alternate-branch solver model.
 ///
 /// Replay is intentionally conservative: only models whose entries all map
@@ -5446,6 +5483,8 @@ pub struct AlternateBranchReplay {
     pub applied_registers: usize,
     /// Entry-snapshot symbolic memory bytes concretized from the model.
     pub applied_memory_bytes: usize,
+    /// Runtime stream bytes concretized into stdin or symbolic-file contents.
+    pub applied_stream_bytes: usize,
     pub detail: String,
 }
 
@@ -8313,6 +8352,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             matched_alternate: false,
             applied_registers: 0,
             applied_memory_bytes: 0,
+            applied_stream_bytes: 0,
             detail,
         };
 
@@ -8344,6 +8384,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
 
         let mut assignments = BTreeMap::<u32, u64>::new();
         let mut memory_assignments = BTreeMap::<Address, u8>::new();
+        let mut stream_assignments = BTreeMap::<ReplayStreamInput, u8>::new();
         for (expression, bytes) in &solution.model {
             let Some(binding) = state
                 .symbols
@@ -8356,6 +8397,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 );
                 replay.applied_registers = assignments.len();
                 replay.applied_memory_bytes = memory_assignments.len();
+                replay.applied_stream_bytes = stream_assignments.len();
                 return Ok(replay);
             };
 
@@ -8389,6 +8431,37 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     }
                     continue;
                 }
+                if let Some(origin) = state.replay_stream_symbols.get(&binding.expression).cloned() {
+                    if bytes.is_empty() || bytes.get(1..).is_some_and(|upper| upper.iter().any(|byte| *byte != 0)) {
+                        let mut replay = base(
+                            "unsupported-model",
+                            format!(
+                                "solver model expression {expression} is an 8-bit stream input but carries {} byte(s) with non-zero/invalid upper data",
+                                bytes.len()
+                            ),
+                        );
+                        replay.applied_registers = assignments.len();
+                        replay.applied_memory_bytes = memory_assignments.len();
+                        replay.applied_stream_bytes = stream_assignments.len();
+                        return Ok(replay);
+                    }
+                    let value = bytes[0];
+                    if let Err((existing, conflicting)) =
+                        insert_replay_stream_assignment(&mut stream_assignments, origin.clone(), value)
+                    {
+                        let mut replay = base(
+                            "ambiguous-model",
+                            format!(
+                                "solver model assigns conflicting values to stream input {origin:?}: {existing:#04x} vs {conflicting:#04x}; refusing model-order-dependent replay"
+                            ),
+                        );
+                        replay.applied_registers = assignments.len();
+                        replay.applied_memory_bytes = memory_assignments.len();
+                        replay.applied_stream_bytes = stream_assignments.len();
+                        return Ok(replay);
+                    }
+                    continue;
+                }
             }
 
             let nonzero_upper = bytes.get(8..).is_some_and(|upper| upper.iter().any(|byte| *byte != 0));
@@ -8403,6 +8476,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 );
                 replay.applied_registers = assignments.len();
                 replay.applied_memory_bytes = memory_assignments.len();
+                replay.applied_stream_bytes = stream_assignments.len();
                 return Ok(replay);
             }
 
@@ -8422,14 +8496,15 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 );
                 replay.applied_registers = assignments.len();
                 replay.applied_memory_bytes = memory_assignments.len();
+                replay.applied_stream_bytes = stream_assignments.len();
                 return Ok(replay);
             }
         }
 
-        if assignments.is_empty() && memory_assignments.is_empty() {
+        if assignments.is_empty() && memory_assignments.is_empty() && stream_assignments.is_empty() {
             return Ok(base(
                 "unsupported-model",
-                "SAT alternate model contained no replayable register or tracked entry-memory assignments".to_string(),
+                "SAT alternate model contained no replayable register, entry-memory, or stream assignments".to_string(),
             ));
         }
 
@@ -8444,6 +8519,45 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 .memory
                 .write(address, &[ByteValue::Concrete(value)])
                 .map_err(|error| RuntimeError::Memory(format!("replay memory {address:#x}: {error:?}")))?;
+        }
+
+        // Rebuild every symbolic stream extent seen on this path so concrete
+        // read() returns the same byte count even when the solver model omits
+        // unconstrained bytes. Existing configured bytes are preserved and
+        // missing extent bytes are deterministically zero-filled.
+        let mut stdin_extent = process.stdin.len();
+        let mut file_extents = BTreeMap::<String, usize>::new();
+        for origin in state.replay_stream_symbols.values() {
+            match origin {
+                ReplayStreamInput::Stdin { offset } => {
+                    stdin_extent = stdin_extent.max(offset.saturating_add(1));
+                }
+                ReplayStreamInput::File { path, offset } => {
+                    let extent = file_extents.entry(path.clone()).or_default();
+                    *extent = (*extent).max(offset.saturating_add(1));
+                }
+            }
+        }
+        process.stdin.resize(stdin_extent, 0);
+        for (path, extent) in file_extents {
+            process.files.entry(path).or_default().resize(extent, 0);
+        }
+        for (origin, value) in &stream_assignments {
+            match origin {
+                ReplayStreamInput::Stdin { offset } => {
+                    if *offset >= process.stdin.len() {
+                        process.stdin.resize(offset.saturating_add(1), 0);
+                    }
+                    process.stdin[*offset] = *value;
+                }
+                ReplayStreamInput::File { path, offset } => {
+                    let data = process.files.entry(path.clone()).or_default();
+                    if *offset >= data.len() {
+                        data.resize(offset.saturating_add(1), 0);
+                    }
+                    data[*offset] = *value;
+                }
+            }
         }
 
         let budget = max_steps.max(1);
@@ -8467,6 +8581,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             matched_alternate: false,
                             applied_registers: assignments.len(),
                             applied_memory_bytes: memory_assignments.len(),
+                            applied_stream_bytes: stream_assignments.len(),
                             detail: format!(
                                 "concrete replay reached dynamic visit {expected_visit} of branch {:#x}, but the entry-to-branch trace fingerprint differs (symbolic={:#018x}, replay={:#018x}); refusing to validate the wrong path context",
                                 solution.decision.pc, solution.decision.trace_fingerprint, replay_trace_fingerprint
@@ -8487,6 +8602,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         matched_alternate: matched,
                         applied_registers: assignments.len(),
                         applied_memory_bytes: memory_assignments.len(),
+                        applied_stream_bytes: stream_assignments.len(),
                         detail: if matched {
                             format!(
                                 "concrete replay reached dynamic visit {expected_visit} of branch {:#x} and took the solver-predicted alternate successor",
@@ -8519,6 +8635,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             matched_alternate: false,
             applied_registers: assignments.len(),
             applied_memory_bytes: memory_assignments.len(),
+            applied_stream_bytes: stream_assignments.len(),
             detail: if process.terminated {
                 format!(
                     "concrete replay terminated after {observed_visits} visit(s) to branch {:#x}; expected dynamic visit {expected_visit}",
