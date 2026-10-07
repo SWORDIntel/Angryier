@@ -5309,7 +5309,6 @@ mod solver_constraint_safety_tests {
         assert_eq!(assignments.get(&7), Some(&0x1234));
     }
 
-
     #[test]
     fn replay_memory_assignment_rejects_conflicts_but_deduplicates_equal_values() {
         let mut assignments = BTreeMap::new();
@@ -5323,7 +5322,6 @@ mod solver_constraint_safety_tests {
         );
         assert_eq!(assignments.get(&0x4000), Some(&0x41));
     }
-
 }
 
 /// The most recent symbolic branch decision on one state.
@@ -7551,9 +7549,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         right: &BTreeMap<ExprId, Address>,
     ) -> BTreeMap<ExprId, Address> {
         left.iter()
-            .filter_map(|(expr, address)| {
-                (right.get(expr) == Some(address)).then_some((*expr, *address))
-            })
+            .filter_map(|(expr, address)| (right.get(expr) == Some(address)).then_some((*expr, *address)))
             .collect()
     }
 
@@ -8388,9 +8384,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             applied_memory_bytes: memory_assignments.len(),
                             detail: format!(
                                 "concrete replay reached dynamic visit {expected_visit} of branch {:#x}, but the entry-to-branch trace fingerprint differs (symbolic={:#018x}, replay={:#018x}); refusing to validate the wrong path context",
-                                solution.decision.pc,
-                                solution.decision.trace_fingerprint,
-                                replay_trace_fingerprint
+                                solution.decision.pc, solution.decision.trace_fingerprint, replay_trace_fingerprint
                             ),
                         });
                     }
