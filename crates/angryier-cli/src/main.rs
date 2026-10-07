@@ -1114,6 +1114,9 @@ if r.branch_analysis ~= nil then
     print(string.format("  status                  : %s", tostring(b.status or "?")))
     if b.status == "recorded" then
         print(string.format("  branch pc               : %s", tostring(b.pc_hex or b.pc or "?")))
+        print(string.format("  dynamic visit           : %s", tostring(b.visit_index or "?")))
+        print(string.format("  visit identity exact    : %s", yn(b.visit_index_exact)))
+        print(string.format("  path fingerprint        : %s", tostring(b.trace_fingerprint_hex or "?")))
         print(string.format("  chosen condition value  : %s", tostring(b.chosen_condition or b.chosen or "?")))
         print(string.format("  condition=true target   : %s", tostring(b.condition_true_target_hex or b.taken_target_hex or b.taken_target or "?")))
         print(string.format("  condition=false target  : %s", tostring(b.condition_false_target_hex or b.not_taken_target_hex or b.not_taken_target or "?")))
@@ -1144,6 +1147,8 @@ if r.branch_analysis ~= nil then
             print("[angryier][branch-analysis] concrete alternate replay")
             print(string.format("  replay status           : %s", tostring(replay.status or "?")))
             print(string.format("  replay steps            : %s", tostring(replay.steps or 0)))
+            print(string.format("  expected branch visit   : %s", tostring(replay.expected_visit or "?")))
+            print(string.format("  observed branch visits  : %s", tostring(replay.observed_visits or 0)))
             print(string.format("  reached branch          : %s", yn(replay.reached_branch)))
             print(string.format("  matched alternate       : %s", yn(replay.matched_alternate)))
             print(string.format("  applied registers       : %s", tostring(replay.applied_registers or 0)))
@@ -1291,6 +1296,12 @@ if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
         idea("CONCRETE BRANCH FLIP VALIDATED: replay from the clean entry snapshot reached the recorded branch and took the solver-predicted alternate successor. This validates the immediate branch mutation in the modeled environment; it does not by itself prove the later target is reachable.")
     elseif replay_status == "mismatch" then
         idea("MODEL/REPLAY DIVERGENCE: the solver produced a SAT alternate model, but concrete replay reached the branch and took a different successor. Treat this as a fidelity bug or environment/model mismatch; do not promote the seed until the divergence is explained.")
+    elseif replay_status == "path-context-mismatch" then
+        idea("PATH-CONTEXT MISMATCH: concrete replay reached the expected numbered visit of the branch, but through a different entry-to-branch PC sequence. Do not call this model validated; compare the symbolic and replay traces to find the earlier divergence.")
+    elseif replay_status == "ambiguous-branch-visit" then
+        idea("AMBIGUOUS DYNAMIC BRANCH: the retained symbolic trace rolled over before Angryier could prove the absolute visit number. Re-run with a shorter path, a nearer entry/waypoint, or a larger trace budget before attempting proof-quality replay.")
+    elseif replay_status == "ambiguous-model" then
+        idea("AMBIGUOUS SOLVER MODEL: multiple model entries collapse onto the same architectural register with conflicting values. Treat this as backend/model-normalization debt; inspect the reported model rather than allowing iteration order to pick a replay value.")
     elseif replay_status == "unsupported-model" then
         idea("Concrete replay was skipped because the alternate model contains symbolic inputs that are not representable as 64-bit GPR seeds. A future input materializer should replay argv/stdin/file/memory symbols rather than silently dropping them.")
     elseif replay_status == "stateful-kernel-model" or replay_status == "stateful-environment" then
@@ -1932,6 +1943,11 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "replay status",
                 "CONCRETE BRANCH FLIP VALIDATED",
                 "MODEL/REPLAY DIVERGENCE",
+                "PATH-CONTEXT MISMATCH",
+                "AMBIGUOUS DYNAMIC BRANCH",
+                "AMBIGUOUS SOLVER MODEL",
+                "path fingerprint",
+                "expected branch visit",
                 "TARGET-DIRECTED NEXT RUN",
                 "branch_analysis = true",
                 "constraint dependencies",
