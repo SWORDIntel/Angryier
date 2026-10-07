@@ -5337,7 +5337,6 @@ mod solver_constraint_safety_tests {
         assert_eq!(assignments.get(&0x4000), Some(&0x41));
     }
 
-
     #[test]
     fn replay_stream_assignment_is_source_aware_and_rejects_conflicts() {
         let mut assignments = BTreeMap::new();
@@ -5347,9 +5346,18 @@ mod solver_constraint_safety_tests {
             offset: 3,
         };
 
-        assert_eq!(insert_replay_stream_assignment(&mut assignments, stdin.clone(), 0x41), Ok(()));
-        assert_eq!(insert_replay_stream_assignment(&mut assignments, stdin.clone(), 0x41), Ok(()));
-        assert_eq!(insert_replay_stream_assignment(&mut assignments, file.clone(), 0x41), Ok(()));
+        assert_eq!(
+            insert_replay_stream_assignment(&mut assignments, stdin.clone(), 0x41),
+            Ok(())
+        );
+        assert_eq!(
+            insert_replay_stream_assignment(&mut assignments, stdin.clone(), 0x41),
+            Ok(())
+        );
+        assert_eq!(
+            insert_replay_stream_assignment(&mut assignments, file.clone(), 0x41),
+            Ok(())
+        );
         assert_eq!(assignments.len(), 2);
         assert_eq!(
             insert_replay_stream_assignment(&mut assignments, stdin.clone(), 0x42),
@@ -6770,16 +6778,9 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         state.process.stdin_pos = base.saturating_add(count_usize);
                         ReplayStreamInput::Stdin { offset: base }
                     } else {
-                        let path = state
-                            .process
-                            .symbolic_fd_paths
-                            .get(&fd)
-                            .cloned()
-                            .ok_or_else(|| {
-                                RuntimeError::Execution(format!(
-                                    "symbolic fd {fd} has no retained pathname provenance"
-                                ))
-                            })?;
+                        let path = state.process.symbolic_fd_paths.get(&fd).cloned().ok_or_else(|| {
+                            RuntimeError::Execution(format!("symbolic fd {fd} has no retained pathname provenance"))
+                        })?;
                         let (_, pos) = state.process.open_fds.get_mut(&fd).ok_or_else(|| {
                             RuntimeError::Execution(format!("symbolic fd {fd} is not present in open_fds"))
                         })?;
@@ -6818,17 +6819,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             width: 8,
                         });
                         let origin = match &stream_origin {
-                            ReplayStreamInput::Stdin { offset } => {
-                                ReplayStreamInput::Stdin {
-                                    offset: offset.saturating_add(i as usize),
-                                }
-                            }
-                            ReplayStreamInput::File { path, offset } => {
-                                ReplayStreamInput::File {
-                                    path: path.clone(),
-                                    offset: offset.saturating_add(i as usize),
-                                }
-                            }
+                            ReplayStreamInput::Stdin { offset } => ReplayStreamInput::Stdin {
+                                offset: offset.saturating_add(i as usize),
+                            },
+                            ReplayStreamInput::File { path, offset } => ReplayStreamInput::File {
+                                path: path.clone(),
+                                offset: offset.saturating_add(i as usize),
+                            },
                         };
                         state.replay_stream_symbols.insert(expr, origin);
                     }
@@ -7665,9 +7662,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         right: &BTreeMap<ExprId, ReplayStreamInput>,
     ) -> BTreeMap<ExprId, ReplayStreamInput> {
         left.iter()
-            .filter_map(|(expr, origin)| {
-                (right.get(expr) == Some(origin)).then_some((*expr, origin.clone()))
-            })
+            .filter_map(|(expr, origin)| (right.get(expr) == Some(origin)).then_some((*expr, origin.clone())))
             .collect()
     }
 
