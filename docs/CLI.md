@@ -234,6 +234,8 @@ For branch-edge naming, `taken_target`, `not_taken_target`, and `chosen = taken/
 
 This cap is intentional: diagnostic output should improve the next experiment without turning every run into an unbounded retrospective SMT sweep.
 
+Shared CFG recovery is an optimization, not a semantic dependency. If recovery from the earliest retained branch fails, Angryier disables older-branch CFG ranking for that run but performs one bounded recovery from the newest branch PC so the detailed newest-branch analysis keeps the behavior it had before branch-history ranking was added. The result exposes the source through `cfg_source`.
+
 ### Exit codes
 
 | Code | Cause |
@@ -305,6 +307,7 @@ Result table:
 | `branch_analysis.history_candidate_analysis` | At most one extra solver/replay analysis for that older decision, including CFG distances, model, replay, and steering verdict. |
 | `branch_analysis.condition_true_target[_hex]` / `condition_false_target[_hex]` | Preferred aliases for the two predicate successors. These avoid implying how the original ISA mnemonic spells its architectural jump sense. |
 | `branch_analysis.chosen_condition` | `true` or `false` for the predicate value followed by the selected diagnostic state. Prefer this over the legacy `chosen = taken/not_taken` label in operator-facing output. |
+| `branch_analysis.cfg_source` | `shared-history-root` when newest-branch distances reuse the bounded CFG recovered for history ranking, or `latest-branch-fallback` when the shared recovery failed and Angryier retried from the newest branch PC. |
 | `branch_analysis.model[*].value_hex` | For 64-bit register-backed solver assignments, canonical integer value suitable for replay (for example `0x000000000000002a`). Raw solver bytes remain available separately for byte-granular inputs. |
 | `found` | Number of states that reached a `find` target. |
 | `inputs` | Only with `solve = true`: one entry per solved found state, each an array of byte-strings (model bytes per symbol). Per-state model solving is capped at 10 seconds. |
