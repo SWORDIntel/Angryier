@@ -2632,9 +2632,9 @@ mod tests {
 
     fn read_test_u64(state: &SimState, address: u64) -> Result<u64, String> {
         let bytes = state.read_bytes(address, 8);
-        let raw: [u8; 8] = bytes.try_into().map_err(|v: Vec<u8>| {
-            format!("expected 8 bytes at {address:#x}, got {}", v.len())
-        })?;
+        let raw: [u8; 8] = bytes
+            .try_into()
+            .map_err(|v: Vec<u8>| format!("expected 8 bytes at {address:#x}, got {}", v.len()))?;
         Ok(u64::from_le_bytes(raw))
     }
 
@@ -2794,7 +2794,9 @@ mod tests {
         assert_eq!(tid, 1000);
         assert_eq!(tracker.thread_count(), 1);
 
-        let desc = tracker.get_thread(tid).ok_or_else(|| format!("missing thread descriptor for tid {tid}"))?;
+        let desc = tracker
+            .get_thread(tid)
+            .ok_or_else(|| format!("missing thread descriptor for tid {tid}"))?;
         assert_eq!(desc.entry_point, 0x401000);
         assert_eq!(desc.arg, 0xDEADBEEF);
         assert_eq!(desc.stack.size, ThreadTracker::DEFAULT_STACK_SIZE);
@@ -2810,7 +2812,9 @@ mod tests {
         assert_eq!(tid2, 1001);
         assert_eq!(tracker.thread_count(), 2);
 
-        let desc2 = tracker.get_thread(tid2).ok_or_else(|| format!("missing thread descriptor for tid {tid2}"))?;
+        let desc2 = tracker
+            .get_thread(tid2)
+            .ok_or_else(|| format!("missing thread descriptor for tid {tid2}"))?;
         assert_eq!(desc2.entry_point, 0x402000);
         assert_ne!(desc2.stack.base, desc.stack.base);
         Ok(())
