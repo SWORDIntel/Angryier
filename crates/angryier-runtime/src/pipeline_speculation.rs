@@ -397,7 +397,7 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    fn linear_cfg(base: Address, n_nops: usize) -> (Cfg, Vec<u8>) {
+    fn linear_cfg(base: Address, n_nops: usize) -> Result<(Cfg, Vec<u8>), String> {
         let mut code = vec![0x90u8; n_nops];
         code.push(0xC3);
 
@@ -405,13 +405,16 @@ mod tests {
         let mut insns = Vec::new();
         let mut cursor = base;
         for &byte in &code {
-            let decoded = decoder.decode(cursor, &[byte]).unwrap();
+            let decoded = decoder.decode(cursor, &[byte])?;
             cursor = cursor.wrapping_add(u64::from(decoded.length));
             insns.push(decoded);
         }
         let end = cursor;
 
-        let ret_addr = insns.last().unwrap().address;
+        let ret_addr = insns
+            .last()
+            .ok_or_else(|| "linear fixture emitted no instructions".to_string())?
+            .address;
         let block = BasicBlock {
             start: base,
             end,
@@ -430,16 +433,16 @@ mod tests {
                 kind: EdgeKind::Return,
             }],
         };
-        (cfg, code)
+        Ok((cfg, code))
     }
 
     // ── Test: linear execution — high hit rate ───────────────────────────────
 
     #[test]
-    fn linear_execution_high_hit_rate() {
+    fn linear_execution_high_hit_rate() -> Result<(), String> {
         let base: Address = 0x1000;
         let n_nops = 8;
-        let (cfg, code) = linear_cfg(base, n_nops);
+        let (cfg, code) = linear_cfg(base, n_nops)?;
         let decoder = MinimalDecoder;
 
         let mut pipeline = SpeculativeDecodePipeline::new();
@@ -450,8 +453,8 @@ mod tests {
         // Execute each nop in order; all should be cache hits.
         let mut pc = base;
         for i in 0..n_nops {
-            let offset = usize::try_from(pc - base).unwrap();
-            let insn = pipeline.poll_or_decode(pc, &decoder, &code[offset..]).unwrap();
+            let offset = usize::try_from(pc - base).map_err(|error| error.to_string())?;
+            let insn = pipeline.poll_or_decode(pc, &decoder, &code[offset..])?;
             assert_eq!(insn.address, pc, "instruction {i} address mismatch");
             pc = pc.wrapping_add(u64::from(insn.length));
         }
@@ -463,12 +466,13 @@ mod tests {
             "expected all queries to be cache hits"
         );
         assert_eq!(pipeline.pipeline_flushes, 0, "linear execution must not flush");
+        Ok(())
     }
 
     // ── Test: misprediction triggers flush ───────────────────────────────────
 
     #[test]
-    fn misprediction_triggers_flush_and_fallback() {
+    fn misprediction_triggers_flush_and_fallback() -> Result<(), String> {
         let code: Vec<u8> = vec![
             0x90, // [0] 0x1000 nop
             0x75, 0x04, // [1] 0x1001 jnz +4 (target: 0x1003 + 4 = 0x1007)
@@ -482,8 +486,8 @@ mod tests {
         let decoder = MinimalDecoder;
 
         // Block A: 0x1000..0x1003 (nop, jnz)
-        let nop_a = decoder.decode(0x1000, &code[0..]).unwrap();
-        let jnz = decoder.decode(0x1001, &code[1..]).unwrap();
+        let nop_a = decoder.decode(0x1000, &code[0..])?;
+        let jnz = decoder.decode(0x1001, &code[1..])?;
         let block_a = BasicBlock {
             start: 0x1000,
             end: 0x1003,
@@ -491,8 +495,8 @@ mod tests {
             terminator: EdgeKind::ConditionalTaken,
         };
         // Block B (fall-through): 0x1003..0x1005
-        let nop_b = decoder.decode(0x1003, &code[3..]).unwrap();
-        let ret_b = decoder.decode(0x1004, &code[4..]).unwrap();
+        let nop_b = decoder.decode(0x1003, &code[3..])?;
+        let ret_b = decoder.decode(0x1004, &code[4..])?;
         let block_b = BasicBlock {
             start: 0x1003,
             end: 0x1005,
@@ -500,8 +504,8 @@ mod tests {
             terminator: EdgeKind::Return,
         };
         // Block C (taken): 0x1007..0x1009
-        let nop_c = decoder.decode(0x1007, &code[7..]).unwrap();
-        let ret_c = decoder.decode(0x1008, &code[8..]).unwrap();
+        let nop_c = decoder.decode(0x1007, &code[7..])?;
+        let ret_c = decoder.decode(0x1008, &code[8..])?;
         let block_c = BasicBlock {
             start: 0x1007,
             end: 0x1009,
@@ -557,23 +561,24 @@ mod tests {
         );
 
         // Simulate executing nop at 0x1000 (hit expected).
-        let insn = pipeline.poll_or_decode(0x1000, &decoder, &code[0..]).unwrap();
+        let insn = pipeline.poll_or_decode(0x1000, &decoder, &code[0..])?;
         assert_eq!(insn.address, 0x1000);
         assert_eq!(pipeline.pipeline_hits, 1);
 
         // Now simulate that the branch was actually *taken* (-> 0x1007), so
         // the pipeline predicted fall-through (0x1003) but we jump to 0x1007.
-        let insn = pipeline.poll_or_decode(0x1007, &decoder, &code[7..]).unwrap();
+        let insn = pipeline.poll_or_decode(0x1007, &decoder, &code[7..])?;
         assert_eq!(insn.address, 0x1007);
         assert_eq!(pipeline.pipeline_flushes, 1, "misprediction must trigger a flush");
         // The instruction at 0x1007 is a miss (buffer was flushed).
         assert_eq!(pipeline.pipeline_hits, 1, "only the first query should have been a hit");
+        Ok(())
     }
 
     // ── Test: bounded queue depth and eviction ───────────────────────────────
 
     #[test]
-    fn bounded_queue_evicts_oldest() {
+    fn bounded_queue_evicts_oldest() -> Result<(), String> {
         let decoder = MinimalDecoder;
         let base: Address = 0x2000;
         let n = RING_CAPACITY + 16;
@@ -583,7 +588,7 @@ mod tests {
 
         for i in 0..n {
             let pc = base.wrapping_add(i as u64);
-            pipeline.poll_or_decode(pc, &decoder, &code[i..]).unwrap();
+            let _ = pipeline.poll_or_decode(pc, &decoder, &code[i..])?;
         }
 
         assert!(
@@ -609,15 +614,16 @@ mod tests {
             pipeline.index.len(),
             "ring and index must be in sync"
         );
+        Ok(())
     }
 
     // ── Test: prefetch_depth_avg metric ─────────────────────────────────────
 
     #[test]
-    fn prefetch_depth_avg_is_correct() {
+    fn prefetch_depth_avg_is_correct() -> Result<(), String> {
         let base: Address = 0x3000;
         let code = vec![0x90u8; 32];
-        let (cfg, _) = linear_cfg(base, 16);
+        let (cfg, _) = linear_cfg(base, 16)?;
         let decoder = MinimalDecoder;
 
         let mut pipeline = SpeculativeDecodePipeline::new();
@@ -631,15 +637,16 @@ mod tests {
             (avg - expected).abs() < 1e-9,
             "prefetch_depth_avg expected {expected} got {avg}"
         );
+        Ok(())
     }
 
     // ── Test: repeated linear execution — cache serves every instruction ──────
 
     #[test]
-    fn repeated_execution_served_from_cache() {
+    fn repeated_execution_served_from_cache() -> Result<(), String> {
         let base: Address = 0x4000;
         let n_nops = 4;
-        let (cfg, code) = linear_cfg(base, n_nops);
+        let (cfg, code) = linear_cfg(base, n_nops)?;
         let decoder = MinimalDecoder;
 
         let mut pipeline = SpeculativeDecodePipeline::new();
@@ -648,8 +655,8 @@ mod tests {
         for _pass in 0..3 {
             let mut pc = base;
             for _ in 0..n_nops {
-                let offset = usize::try_from(pc - base).unwrap();
-                let _ = pipeline.poll_or_decode(pc, &decoder, &code[offset..]).unwrap();
+                let offset = usize::try_from(pc - base).map_err(|error| error.to_string())?;
+                let _ = pipeline.poll_or_decode(pc, &decoder, &code[offset..])?;
                 pc = pc.wrapping_add(1);
             }
         }
@@ -659,5 +666,6 @@ mod tests {
         assert_eq!(pipeline.pipeline_queries, expected_queries);
         assert_eq!(pipeline.pipeline_hits, expected_hits);
         assert_eq!(pipeline.pipeline_flushes, 0);
+        Ok(())
     }
 }
