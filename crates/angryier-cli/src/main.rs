@@ -1304,7 +1304,7 @@ if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
     elseif replay_status == "ambiguous-model" then
         idea("AMBIGUOUS SOLVER MODEL: multiple model entries collapse onto the same architectural register with conflicting values. Treat this as backend/model-normalization debt; inspect the reported model rather than allowing iteration order to pick a replay value.")
     elseif replay_status == "unsupported-model" then
-        idea("Concrete replay was skipped because the alternate model contains symbolic inputs that are not representable as 64-bit GPR seeds. A future input materializer should replay argv/stdin/file/memory symbols rather than silently dropping them.")
+        idea("Concrete replay was skipped because the alternate model contains symbolic inputs without exact replay provenance. Entry-time symbolic argv and explicit symbolic-memory bytes are supported; runtime-generated stdin/file/free symbols remain fail-closed until their stream/object provenance is materialized.")
     elseif replay_status == "stateful-kernel-model" or replay_status == "stateful-environment" then
         idea("Concrete replay was deliberately skipped because stateful environment/model activity cannot yet be rewound with proof-quality fidelity. Keep the solver result as symbolic evidence only.")
     elseif replay_status == "budget-exhausted" then
