@@ -242,7 +242,7 @@ Concrete branch replay is **dynamic-visit aware**. A static PC is not a unique b
 
 Solver-assisted symbolic-address concretization follows the same rule: retained path constraints and generated region-bound predicates must be canonically keyed. Missing metadata aborts concretization rather than silently dropping a constraint.
 
-Concrete branch replay uses **three-part dynamic identity**: branch PC, 1-based visit index, and an exact entry-to-branch trace fingerprint. Reaching the same static branch—or even the same numbered visit—through a different concrete route returns `path-context-mismatch` rather than a false validation. If the bounded symbolic trace has already rolled over, Angryier returns `ambiguous-branch-visit` and refuses to guess. Solver models are also normalized by architectural register; duplicate equal assignments are deduplicated, while conflicting values for the same register return `ambiguous-model` instead of relying on backend/model iteration order.
+Concrete branch replay uses **three-part dynamic identity**: branch PC, 1-based visit index, and an exact entry-to-branch trace fingerprint. Reaching the same static branch—or even the same numbered visit—through a different concrete route returns `path-context-mismatch` rather than a false validation. If the bounded symbolic trace has already rolled over, Angryier returns `ambiguous-branch-visit` and refuses to guess. Solver models are also normalized by architectural register; duplicate equal assignments are deduplicated, while conflicting values for the same register return `ambiguous-model` instead of relying on backend/model iteration order. Entry-time `symbolic_memory` and `argv` byte symbols carry expression→address provenance and are concretized into the reset entry snapshot before replay; runtime-generated stdin/file/free symbols remain unsupported rather than being silently dropped.
 
 ### Exit codes
 
@@ -305,13 +305,15 @@ Result table:
 | `branch_analysis.steering_action` | Stable machine-readable recommendation: `prioritize-alternate`, `keep-chosen`, `reject-alternate`, `explore-both`, `explore-alternate`, or `unresolved`. |
 | `branch_analysis.steering_confidence` | `high`, `medium`, or `low`. High requires direct target/UNSAT evidence; bounded-CFG directionality is deliberately capped at medium. |
 | `branch_analysis.steering_reason` | Stable human-readable rationale for the steering action. The policy requires solver feasibility before CFG evidence can prioritize an alternate edge. |
-| `branch_analysis.replay` | Concrete validation result for SAT alternate models when every model leaf is a replayable 64-bit GPR input and the environment is rewind-safe. |
+| `branch_analysis.replay` | Concrete validation result for SAT alternate models when model leaves can be materialized exactly as 64-bit GPR inputs or tracked entry-snapshot symbolic memory/argv bytes and the environment is rewind-safe. |
 | `branch_analysis.error` | Diagnostic error when exact alternate-edge solver setup fails (including unavailable path-constraint metadata). The solver is not called with a reduced path; the steering action remains unresolved. |
 | `branch_analysis.replay.status` | `validated`, `mismatch`, `path-context-mismatch`, `ambiguous-model`, `budget-exhausted`, `terminated-before-branch`, `ambiguous-branch-visit`, `unsupported-model`, `stateful-kernel-model`, `stateful-environment`, `not-sat`, or `error`. |
 | `branch_analysis.visit_index` | 1-based dynamic visit number of the selected branch PC within the retained symbolic trace. |
 | `branch_analysis.visit_index_exact` | True only when the retained trace still covers execution from entry; false makes concrete replay fail closed rather than guess which repeated branch visit was intended. |
 | `branch_analysis.replay.expected_visit` | Dynamic branch occurrence the symbolic decision requires replay to validate. |
 | `branch_analysis.replay.observed_visits` | Number of concrete visits to that PC seen before replay validated, terminated, or exhausted its budget. |
+| `branch_analysis.replay.applied_registers` | Number of unique architectural register assignments concretized from the solver model. |
+| `branch_analysis.replay.applied_memory_bytes` | Number of tracked entry-snapshot symbolic bytes (including symbolic `argv[0]` bytes) concretized from the solver model. |
 | `branch_analysis.replay.matched_alternate` | True only when concrete execution restarted from entry, reached the recorded branch PC, and stepped to the solver-predicted alternate successor. |
 | `branch_analysis.replay.observed_target_hex` | Exact successor observed after replaying the branch, when available. |
 | `branch_analysis.replay.detail` | Human-readable explanation of validation, refusal, mismatch, or budget exhaustion. |
