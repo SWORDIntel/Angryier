@@ -1127,6 +1127,9 @@ if r.branch_analysis ~= nil then
             print("  target relation         : neither immediate successor is an exact configured --find target")
         end
         print(string.format("  CFG target analysis     : %s", tostring(b.cfg_status or "not-run")))
+        if b.cfg_source ~= nil then
+            print(string.format("  CFG recovery source     : %s", tostring(b.cfg_source)))
+        end
         if b.cfg_preference ~= nil and b.cfg_preference ~= "none" then
             print(string.format("  CFG preferred edge      : %s", tostring(b.cfg_preference)))
             print(string.format("  CFG ranked find target  : %s", tostring(b.cfg_find_target_hex or b.cfg_find_target or "?")))
@@ -1921,6 +1924,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "alternate solver status",
                 "target relation",
                 "CFG target analysis",
+                "CFG recovery source",
                 "steering action",
                 "steering confidence",
                 "steering reason",
