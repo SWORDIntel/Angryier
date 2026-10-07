@@ -780,15 +780,8 @@ fn test_angry_run_branch_analysis_replay_targets_exact_dynamic_visit() {
         "#
     );
 
-    let (visit, exact, status, expected, observed, matched, detail): (
-        u64,
-        bool,
-        String,
-        u64,
-        u64,
-        bool,
-        String,
-    ) = lua.load(&script).eval().expect("dynamic branch-visit analysis");
+    let (visit, exact, status, expected, observed, matched, detail): (u64, bool, String, u64, u64, bool, String) =
+        lua.load(&script).eval().expect("dynamic branch-visit analysis");
 
     assert_eq!(visit, 3, "the target path reaches the loop branch three times");
     assert!(exact, "the short fixture trace should be complete from entry");
