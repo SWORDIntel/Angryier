@@ -715,6 +715,94 @@ fn test_angry_run_branch_analysis_solves_ranked_older_candidate() {
 }
 
 #[test]
+fn test_angry_run_branch_analysis_replay_targets_exact_dynamic_visit() {
+    const SRC: &str = r#"
+        .global _start
+        .global target
+        .text
+    _start:
+        mov %rdi, %rax
+        and $3, %rax
+        cmp $3, %rax
+        jne fail
+        xor %rcx, %rcx
+    loop_head:
+        inc %rcx
+        cmp %rdi, %rcx
+        jne loop_head
+    target:
+        mov $60, %rax
+        xor %rdi, %rdi
+        syscall
+    fail:
+        mov $60, %rax
+        mov $1, %rdi
+        syscall
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "branch_dynamic_visit") else {
+        eprintln!("skipping dynamic branch-visit test: system assembler not found");
+        return;
+    };
+
+    let bytes = std::fs::read(&bin_path).expect("read linked fixture");
+    let runtime = angryier_runtime::Runtime::with_native_xed(
+        angryier_types::SemanticVersion(1),
+        angryier_types::TargetProfileId(1),
+    );
+    let process = runtime.load_elf(&bytes).expect("load fixture");
+    let target = process.symbol("target").expect("target symbol").address;
+
+    let lua = init_lua();
+    let bin_str = bin_path.to_str().expect("valid path string");
+    let script = format!(
+        r#"
+        local r = angry.run("{bin_str}", {{
+            symbolic = {{ rdi = 64 }},
+            find = {{ {target} }},
+            steps = 256,
+            states = 32,
+            exploration = "fork",
+            search = "dfs",
+            branch_analysis = true,
+            branch_timeout_ms = 2000,
+        }})
+        local b = assert(r.branch_analysis)
+        local replay = assert(b.replay)
+        return
+            b.visit_index,
+            b.visit_index_exact == true,
+            replay.status,
+            replay.expected_visit,
+            replay.observed_visits,
+            replay.matched_alternate == true,
+            tostring(replay.detail or "")
+        "#
+    );
+
+    let (visit, exact, status, expected, observed, matched, detail): (
+        u64,
+        bool,
+        String,
+        u64,
+        u64,
+        bool,
+        String,
+    ) = lua.load(&script).eval().expect("dynamic branch-visit analysis");
+
+    assert_eq!(visit, 3, "the target path reaches the loop branch three times");
+    assert!(exact, "the short fixture trace should be complete from entry");
+    assert_eq!(expected, visit);
+    assert_eq!(
+        observed, visit,
+        "replay must not validate the matching alternate successor at an earlier visit"
+    );
+    assert_eq!(status, "validated", "replay detail: {detail}");
+    assert!(matched, "replay detail: {detail}");
+    assert!(detail.contains("dynamic visit 3"), "replay detail: {detail}");
+}
+
+#[test]
 fn test_angry_run_branch_analysis_merge_clears_stale_provenance() {
     const SRC: &str = r#"
         .global _start
