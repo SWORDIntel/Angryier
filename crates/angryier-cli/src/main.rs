@@ -1014,10 +1014,11 @@ if r.branch_analysis ~= nil then
             if h ~= nil then
                 local marker = h.alternate_is_find_target and "  <-- alternate directly hits --find" or ""
                 print(string.format(
-                    "    [%02d] pc=%s chosen=%s alternate=%s deps=%s%s",
+                    "    [%02d] pc=%s condition=%s chosen_target=%s alternate=%s deps=%s%s",
                     i,
                     tostring(h.pc_hex or h.pc or "?"),
-                    tostring(h.chosen or "?"),
+                    tostring(h.chosen_condition or h.chosen or "?"),
+                    tostring(h.chosen_target_hex or h.chosen_target or "?"),
                     tostring(h.alternate_target_hex or h.alternate_target or "?"),
                     tostring(h.dependency_sources or "?"),
                     marker
@@ -1113,9 +1114,10 @@ if r.branch_analysis ~= nil then
     print(string.format("  status                  : %s", tostring(b.status or "?")))
     if b.status == "recorded" then
         print(string.format("  branch pc               : %s", tostring(b.pc_hex or b.pc or "?")))
-        print(string.format("  chosen edge             : %s", tostring(b.chosen or "?")))
-        print(string.format("  taken target            : %s", tostring(b.taken_target_hex or b.taken_target or "?")))
-        print(string.format("  not-taken target        : %s", tostring(b.not_taken_target_hex or b.not_taken_target or "?")))
+        print(string.format("  chosen condition value  : %s", tostring(b.chosen_condition or b.chosen or "?")))
+        print(string.format("  condition=true target   : %s", tostring(b.condition_true_target_hex or b.taken_target_hex or b.taken_target or "?")))
+        print(string.format("  condition=false target  : %s", tostring(b.condition_false_target_hex or b.not_taken_target_hex or b.not_taken_target or "?")))
+        print(string.format("  chosen target           : %s", tostring(b.chosen_target_hex or b.chosen_target or "?")))
         print(string.format("  alternate target        : %s", tostring(b.alternate_target_hex or b.alternate_target or "?")))
         if b.chosen_is_find_target then
             print("  target relation         : chosen successor exactly matches a configured --find target")
