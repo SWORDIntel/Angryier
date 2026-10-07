@@ -4418,6 +4418,7 @@ impl<'a, D: Decoder> ConcolicSession<'a, D> {
             constraints,
             memory,
             symbols,
+            replay_memory_symbols: BTreeMap::new(),
             concrete_registers,
             id,
             expr_concrete,
@@ -5421,6 +5422,11 @@ pub struct SymbolicState {
     pub memory: angryier_execution::SymbolicSessionMemory,
     /// Symbols bound during this state's execution.
     pub symbols: Vec<angryier_execution::SymbolBinding>,
+    /// Entry-snapshot memory bytes that were explicitly made symbolic.
+    /// Expression -> concrete address. Only these byte symbols are eligible
+    /// for exact concrete replay; runtime-generated stdin/file symbols are
+    /// deliberately absent and remain fail-closed.
+    pub replay_memory_symbols: BTreeMap<ExprId, Address>,
     /// Concrete values for registers with no symbolic binding — untouched
     /// registers (rsp, rip, startup GPRs) read concrete instead of
     /// auto-symboling; a register that was *written* symbolically has a
@@ -5675,6 +5681,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             constraints: Vec::new(),
             memory,
             symbols: Vec::new(),
+            replay_memory_symbols: BTreeMap::new(),
             concrete_registers,
             id: 0,
             expr_concrete: BTreeMap::new(),
@@ -6361,6 +6368,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 expression: expr,
                 width: 8,
             });
+            state.replay_memory_symbols.insert(expr, address + i);
             bytes.push(ByteValue::Symbolic(expr));
         }
         state
@@ -6421,6 +6429,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     expression: expr,
                     width: 8,
                 });
+                state.replay_memory_symbols.insert(expr, argv0 + i);
                 ByteValue::Symbolic(expr)
             };
             bytes.push(byte);
@@ -7502,6 +7511,20 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Ok(feasible)
     }
 
+    /// Keeps only replayable entry-memory provenance that both merging
+    /// states agree on exactly. A one-sided/path-local symbol cannot become a
+    /// replayable entry input merely because states reconverged.
+    fn merged_replay_memory_symbols(
+        left: &BTreeMap<ExprId, Address>,
+        right: &BTreeMap<ExprId, Address>,
+    ) -> BTreeMap<ExprId, Address> {
+        left.iter()
+            .filter_map(|(expr, address)| {
+                (right.get(expr) == Some(address)).then_some((*expr, *address))
+            })
+            .collect()
+    }
+
     /// Merges every group of live states sharing the same pc via
     /// [`merge_snapshots`] — the Veritesting reconvergence primitive.
     /// Divergent registers become `Ite(left_guard, l, r)` under each state's
@@ -7555,12 +7578,15 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     },
                 )
                 .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                let replay_memory_symbols =
+                    Self::merged_replay_memory_symbols(&left.replay_memory_symbols, &right.replay_memory_symbols);
                 let merged_state = SymbolicState {
                     process: left.process,
                     registers: snapshot.registers,
                     constraints: snapshot.constraints,
                     memory: left.memory,
                     symbols: snapshot.symbols,
+                    replay_memory_symbols,
                     concrete_registers: left.concrete_registers.clone(),
                     id: left.id,
                     expr_concrete: snapshot.expr_concrete.clone(),
@@ -7743,6 +7769,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         },
                     )
                     .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
+                    let replay_memory_symbols =
+                        Self::merged_replay_memory_symbols(&left.replay_memory_symbols, &right.replay_memory_symbols);
                     self.states.insert(
                         lo,
                         SymbolicState {
@@ -7751,6 +7779,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             constraints: snapshot.constraints,
                             memory: left.memory,
                             symbols: snapshot.symbols,
+                            replay_memory_symbols,
                             concrete_registers: left.concrete_registers,
                             id: left.id,
                             expr_concrete: snapshot.expr_concrete.clone(),
