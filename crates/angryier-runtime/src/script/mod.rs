@@ -945,15 +945,46 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     branch_out.set("chosen_is_find_target", policy.find.contains(&chosen_target))?;
                     branch_out.set("alternate_is_find_target", policy.find.contains(&alternate_target))?;
 
-                    // Static target directionality: recover only a bounded
-                    // executable window rooted at this branch and compare
-                    // graph-edge distances from each successor to configured
-                    // find targets. This is structural guidance, never raw
-                    // numeric address proximity.
+                    // Static target directionality. Prefer the one shared
+                    // history-root CFG so older ranking + newest analysis pay
+                    // one recovery cost. If that shared recovery failed, retry
+                    // from the newest branch PC (only when it is a distinct
+                    // root) so multi-branch diagnostics never regress the
+                    // historical per-last-branch behavior.
+                    let shared_root_pc = state.branch_history.first().map(|recorded| recorded.pc);
+                    let latest_cfg_fallback =
+                        if !policy.find.is_empty()
+                            && analysis_cfg.as_ref().is_some_and(Result::is_err)
+                            && shared_root_pc != Some(decision.pc)
+                        {
+                            Some(runtime.recover_cfg_window(
+                                &state.process,
+                                decision.pc,
+                                16 * 1024 * 1024,
+                            ))
+                        } else {
+                            None
+                        };
+                    let latest_cfg = match analysis_cfg.as_ref() {
+                        Some(Ok(cfg)) => {
+                            branch_out.set("cfg_source", "shared-history-root")?;
+                            Some(Ok(cfg))
+                        }
+                        Some(Err(_)) => match latest_cfg_fallback.as_ref() {
+                            Some(Ok(cfg)) => {
+                                branch_out.set("cfg_source", "latest-branch-fallback")?;
+                                Some(Ok(cfg))
+                            }
+                            Some(Err(error)) => Some(Err(error)),
+                            None => analysis_cfg.as_ref().map(|result| result.as_ref()),
+                        },
+                        None => latest_cfg_fallback.as_ref().map(|result| result.as_ref()),
+                    };
+
                     if policy.find.is_empty() {
                         branch_out.set("cfg_status", "no-find-targets")?;
                     } else {
-                        match analysis_cfg.as_ref() {
+                        match latest_cfg {
                             Some(Ok(cfg)) => {
                                 branch_out.set("cfg_status", "ok")?;
                                 let target_tbl = lua.create_table()?;
@@ -1032,7 +1063,18 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                             }
                             Some(Err(error)) => {
                                 branch_out.set("cfg_status", "unavailable")?;
-                                branch_out.set("cfg_error", error.to_string())?;
+                                if analysis_cfg.as_ref().is_some_and(Result::is_err)
+                                    && latest_cfg_fallback.as_ref().is_some_and(Result::is_err)
+                                {
+                                    branch_out.set(
+                                        "cfg_error",
+                                        format!(
+                                            "shared history-root CFG recovery failed; latest-branch fallback also failed: {error}"
+                                        ),
+                                    )?;
+                                } else {
+                                    branch_out.set("cfg_error", error.to_string())?;
+                                }
                             }
                             None => {
                                 branch_out.set("cfg_status", "unavailable")?;
