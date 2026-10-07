@@ -2280,6 +2280,10 @@ impl<D: Decoder> Runtime<D> {
         }
 
         let pc = process.pc()?;
+        // Keep concrete and symbolic trace semantics identical: record the
+        // attempted/executed PC before any early environment-model dispatch.
+        // This includes syscalls, CPUID, SimProcedures and terminating blocks.
+        process.record_trace_pc(pc);
 
         // Instance SimProcedure hooks (call-target stubs) take priority over
         // the name-keyed hooks.
@@ -4680,7 +4684,6 @@ fn finish_step(
     match outcome {
         ExecutionOutcome::Continue { next_pc, .. } => {
             process.write_pc(next_pc)?;
-            process.record_trace_pc(pc);
             Ok(StepOutcome::Stepped {
                 pc,
                 next_pc,
@@ -6548,6 +6551,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Ok(())
     }
 
+    fn sync_concrete_register(state: &mut SymbolicState, register: u32) {
+        if let Ok(value) = state.process.read_register(register) {
+            state.registers.remove(&register);
+            state.concrete_registers.insert(register, value);
+        }
+    }
+
     /// Steps state `index` through one instruction: decode → lower → symbolic
     /// eval. Conditional branches fork the state (taken gets the condition,
     /// not-taken its negation); unconditional jumps and direct calls follow
@@ -6834,6 +6844,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         .write_bytes(buf, &bytes)
                         .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
                     state.process.write_register(register_id::GPR_BASE, count)?;
+                    Self::sync_concrete_register(state, register_id::GPR_BASE);
                     let next_pc = pc.wrapping_add(u64::from(decoded.length));
                     state.process.write_pc(next_pc)?;
                     state.process.step_count += 1;
@@ -6841,6 +6852,22 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 }
             }
             let outcome = self.runtime.step(&mut state.process)?;
+            if decoded.form_id == SYSCALL_FORM_ID {
+                // Linux x86-64 syscalls return through RAX. The concrete
+                // environment model is authoritative for that value.
+                Self::sync_concrete_register(state, register_id::GPR_BASE);
+            } else {
+                // CPUID overwrites EAX/EBX/ECX/EDX (zero-extended in the
+                // architectural register file); discard stale symbolic views.
+                for register in [
+                    register_id::GPR_BASE,
+                    register_id::GPR_BASE + 3,
+                    register_id::GPR_BASE + 1,
+                    register_id::GPR_BASE + 2,
+                ] {
+                    Self::sync_concrete_register(state, register);
+                }
+            }
             return Ok(match outcome {
                 StepOutcome::Terminated { .. } => SymbolicStepOutcome::Terminated,
                 _ => SymbolicStepOutcome::Stepped {
