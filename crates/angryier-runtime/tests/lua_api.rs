@@ -578,6 +578,110 @@ fn test_angry_run_branch_analysis_retains_ordered_branch_history() {
 }
 
 #[test]
+fn test_angry_run_branch_analysis_solves_ranked_older_candidate() {
+    const SRC: &str = r#"
+        .global _start
+        .global target
+        .text
+    _start:
+        test $1, %rdi
+        jz short_path
+    long_path:
+        test $2, %rdi
+        jz second_detour
+        nop
+        jmp long_mid
+    long_mid:
+        nop
+        jmp long_tail
+    long_tail:
+        nop
+        jmp target
+    second_detour:
+        nop
+        nop
+        jmp long_mid
+    short_path:
+        jmp target
+    target:
+        mov $60, %rax
+        xor %rdi, %rdi
+        syscall
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "ranked_older_branch") else {
+        eprintln!("skipping ranked older branch test: system assembler not found");
+        return;
+    };
+
+    let bytes = std::fs::read(&bin_path).expect("read linked fixture");
+    let runtime = angryier_runtime::Runtime::with_native_xed(
+        angryier_types::SemanticVersion(1),
+        angryier_types::TargetProfileId(1),
+    );
+    let process = runtime.load_elf(&bytes).expect("load fixture");
+    let target = process.symbol("target").expect("target symbol").address;
+
+    let lua = init_lua();
+    let bin_str = bin_path.to_str().expect("valid path string");
+    let script = format!(
+        r#"
+        local r = angry.run("{bin_str}", {{
+            symbolic = {{ rdi = 64 }},
+            find = {{ {target} }},
+            steps = 256,
+            states = 16,
+            search = "dfs",
+            branch_analysis = true,
+            branch_timeout_ms = 2000,
+        }})
+        local b = assert(r.branch_analysis)
+        local hc = assert(b.history_candidate_analysis)
+        local replay = assert(hc.replay)
+        return
+            b.history_count,
+            b.history_candidate_index,
+            hc.index,
+            hc.cfg_preference,
+            hc.solver_status,
+            replay.status,
+            replay.matched_alternate == true,
+            hc.steering_action,
+            hc.steering_confidence,
+            hc.find_target_hex
+        "#
+    );
+
+    let (
+        history_count,
+        ranked_index,
+        analyzed_index,
+        cfg_preference,
+        solver_status,
+        replay_status,
+        replay_matched,
+        steering_action,
+        steering_confidence,
+        ranked_target,
+    ): (usize, usize, usize, String, String, String, bool, String, String, String) =
+        lua.load(&script).eval().expect("ranked older branch analysis");
+
+    assert!(history_count >= 2, "fixture must retain at least two symbolic decisions");
+    assert_eq!(ranked_index, 1, "the first branch is the deliberately shorter alternate route");
+    assert_eq!(analyzed_index, ranked_index);
+    assert_eq!(cfg_preference, "alternate");
+    assert_eq!(solver_status, "Sat");
+    assert_eq!(replay_status, "validated");
+    assert!(replay_matched);
+    assert_eq!(steering_action, "prioritize-alternate");
+    assert!(
+        steering_confidence == "medium" || steering_confidence == "high",
+        "validated CFG-ranked alternate should have actionable confidence, got {steering_confidence}"
+    );
+    assert_eq!(ranked_target, format!("{target:#018x}"));
+}
+
+#[test]
 fn test_angry_run_branch_analysis_merge_clears_stale_provenance() {
     const SRC: &str = r#"
         .global _start
