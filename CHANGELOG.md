@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Fail-closed symbolic constraint handling:** feasibility queries, opposite-edge branch solving, and concrete-model extraction no longer silently omit path constraints whose dependency summaries are unavailable. Such queries now report an explicit indexed error rather than yielding potentially unsound SAT results.
+- **Branch candidate ranking safety:** named candidate fields replace the positional seven-element history tuple, preventing distance/priority fields from being accidentally interchanged.
+
 ### Added
 
 - **Operator-grade symbolic diagnostics:** generated CLI runs now report state economics, trace frontier, timeout/failure context, concretization pressure, semantic/memory/vector fidelity debt, and evidence-driven follow-up ideas.
