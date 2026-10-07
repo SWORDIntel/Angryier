@@ -5174,10 +5174,7 @@ mod tests {
 /// dependency metadata means the query is incomplete, not that the missing
 /// predicate is irrelevant. This is used by feasibility checks, alternate
 /// branch inversion, and both state-model extraction entry points.
-fn checked_path_constraints(
-    arena: &SymbolicArena,
-    path: &[ExprId],
-) -> Result<Vec<CanonicalConstraint>, RuntimeError> {
+fn checked_path_constraints(arena: &SymbolicArena, path: &[ExprId]) -> Result<Vec<CanonicalConstraint>, RuntimeError> {
     path.iter()
         .enumerate()
         .map(|(index, expr)| {
@@ -5258,6 +5255,13 @@ pub struct SymbolicBranchDecision {
     pub chose_taken: bool,
     /// Constraint count before this branch's edge predicate was appended.
     pub prefix_constraints: usize,
+    /// 1-based dynamic visit to this branch PC within the retained execution
+    /// trace.
+    pub visit_index: u64,
+    /// Whether the retained trace still covers execution from entry. When
+    /// false, `visit_index` is only a suffix count and replay must fail
+    /// closed instead of guessing which loop visit produced the decision.
+    pub visit_index_exact: bool,
 }
 
 /// Maximum symbolic branch decisions retained per state. The ledger is
@@ -5290,10 +5294,14 @@ pub struct AlternateBranchSolution {
 pub struct AlternateBranchReplay {
     /// Stable status for scripting/frontends: `validated`, `mismatch`,
     /// `budget-exhausted`, `terminated-before-branch`,
-    /// `unsupported-model`, `stateful-kernel-model`,
-    /// `stateful-environment`, or `not-sat`.
+    /// `ambiguous-branch-visit`, `unsupported-model`,
+    /// `stateful-kernel-model`, `stateful-environment`, or `not-sat`.
     pub status: &'static str,
     pub steps: u64,
+    /// Dynamic branch visit requested by the symbolic decision.
+    pub expected_visit: u64,
+    /// Concrete visits to the same branch PC observed during replay.
+    pub observed_visits: u64,
     pub reached_branch: bool,
     pub observed_target: Option<Address>,
     pub matched_alternate: bool,
@@ -7102,6 +7110,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             let child_index = self.states.len();
             let state = &mut self.states[index];
             let prefix_constraints = state.constraints.len();
+            let visit_index = state.process.trace.iter().filter(|&&address| address == pc).count() as u64;
+            let visit_index_exact = state.process.trace.len() < MAX_TRACE;
             if taken_feasible && other_feasible {
                 // Clone the common pre-branch state before recording either
                 // edge so both histories inherit the exact same prefix.
@@ -7113,6 +7123,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     not_taken: branch.not_taken,
                     chose_taken: true,
                     prefix_constraints,
+                    visit_index,
+                    visit_index_exact,
                 });
                 state.constraints.push(condition);
                 let _ = state.process.write_pc(branch.taken);
@@ -7123,6 +7135,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     not_taken: branch.not_taken,
                     chose_taken: false,
                     prefix_constraints,
+                    visit_index,
+                    visit_index_exact,
                 });
                 child.constraints.push(not_cond);
                 let _ = child.process.write_pc(branch.not_taken);
@@ -7171,6 +7185,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 not_taken: branch.not_taken,
                 chose_taken,
                 prefix_constraints,
+                visit_index,
+                visit_index_exact,
             });
             state.constraints.push(constraint);
             let _ = state.process.write_pc(next_pc);
@@ -8057,43 +8073,42 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         solution: &AlternateBranchSolution,
         max_steps: u64,
     ) -> Result<AlternateBranchReplay, RuntimeError> {
+        let expected_visit = solution.decision.visit_index;
+        let base = |status: &'static str, detail: String| AlternateBranchReplay {
+            status,
+            steps: 0,
+            expected_visit,
+            observed_visits: 0,
+            reached_branch: false,
+            observed_target: None,
+            matched_alternate: false,
+            applied_registers: 0,
+            detail,
+        };
+
         if solution.outcome != SolverOutcomeKind::Sat {
-            return Ok(AlternateBranchReplay {
-                status: "not-sat",
-                steps: 0,
-                reached_branch: false,
-                observed_target: None,
-                matched_alternate: false,
-                applied_registers: 0,
-                detail: format!("solver outcome is {:?}", solution.outcome),
-            });
+            return Ok(base("not-sat", format!("solver outcome is {:?}", solution.outcome)));
         }
         if state.process.kernel_pool.is_some() {
-            return Ok(AlternateBranchReplay {
-                status: "stateful-kernel-model",
-                steps: 0,
-                reached_branch: false,
-                observed_target: None,
-                matched_alternate: false,
-                applied_registers: 0,
-                detail: "kernel pool model state is externally shared and cannot be safely rewound for post-run replay"
-                    .to_string(),
-            });
+            return Ok(base(
+                "stateful-kernel-model",
+                "kernel pool model state is externally shared and cannot be safely rewound for post-run replay".to_string(),
+            ));
         }
-
         if state.process.simproc_dispatches > 0 {
-            return Ok(AlternateBranchReplay {
-                status: "stateful-environment",
-                steps: 0,
-                reached_branch: false,
-                observed_target: None,
-                matched_alternate: false,
-                applied_registers: 0,
-                detail: format!(
+            return Ok(base(
+                "stateful-environment",
+                format!(
                     "{} SimProcedure dispatch(es) occurred before the diagnostic frontier; post-run replay refuses to assume those model instances are rewindable",
                     state.process.simproc_dispatches
                 ),
-            });
+            ));
+        }
+        if !solution.decision.visit_index_exact || expected_visit == 0 {
+            return Ok(base(
+                "ambiguous-branch-visit",
+                "the retained symbolic trace does not prove the absolute dynamic visit for this repeated branch PC; refusing to validate an earlier matching occurrence".to_string(),
+            ));
         }
 
         let mut assignments = Vec::<(u32, u64)>::new();
@@ -8103,36 +8118,27 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 .iter()
                 .find(|binding| u64::from(binding.expression.0) == *expression)
             else {
-                return Ok(AlternateBranchReplay {
-                    status: "unsupported-model",
-                    steps: 0,
-                    reached_branch: false,
-                    observed_target: None,
-                    matched_alternate: false,
-                    applied_registers: assignments.len(),
-                    detail: format!("solver model expression {expression} is not a register-backed symbolic input"),
-                });
+                let mut replay = base(
+                    "unsupported-model",
+                    format!("solver model expression {expression} is not a register-backed symbolic input"),
+                );
+                replay.applied_registers = assignments.len();
+                return Ok(replay);
             };
             let nonzero_upper = bytes.get(8..).is_some_and(|upper| upper.iter().any(|byte| *byte != 0));
             if binding.width != 64 || nonzero_upper {
-                return Ok(AlternateBranchReplay {
-                    status: "unsupported-model",
-                    steps: 0,
-                    reached_branch: false,
-                    observed_target: None,
-                    matched_alternate: false,
-                    applied_registers: assignments.len(),
-                    detail: format!(
+                let mut replay = base(
+                    "unsupported-model",
+                    format!(
                         "solver model expression {expression} is {} bits / {} byte(s), not a replayable 64-bit GPR value",
                         binding.width,
                         bytes.len()
                     ),
-                });
+                );
+                replay.applied_registers = assignments.len();
+                return Ok(replay);
             }
-            // Native Z3 preserves a historical <=128-bit model container:
-            // even a 64-bit symbol may arrive as 16 little-endian bytes.
-            // Accept zero-extended upper bytes and replay the architectural
-            // low 64 bits, matching the existing Lua value/value_hex surface.
+
             let mut value_bytes = [0u8; 8];
             let len = bytes.len().min(8);
             value_bytes[..len].copy_from_slice(&bytes[..len]);
@@ -8140,15 +8146,10 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         }
 
         if assignments.is_empty() {
-            return Ok(AlternateBranchReplay {
-                status: "unsupported-model",
-                steps: 0,
-                reached_branch: false,
-                observed_target: None,
-                matched_alternate: false,
-                applied_registers: 0,
-                detail: "SAT alternate model contained no replayable register assignments".to_string(),
-            });
+            return Ok(base(
+                "unsupported-model",
+                "SAT alternate model contained no replayable register assignments".to_string(),
+            ));
         }
 
         let mut process = state.process.clone();
@@ -8159,30 +8160,40 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
 
         let budget = max_steps.max(1);
         let mut steps = 0u64;
+        let mut observed_visits = 0u64;
         while steps < budget && !process.terminated {
             let pc = process.pc()?;
             if pc == solution.decision.pc {
-                let _ = self.runtime.step(&mut process)?;
-                steps += 1;
-                let observed = process.pc().ok();
-                let matched = observed == Some(solution.alternate_target);
-                return Ok(AlternateBranchReplay {
-                    status: if matched { "validated" } else { "mismatch" },
-                    steps,
-                    reached_branch: true,
-                    observed_target: observed,
-                    matched_alternate: matched,
-                    applied_registers: assignments.len(),
-                    detail: if matched {
-                        "concrete replay reached the recorded branch and took the solver-predicted alternate successor"
-                            .to_string()
-                    } else {
-                        format!(
-                            "concrete replay reached the recorded branch but observed successor {:?}, expected {:#x}",
-                            observed, solution.alternate_target
-                        )
-                    },
-                });
+                observed_visits += 1;
+                if observed_visits == expected_visit {
+                    let _ = self.runtime.step(&mut process)?;
+                    steps += 1;
+                    let observed = process.pc().ok();
+                    let matched = observed == Some(solution.alternate_target);
+                    return Ok(AlternateBranchReplay {
+                        status: if matched { "validated" } else { "mismatch" },
+                        steps,
+                        expected_visit,
+                        observed_visits,
+                        reached_branch: true,
+                        observed_target: observed,
+                        matched_alternate: matched,
+                        applied_registers: assignments.len(),
+                        detail: if matched {
+                            format!(
+                                "concrete replay reached dynamic visit {expected_visit} of branch {:#x} and took the solver-predicted alternate successor",
+                                solution.decision.pc
+                            )
+                        } else {
+                            format!(
+                                "concrete replay reached dynamic visit {expected_visit} of branch {:#x} but observed successor {:?}, expected {:#x}",
+                                solution.decision.pc,
+                                observed,
+                                solution.alternate_target
+                            )
+                        },
+                    });
+                }
             }
             let _ = self.runtime.step(&mut process)?;
             steps += 1;
@@ -8195,18 +8206,20 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 "budget-exhausted"
             },
             steps,
+            expected_visit,
+            observed_visits,
             reached_branch: false,
             observed_target: process.pc().ok(),
             matched_alternate: false,
             applied_registers: assignments.len(),
             detail: if process.terminated {
                 format!(
-                    "concrete replay terminated before reaching recorded branch {:#x}",
+                    "concrete replay terminated after {observed_visits} visit(s) to branch {:#x}; expected dynamic visit {expected_visit}",
                     solution.decision.pc
                 )
             } else {
                 format!(
-                    "concrete replay exhausted {budget} step(s) before reaching recorded branch {:#x}",
+                    "concrete replay exhausted {budget} step(s) after {observed_visits} visit(s) to branch {:#x}; expected dynamic visit {expected_visit}",
                     solution.decision.pc
                 )
             },
