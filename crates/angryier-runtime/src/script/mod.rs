@@ -1244,26 +1244,26 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                     candidate_out.set("model", model)?;
 
                                     let replay_out = lua.create_table()?;
-                                    let replay_status = match session.replay_alternate_branch_model(state, &solution, steps)
-                                    {
-                                        Ok(replay) => {
-                                            replay_out.set("status", replay.status)?;
-                                            replay_out.set("steps", replay.steps)?;
-                                            replay_out.set("reached_branch", replay.reached_branch)?;
-                                            replay_out.set("matched_alternate", replay.matched_alternate)?;
-                                            replay_out.set("applied_registers", replay.applied_registers)?;
-                                            replay_out.set("detail", replay.detail)?;
-                                            if let Some(observed) = replay.observed_target {
-                                                set_addr64(&replay_out, "observed_target", observed)?;
+                                    let replay_status =
+                                        match session.replay_alternate_branch_model(state, &solution, steps) {
+                                            Ok(replay) => {
+                                                replay_out.set("status", replay.status)?;
+                                                replay_out.set("steps", replay.steps)?;
+                                                replay_out.set("reached_branch", replay.reached_branch)?;
+                                                replay_out.set("matched_alternate", replay.matched_alternate)?;
+                                                replay_out.set("applied_registers", replay.applied_registers)?;
+                                                replay_out.set("detail", replay.detail)?;
+                                                if let Some(observed) = replay.observed_target {
+                                                    set_addr64(&replay_out, "observed_target", observed)?;
+                                                }
+                                                Some(replay.status)
                                             }
-                                            Some(replay.status)
-                                        }
-                                        Err(error) => {
-                                            replay_out.set("status", "error")?;
-                                            replay_out.set("detail", error.to_string())?;
-                                            Some("error")
-                                        }
-                                    };
+                                            Err(error) => {
+                                                replay_out.set("status", "error")?;
+                                                replay_out.set("detail", error.to_string())?;
+                                                Some("error")
+                                            }
+                                        };
                                     candidate_out.set("replay", replay_out)?;
 
                                     let candidate_verdict = branch_steering_verdict(
@@ -1282,10 +1282,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                     candidate_out.set("error", error.to_string())?;
                                     candidate_out.set("steering_action", "unresolved")?;
                                     candidate_out.set("steering_confidence", "low")?;
-                                    candidate_out.set(
-                                        "steering_reason",
-                                        "older candidate alternate-edge solving failed",
-                                    )?;
+                                    candidate_out
+                                        .set("steering_reason", "older candidate alternate-edge solving failed")?;
                                 }
                             }
                         } else {
