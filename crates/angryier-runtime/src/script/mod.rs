@@ -76,11 +76,29 @@ fn branch_steering_verdict(
             confidence: "high",
             reason: "the alternate edge is UNSAT under the exact shared pre-branch constraint prefix",
         },
-        "Sat" if replay_status == Some("mismatch") => BranchSteeringVerdict {
-            action: "unresolved",
-            confidence: "low",
-            reason: "the symbolic alternate model was SAT but concrete replay reached the branch and did not take the predicted successor",
-        },
+        "Sat"
+            if matches!(
+                replay_status,
+                Some("mismatch") | Some("path-context-mismatch") | Some("ambiguous-model") | Some("error")
+            ) =>
+        {
+            BranchSteeringVerdict {
+                action: "unresolved",
+                confidence: "low",
+                reason: match replay_status {
+                    Some("path-context-mismatch") => {
+                        "the symbolic alternate model was SAT but concrete replay reached a different dynamic path context"
+                    }
+                    Some("ambiguous-model") => {
+                        "the symbolic alternate model was SAT but its register assignments were internally ambiguous"
+                    }
+                    Some("error") => "the symbolic alternate model was SAT but concrete replay failed",
+                    _ => {
+                        "the symbolic alternate model was SAT but concrete replay reached the branch and did not take the predicted successor"
+                    }
+                },
+            }
+        }
         "Sat" if alternate_is_find_target => BranchSteeringVerdict {
             action: "prioritize-alternate",
             confidence: "high",
@@ -1587,6 +1605,23 @@ mod tests {
         assert_eq!(verdict.action, "unresolved");
         assert_eq!(verdict.confidence, "low");
         assert!(verdict.reason.contains("did not take the predicted successor"));
+    }
+
+    #[test]
+    fn branch_steering_path_context_mismatch_vetoes_cfg_priority() {
+        let verdict =
+            branch_steering_verdict("Sat", false, true, Some("alternate"), Some("path-context-mismatch"));
+        assert_eq!(verdict.action, "unresolved");
+        assert_eq!(verdict.confidence, "low");
+        assert!(verdict.reason.contains("different dynamic path context"));
+    }
+
+    #[test]
+    fn branch_steering_ambiguous_model_vetoes_direct_target_priority() {
+        let verdict = branch_steering_verdict("Sat", false, true, None, Some("ambiguous-model"));
+        assert_eq!(verdict.action, "unresolved");
+        assert_eq!(verdict.confidence, "low");
+        assert!(verdict.reason.contains("internally ambiguous"));
     }
 
     #[test]
