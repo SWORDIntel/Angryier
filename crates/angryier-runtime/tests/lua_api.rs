@@ -477,6 +477,165 @@ fn test_angry_run_branch_analysis_replays_symbolic_argv_byte() {
 }
 
 #[test]
+fn test_angry_run_branch_analysis_replays_symbolic_stdin_byte() {
+    const SRC: &str = r#"
+        .global _start
+        .text
+    _start:
+        sub $16, %rsp
+        xor %rax, %rax
+        xor %rdi, %rdi
+        mov %rsp, %rsi
+        mov $1, %rdx
+        syscall
+        cmpb $0x41, (%rsp)
+        jne fail
+        mov $60, %rax
+        xor %rdi, %rdi
+        syscall
+    fail:
+        mov $60, %rax
+        mov $1, %rdi
+        syscall
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "branch_analysis_stdin") else {
+        eprintln!("skipping symbolic-stdin replay test: system assembler not found");
+        return;
+    };
+
+    let lua = init_lua();
+    let bin_str = bin_path.to_str().expect("valid path string");
+    let script = format!(
+        r#"
+        local r = angry.run("{bin_str}", {{
+            steps = 96,
+            states = 8,
+            branch_analysis = true,
+            branch_timeout_ms = 2000,
+        }})
+        local b = assert(r.branch_analysis)
+        local replay = assert(b.replay)
+        return
+            b.solver_status,
+            replay.status,
+            replay.matched_alternate == true,
+            replay.applied_registers or 0,
+            replay.applied_memory_bytes or 0,
+            replay.applied_stream_bytes or 0,
+            tostring(replay.detail or "none")
+        "#
+    );
+
+    let (
+        solver_status,
+        replay_status,
+        matched,
+        applied_registers,
+        applied_memory_bytes,
+        applied_stream_bytes,
+        detail,
+    ): (String, String, bool, usize, usize, usize, String) =
+        lua.load(&script).eval().expect("symbolic stdin branch analysis");
+
+    assert_eq!(solver_status, "Sat");
+    assert_eq!(replay_status, "validated", "replay detail: {detail}");
+    assert!(matched, "replay detail: {detail}");
+    assert_eq!(applied_registers, 0, "stdin model should not require a GPR assignment");
+    assert_eq!(applied_memory_bytes, 0, "stdin input is a stream, not entry memory");
+    assert!(
+        applied_stream_bytes >= 1,
+        "stdin model should concretize at least one stream byte: {detail}"
+    );
+}
+
+#[test]
+fn test_angry_run_branch_analysis_replays_symbolic_file_byte() {
+    const SRC: &str = r#"
+        .global _start
+        .text
+    _start:
+        lea input_path(%rip), %rsi
+        mov $-100, %rdi
+        xor %rdx, %rdx
+        xor %r10, %r10
+        mov $257, %rax
+        syscall
+
+        sub $16, %rsp
+        mov %rax, %rdi
+        xor %rax, %rax
+        mov %rsp, %rsi
+        mov $1, %rdx
+        syscall
+
+        cmpb $0x41, (%rsp)
+        jne fail
+        mov $60, %rax
+        xor %rdi, %rdi
+        syscall
+    fail:
+        mov $60, %rax
+        mov $1, %rdi
+        syscall
+
+        .section .rodata
+    input_path:
+        .asciz "/symbolic-input"
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "branch_analysis_file") else {
+        eprintln!("skipping symbolic-file replay test: system assembler not found");
+        return;
+    };
+
+    let lua = init_lua();
+    let bin_str = bin_path.to_str().expect("valid path string");
+    let script = format!(
+        r#"
+        local r = angry.run("{bin_str}", {{
+            files = {{ ["/symbolic-input"] = true }},
+            steps = 128,
+            states = 8,
+            branch_analysis = true,
+            branch_timeout_ms = 2000,
+        }})
+        local b = assert(r.branch_analysis)
+        local replay = assert(b.replay)
+        return
+            b.solver_status,
+            replay.status,
+            replay.matched_alternate == true,
+            replay.applied_registers or 0,
+            replay.applied_memory_bytes or 0,
+            replay.applied_stream_bytes or 0,
+            tostring(replay.detail or "none")
+        "#
+    );
+
+    let (
+        solver_status,
+        replay_status,
+        matched,
+        applied_registers,
+        applied_memory_bytes,
+        applied_stream_bytes,
+        detail,
+    ): (String, String, bool, usize, usize, usize, String) =
+        lua.load(&script).eval().expect("symbolic file branch analysis");
+
+    assert_eq!(solver_status, "Sat");
+    assert_eq!(replay_status, "validated", "replay detail: {detail}");
+    assert!(matched, "replay detail: {detail}");
+    assert_eq!(applied_registers, 0, "file model should not require a GPR assignment");
+    assert_eq!(applied_memory_bytes, 0, "file input is a stream, not entry memory");
+    assert!(
+        applied_stream_bytes >= 1,
+        "file model should concretize at least one stream byte: {detail}"
+    );
+}
+
+#[test]
 fn test_angry_run_branch_analysis_ranks_cfg_distance_to_find_target() {
     const SRC: &str = r#"
         .global _start
