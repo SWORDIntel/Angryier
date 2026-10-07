@@ -1205,6 +1205,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                         replay_out.set("matched_alternate", replay.matched_alternate)?;
                                         replay_out.set("applied_registers", replay.applied_registers)?;
                                         replay_out.set("applied_memory_bytes", replay.applied_memory_bytes)?;
+                                        replay_out.set("applied_stream_bytes", replay.applied_stream_bytes)?;
                                         replay_out.set("detail", replay.detail)?;
                                         if let Some(observed) = replay.observed_target {
                                             set_addr64(&replay_out, "observed_target", observed)?;
@@ -1344,6 +1345,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                                                 replay_out.set("matched_alternate", replay.matched_alternate)?;
                                                 replay_out.set("applied_registers", replay.applied_registers)?;
                                                 replay_out.set("applied_memory_bytes", replay.applied_memory_bytes)?;
+                                        replay_out.set("applied_stream_bytes", replay.applied_stream_bytes)?;
                                                 replay_out.set("detail", replay.detail)?;
                                                 if let Some(observed) = replay.observed_target {
                                                     set_addr64(&replay_out, "observed_target", observed)?;
