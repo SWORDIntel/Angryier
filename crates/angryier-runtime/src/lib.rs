@@ -6695,18 +6695,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     })
                     .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
                 let state_ref = &self.states[index];
-                let mut constraints: Vec<CanonicalConstraint> = state_ref
-                    .constraints
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, c)| {
-                        self.arena.dependency_summary(*c).map(|s| CanonicalConstraint {
-                            id: ConstraintId(i as u64),
-                            key: s.key,
-                            expr: *c,
-                        })
-                    })
-                    .collect();
+                let mut constraints = checked_path_constraints(self.arena, &state_ref.constraints)?;
                 // Region bounds as ONE disjunctive predicate conjuncted onto
                 // `eq`: `expr == free AND (base_1 <= free < end_1 OR ...)`.
                 // The bounds MUST be a disjunction — pushing every region's
@@ -6791,16 +6780,17 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                                 immediate: Vec::new(),
                             })
                             .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
-                        // Without a dependency summary the conjunct cannot be
-                        // canonically keyed — drop it rather than send an
-                        // unkeyable constraint (same rule as the path list).
-                        if let Some(s) = self.arena.dependency_summary(conj) {
-                            constraints.push(CanonicalConstraint {
-                                id: ConstraintId(u64::MAX),
-                                key: s.key,
-                                expr: conj,
-                            });
-                        }
+                        let summary = self.arena.dependency_summary(conj).ok_or_else(|| {
+                            RuntimeError::Symbolic(format!(
+                                "address concretization bounds expression {} lacks dependency metadata; refusing to weaken the solver query",
+                                conj.0
+                            ))
+                        })?;
+                        constraints.push(CanonicalConstraint {
+                            id: ConstraintId(u64::MAX),
+                            key: summary.key,
+                            expr: conj,
+                        });
                     }
                 }
                 let profile = state_ref.process.target_profile;
