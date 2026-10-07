@@ -384,6 +384,10 @@ pub struct Process {
     /// Addresses of executed blocks, in execution order (bounded by
     /// [`MAX_TRACE`]); used to build symbolic traces for branch solving.
     pub trace: Vec<Address>,
+    /// True once bounded trace recording has evicted at least one earlier PC.
+    /// A full trace at exactly MAX_TRACE entries is still exact until the
+    /// next append actually drops history.
+    trace_truncated: bool,
     /// Observable effects of modeled syscalls (captured output, exit code).
     pub syscalls: SyscallModel,
     /// Current program break for `brk` (initialized at the image end).
@@ -481,6 +485,7 @@ impl Process {
     pub fn reset_to_entry(&mut self) {
         self.state = self.entry_state.clone();
         self.trace.clear();
+        self.trace_truncated = false;
         self.syscalls.reset();
         self.program_break = self.entry_program_break;
         self.mmap_next = MMAP_BASE;
@@ -513,6 +518,16 @@ impl Process {
             .registers
             .write_in_place(register_id::RIP.0, &pc.to_le_bytes())
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))
+    }
+
+    /// Appends one executed PC to the bounded trace and records whether
+    /// any older history was actually evicted.
+    fn record_trace_pc(&mut self, pc: Address) {
+        if self.trace.len() >= MAX_TRACE {
+            self.trace.remove(0);
+            self.trace_truncated = true;
+        }
+        self.trace.push(pc);
     }
 
     /// Reads a register as u64.
@@ -1440,6 +1455,7 @@ impl<D: Decoder> Runtime<D> {
             pci_config_address: 0,
             symbols: Vec::new(),
             trace: Vec::new(),
+            trace_truncated: false,
             syscalls: SyscallModel::new(),
             program_break: 0,
             entry_program_break: 0,
@@ -1599,6 +1615,7 @@ impl<D: Decoder> Runtime<D> {
             pci_config_address: 0,
             symbols: image.symbols.clone(),
             trace: Vec::new(),
+            trace_truncated: false,
             syscalls: SyscallModel::new(),
             program_break: HEAP_BASE,
             entry_program_break: HEAP_BASE,
@@ -2215,6 +2232,7 @@ impl<D: Decoder> Runtime<D> {
             pci_config_address: 0,
             symbols: image.symbols,
             trace: Vec::new(),
+            trace_truncated: false,
             syscalls: SyscallModel::new(),
             program_break: brk_base,
             entry_program_break: brk_base,
@@ -4649,10 +4667,7 @@ fn finish_step(
     match outcome {
         ExecutionOutcome::Continue { next_pc, .. } => {
             process.write_pc(next_pc)?;
-            if process.trace.len() >= MAX_TRACE {
-                process.trace.remove(0);
-            }
-            process.trace.push(pc);
+            process.record_trace_pc(pc);
             Ok(StepOutcome::Stepped {
                 pc,
                 next_pc,
@@ -4837,6 +4852,7 @@ mod tests {
             pci_config_address: 0,
             symbols: Vec::new(),
             trace: Vec::new(),
+            trace_truncated: false,
             syscalls: SyscallModel::new(),
             program_break: 0,
             entry_program_break: 0,
@@ -5099,12 +5115,16 @@ mod tests {
         process.step_count = 91;
         process.simproc_dispatches = 4;
         process.terminated = true;
+        process.trace = vec![entry_pc; MAX_TRACE];
+        process.trace_truncated = true;
         process.syscalls.record_write(b"noise");
         process.write_pc(entry_pc.wrapping_add(1))?;
 
         process.reset_to_entry();
 
         assert_eq!(process.pc()?, entry_pc);
+        assert!(process.trace.is_empty());
+        assert!(!process.trace_truncated);
         assert_eq!(process.program_break, entry_brk);
         assert_eq!(process.mmap_next, MMAP_BASE);
         assert!(process.open_fds.is_empty());
@@ -6460,10 +6480,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         // history for diagnosis and replay.
         {
             if let Some(state) = self.states.get_mut(index) {
-                if state.process.trace.len() >= MAX_TRACE {
-                    state.process.trace.remove(0);
-                }
-                state.process.trace.push(pc);
+                state.process.record_trace_pc(pc);
             }
         }
 
@@ -7176,7 +7193,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             let state = &mut self.states[index];
             let prefix_constraints = state.constraints.len();
             let visit_index = state.process.trace.iter().filter(|&&address| address == pc).count() as u64;
-            let visit_index_exact = state.process.trace.len() < MAX_TRACE;
+            let visit_index_exact = !state.process.trace_truncated;
             let branch_trace_fingerprint = trace_fingerprint(state.process.trace.iter().copied());
             if taken_feasible && other_feasible {
                 // Clone the common pre-branch state before recording either
