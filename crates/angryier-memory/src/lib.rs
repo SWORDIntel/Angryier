@@ -2721,10 +2721,8 @@ mod tests {
     }
 
     #[test]
-    fn uc_fabrication_cap_fails_closed_but_records_debt() {
-        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])
-            .expect("memory")
-            .with_uc_memory();
+    fn uc_fabrication_cap_fails_closed_but_records_debt() -> Result<(), MemoryError> {
+        let memory = PersistentMemory::new(vec![region(0x1000, 0x1000, true, false)])?.with_uc_memory();
         // One access spanning more distinct pages than the fabrication cap
         // allows: the policy refuses (exact flag-off error) after recording.
         let span_pages = UC_MEMORY_MAX_FABRICATED_PAGES + 2;
@@ -2737,6 +2735,7 @@ mod tests {
         );
         assert_eq!(memory.uc_memory_total(), 1);
         assert_eq!(memory.uc_memory_fabricated_pages(), 0);
+        Ok(())
     }
 
     #[test]
