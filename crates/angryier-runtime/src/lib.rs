@@ -409,6 +409,10 @@ pub struct Process {
     pub symbolic_files: std::collections::BTreeSet<String>,
     /// fds opened on symbolic paths — symbolic `read` materializes bytes.
     pub symbolic_fds: std::collections::BTreeSet<u64>,
+    /// Original pathname for each symbolic fd. Concrete replay needs this to
+    /// reconstruct the same stream rather than treating a buffer address as
+    /// input provenance.
+    pub symbolic_fd_paths: BTreeMap<u64, String>,
     /// Where `argv[0]`'s NUL-terminated string landed on the stack —
     /// `symbolize_argv0` overwrites it with symbolic bytes.
     pub argv0_addr: Option<u64>,
@@ -491,6 +495,7 @@ impl Process {
         self.mmap_next = MMAP_BASE;
         self.open_fds.clear();
         self.symbolic_fds.clear();
+        self.symbolic_fd_paths.clear();
         self.stdin_pos = 0;
         self.next_fd = 3;
         self.pci_config_address = 0;
@@ -1465,6 +1470,7 @@ impl<D: Decoder> Runtime<D> {
             open_fds: BTreeMap::new(),
             symbolic_files: std::collections::BTreeSet::new(),
             symbolic_fds: std::collections::BTreeSet::new(),
+            symbolic_fd_paths: BTreeMap::new(),
             argv0_addr: None,
             stdin: Vec::new(),
             stdin_pos: 0,
@@ -1625,6 +1631,7 @@ impl<D: Decoder> Runtime<D> {
             open_fds: BTreeMap::new(),
             symbolic_files: std::collections::BTreeSet::new(),
             symbolic_fds: std::collections::BTreeSet::new(),
+            symbolic_fd_paths: BTreeMap::new(),
             argv0_addr: Some(argv0_addr),
             stdin: Vec::new(),
             stdin_pos: 0,
@@ -2242,6 +2249,7 @@ impl<D: Decoder> Runtime<D> {
             open_fds: BTreeMap::new(),
             symbolic_files: std::collections::BTreeSet::new(),
             symbolic_fds: std::collections::BTreeSet::new(),
+            symbolic_fd_paths: BTreeMap::new(),
             argv0_addr: Some(argv0_addr),
             stdin: Vec::new(),
             stdin_pos: 0,
@@ -2979,6 +2987,7 @@ impl<D: Decoder> Runtime<D> {
                     process.open_fds.insert(fd, (data, 0));
                     if process.symbolic_files.contains(&path) {
                         process.symbolic_fds.insert(fd);
+                        process.symbolic_fd_paths.insert(fd, path.clone());
                     }
                     fd
                 } else {
@@ -2991,6 +3000,8 @@ impl<D: Decoder> Runtime<D> {
             }
             syscall::CLOSE => {
                 process.open_fds.remove(&arg0);
+                process.symbolic_fds.remove(&arg0);
+                process.symbolic_fd_paths.remove(&arg0);
                 process.write_register(register_id::GPR_BASE, 0)?;
                 process.write_pc(next_pc)?;
                 process.step_count += 1;
@@ -4419,6 +4430,7 @@ impl<'a, D: Decoder> ConcolicSession<'a, D> {
             memory,
             symbols,
             replay_memory_symbols: BTreeMap::new(),
+            replay_stream_symbols: BTreeMap::new(),
             concrete_registers,
             id,
             expr_concrete,
@@ -4863,6 +4875,7 @@ mod tests {
             open_fds: BTreeMap::new(),
             symbolic_files: std::collections::BTreeSet::new(),
             symbolic_fds: std::collections::BTreeSet::new(),
+            symbolic_fd_paths: BTreeMap::new(),
             argv0_addr: None,
             stdin: Vec::new(),
             stdin_pos: 0,
@@ -5109,6 +5122,7 @@ mod tests {
         process.symbolic_files.insert("/symbolic".into());
         process.open_fds.insert(7, (vec![0xbb], 1));
         process.symbolic_fds.insert(7);
+        process.symbolic_fd_paths.insert(7, "/symbolic".into());
         process.next_fd = 19;
         process.program_break = entry_brk.wrapping_add(0x2000);
         process.mmap_next = MMAP_BASE.wrapping_sub(0x8000);
@@ -5435,6 +5449,17 @@ pub struct AlternateBranchReplay {
     pub detail: String,
 }
 
+/// Replayable source location for one runtime-generated symbolic stream byte.
+///
+/// This is source provenance, not the destination buffer address. It lets a
+/// concrete replay rebuild the input stream that caused the symbolic byte to
+/// be materialized.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReplayStreamInput {
+    Stdin { offset: usize },
+    File { path: String, offset: usize },
+}
+
 /// A symbolic execution state: the concrete [`Process`] (decode source,
 /// concrete fallbacks, environment model) plus the symbolic register
 /// bindings, path constraints, and symbolic byte store that make this the
@@ -5457,6 +5482,10 @@ pub struct SymbolicState {
     /// for exact concrete replay; runtime-generated stdin/file symbols are
     /// deliberately absent and remain fail-closed.
     pub replay_memory_symbols: BTreeMap<ExprId, Address>,
+    /// Runtime-generated stream byte provenance. Unlike entry memory, these
+    /// symbols are replayed by reconstructing stdin/file contents and letting
+    /// the normal syscall model refill the program buffer.
+    pub replay_stream_symbols: BTreeMap<ExprId, ReplayStreamInput>,
     /// Concrete values for registers with no symbolic binding — untouched
     /// registers (rsp, rip, startup GPRs) read concrete instead of
     /// auto-symboling; a register that was *written* symbolically has a
@@ -5712,6 +5741,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             memory,
             symbols: Vec::new(),
             replay_memory_symbols: BTreeMap::new(),
+            replay_stream_symbols: BTreeMap::new(),
             concrete_registers,
             id: 0,
             expr_concrete: BTreeMap::new(),
@@ -6694,6 +6724,30 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 let buf = arg(state, register_id::GPR_BASE + 6);
                 let count = arg(state, register_id::GPR_BASE + 2);
                 if (fd == 0 || state.process.symbolic_fds.contains(&fd)) && count > 0 && count <= 4096 {
+                    let count_usize = usize::try_from(count)
+                        .map_err(|_| RuntimeError::Execution("symbolic read count does not fit usize".into()))?;
+                    let stream_origin = if fd == 0 {
+                        let base = state.process.stdin_pos;
+                        state.process.stdin_pos = base.saturating_add(count_usize);
+                        ReplayStreamInput::Stdin { offset: base }
+                    } else {
+                        let path = state
+                            .process
+                            .symbolic_fd_paths
+                            .get(&fd)
+                            .cloned()
+                            .ok_or_else(|| {
+                                RuntimeError::Execution(format!(
+                                    "symbolic fd {fd} has no retained pathname provenance"
+                                ))
+                            })?;
+                        let (_, pos) = state.process.open_fds.get_mut(&fd).ok_or_else(|| {
+                            RuntimeError::Execution(format!("symbolic fd {fd} is not present in open_fds"))
+                        })?;
+                        let base = *pos;
+                        *pos = base.saturating_add(count_usize);
+                        ReplayStreamInput::File { path, offset: base }
+                    };
                     let next_symbol = state
                         .symbols
                         .iter()
@@ -6724,6 +6778,20 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             expression: expr,
                             width: 8,
                         });
+                        let origin = match &stream_origin {
+                            ReplayStreamInput::Stdin { offset } => {
+                                ReplayStreamInput::Stdin {
+                                    offset: offset.saturating_add(i as usize),
+                                }
+                            }
+                            ReplayStreamInput::File { path, offset } => {
+                                ReplayStreamInput::File {
+                                    path: path.clone(),
+                                    offset: offset.saturating_add(i as usize),
+                                }
+                            }
+                        };
+                        state.replay_stream_symbols.insert(expr, origin);
                     }
                     state
                         .memory
@@ -7553,6 +7621,17 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .collect()
     }
 
+    fn merged_replay_stream_symbols(
+        left: &BTreeMap<ExprId, ReplayStreamInput>,
+        right: &BTreeMap<ExprId, ReplayStreamInput>,
+    ) -> BTreeMap<ExprId, ReplayStreamInput> {
+        left.iter()
+            .filter_map(|(expr, origin)| {
+                (right.get(expr) == Some(origin)).then_some((*expr, origin.clone()))
+            })
+            .collect()
+    }
+
     /// Merges every group of live states sharing the same pc via
     /// [`merge_snapshots`] — the Veritesting reconvergence primitive.
     /// Divergent registers become `Ite(left_guard, l, r)` under each state's
@@ -7608,6 +7687,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                 .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
                 let replay_memory_symbols =
                     Self::merged_replay_memory_symbols(&left.replay_memory_symbols, &right.replay_memory_symbols);
+                let replay_stream_symbols =
+                    Self::merged_replay_stream_symbols(&left.replay_stream_symbols, &right.replay_stream_symbols);
                 let merged_state = SymbolicState {
                     process: left.process,
                     registers: snapshot.registers,
@@ -7615,6 +7696,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     memory: left.memory,
                     symbols: snapshot.symbols,
                     replay_memory_symbols,
+                    replay_stream_symbols,
                     concrete_registers: left.concrete_registers.clone(),
                     id: left.id,
                     expr_concrete: snapshot.expr_concrete.clone(),
@@ -7799,6 +7881,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
                     let replay_memory_symbols =
                         Self::merged_replay_memory_symbols(&left.replay_memory_symbols, &right.replay_memory_symbols);
+                    let replay_stream_symbols =
+                        Self::merged_replay_stream_symbols(&left.replay_stream_symbols, &right.replay_stream_symbols);
                     self.states.insert(
                         lo,
                         SymbolicState {
@@ -7808,6 +7892,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             memory: left.memory,
                             symbols: snapshot.symbols,
                             replay_memory_symbols,
+                            replay_stream_symbols,
                             concrete_registers: left.concrete_registers,
                             id: left.id,
                             expr_concrete: snapshot.expr_concrete.clone(),
