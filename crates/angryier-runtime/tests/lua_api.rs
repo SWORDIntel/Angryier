@@ -680,11 +680,27 @@ fn test_angry_run_branch_analysis_solves_ranked_older_candidate() {
         steering_action,
         steering_confidence,
         ranked_target,
-    ): (usize, usize, usize, String, String, String, bool, String, String, String) =
-        lua.load(&script).eval().expect("ranked older branch analysis");
+    ): (
+        usize,
+        usize,
+        usize,
+        String,
+        String,
+        String,
+        bool,
+        String,
+        String,
+        String,
+    ) = lua.load(&script).eval().expect("ranked older branch analysis");
 
-    assert!(history_count >= 2, "fixture must retain at least two symbolic decisions");
-    assert_eq!(ranked_index, 1, "the first branch is the deliberately shorter alternate route");
+    assert!(
+        history_count >= 2,
+        "fixture must retain at least two symbolic decisions"
+    );
+    assert_eq!(
+        ranked_index, 1,
+        "the first branch is the deliberately shorter alternate route"
+    );
     assert_eq!(analyzed_index, ranked_index);
     assert_eq!(cfg_preference, "alternate");
     assert_eq!(solver_status, "Sat");
