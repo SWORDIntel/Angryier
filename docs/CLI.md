@@ -216,6 +216,22 @@ Replay is deliberately refused when:
 
 A `mismatch` is treated as a fidelity warning: SAT symbolic evidence exists, but concrete replay contradicted the predicted immediate successor. Steering is downgraded to `unresolved/low` until that divergence is explained.
 
+### Bounded branch-history ranking
+
+Branch analysis retains at most **64** symbolic decisions per state. Fork siblings inherit the same pre-branch history and append their own chosen edge. State merges clear branch history because merge rewriting invalidates the original per-decision constraint-prefix indices; Angryier fails closed rather than solving stale provenance.
+
+The post-run target-directed analysis is deliberately bounded:
+
+1. Recover **one** CFG window rooted at the earliest retained decision and reuse it for every retained branch.
+2. Score older decisions only when their alternate successor has a structurally better bounded-CFG path to a configured `find` target.
+3. Prefer an alternate that reaches a target when the chosen edge cannot; otherwise prefer larger edge-distance improvement, then shorter alternate distance.
+4. Analyze the newest symbolic decision normally.
+5. Issue **at most one additional solver query and one replay** for the highest-ranked older decision.
+
+The older result is exposed as `branch_analysis.history_candidate_analysis`. It contains the history index, branch PC, ranked target, chosen/alternate CFG distances, solver status, model, replay result, and the same steering action/confidence/reason contract used by the newest branch.
+
+This cap is intentional: diagnostic output should improve the next experiment without turning every run into an unbounded retrospective SMT sweep.
+
 ### Exit codes
 
 | Code | Cause |
@@ -282,6 +298,9 @@ Result table:
 | `branch_analysis.replay.matched_alternate` | True only when concrete execution restarted from entry, reached the recorded branch PC, and stepped to the solver-predicted alternate successor. |
 | `branch_analysis.replay.observed_target_hex` | Exact successor observed after replaying the branch, when available. |
 | `branch_analysis.replay.detail` | Human-readable explanation of validation, refusal, mismatch, or budget exhaustion. |
+| `branch_analysis.history` | Bounded ordered branch-decision provenance for the selected diagnostic state (up to 64 decisions). |
+| `branch_analysis.history_candidate_index` | Highest-ranked older decision whose alternate edge is structurally better toward a configured `find` target. |
+| `branch_analysis.history_candidate_analysis` | At most one extra solver/replay analysis for that older decision, including CFG distances, model, replay, and steering verdict. |
 | `branch_analysis.model[*].value_hex` | For 64-bit register-backed solver assignments, canonical integer value suitable for replay (for example `0x000000000000002a`). Raw solver bytes remain available separately for byte-granular inputs. |
 | `found` | Number of states that reached a `find` target. |
 | `inputs` | Only with `solve = true`: one entry per solved found state, each an array of byte-strings (model bytes per symbol). Per-state model solving is capped at 10 seconds. |
