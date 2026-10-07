@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Concrete symbolic-memory replay:** SAT branch models can now materialize explicitly tracked entry-time symbolic memory and `argv[0]` bytes into a clean entry snapshot before replay. Runtime-generated stdin/file/free symbols remain fail-closed until their provenance is modeled.
 - **Operator-grade symbolic diagnostics:** generated CLI runs now report state economics, trace frontier, timeout/failure context, concretization pressure, semantic/memory/vector fidelity debt, and evidence-driven follow-up ideas.
 - **Primary-limiter analysis:** Angryier classifies the dominant observed constraint on a run (timeout, state pruning, model/semantic failure, unsupported semantics, under-constrained memory/address handling, vector debt, step budget, absent symbolic influence, or unresolved target reachability).
 - **Path-relevant symbolic frontier:** `angry.run` now exposes a diagnostic `frontier` state with current symbolic registers and the symbolic leaf IDs that actually occur in retained path constraints. Register-backed dependencies are mapped back to register name/width/expression, allowing the CLI to distinguish predicate-driving inputs from merely-symbolic inputs.
