@@ -585,7 +585,9 @@ fn test_angry_run_branch_analysis_solves_ranked_older_candidate() {
         .text
     _start:
         test $1, %rdi
-        jz short_path
+        jz long_path
+    short_path:
+        jmp target
     long_path:
         test $2, %rdi
         jz second_detour
@@ -601,8 +603,6 @@ fn test_angry_run_branch_analysis_solves_ranked_older_candidate() {
         nop
         nop
         jmp long_mid
-    short_path:
-        jmp target
     target:
         mov $60, %rax
         xor %rdi, %rdi
