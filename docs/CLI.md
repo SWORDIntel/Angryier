@@ -242,6 +242,8 @@ Concrete branch replay is **dynamic-visit aware**. A static PC is not a unique b
 
 Solver-assisted symbolic-address concretization follows the same rule: retained path constraints and generated region-bound predicates must be canonically keyed. Missing metadata aborts concretization rather than silently dropping a constraint.
 
+Concrete branch replay uses **three-part dynamic identity**: branch PC, 1-based visit index, and an exact entry-to-branch trace fingerprint. Reaching the same static branch—or even the same numbered visit—through a different concrete route returns `path-context-mismatch` rather than a false validation. If the bounded symbolic trace has already rolled over, Angryier returns `ambiguous-branch-visit` and refuses to guess.
+
 ### Exit codes
 
 | Code | Cause |
@@ -305,7 +307,7 @@ Result table:
 | `branch_analysis.steering_reason` | Stable human-readable rationale for the steering action. The policy requires solver feasibility before CFG evidence can prioritize an alternate edge. |
 | `branch_analysis.replay` | Concrete validation result for SAT alternate models when every model leaf is a replayable 64-bit GPR input and the environment is rewind-safe. |
 | `branch_analysis.error` | Diagnostic error when exact alternate-edge solver setup fails (including unavailable path-constraint metadata). The solver is not called with a reduced path; the steering action remains unresolved. |
-| `branch_analysis.replay.status` | `validated`, `mismatch`, `budget-exhausted`, `terminated-before-branch`, `ambiguous-branch-visit`, `unsupported-model`, `stateful-kernel-model`, `stateful-environment`, `not-sat`, or `error`. |
+| `branch_analysis.replay.status` | `validated`, `mismatch`, `path-context-mismatch`, `budget-exhausted`, `terminated-before-branch`, `ambiguous-branch-visit`, `unsupported-model`, `stateful-kernel-model`, `stateful-environment`, `not-sat`, or `error`. |
 | `branch_analysis.visit_index` | 1-based dynamic visit number of the selected branch PC within the retained symbolic trace. |
 | `branch_analysis.visit_index_exact` | True only when the retained trace still covers execution from entry; false makes concrete replay fail closed rather than guess which repeated branch visit was intended. |
 | `branch_analysis.replay.expected_visit` | Dynamic branch occurrence the symbolic decision requires replay to validate. |
@@ -313,6 +315,7 @@ Result table:
 | `branch_analysis.replay.matched_alternate` | True only when concrete execution restarted from entry, reached the recorded branch PC, and stepped to the solver-predicted alternate successor. |
 | `branch_analysis.replay.observed_target_hex` | Exact successor observed after replaying the branch, when available. |
 | `branch_analysis.replay.detail` | Human-readable explanation of validation, refusal, mismatch, or budget exhaustion. |
+| `branch_analysis.trace_fingerprint_hex` | Deterministic fingerprint of the exact entry-to-branch PC sequence for this dynamic decision. Replay must match it, the branch PC, and the dynamic visit index before status can become `validated`. |
 | `branch_analysis.history` | Bounded ordered branch-decision provenance for the selected diagnostic state (up to 64 decisions). |
 | `branch_analysis.history_candidate_index` | Highest-ranked older decision whose alternate edge is structurally better toward a configured `find` target. |
 | `branch_analysis.history_candidate_analysis` | At most one extra solver/replay analysis for that older decision, including CFG distances, model, replay, and steering verdict. |
