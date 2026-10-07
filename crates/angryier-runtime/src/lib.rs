@@ -5228,13 +5228,14 @@ mod solver_constraint_safety_tests {
         let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
         let missing = ExprId(u32::MAX);
         let error = checked_path_constraints(&arena, &[missing]);
-        match error {
-            Err(RuntimeError::Symbolic(message)) => {
-                assert!(message.contains("constraint #0"), "{message}");
-                assert!(message.contains("refusing to solve"), "{message}");
-            }
-            other => assert!(false, "expected fail-closed symbolic error, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                error,
+                Err(RuntimeError::Symbolic(ref message))
+                    if message.contains("constraint #0") && message.contains("refusing to solve")
+            ),
+            "a missing constraint summary must abort the query"
+        );
     }
 }
 
