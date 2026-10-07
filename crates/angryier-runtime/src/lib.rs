@@ -5168,6 +5168,76 @@ mod tests {
     }
 }
 
+/// Converts a retained symbolic path into an exact solver constraint list.
+///
+/// Solver queries must never silently omit path predicates. Missing
+/// dependency metadata means the query is incomplete, not that the missing
+/// predicate is irrelevant. This is used by feasibility checks, alternate
+/// branch inversion, and both state-model extraction entry points.
+fn checked_path_constraints(
+    arena: &SymbolicArena,
+    path: &[ExprId],
+) -> Result<Vec<CanonicalConstraint>, RuntimeError> {
+    path.iter()
+        .enumerate()
+        .map(|(index, expr)| {
+            let summary = arena.dependency_summary(*expr).ok_or_else(|| {
+                RuntimeError::Symbolic(format!(
+                    "incomplete solver path: constraint #{index} (expression {}) lacks dependency metadata; refusing to solve with a weakened prefix",
+                    expr.0
+                ))
+            })?;
+            Ok(CanonicalConstraint {
+                id: ConstraintId(index as u64),
+                key: summary.key,
+                expr: *expr,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod solver_constraint_safety_tests {
+    use super::*;
+
+    #[test]
+    fn solver_path_conversion_preserves_every_constraint() -> Result<(), RuntimeError> {
+        let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
+        let valid = angryier_expr::ExprArena::intern(
+            &arena,
+            ExprNode {
+                sort: ExprSort::Bool,
+                op: ExprOp::Constant,
+                operands: Vec::new(),
+                immediate: vec![1],
+            },
+        )
+        .map_err(|error| RuntimeError::Symbolic(error.to_string()))?;
+
+        let constraints = checked_path_constraints(&arena, &[valid, valid])?;
+        assert_eq!(constraints.len(), 2);
+        assert_eq!(constraints[0].id, ConstraintId(0));
+        assert_eq!(constraints[1].id, ConstraintId(1));
+        assert_eq!(constraints[0].expr, valid);
+        assert_eq!(constraints[1].expr, valid);
+        Ok(())
+    }
+
+    #[test]
+    fn solver_path_conversion_refuses_missing_metadata_in_prefix() {
+        let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
+        let missing = ExprId(u32::MAX);
+        let error = checked_path_constraints(&arena, &[missing]);
+        match error {
+            Err(RuntimeError::Symbolic(message)) => {
+                assert!(message.contains("constraint #0"), "{message}");
+                assert!(message.contains("refusing to solve"), "{message}");
+            }
+            other => assert!(false, "expected fail-closed symbolic error, got {other:?}"),
+        }
+    }
+}
+
 /// The most recent symbolic branch decision on one state.
 ///
 /// `prefix_constraints` is the number of path constraints that existed
@@ -7284,18 +7354,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             return Ok(*cached);
         }
         let state = &self.states[index];
-        let constraints: Vec<CanonicalConstraint> = state
-            .constraints
-            .iter()
-            .enumerate()
-            .filter_map(|(i, expr)| {
-                self.arena.dependency_summary(*expr).map(|s| CanonicalConstraint {
-                    id: ConstraintId(i as u64),
-                    key: s.key,
-                    expr: *expr,
-                })
-            })
-            .collect();
+        let constraints = checked_path_constraints(self.arena, &state.constraints)?;
         let key = self
             .arena
             .dependency_summary(direction)
@@ -7937,17 +7996,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         } else {
             decision.condition
         };
-        let constraints: Vec<CanonicalConstraint> = state.constraints[..decision.prefix_constraints]
-            .iter()
-            .enumerate()
-            .filter_map(|(i, expr)| {
-                self.arena.dependency_summary(*expr).map(|s| CanonicalConstraint {
-                    id: ConstraintId(i as u64),
-                    key: s.key,
-                    expr: *expr,
-                })
-            })
-            .collect();
+        let constraints = checked_path_constraints(self.arena, &state.constraints[..decision.prefix_constraints])?;
         let key = self
             .arena
             .dependency_summary(alternate)
@@ -8177,18 +8226,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .states
             .get(index)
             .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
-        let constraints: Vec<CanonicalConstraint> = state
-            .constraints
-            .iter()
-            .enumerate()
-            .filter_map(|(i, expr)| {
-                self.arena.dependency_summary(*expr).map(|s| CanonicalConstraint {
-                    id: ConstraintId(i as u64),
-                    key: s.key,
-                    expr: *expr,
-                })
-            })
-            .collect();
+        let constraints = checked_path_constraints(self.arena, &state.constraints)?;
         let true_expr = self
             .arena
             .intern(angryier_expr::ExprNode {
@@ -8244,18 +8282,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .states
             .get(index)
             .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
-        let constraints: Vec<CanonicalConstraint> = state
-            .constraints
-            .iter()
-            .enumerate()
-            .filter_map(|(i, expr)| {
-                self.arena.dependency_summary(*expr).map(|s| CanonicalConstraint {
-                    id: ConstraintId(i as u64),
-                    key: s.key,
-                    expr: *expr,
-                })
-            })
-            .collect();
+        let constraints = checked_path_constraints(self.arena, &state.constraints)?;
         // Trivially-satisfiable predicate: the constraints themselves carry
         // the path; a literal `true` predicate asks for any model.
         let true_expr = self
