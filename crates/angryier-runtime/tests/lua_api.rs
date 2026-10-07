@@ -412,6 +412,71 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
 }
 
 #[test]
+fn test_angry_run_branch_analysis_replays_symbolic_argv_byte() {
+    const SRC: &str = r#"
+        .global _start
+        .text
+    _start:
+        mov 8(%rsp), %rax
+        cmpb $0x41, (%rax)
+        jne fail
+        mov $60, %rax
+        xor %rdi, %rdi
+        syscall
+    fail:
+        mov $60, %rax
+        mov $1, %rdi
+        syscall
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "branch_analysis_argv") else {
+        eprintln!("skipping symbolic-argv replay test: system assembler not found");
+        return;
+    };
+
+    let lua = init_lua();
+    let bin_str = bin_path.to_str().expect("valid path string");
+    let script = format!(
+        r#"
+        local r = angry.run("{bin_str}", {{
+            argv = 2,
+            steps = 64,
+            states = 8,
+            branch_analysis = true,
+            branch_timeout_ms = 2000,
+        }})
+        local b = assert(r.branch_analysis)
+        local replay = assert(b.replay)
+        return
+            b.solver_status,
+            replay.status,
+            replay.matched_alternate == true,
+            replay.applied_registers or 0,
+            replay.applied_memory_bytes or 0,
+            tostring(replay.detail or "none")
+        "#
+    );
+
+    let (solver_status, replay_status, matched, applied_registers, applied_memory_bytes, detail): (
+        String,
+        String,
+        bool,
+        usize,
+        usize,
+        String,
+    ) = lua.load(&script).eval().expect("symbolic argv branch analysis");
+
+    assert_eq!(solver_status, "Sat");
+    assert_eq!(replay_status, "validated", "replay detail: {detail}");
+    assert!(matched, "replay detail: {detail}");
+    assert_eq!(applied_registers, 0, "argv model should not require a GPR assignment");
+    assert!(
+        applied_memory_bytes >= 1,
+        "argv model should concretize at least one entry-memory byte: {detail}"
+    );
+}
+
+#[test]
 fn test_angry_run_branch_analysis_ranks_cfg_distance_to_find_target() {
     const SRC: &str = r#"
         .global _start
