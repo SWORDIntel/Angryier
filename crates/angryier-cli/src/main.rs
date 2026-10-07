@@ -1152,6 +1152,7 @@ if r.branch_analysis ~= nil then
             print(string.format("  reached branch          : %s", yn(replay.reached_branch)))
             print(string.format("  matched alternate       : %s", yn(replay.matched_alternate)))
             print(string.format("  applied registers       : %s", tostring(replay.applied_registers or 0)))
+            print(string.format("  applied memory bytes    : %s", tostring(replay.applied_memory_bytes or 0)))
             if replay.observed_target_hex ~= nil or replay.observed_target ~= nil then
                 print(string.format("  observed successor      : %s", tostring(replay.observed_target_hex or replay.observed_target)))
             end
