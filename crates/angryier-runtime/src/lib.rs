@@ -5274,6 +5274,20 @@ mod solver_constraint_safety_tests {
         assert_ne!(a, shorter);
     }
 
+    #[test]
+    fn replay_register_assignment_rejects_conflicts_but_deduplicates_equal_values() {
+        let mut assignments = BTreeMap::new();
+
+        assert_eq!(insert_replay_register_assignment(&mut assignments, 7, 0x1234), Ok(()));
+        assert_eq!(insert_replay_register_assignment(&mut assignments, 7, 0x1234), Ok(()));
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(
+            insert_replay_register_assignment(&mut assignments, 7, 0x5678),
+            Err((0x1234, 0x5678))
+        );
+        assert_eq!(assignments.get(&7), Some(&0x1234));
+    }
+
 }
 
 /// The most recent symbolic branch decision on one state.
@@ -5327,6 +5341,23 @@ pub struct AlternateBranchSolution {
     pub solver_elapsed: Duration,
 }
 
+/// Adds one concrete replay assignment without allowing solver-model order
+/// to decide between conflicting values for the same architectural register.
+fn insert_replay_register_assignment(
+    assignments: &mut BTreeMap<u32, u64>,
+    register: u32,
+    value: u64,
+) -> Result<(), (u64, u64)> {
+    match assignments.get(&register).copied() {
+        Some(existing) if existing == value => Ok(()),
+        Some(existing) => Err((existing, value)),
+        None => {
+            assignments.insert(register, value);
+            Ok(())
+        }
+    }
+}
+
 /// Concrete validation of an alternate-branch solver model.
 ///
 /// Replay is intentionally conservative: only models whose entries all map
@@ -5337,7 +5368,8 @@ pub struct AlternateBranchSolution {
 pub struct AlternateBranchReplay {
     /// Stable status for scripting/frontends: `validated`, `mismatch`,
     /// `budget-exhausted`, `terminated-before-branch`,
-    /// `ambiguous-branch-visit`, `path-context-mismatch`, `unsupported-model`,
+    /// `ambiguous-branch-visit`, `path-context-mismatch`, `ambiguous-model`,
+    /// `unsupported-model`,
     /// `stateful-kernel-model`, `stateful-environment`, or `not-sat`.
     pub status: &'static str,
     pub steps: u64,
@@ -8149,7 +8181,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             ));
         }
 
-        let mut assignments = Vec::<(u32, u64)>::new();
+        let mut assignments = BTreeMap::<u32, u64>::new();
         for (expression, bytes) in &solution.model {
             let Some(binding) = state
                 .symbols
@@ -8180,7 +8212,20 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             let mut value_bytes = [0u8; 8];
             let len = bytes.len().min(8);
             value_bytes[..len].copy_from_slice(&bytes[..len]);
-            assignments.push((binding.register, u64::from_le_bytes(value_bytes)));
+            let value = u64::from_le_bytes(value_bytes);
+            if let Err((existing, conflicting)) =
+                insert_replay_register_assignment(&mut assignments, binding.register, value)
+            {
+                let mut replay = base(
+                    "ambiguous-model",
+                    format!(
+                        "solver model assigns conflicting values to register {}: {existing:#018x} vs {conflicting:#018x}; refusing model-order-dependent replay",
+                        binding.register
+                    ),
+                );
+                replay.applied_registers = assignments.len();
+                return Ok(replay);
+            }
         }
 
         if assignments.is_empty() {
@@ -8192,8 +8237,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
 
         let mut process = state.process.clone();
         process.reset_to_entry();
-        for (register, value) in &assignments {
-            process.write_register(*register, *value)?;
+        for (&register, &value) in &assignments {
+            process.write_register(register, value)?;
         }
 
         let budget = max_steps.max(1);
