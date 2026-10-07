@@ -631,6 +631,7 @@ fn test_angry_run_branch_analysis_solves_ranked_older_candidate() {
             find = {{ {target} }},
             steps = 256,
             states = 16,
+            exploration = "fork",
             search = "dfs",
             branch_analysis = true,
             branch_timeout_ms = 2000,
