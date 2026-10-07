@@ -1299,7 +1299,7 @@ if r.branch_analysis ~= nil and r.branch_analysis.status == "recorded" then
     elseif replay_status == "path-context-mismatch" then
         idea("PATH-CONTEXT MISMATCH: concrete replay reached the expected numbered visit of the branch, but through a different entry-to-branch PC sequence. Do not call this model validated; compare the symbolic and replay traces to find the earlier divergence.")
     elseif replay_status == "ambiguous-branch-visit" then
-        idea("AMBIGUOUS DYNAMIC BRANCH: the retained symbolic trace rolled over before Angryier could prove the absolute visit number. Re-run with a shorter path, a nearer entry/waypoint, or a larger trace budget before attempting proof-quality replay.")
+        idea("AMBIGUOUS DYNAMIC BRANCH: the retained symbolic trace rolled over before Angryier could prove the absolute visit number. Re-run from a nearer entry/waypoint or otherwise shorten the pre-branch path before attempting proof-quality replay; the current trace cap is fixed.")
     elseif replay_status == "ambiguous-model" then
         idea("AMBIGUOUS SOLVER MODEL: multiple model entries collapse onto the same architectural register with conflicting values. Treat this as backend/model-normalization debt; inspect the reported model rather than allowing iteration order to pick a replay value.")
     elseif replay_status == "unsupported-model" then
