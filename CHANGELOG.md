@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Deterministic replay model application:** duplicate equal register assignments are deduplicated; conflicting solver values targeting the same architectural register return `ambiguous-model` instead of being applied in backend/model order.
 - **Exact dynamic branch replay:** alternate-branch validation now binds to a three-part identity: static branch PC, recorded 1-based dynamic occurrence, and deterministic entry-to-branch trace fingerprint. Loops cannot falsely validate an earlier visit, and divergent paths reaching the same numbered visit return `path-context-mismatch`. Truncated trace provenance returns `ambiguous-branch-visit` instead of guessing.
 - **Symbolic-address solver integrity:** address-concretization queries now fail closed on missing path or bounds dependency metadata instead of silently weakening the query.
 - **Strict-Clippy test cleanup:** register-seed and speculative decode-pipeline tests use fallible helpers/results rather than denied unwrap/expect patterns.
