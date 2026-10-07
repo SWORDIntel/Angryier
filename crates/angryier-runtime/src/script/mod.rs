@@ -1663,15 +1663,19 @@ mod tests {
     fn reg_seed_numeric_form_and_errors() -> Result<(), Box<dyn std::error::Error>> {
         let lua = Lua::new();
         let s = |v: &str| -> Result<Value, mlua::Error> { Ok(Value::String(lua.create_string(v)?)) };
+        let rcx = reg_by_name("rcx").ok_or_else(|| mlua::Error::external("missing rcx mapping"))?;
+        let rdx = reg_by_name("rdx").ok_or_else(|| mlua::Error::external("missing rdx mapping"))?;
         let pair = reg_seed_from_pair(&s("rcx")?, &Value::Integer(64))?;
-        assert_eq!(pair, Some((reg_by_name("rcx").unwrap(), 64)));
+        assert_eq!(pair, Some((rcx, 64)));
         // Exact whole-number float behaves like mlua's old i64 conversion.
         let pair = reg_seed_from_pair(&s("rdx")?, &Value::Number(64.0))?;
-        assert_eq!(pair, Some((reg_by_name("rdx").unwrap(), 64)));
+        assert_eq!(pair, Some((rdx, 64)));
         // Kernel pointer as a float is lossy > i64::MAX: honest error, not a
         // silently truncated seed.
-        let err = reg_seed_from_pair(&s("rcx")?, &Value::Number(1.8446603336221197e19))
-            .expect_err("lossy float must be rejected");
+        let err = match reg_seed_from_pair(&s("rcx")?, &Value::Number(1.8446603336221197e19)) {
+            Err(error) => error,
+            Ok(_) => return Err(std::io::Error::other("lossy float must be rejected").into()),
+        };
         assert!(err.to_string().contains("_hex"), "{err}");
         // Unknown register and non-numeric payloads are honest errors too.
         assert!(reg_seed_from_pair(&s("xmm0")?, &Value::Integer(1)).is_err());
@@ -1690,15 +1694,23 @@ mod tests {
         let lua = Lua::new();
         let s = |v: &str| -> Result<Value, mlua::Error> { Ok(Value::String(lua.create_string(v)?)) };
         let kernel_ptr = 0xffff_8000_0000_1234u64;
+        let rcx = reg_by_name("rcx").ok_or_else(|| mlua::Error::external("missing rcx mapping"))?;
+        let r9 = reg_by_name("r9").ok_or_else(|| mlua::Error::external("missing r9 mapping"))?;
         let pair = reg_seed_from_pair(&s("rcx_hex")?, &s("0xffff800000001234")?)?;
-        assert_eq!(pair, Some((reg_by_name("rcx").unwrap(), kernel_ptr)));
+        assert_eq!(pair, Some((rcx, kernel_ptr)));
         // `0X` prefix and bare digits are accepted; wrong register or
         // garbage digits are honest errors naming the key.
         let pair = reg_seed_from_pair(&s("r9_hex")?, &s("0XFF")?)?;
-        assert_eq!(pair, Some((reg_by_name("r9").unwrap(), 0xff)));
-        let err = reg_seed_from_pair(&s("nope_hex")?, &s("0x10")?).expect_err("bad reg");
+        assert_eq!(pair, Some((r9, 0xff)));
+        let err = match reg_seed_from_pair(&s("nope_hex")?, &s("0x10")?) {
+            Err(error) => error,
+            Ok(_) => return Err(std::io::Error::other("bad register must be rejected").into()),
+        };
         assert!(err.to_string().contains("nope"), "{err}");
-        let err = reg_seed_from_pair(&s("rcx_hex")?, &s("zzz")?).expect_err("bad hex");
+        let err = match reg_seed_from_pair(&s("rcx_hex")?, &s("zzz")?) {
+            Err(error) => error,
+            Ok(_) => return Err(std::io::Error::other("bad hex must be rejected").into()),
+        };
         assert!(err.to_string().contains("rcx_hex"), "{err}");
         // _hex with a non-string payload is an error, not a skip.
         assert!(reg_seed_from_pair(&s("rcx_hex")?, &Value::Integer(7)).is_err());
