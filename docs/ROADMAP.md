@@ -1,6 +1,6 @@
 # Angryier — Consolidated Roadmap and Architecture-as-Built
 
-Cross-project delivery order for ISANITY, METHRA, radare3, and Angryier on KP14-SUITE / VM 9211: [Four-product unified roadmap](../../METHRA/docs/VM9211_CORE_ROADMAP.md). This file remains the source of truth for Angryier-specific implementation status.
+Cross-project delivery order for ISANITY, METHRA, radare3, and Angryier on KP14-SUITE / VM 9211: [Four-product unified roadmap](https://github.com/SWORDIntel/METHRA/blob/main/docs/VM9211_CORE_ROADMAP.md). Shared instruction identities and semantics: [ISANITY](https://github.com/SWORDIntel/ISANITY). This file remains the source of truth for Angryier-specific implementation status.
 
 > **Single source of truth — 2026-09-28.** This file merges the former phase
 > tracker (ROADMAP.md), the implementation-status annotations of the
