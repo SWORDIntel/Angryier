@@ -459,6 +459,20 @@ fn test_concrete_seeding_poke_and_entry_override() {
     assert_eq!(rep_poke_ok.found_pcs, vec![0x40100e]);
     assert_eq!(rep_poke_ok.forks, 0);
 
+    // IOCTL seeding marks an entire structure symbolic, then pins pointer
+    // and request fields. The concrete poke must win inside that region.
+    let opts_symbolic_then_poke = RunOptions {
+        symbolic_memory: vec![(0x402000, 8)],
+        poke: vec![(0x402000, 42)],
+        find: vec![0x40100e],
+        ..RunOptions::default()
+    };
+    let rep_symbolic_then_poke = engine
+        .run(&poke_image, &opts_symbolic_then_poke)
+        .expect("concrete poke wins over symbolic region");
+    assert_eq!(rep_symbolic_then_poke.found_pcs, vec![0x40100e]);
+    assert_eq!(rep_symbolic_then_poke.forks, 0);
+
     let opts_poke_fail = RunOptions {
         poke: vec![(0x402000, 999)],
         find: vec![0x40101a],

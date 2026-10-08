@@ -37,6 +37,9 @@ use angryier_runtime::{
 };
 use angryier_types::{ExpressionNormalizationVersion, SemanticVersion, TargetProfileId};
 
+/// Targeted Windows driver state seeding for IOCTL handler exploration.
+pub mod driver_ioctl;
+
 /// Default instruction-step budget for one-shot runs. Must stay equal to
 /// the Lua surface's `angry.run` default (`DEFAULT_STEPS` in
 /// `angryier-runtime::script`).
@@ -169,9 +172,11 @@ pub struct RunOptions {
     pub symbolic: Vec<(String, u16)>,
     /// Concrete register seeds: `(register name, value)`.
     pub regs: Vec<(String, u64)>,
-    /// 8-byte little-endian memory pokes: `(address, value)`.
+    /// 8-byte little-endian memory pokes: `(address, value)`. Applied after
+    /// symbolic memory marks, so explicit fields remain concrete.
     pub poke: Vec<(u64, u64)>,
-    /// Byte-granular symbolic memory ranges: `(address, length)`.
+    /// Byte-granular symbolic memory ranges: `(address, length)`. Applied
+    /// before concrete memory pokes.
     pub symbolic_memory: Vec<(u64, usize)>,
     /// PCs whose states are reported as `found` and not stepped further.
     pub find: Vec<u64>,
@@ -654,6 +659,14 @@ fn apply_inputs(
             .map_err(|e| ApiError::Run(format!("regs[{name}]: {e:?}")))?;
         session.states[0].concrete_registers.insert(reg, *value);
     }
+    // Materialize broad symbolic regions before applying concrete structure
+    // pointers and pinned fields. Otherwise the symbolic mark would erase a
+    // caller's explicit poke inside an IRP or IO_STACK_LOCATION region.
+    for (addr, len) in &options.symbolic_memory {
+        session
+            .mark_memory_symbolic(0, *addr, *len)
+            .map_err(|e| ApiError::Run(format!("symbolic_memory: {e:?}")))?;
+    }
     for (addr, value) in &options.poke {
         session.states[0].process.state.memory = session.states[0]
             .process
@@ -671,11 +684,6 @@ fn apply_inputs(
             .memory
             .write_bytes(*addr, &byte_vals)
             .map_err(|e| ApiError::Run(format!("poke session: {e:?}")))?;
-    }
-    for (addr, len) in &options.symbolic_memory {
-        session
-            .mark_memory_symbolic(0, *addr, *len)
-            .map_err(|e| ApiError::Run(format!("symbolic_memory: {e:?}")))?;
     }
     if let Some(len) = options.argv0 {
         session

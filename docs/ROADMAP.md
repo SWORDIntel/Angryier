@@ -1,5 +1,7 @@
 # Angryier — Consolidated Roadmap and Architecture-as-Built
 
+Cross-project delivery order for ISANITY, METHRA, radare3, and Angryier on KP14-SUITE / VM 9211: [Four-product unified roadmap](../../METHRA/docs/VM9211_CORE_ROADMAP.md). This file remains the source of truth for Angryier-specific implementation status.
+
 > **Single source of truth — 2026-09-28.** This file merges the former phase
 > tracker (ROADMAP.md), the implementation-status annotations of the
 > `docs/architecture/` set (which froze 2026-09-14 and drifted stale), and the
@@ -867,6 +869,20 @@ Full hybrid fuzzing subsystem in `crates/angryier-fuzz/src/lib.rs`:
 ### Production 1.0 — validation + reproducible reports
 The checklist in §6; the blocking items are Gate B numbers, ISA breadth,
 and reproducible correctness/performance reports.
+
+### KP14-SUITE driver-verification convergence track
+
+Angryier is the intended owner of POPKORN's targeted Windows-driver analysis capabilities. KP14's existing POPKORN/angr engine is the comparison baseline while these capabilities are integrated; its current presence must not be mistaken for Angryier parity. radare3 and Ghidra supply candidate static targets, METHRA coordinates bounded execution and QIHSE evidence, and KP14 presents the case verdicts on VM 9211.
+
+- [x] local x64 IOCTL handler seed builder with symbolic kernel objects, pinned driver pointers, optional IOCTL code, and explicit step/state budgets
+- [ ] consume a versioned static handoff with binary identity, image base, architecture, CFG/function context, candidate IOCTL dispatch targets, imports, sink addresses, provenance, and fidelity gaps
+- [ ] reproduce POPKORN's seeded `_DRIVER_OBJECT`, `_DEVICE_OBJECT`, `_IRP`, and `_IO_STACK_LOCATION` layouts and Windows calling-convention assumptions in Angryier environment models
+- [ ] provide targeted IOCTL-to-sink exploration with constrained inputs, kernel import models, explicit budgets, and no whole-driver brute-force prerequisite
+- [ ] emit the existing KP14 verdict taxonomy with constraints, witness/replay data where available, and honest timeout, unsupported, or incomplete states
+- [ ] differentially test target selection, reachability, input constraints, and verdicts against the current KP14 POPKORN fixtures and known driver corpus
+- [ ] pass local fixture and driver-corpus parity checks before an opt-in KP14-SUITE pilot; become the default verifier only after the pilot passes
+
+Capstone remains a later optional decoder evaluation and does not gate this track.
 
 ---
 
