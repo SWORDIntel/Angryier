@@ -707,6 +707,11 @@ memory and embedded-broadcast instances remain unmapped because the current
 executor cannot guarantee lane-level memory fault suppression or broadcast
 semantics. See `docs/status/xed-packed-f32-vex-evex-gap.md` for the packed-
 single boundary; the packed-double slice follows the same memory constraints.
+**EVEX.128/256 packed MIN/MAX slice landed 2026-10-10**: VMINPS, VMAXPS,
+VMINPD, and VMAXPD now have 16 distinct XMM/YMM forms and providers using the
+existing AVX `VectorOp::FMin/FMax` semantics. Exact XED IFORM names are pinned
+in runtime mapper tests; engine-oracle cases cover register and unmasked k0
+memory at both widths. k1-k7 memory and embedded broadcasts remain unmapped.
 **VNNI slice landed 2026-09-28** (84 providers total: VPDPBUSD/VPDPBUSDS/
 VPDPWSSD/VPDPWSSDS across XMM/YMM/ZMM, reg+mem — new `DotU8S8` and
 `SatAddS` vector ops wired through IR lowering and the concrete

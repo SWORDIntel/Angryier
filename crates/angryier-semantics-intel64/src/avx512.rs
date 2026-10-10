@@ -11,6 +11,9 @@
 //!   (XMM reg-reg/reg-mem128 and YMM reg-reg/reg-mem256 forms, with opmask
 //!   merge/zero and upper-lane zeroing; masked-memory and embedded-broadcast
 //!   forms are intentionally unmapped)
+//! - EVEX packed MIN/MAX for single and double precision at 128/256-bit VL,
+//!   reusing the corpus VectorOp::FMin/FMax definitions; only register and
+//!   unmasked k0 full-width memory forms are mapped.
 //! - Scalar single/double precision float arithmetic (EVEX forms): VADDSS, VSUBSS, VMULSS, VDIVSS,
 //!   VADDSD, VSUBSD, VMULSD, VDIVSD (XMM reg-reg and reg-mem32/mem64 forms)
 //! - Packed single/double float logic: VANDPS, VANDPD, VANDNPS, VANDNPD,
@@ -204,6 +207,24 @@ pub mod forms {
     pub const VDIVPD_EVEX_XMM_XMM_MEM128: u32 = 0x118D;
     pub const VDIVPD_EVEX_YMM_YMM_YMM: u32 = 0x118E;
     pub const VDIVPD_EVEX_YMM_YMM_MEM: u32 = 0x118F;
+
+    // EVEX packed single min/max (0x1190..0x119F).
+    pub const VMINPS_EVEX_XMM_XMM_XMM: u32 = 0x1190;
+    pub const VMINPS_EVEX_XMM_XMM_MEM128: u32 = 0x1191;
+    pub const VMINPS_EVEX_YMM_YMM_YMM: u32 = 0x1192;
+    pub const VMINPS_EVEX_YMM_YMM_MEM: u32 = 0x1193;
+    pub const VMAXPS_EVEX_XMM_XMM_XMM: u32 = 0x1194;
+    pub const VMAXPS_EVEX_XMM_XMM_MEM128: u32 = 0x1195;
+    pub const VMAXPS_EVEX_YMM_YMM_YMM: u32 = 0x1196;
+    pub const VMAXPS_EVEX_YMM_YMM_MEM: u32 = 0x1197;
+    pub const VMINPD_EVEX_XMM_XMM_XMM: u32 = 0x1198;
+    pub const VMINPD_EVEX_XMM_XMM_MEM128: u32 = 0x1199;
+    pub const VMINPD_EVEX_YMM_YMM_YMM: u32 = 0x119A;
+    pub const VMINPD_EVEX_YMM_YMM_MEM: u32 = 0x119B;
+    pub const VMAXPD_EVEX_XMM_XMM_XMM: u32 = 0x119C;
+    pub const VMAXPD_EVEX_XMM_XMM_MEM128: u32 = 0x119D;
+    pub const VMAXPD_EVEX_YMM_YMM_YMM: u32 = 0x119E;
+    pub const VMAXPD_EVEX_YMM_YMM_MEM: u32 = 0x119F;
 }
 
 const U512: SemanticType = SemanticType::Scalar(ScalarType::BitVec(512));
@@ -1078,6 +1099,129 @@ macro_rules! packed_double_evex_ymm {
     };
 }
 
+// EVEX packed min/max use the established AVX VectorOp::FMin/FMax semantics,
+// not the LaneWiseFloat arithmetic primitive. Keep the register/memory shape,
+// mask, and upper-zero behavior identical to the arithmetic EVEX providers.
+macro_rules! packed_minmax_evex_xmm {
+    ($name:ident, $form:expr, $ty:expr, $full_ty:expr, $zero_fn:ident, $upper_ty:expr, $lanes:expr, $op:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let destination = insn.operand(0).ok_or(SemanticError::InvalidOperand)?;
+                let parent = match destination.kind {
+                    angryier_semantics::OperandKind::Register(view)
+                        if destination.width_bits == 128 && view.width_bits == 128 && view.bit_offset == 0 =>
+                    {
+                        view.parent
+                    }
+                    _ => return Err(SemanticError::InvalidOperand),
+                };
+                let (src1_idx, src2_idx) = evex_source_indices(insn);
+                let left = out.read_operand(src1_idx, $ty)?;
+                let right = out.read_operand(src2_idx, $ty)?;
+                let result = out.emit(SemanticOp::Vector($op), $ty, &[left, right])?;
+                let masked = apply_evex_mask(insn, out, $ty, None, result)?;
+                let upper = $zero_fn(out, $upper_ty, $lanes)?;
+                let full = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    $full_ty,
+                    &[masked, upper],
+                )?;
+                out.write_register(parent, full)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+macro_rules! packed_minmax_evex_ymm {
+    ($name:ident, $form:expr, $ty:expr, $half_ty:expr, $upper_ty:expr, $upper_lanes:expr, $full_ty:expr, $zero_fn:ident, $op:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let destination = insn.operand(0).ok_or(SemanticError::InvalidOperand)?;
+                let parent = match destination.kind {
+                    angryier_semantics::OperandKind::Register(view)
+                        if destination.width_bits == 256 && view.width_bits == 256 && view.bit_offset == 0 =>
+                    {
+                        view.parent
+                    }
+                    _ => return Err(SemanticError::InvalidOperand),
+                };
+                let (src1_idx, src2_idx) = evex_source_indices(insn);
+                let left = out.read_operand(src1_idx, $ty)?;
+                let right = out.read_operand(src2_idx, $ty)?;
+                let zero = const_u64(out, 0)?;
+                let half = const_u64(out, 128)?;
+                let ll = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[left, zero],
+                )?;
+                let lh = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[left, half],
+                )?;
+                let rl = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[right, zero],
+                )?;
+                let rh = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    $half_ty,
+                    &[right, half],
+                )?;
+                let lo = out.emit(SemanticOp::Vector($op), $half_ty, &[ll, rl])?;
+                let hi = out.emit(SemanticOp::Vector($op), $half_ty, &[lh, rh])?;
+                let computed = out.emit(SemanticOp::Primitive(PrimitiveOp::Concat), $ty, &[lo, hi])?;
+                let masked = apply_evex_mask(insn, out, $ty, None, computed)?;
+                let upper = $zero_fn(out, $upper_ty, $upper_lanes)?;
+                let full = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    $full_ty,
+                    &[masked, upper],
+                )?;
+                out.write_register(parent, full)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
 packed_double_evex_xmm!(
     VaddpdEvexXmmXmmXmm,
     forms::VADDPD_EVEX_XMM_XMM_XMM,
@@ -1173,6 +1317,191 @@ packed_double_evex_ymm!(
     forms::VDIVPD_EVEX_YMM_YMM_MEM,
     FloatingOp::Div,
     0x168F
+);
+
+packed_minmax_evex_xmm!(
+    VminpsEvexXmmXmmXmm,
+    forms::VMINPS_EVEX_XMM_XMM_XMM,
+    F32X4,
+    F32X16,
+    zero_f32_lanes,
+    F32X12,
+    12,
+    VectorOp::FMin,
+    0x1690
+);
+packed_minmax_evex_xmm!(
+    VminpsEvexXmmXmmMem128,
+    forms::VMINPS_EVEX_XMM_XMM_MEM128,
+    F32X4,
+    F32X16,
+    zero_f32_lanes,
+    F32X12,
+    12,
+    VectorOp::FMin,
+    0x1691
+);
+packed_minmax_evex_xmm!(
+    VmaxpsEvexXmmXmmXmm,
+    forms::VMAXPS_EVEX_XMM_XMM_XMM,
+    F32X4,
+    F32X16,
+    zero_f32_lanes,
+    F32X12,
+    12,
+    VectorOp::FMax,
+    0x1692
+);
+packed_minmax_evex_xmm!(
+    VmaxpsEvexXmmXmmMem128,
+    forms::VMAXPS_EVEX_XMM_XMM_MEM128,
+    F32X4,
+    F32X16,
+    zero_f32_lanes,
+    F32X12,
+    12,
+    VectorOp::FMax,
+    0x1693
+);
+packed_minmax_evex_xmm!(
+    VminpdEvexXmmXmmXmm,
+    forms::VMINPD_EVEX_XMM_XMM_XMM,
+    F64X2,
+    F64X8,
+    zero_f64_lanes,
+    F64X6,
+    6,
+    VectorOp::FMin,
+    0x1694
+);
+packed_minmax_evex_xmm!(
+    VminpdEvexXmmXmmMem128,
+    forms::VMINPD_EVEX_XMM_XMM_MEM128,
+    F64X2,
+    F64X8,
+    zero_f64_lanes,
+    F64X6,
+    6,
+    VectorOp::FMin,
+    0x1695
+);
+packed_minmax_evex_xmm!(
+    VmaxpdEvexXmmXmmXmm,
+    forms::VMAXPD_EVEX_XMM_XMM_XMM,
+    F64X2,
+    F64X8,
+    zero_f64_lanes,
+    F64X6,
+    6,
+    VectorOp::FMax,
+    0x1696
+);
+packed_minmax_evex_xmm!(
+    VmaxpdEvexXmmXmmMem128,
+    forms::VMAXPD_EVEX_XMM_XMM_MEM128,
+    F64X2,
+    F64X8,
+    zero_f64_lanes,
+    F64X6,
+    6,
+    VectorOp::FMax,
+    0x1697
+);
+packed_minmax_evex_ymm!(
+    VminpsEvexYmmYmmYmm,
+    forms::VMINPS_EVEX_YMM_YMM_YMM,
+    F32X8,
+    F32X4,
+    F32X8,
+    8,
+    F32X16,
+    zero_f32_lanes,
+    VectorOp::FMin,
+    0x1698
+);
+packed_minmax_evex_ymm!(
+    VminpsEvexYmmYmmMem,
+    forms::VMINPS_EVEX_YMM_YMM_MEM,
+    F32X8,
+    F32X4,
+    F32X8,
+    8,
+    F32X16,
+    zero_f32_lanes,
+    VectorOp::FMin,
+    0x1699
+);
+packed_minmax_evex_ymm!(
+    VmaxpsEvexYmmYmmYmm,
+    forms::VMAXPS_EVEX_YMM_YMM_YMM,
+    F32X8,
+    F32X4,
+    F32X8,
+    8,
+    F32X16,
+    zero_f32_lanes,
+    VectorOp::FMax,
+    0x169A
+);
+packed_minmax_evex_ymm!(
+    VmaxpsEvexYmmYmmMem,
+    forms::VMAXPS_EVEX_YMM_YMM_MEM,
+    F32X8,
+    F32X4,
+    F32X8,
+    8,
+    F32X16,
+    zero_f32_lanes,
+    VectorOp::FMax,
+    0x169B
+);
+packed_minmax_evex_ymm!(
+    VminpdEvexYmmYmmYmm,
+    forms::VMINPD_EVEX_YMM_YMM_YMM,
+    F64X4,
+    F64X2,
+    F64X4,
+    4,
+    F64X8,
+    zero_f64_lanes,
+    VectorOp::FMin,
+    0x169C
+);
+packed_minmax_evex_ymm!(
+    VminpdEvexYmmYmmMem,
+    forms::VMINPD_EVEX_YMM_YMM_MEM,
+    F64X4,
+    F64X2,
+    F64X4,
+    4,
+    F64X8,
+    zero_f64_lanes,
+    VectorOp::FMin,
+    0x169D
+);
+packed_minmax_evex_ymm!(
+    VmaxpdEvexYmmYmmYmm,
+    forms::VMAXPD_EVEX_YMM_YMM_YMM,
+    F64X4,
+    F64X2,
+    F64X4,
+    4,
+    F64X8,
+    zero_f64_lanes,
+    VectorOp::FMax,
+    0x169E
+);
+packed_minmax_evex_ymm!(
+    VmaxpdEvexYmmYmmMem,
+    forms::VMAXPD_EVEX_YMM_YMM_MEM,
+    F64X4,
+    F64X2,
+    F64X4,
+    4,
+    F64X8,
+    zero_f64_lanes,
+    VectorOp::FMax,
+    0x169F
 );
 
 // ---------------------------------------------------------------------------
@@ -2587,6 +2916,23 @@ pub fn providers() -> Vec<Arc<dyn SemanticProvider>> {
         Arc::new(VmulpdEvexYmmYmmMem),
         Arc::new(VdivpdEvexYmmYmmYmm),
         Arc::new(VdivpdEvexYmmYmmMem),
+        // Packed min/max, EVEX.128/.256 (16)
+        Arc::new(VminpsEvexXmmXmmXmm),
+        Arc::new(VminpsEvexXmmXmmMem128),
+        Arc::new(VmaxpsEvexXmmXmmXmm),
+        Arc::new(VmaxpsEvexXmmXmmMem128),
+        Arc::new(VminpdEvexXmmXmmXmm),
+        Arc::new(VminpdEvexXmmXmmMem128),
+        Arc::new(VmaxpdEvexXmmXmmXmm),
+        Arc::new(VmaxpdEvexXmmXmmMem128),
+        Arc::new(VminpsEvexYmmYmmYmm),
+        Arc::new(VminpsEvexYmmYmmMem),
+        Arc::new(VmaxpsEvexYmmYmmYmm),
+        Arc::new(VmaxpsEvexYmmYmmMem),
+        Arc::new(VminpdEvexYmmYmmYmm),
+        Arc::new(VminpdEvexYmmYmmMem),
+        Arc::new(VmaxpdEvexYmmYmmYmm),
+        Arc::new(VmaxpdEvexYmmYmmMem),
     ]
 }
 

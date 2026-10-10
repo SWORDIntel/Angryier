@@ -1507,21 +1507,53 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_VMINPS => match shapes {
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VMINPS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMINPS_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VMINPS_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMINPS_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMINPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMINPS_YMM_YMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VMAXPS => match shapes {
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VMAXPS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMAXPS_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VMAXPS_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMAXPS_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMAXPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMAXPS_YMM_YMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VMINPD => match shapes {
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VMINPD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMINPD_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VMINPD_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMINPD_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMINPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMINPD_YMM_YMM_MEM),
             _ => None,
         },
         iclass::XED_ICLASS_VMAXPD => match shapes {
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VMAXPD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMAXPD_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VMAXPD_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMAXPD_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMAXPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMAXPD_YMM_YMM_MEM),
             _ => None,
@@ -4548,6 +4580,80 @@ mod tests {
             assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x29, opcode, 0x00])?, None);
             assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0xA9, opcode, 0x00])?, None);
             assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x38, opcode, 0x00])?, None);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn maps_evex128_256_packed_minmax_forms() -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            (
+                0x5Du8,
+                0x74u8,
+                evex_forms::VMINPS_EVEX_XMM_XMM_XMM,
+                evex_forms::VMINPS_EVEX_XMM_XMM_MEM128,
+                evex_forms::VMINPS_EVEX_YMM_YMM_YMM,
+                evex_forms::VMINPS_EVEX_YMM_YMM_MEM,
+            ),
+            (
+                0x5Fu8,
+                0x74u8,
+                evex_forms::VMAXPS_EVEX_XMM_XMM_XMM,
+                evex_forms::VMAXPS_EVEX_XMM_XMM_MEM128,
+                evex_forms::VMAXPS_EVEX_YMM_YMM_YMM,
+                evex_forms::VMAXPS_EVEX_YMM_YMM_MEM,
+            ),
+            (
+                0x5Du8,
+                0xF5u8,
+                evex_forms::VMINPD_EVEX_XMM_XMM_XMM,
+                evex_forms::VMINPD_EVEX_XMM_XMM_MEM128,
+                evex_forms::VMINPD_EVEX_YMM_YMM_YMM,
+                evex_forms::VMINPD_EVEX_YMM_YMM_MEM,
+            ),
+            (
+                0x5Fu8,
+                0xF5u8,
+                evex_forms::VMAXPD_EVEX_XMM_XMM_XMM,
+                evex_forms::VMAXPD_EVEX_XMM_XMM_MEM128,
+                evex_forms::VMAXPD_EVEX_YMM_YMM_YMM,
+                evex_forms::VMAXPD_EVEX_YMM_YMM_MEM,
+            ),
+        ];
+        for (opcode, pp, xmm_reg, xmm_mem, ymm_reg, ymm_mem) in cases {
+            for (ll, reg_id, mem_id, shape) in [(0x08u8, xmm_reg, xmm_mem, "XMM"), (0x28u8, ymm_reg, ymm_mem, "YMM")] {
+                let reg = [0x62, 0xF1, pp, ll, opcode, 0xC2];
+                let (decoded, iform) = XedDecoder::new().decode_with_iform(0x401000, &reg)?;
+                let element = if pp == 0x74 { "f32" } else { "f64" };
+                let mnemonic = match (pp, opcode) {
+                    (0x74, 0x5D) => "VMINPS",
+                    (0x74, 0x5F) => "VMAXPS",
+                    (0xF5, 0x5D) => "VMINPD",
+                    (0xF5, 0x5F) => "VMAXPD",
+                    _ => unreachable!(),
+                };
+                let expected =
+                    format!("XED_IFORM_{mnemonic}_{shape}{element}_MASKmskw_{shape}{element}_{shape}{element}_AVX512");
+                assert_eq!(iform.name, expected);
+                assert_eq!(map_form(&decoded), Some(reg_id), "{iform:?}");
+                let mem = [0x62, 0xF1, pp, ll, opcode, 0x00];
+                let (decoded, iform) = XedDecoder::new().decode_with_iform(0x401000, &mem)?;
+                let expected =
+                    format!("XED_IFORM_{mnemonic}_{shape}{element}_MASKmskw_{shape}{element}_MEM{element}_AVX512");
+                assert_eq!(iform.name, expected);
+                assert_eq!(map_form(&decoded), Some(mem_id), "{iform:?}");
+                let masked_mem = [0x62, 0xF1, pp, ll | 1, opcode, 0x00];
+                assert_eq!(mapped(&masked_mem)?, None, "masked memory must remain unmapped");
+                let zero_masked_mem = [0x62, 0xF1, pp, ll | 0x81, opcode, 0x00];
+                assert_eq!(
+                    mapped(&zero_masked_mem)?,
+                    None,
+                    "zero-masked memory must remain unmapped"
+                );
+                let broadcast_ll = ll | 0x10;
+                let broadcast = [0x62, 0xF1, pp, broadcast_ll, opcode, 0x00];
+                assert_eq!(mapped(&broadcast)?, None, "broadcast memory must remain unmapped");
+            }
         }
         Ok(())
     }

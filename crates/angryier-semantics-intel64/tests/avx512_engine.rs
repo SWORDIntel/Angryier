@@ -652,21 +652,21 @@ fn test_evex_zeroing_masking() -> Result<(), BoxError> {
 #[test]
 fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
     let providers = avx512::providers();
-    assert_eq!(providers.len(), 140, "expected 140 AVX-512/VNNI providers");
+    assert_eq!(providers.len(), 156, "expected 156 AVX-512/VNNI providers");
 
     let mut rule_ids = BTreeSet::new();
     for provider in &providers {
         let rid = provider.rule_id();
         assert!(
-            rid.0 >= 0x2600 && rid.0 <= 0x268F,
-            "rule id {:#x} outside assigned band 0x2600..0x268F",
+            rid.0 >= 0x2600 && rid.0 <= 0x269F,
+            "rule id {:#x} outside assigned band 0x2600..0x269F",
             rid.0
         );
         let inserted = rule_ids.insert(rid.0);
         assert!(inserted, "duplicate rule id {:#x}", rid.0);
     }
 
-    assert_eq!(rule_ids.len(), 140, "all 140 rule IDs must be unique");
+    assert_eq!(rule_ids.len(), 156, "all 156 rule IDs must be unique");
 
     // All form constants in forms module
     let all_forms = [
@@ -810,6 +810,22 @@ fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
         avx512::forms::VMULPD_EVEX_YMM_YMM_MEM,
         avx512::forms::VDIVPD_EVEX_YMM_YMM_YMM,
         avx512::forms::VDIVPD_EVEX_YMM_YMM_MEM,
+        avx512::forms::VMINPS_EVEX_XMM_XMM_XMM,
+        avx512::forms::VMINPS_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VMAXPS_EVEX_XMM_XMM_XMM,
+        avx512::forms::VMAXPS_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VMINPD_EVEX_XMM_XMM_XMM,
+        avx512::forms::VMINPD_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VMAXPD_EVEX_XMM_XMM_XMM,
+        avx512::forms::VMAXPD_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VMINPS_EVEX_YMM_YMM_YMM,
+        avx512::forms::VMINPS_EVEX_YMM_YMM_MEM,
+        avx512::forms::VMAXPS_EVEX_YMM_YMM_YMM,
+        avx512::forms::VMAXPS_EVEX_YMM_YMM_MEM,
+        avx512::forms::VMINPD_EVEX_YMM_YMM_YMM,
+        avx512::forms::VMINPD_EVEX_YMM_YMM_MEM,
+        avx512::forms::VMAXPD_EVEX_YMM_YMM_YMM,
+        avx512::forms::VMAXPD_EVEX_YMM_YMM_MEM,
     ];
 
     let mut form_set = BTreeSet::new();
@@ -2292,6 +2308,152 @@ fn test_evex256_packed_single_arithmetic() -> Result<(), BoxError> {
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn test_evex128_256_packed_minmax_register_and_memory_oracle() -> Result<(), BoxError> {
+    let mut old = [0u8; 64];
+    let mut left32 = [0u8; 64];
+    let mut right32 = [0u8; 64];
+    let mut left64 = [0u8; 64];
+    let mut right64 = [0u8; 64];
+    for lane in 0..16 {
+        old[lane * 4..lane * 4 + 4].copy_from_slice(&(99.0f32 + lane as f32).to_le_bytes());
+        left32[lane * 4..lane * 4 + 4].copy_from_slice(&(lane as f32 + 2.0).to_le_bytes());
+        right32[lane * 4..lane * 4 + 4].copy_from_slice(&(lane as f32 + 1.0).to_le_bytes());
+    }
+    for lane in 0..8 {
+        left64[lane * 8..lane * 8 + 8].copy_from_slice(&(lane as f64 + 2.0).to_le_bytes());
+        right64[lane * 8..lane * 8 + 8].copy_from_slice(&(lane as f64 + 1.0).to_le_bytes());
+    }
+
+    macro_rules! check_f32 {
+        ($opcode:expr, $xreg:expr, $xmem:expr, $yreg:expr, $ymem:expr, $op:expr) => {{
+            for (ll, reg_provider, mem_provider, lanes) in [
+                (
+                    0x08u8,
+                    &$xreg as &dyn SemanticProvider,
+                    &$xmem as &dyn SemanticProvider,
+                    4usize,
+                ),
+                (
+                    0x28u8,
+                    &$yreg as &dyn SemanticProvider,
+                    &$ymem as &dyn SemanticProvider,
+                    8usize,
+                ),
+            ] {
+                for (memory, provider, rm) in [(false, reg_provider, 0xC2u8), (true, mem_provider, 0x00u8)] {
+                    let code = [0x62, 0xF1, 0x74, ll, $opcode, rm];
+                    let state = run_engine_full(FullEngineCase {
+                        code: &code,
+                        provider,
+                        zmm0: Some(&old),
+                        zmm1: Some(&left32),
+                        zmm2: if memory { None } else { Some(&right32) },
+                        k1: None,
+                        k2: None,
+                        k3: None,
+                        mem_data: if memory { Some(&right32) } else { None },
+                    })
+                    .map_err(|error| format!("f32 opcode {:#x} VL {ll:#x} memory {memory}: {error}", $opcode))?;
+                    let actual = read_f32_lanes(&read_zmm_bytes(&state, ZMM0)?)?;
+                    for lane in 0..16 {
+                        if lane < lanes {
+                            assert_eq!(
+                                actual[lane],
+                                $op(lane as f32 + 2.0, lane as f32 + 1.0),
+                                "opcode {:#x}, ll {ll:#x}, memory {memory}, lane {lane}",
+                                $opcode
+                            );
+                        } else {
+                            assert_eq!(actual[lane], 0.0, "EVEX upper lane must clear");
+                        }
+                    }
+                }
+            }
+        }};
+    }
+    macro_rules! check_f64 {
+        ($opcode:expr, $xreg:expr, $xmem:expr, $yreg:expr, $ymem:expr, $op:expr) => {{
+            for (ll, reg_provider, mem_provider, lanes) in [
+                (
+                    0x08u8,
+                    &$xreg as &dyn SemanticProvider,
+                    &$xmem as &dyn SemanticProvider,
+                    2usize,
+                ),
+                (
+                    0x28u8,
+                    &$yreg as &dyn SemanticProvider,
+                    &$ymem as &dyn SemanticProvider,
+                    4usize,
+                ),
+            ] {
+                for (memory, provider, rm) in [(false, reg_provider, 0xC2u8), (true, mem_provider, 0x00u8)] {
+                    let code = [0x62, 0xF1, 0xF5, ll, $opcode, rm];
+                    let state = run_engine_full(FullEngineCase {
+                        code: &code,
+                        provider,
+                        zmm0: Some(&old),
+                        zmm1: Some(&left64),
+                        zmm2: if memory { None } else { Some(&right64) },
+                        k1: None,
+                        k2: None,
+                        k3: None,
+                        mem_data: if memory { Some(&right64) } else { None },
+                    })
+                    .map_err(|error| format!("f64 opcode {:#x} VL {ll:#x} memory {memory}: {error}", $opcode))?;
+                    let actual = read_f64_lanes(&read_zmm_bytes(&state, ZMM0)?)?;
+                    for lane in 0..8 {
+                        if lane < lanes {
+                            assert_eq!(
+                                actual[lane],
+                                $op(lane as f64 + 2.0, lane as f64 + 1.0),
+                                "opcode {:#x}, ll {ll:#x}, memory {memory}, lane {lane}",
+                                $opcode
+                            );
+                        } else {
+                            assert_eq!(actual[lane], 0.0, "EVEX upper lane must clear");
+                        }
+                    }
+                }
+            }
+        }};
+    }
+    check_f32!(
+        0x5D,
+        avx512::VminpsEvexXmmXmmXmm,
+        avx512::VminpsEvexXmmXmmMem128,
+        avx512::VminpsEvexYmmYmmYmm,
+        avx512::VminpsEvexYmmYmmMem,
+        f32::min
+    );
+    check_f32!(
+        0x5F,
+        avx512::VmaxpsEvexXmmXmmXmm,
+        avx512::VmaxpsEvexXmmXmmMem128,
+        avx512::VmaxpsEvexYmmYmmYmm,
+        avx512::VmaxpsEvexYmmYmmMem,
+        f32::max
+    );
+    check_f64!(
+        0x5D,
+        avx512::VminpdEvexXmmXmmXmm,
+        avx512::VminpdEvexXmmXmmMem128,
+        avx512::VminpdEvexYmmYmmYmm,
+        avx512::VminpdEvexYmmYmmMem,
+        f64::min
+    );
+    check_f64!(
+        0x5F,
+        avx512::VmaxpdEvexXmmXmmXmm,
+        avx512::VmaxpdEvexXmmXmmMem128,
+        avx512::VmaxpdEvexYmmYmmYmm,
+        avx512::VmaxpdEvexYmmYmmMem,
+        f64::max
+    );
     Ok(())
 }
 
