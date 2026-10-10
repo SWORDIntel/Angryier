@@ -699,6 +699,14 @@ encoding-aware form-map tier + XED iclass exports to fire).
 **EVEX scalar/opmask tier landed 2026-09-28** (scalar float ops + KANDW/
 KORW/KXORW/KANDNW/KXNORW/KNOTW/Q word+qword opmask logic, 17 encodings
 verified end-to-end, `maps_avx512_scalar_and_opmask_forms`).
+**EVEX.128/256 packed float arithmetic slices landed 2026-10-10**:
+VADDPS/VSUBPS/VMULPS/VDIVPS and VADDPD/VSUBPD/VMULPD/VDIVPD have dedicated
+register/memory providers at XMM/YMM widths, aligned registry entries, and
+engine-oracle coverage. Unmasked k0 memory maps and executes; k1-k7 masked
+memory and embedded-broadcast instances remain unmapped because the current
+executor cannot guarantee lane-level memory fault suppression or broadcast
+semantics. See `docs/status/xed-packed-f32-vex-evex-gap.md` for the packed-
+single boundary; the packed-double slice follows the same memory constraints.
 **VNNI slice landed 2026-09-28** (84 providers total: VPDPBUSD/VPDPBUSDS/
 VPDPWSSD/VPDPWSSDS across XMM/YMM/ZMM, reg+mem — new `DotU8S8` and
 `SatAddS` vector ops wired through IR lowering and the concrete
