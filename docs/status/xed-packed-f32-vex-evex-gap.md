@@ -1,15 +1,15 @@
 # XED packed-F32 arithmetic provider gap
 
-Survey of the pinned XED 2024.05.20 enum inventory (`ISANITY/catalogue/imports/xed-iform-enum-candidates.json`) for `VADDPS`, `VSUBPS`, `VMULPS`, and `VDIVPS` finds 40 named IFORMs: 10 per mnemonic. The Angryier runtime map covers 24 (6 per mnemonic): VEX.128 and VEX.256 register/memory pairs, EVEX.128 and EVEX.256 register forms, and EVEX.512 register/memory pairs. EVEX.128/256 memory mappings are restricted to k0 (unmasked); k1-k7 memory instructions stay unmapped until lane-granular fault suppression is supported.
+Survey of the pinned XED 2024.05.20 enum inventory (`ISANITY/catalogue/imports/xed-iform-enum-candidates.json`) for `VADDPS`, `VSUBPS`, `VMULPS`, and `VDIVPS` finds 40 named IFORMs: 10 per mnemonic. Provider forms now exist for all 40 named IFORM entries: VEX.128/.256 and EVEX.128/.256/.512 register/memory shapes. This does not mean every encoding instance is executable: EVEX.128/.256 memory maps only with k0 (unmasked), and embedded-broadcast instances remain unmapped by operand shape.
 
-The remaining 16 named forms in this inventory are the EVEX.128/256 ordinary masked-memory forms (8 total) and embedded-broadcast memory variants (8 total):
+The remaining gaps are encoding-instance constraints, not additional IFORM names. Both masked-memory and embedded-broadcast encodings reuse the ordinary EVEX memory IFORM names:
 
-| Encoding/width | Forms per mnemonic | Total | Status |
-| --- | ---: | ---: | --- |
-| EVEX.128 masked memory (k1-k7) | 1 | 4 | Unsupported — lane-level memory fault suppression not representable |
-| EVEX.256 masked memory (k1-k7) | 1 | 4 | Unsupported — lane-level memory fault suppression not representable |
-| EVEX.128 `{1to4}` | 1 | 4 | Unsupported — broadcast semantics not representable |
-| EVEX.256 `{1to8}` | 1 | 4 | Unsupported — broadcast semantics not representable |
+| Encoding/width | Instruction/shape combinations | Status |
+| --- | ---: | --- |
+| EVEX.128 masked memory (k1-k7) | 4 | Unsupported — lane-level memory fault suppression not representable |
+| EVEX.256 masked memory (k1-k7) | 4 | Unsupported — lane-level memory fault suppression not representable |
+| EVEX.128 `{1to4}` | 4 | Unsupported — broadcast semantics not representable |
+| EVEX.256 `{1to8}` | 4 | Unsupported — broadcast semantics not representable |
 
 The broadcast memory encodings share an IFORM name with the ordinary memory forms but decode a 32-bit memory operand (`Shape::Mem32`), so the shape-based runtime map leaves them unmapped cleanly. They cannot be implemented exactly today: `VectorOp::Broadcast` exists in the semantic IR but the compact-IR lowering rejects non-lane-wise vector ops with `UnsupportedValue("non-lane-wise vector operation")`, so a mapped form could not be lowered or executed. Mapping them would silently compute element-wise semantics on the scalar memory operand and produce wrong values, so they intentionally remain unsupported.
 
@@ -29,4 +29,4 @@ The broadcast memory encodings share an IFORM name with the ordinary memory form
 
 ## Remaining gap
 
-The 8 embedded-broadcast forms (`*PS_XMM...{1to4}`/`*PS_YMM...{1to8}` memory operands) stay unsupported until the IR lowering grows broadcast support. The 8 regular EVEX.128/256 masked memory forms (k1-k7) also stay unmapped until masked lane loads suppress faults correctly. No EVEX.128/256 rounding-control (`{rn-sae}` etc.) forms exist for these mnemonics — `b=1` decodings round up to the ZMM IFORMs, which are already covered.
+The 8 embedded-broadcast instruction/shape combinations (`*PS_XMM...{1to4}`/`*PS_YMM...{1to8}` memory operands) stay unsupported until the IR lowering grows broadcast support; they reuse the regular EVEX memory IFORM names. The 8 regular EVEX.128/256 masked-memory instruction/shape combinations (k1-k7) also stay unmapped until masked lane loads suppress faults correctly. No EVEX.128/256 rounding-control (`{rn-sae}` etc.) IFORMs exist for these mnemonics — `b=1` decodings round up to the ZMM IFORMs, which are already covered.
