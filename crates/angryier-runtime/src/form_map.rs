@@ -18,7 +18,7 @@
 use angryier_arch::{DecodedInstruction, Operand, OperandKind, OperandVisibility};
 use angryier_arch_intel64::register_id;
 use angryier_arch_xed_ffi::iclass;
-use angryier_semantics_intel64::{amx_forms, evex_forms, forms};
+use angryier_semantics_intel64::{amx_forms, avx10_forms, evex_forms, forms};
 
 /// Form id reported for instructions XED can decode but the corpus cannot
 /// execute exactly. No registered corpus form uses this id.
@@ -226,6 +226,83 @@ fn stack_pair_width(decoded: &DecodedInstruction) -> Option<u16> {
         .map(|operand| operand.width_bits)
 }
 
+/// Map unmasked or opmask-decorated EVEX integer add/sub register forms to
+/// their width-specific AVX10 providers. The same XED ICLASS is also used by
+/// VEX encodings, so encoding class is part of the identity decision; legacy
+/// and VEX decodes continue through the existing mapping below.
+fn map_evex_integer_add_sub(decoded: &DecodedInstruction, shapes: &[Shape]) -> Option<u32> {
+    if decoded.modifiers.encoding != angryier_arch_intel64::encoding_class::EVEX {
+        return None;
+    }
+    let has_opmask_operand = decoded.operands.get(1).is_some_and(|operand| {
+        matches!(
+            &operand.kind,
+            OperandKind::Register(register)
+                if (register_id::OPMASK_BASE..register_id::OPMASK_BASE + u32::from(angryier_arch_intel64::OPMASK_COUNT))
+                    .contains(&register.parent.0)
+        )
+    });
+    if !has_opmask_operand {
+        return None;
+    }
+
+    let width = match shapes {
+        [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => 128,
+        [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => 256,
+        [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => 512,
+        _ => return None,
+    };
+    let forms = match decoded.form_id {
+        iclass::XED_ICLASS_VPADDB => [
+            avx10_forms::VPADDB_XMM_XMM_XMM,
+            avx10_forms::VPADDB_YMM_YMM_YMM,
+            avx10_forms::VPADDB_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPADDW => [
+            avx10_forms::VPADDW_XMM_XMM_XMM,
+            avx10_forms::VPADDW_YMM_YMM_YMM,
+            avx10_forms::VPADDW_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPADDD => [
+            avx10_forms::VPADDD_XMM_XMM_XMM,
+            avx10_forms::VPADDD_YMM_YMM_YMM,
+            avx10_forms::VPADDD_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPADDQ => [
+            avx10_forms::VPADDQ_XMM_XMM_XMM,
+            avx10_forms::VPADDQ_YMM_YMM_YMM,
+            avx10_forms::VPADDQ_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPSUBB => [
+            avx10_forms::VPSUBB_XMM_XMM_XMM,
+            avx10_forms::VPSUBB_YMM_YMM_YMM,
+            avx10_forms::VPSUBB_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPSUBW => [
+            avx10_forms::VPSUBW_XMM_XMM_XMM,
+            avx10_forms::VPSUBW_YMM_YMM_YMM,
+            avx10_forms::VPSUBW_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPSUBD => [
+            avx10_forms::VPSUBD_XMM_XMM_XMM,
+            avx10_forms::VPSUBD_YMM_YMM_YMM,
+            avx10_forms::VPSUBD_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPSUBQ => [
+            avx10_forms::VPSUBQ_XMM_XMM_XMM,
+            avx10_forms::VPSUBQ_YMM_YMM_YMM,
+            avx10_forms::VPSUBQ_ZMM_ZMM_ZMM,
+        ],
+        _ => return None,
+    };
+    match width {
+        128 => Some(forms[0]),
+        256 => Some(forms[1]),
+        512 => Some(forms[2]),
+        _ => None,
+    }
+}
+
 pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
     // Implicit operands join the shape (accumulator of `cmp eax, imm`), but a
     // suppressed operand never does. The implicit `CL` of variable-count
@@ -240,6 +317,9 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         .map(shape_of)
         .collect();
     let shapes = explicit.as_slice();
+    if let Some(form) = map_evex_integer_add_sub(decoded, shapes) {
+        return Some(form);
+    }
     let has_cl = decoded
         .operands
         .iter()
@@ -4474,6 +4554,117 @@ mod tests {
         assert_eq!(mapped(&[0x0F, 0x4B, 0xC0])?, Some(forms::CMOVNP_R32_R32));
         assert_eq!(mapped(&[0x0F, 0x40, 0xC0])?, Some(forms::CMOVO_R32_R32));
         assert_eq!(mapped(&[0x0F, 0x41, 0xC0])?, Some(forms::CMOVNO_R32_R32));
+        Ok(())
+    }
+
+    #[test]
+    fn maps_evex_integer_add_sub_register_forms_by_encoding_and_width() -> Result<(), Box<dyn std::error::Error>> {
+        // EVEX register encodings use the same XED ICLASS values as VEX. The
+        // encoding class and decoded vector width select the AVX10 provider;
+        // the already-covered VEX YMM encodings remain on the AVX2 forms.
+        let cases = [
+            (
+                "VPADDB",
+                0x75,
+                0xFC,
+                [
+                    avx10_forms::VPADDB_XMM_XMM_XMM,
+                    avx10_forms::VPADDB_YMM_YMM_YMM,
+                    avx10_forms::VPADDB_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPADDW",
+                0x75,
+                0xFD,
+                [
+                    avx10_forms::VPADDW_XMM_XMM_XMM,
+                    avx10_forms::VPADDW_YMM_YMM_YMM,
+                    avx10_forms::VPADDW_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPADDD",
+                0x75,
+                0xFE,
+                [
+                    avx10_forms::VPADDD_XMM_XMM_XMM,
+                    avx10_forms::VPADDD_YMM_YMM_YMM,
+                    avx10_forms::VPADDD_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPADDQ",
+                0xF5,
+                0xD4,
+                [
+                    avx10_forms::VPADDQ_XMM_XMM_XMM,
+                    avx10_forms::VPADDQ_YMM_YMM_YMM,
+                    avx10_forms::VPADDQ_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPSUBB",
+                0x75,
+                0xF8,
+                [
+                    avx10_forms::VPSUBB_XMM_XMM_XMM,
+                    avx10_forms::VPSUBB_YMM_YMM_YMM,
+                    avx10_forms::VPSUBB_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPSUBW",
+                0x75,
+                0xF9,
+                [
+                    avx10_forms::VPSUBW_XMM_XMM_XMM,
+                    avx10_forms::VPSUBW_YMM_YMM_YMM,
+                    avx10_forms::VPSUBW_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPSUBD",
+                0x75,
+                0xFA,
+                [
+                    avx10_forms::VPSUBD_XMM_XMM_XMM,
+                    avx10_forms::VPSUBD_YMM_YMM_YMM,
+                    avx10_forms::VPSUBD_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPSUBQ",
+                0xF5,
+                0xFB,
+                [
+                    avx10_forms::VPSUBQ_XMM_XMM_XMM,
+                    avx10_forms::VPSUBQ_YMM_YMM_YMM,
+                    avx10_forms::VPSUBQ_ZMM_ZMM_ZMM,
+                ],
+            ),
+        ];
+        let decoder = XedDecoder::new();
+        for (mnemonic, p1, opcode, expected) in cases {
+            for (p2, expected_form) in [(0x08, expected[0]), (0x28, expected[1]), (0x48, expected[2])] {
+                let bytes = [0x62, 0xF1, p1, p2, opcode, 0xC2];
+                let (decoded, iform) = decoder
+                    .decode_with_iform(0x401000, &bytes)
+                    .unwrap_or_else(|error| panic!("opcode {opcode:#04x}, p2 {p2:#04x}: {error}"));
+                assert!(
+                    iform.name.starts_with(&format!("XED_IFORM_{mnemonic}_")),
+                    "{}",
+                    iform.name
+                );
+                assert_eq!(map_form(&decoded), Some(expected_form), "{}", iform.name);
+            }
+        }
+        // EVEX mask k1 uses the same provider form; the provider applies the
+        // predicate semantics from decoded modifiers.
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x75, 0x09, 0xFC, 0xC2])?,
+            Some(avx10_forms::VPADDB_XMM_XMM_XMM)
+        );
         Ok(())
     }
 }
