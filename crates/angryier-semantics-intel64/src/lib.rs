@@ -966,6 +966,14 @@ pub mod forms {
     pub const VANDNPS_YMM_YMM_MEM: u32 = 0x0413;
     pub const VORPS_YMM_YMM_YMM: u32 = 0x0414;
     pub const VORPS_YMM_YMM_MEM: u32 = 0x0415;
+    pub const VADDPS_XMM_XMM_XMM: u32 = 0x0416;
+    pub const VADDPS_XMM_XMM_MEM: u32 = 0x0417;
+    pub const VSUBPS_XMM_XMM_XMM: u32 = 0x0418;
+    pub const VSUBPS_XMM_XMM_MEM: u32 = 0x0419;
+    pub const VMULPS_XMM_XMM_XMM: u32 = 0x041A;
+    pub const VMULPS_XMM_XMM_MEM: u32 = 0x041B;
+    pub const VDIVPS_XMM_XMM_XMM: u32 = 0x041C;
+    pub const VDIVPS_XMM_XMM_MEM: u32 = 0x041D;
 
     // AVX packed-double arithmetic, scalar-double arithmetic, and packed logic.
     pub const VADDPD_YMM_YMM_YMM: u32 = 0x0F48;

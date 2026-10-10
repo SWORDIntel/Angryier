@@ -37,6 +37,14 @@ const F32X4: SemanticType = SemanticType::Vector {
     lanes: 4,
     lane: ScalarType::Float(FloatFormat::F32),
 };
+const F32X12: SemanticType = SemanticType::Vector {
+    lanes: 12,
+    lane: ScalarType::Float(FloatFormat::F32),
+};
+const F32X16: SemanticType = SemanticType::Vector {
+    lanes: 16,
+    lane: ScalarType::Float(FloatFormat::F32),
+};
 const F64X2: SemanticType = SemanticType::Vector {
     lanes: 2,
     lane: ScalarType::Float(FloatFormat::F64),
@@ -8019,6 +8027,68 @@ packed_float_ymm!(VmulpsYmmYmmYmm, forms::VMULPS_YMM_YMM_YMM, FloatingOp::Mul, 0
 packed_float_ymm!(VmulpsYmmYmmMem, forms::VMULPS_YMM_YMM_MEM, FloatingOp::Mul, 0x605);
 packed_float_ymm!(VdivpsYmmYmmYmm, forms::VDIVPS_YMM_YMM_YMM, FloatingOp::Div, 0x606);
 packed_float_ymm!(VdivpsYmmYmmMem, forms::VDIVPS_YMM_YMM_MEM, FloatingOp::Div, 0x607);
+
+/// VEX.128 packed-single arithmetic. Unlike legacy SSE, AVX reads both
+/// sources before writing the destination and clears bits 128..511 of the
+/// destination's ZMM parent. The explicit whole-parent write keeps that
+/// architectural effect independent of the XMM view's legacy-preserve mode.
+macro_rules! packed_float_xmm_vex {
+    ($name:ident, $form:expr, $op:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let destination = insn.operand(0).ok_or(SemanticError::InvalidOperand)?;
+                let parent = match destination.kind {
+                    OperandKind::Register(view) if destination.width_bits == 128 && view.width_bits == 128 => {
+                        view.parent
+                    }
+                    _ => return Err(SemanticError::InvalidOperand),
+                };
+                let left = out.read_operand(1, F32X4)?;
+                let right = out.read_operand(2, F32X4)?;
+                let low = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat($op)),
+                    F32X4,
+                    &[left, right],
+                )?;
+                let upper_zero = vec_const_uniform(out, F32X12, 0, 4, 12)?;
+                let full_parent = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    F32X16,
+                    &[low, upper_zero],
+                )?;
+                out.write_register(parent, full_parent)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+packed_float_xmm_vex!(VaddpsXmmXmmXmm, forms::VADDPS_XMM_XMM_XMM, FloatingOp::Add, 0x3000);
+packed_float_xmm_vex!(VaddpsXmmXmmMem, forms::VADDPS_XMM_XMM_MEM, FloatingOp::Add, 0x3001);
+packed_float_xmm_vex!(VsubpsXmmXmmXmm, forms::VSUBPS_XMM_XMM_XMM, FloatingOp::Sub, 0x3002);
+packed_float_xmm_vex!(VsubpsXmmXmmMem, forms::VSUBPS_XMM_XMM_MEM, FloatingOp::Sub, 0x3003);
+packed_float_xmm_vex!(VmulpsXmmXmmXmm, forms::VMULPS_XMM_XMM_XMM, FloatingOp::Mul, 0x3004);
+packed_float_xmm_vex!(VmulpsXmmXmmMem, forms::VMULPS_XMM_XMM_MEM, FloatingOp::Mul, 0x3005);
+packed_float_xmm_vex!(VdivpsXmmXmmXmm, forms::VDIVPS_XMM_XMM_XMM, FloatingOp::Div, 0x3006);
+packed_float_xmm_vex!(VdivpsXmmXmmMem, forms::VDIVPS_XMM_XMM_MEM, FloatingOp::Div, 0x3007);
 
 macro_rules! scalar_float_xmm {
     ($name:ident, $form:expr, $op:expr, $memory:expr, $rule:expr) => {

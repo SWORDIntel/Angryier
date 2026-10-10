@@ -1141,6 +1141,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_VADDPS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VADDPS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128] => Some(forms::VADDPS_XMM_XMM_MEM),
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VADDPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VADDPS_YMM_YMM_MEM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VADDPS_ZMM_ZMM_ZMM),
@@ -1148,6 +1150,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_VSUBPS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VSUBPS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128] => Some(forms::VSUBPS_XMM_XMM_MEM),
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VSUBPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VSUBPS_YMM_YMM_MEM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VSUBPS_ZMM_ZMM_ZMM),
@@ -1155,6 +1159,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_VMULPS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VMULPS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128] => Some(forms::VMULPS_XMM_XMM_MEM),
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMULPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMULPS_YMM_YMM_MEM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VMULPS_ZMM_ZMM_ZMM),
@@ -1162,6 +1168,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             _ => None,
         },
         iclass::XED_ICLASS_VDIVPS => match shapes {
+            [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(forms::VDIVPS_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Xmm, Shape::Mem128] => Some(forms::VDIVPS_XMM_XMM_MEM),
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VDIVPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VDIVPS_YMM_YMM_MEM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VDIVPS_ZMM_ZMM_ZMM),
@@ -4052,6 +4060,22 @@ mod tests {
         assert_eq!(mapped(&[0xC5, 0xF5, 0x54, 0xC2])?, Some(forms::VANDPD_YMM_YMM_YMM));
         // vxorpd %ymm2, %ymm1, %ymm0
         assert_eq!(mapped(&[0xC5, 0xF5, 0x57, 0xC2])?, Some(forms::VXORPD_YMM_YMM_YMM));
+        Ok(())
+    }
+
+    #[test]
+    fn maps_vex128_packed_single_arithmetic_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // VEX.128 register/memory encodings; each keeps the non-destructive
+        // three-operand shape used by the semantic provider.
+        for (opcode, reg_form, mem_form) in [
+            (0x58, forms::VADDPS_XMM_XMM_XMM, forms::VADDPS_XMM_XMM_MEM),
+            (0x5C, forms::VSUBPS_XMM_XMM_XMM, forms::VSUBPS_XMM_XMM_MEM),
+            (0x59, forms::VMULPS_XMM_XMM_XMM, forms::VMULPS_XMM_XMM_MEM),
+            (0x5E, forms::VDIVPS_XMM_XMM_XMM, forms::VDIVPS_XMM_XMM_MEM),
+        ] {
+            assert_eq!(mapped(&[0xC5, 0xF8, opcode, 0xC2])?, Some(reg_form));
+            assert_eq!(mapped(&[0xC5, 0xF8, opcode, 0x00])?, Some(mem_form));
+        }
         Ok(())
     }
 

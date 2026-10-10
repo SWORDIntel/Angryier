@@ -124,7 +124,7 @@ fn shape_of(operand: &angryier_arch::Operand) -> Option<Shape> {
         OperandKind::Immediate(_) => Some(Shape::Imm),
         OperandKind::Memory(_) if operand.width_bits == 32 => Some(Shape::Mem32),
         OperandKind::Memory(_) if operand.width_bits == 64 => Some(Shape::Mem64),
-        OperandKind::Memory(_) if operand.width_bits == 256 => Some(Shape::Mem),
+        OperandKind::Memory(_) if matches!(operand.width_bits, 128 | 256) => Some(Shape::Mem),
         _ => None,
     }
 }
@@ -148,10 +148,34 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
             [Shape::Mem, Shape::Ymm] => Some(forms::VMOVDQU_MEM_YMM),
             _ => None,
         },
-        xed::XED_ICLASS_VADDPS => packed_form(&shapes, forms::VADDPS_YMM_YMM_YMM, forms::VADDPS_YMM_YMM_MEM),
-        xed::XED_ICLASS_VSUBPS => packed_form(&shapes, forms::VSUBPS_YMM_YMM_YMM, forms::VSUBPS_YMM_YMM_MEM),
-        xed::XED_ICLASS_VMULPS => packed_form(&shapes, forms::VMULPS_YMM_YMM_YMM, forms::VMULPS_YMM_YMM_MEM),
-        xed::XED_ICLASS_VDIVPS => packed_form(&shapes, forms::VDIVPS_YMM_YMM_YMM, forms::VDIVPS_YMM_YMM_MEM),
+        xed::XED_ICLASS_VADDPS => packed_ps_form(
+            &shapes,
+            forms::VADDPS_XMM_XMM_XMM,
+            forms::VADDPS_XMM_XMM_MEM,
+            forms::VADDPS_YMM_YMM_YMM,
+            forms::VADDPS_YMM_YMM_MEM,
+        ),
+        xed::XED_ICLASS_VSUBPS => packed_ps_form(
+            &shapes,
+            forms::VSUBPS_XMM_XMM_XMM,
+            forms::VSUBPS_XMM_XMM_MEM,
+            forms::VSUBPS_YMM_YMM_YMM,
+            forms::VSUBPS_YMM_YMM_MEM,
+        ),
+        xed::XED_ICLASS_VMULPS => packed_ps_form(
+            &shapes,
+            forms::VMULPS_XMM_XMM_XMM,
+            forms::VMULPS_XMM_XMM_MEM,
+            forms::VMULPS_YMM_YMM_YMM,
+            forms::VMULPS_YMM_YMM_MEM,
+        ),
+        xed::XED_ICLASS_VDIVPS => packed_ps_form(
+            &shapes,
+            forms::VDIVPS_XMM_XMM_XMM,
+            forms::VDIVPS_XMM_XMM_MEM,
+            forms::VDIVPS_YMM_YMM_YMM,
+            forms::VDIVPS_YMM_YMM_MEM,
+        ),
         xed::XED_ICLASS_VANDPS => packed_form(&shapes, forms::VANDPS_YMM_YMM_YMM, forms::VANDPS_YMM_YMM_MEM),
         xed::XED_ICLASS_VANDNPS => packed_form(&shapes, forms::VANDNPS_YMM_YMM_YMM, forms::VANDNPS_YMM_YMM_MEM),
         xed::XED_ICLASS_VORPS => packed_form(&shapes, forms::VORPS_YMM_YMM_YMM, forms::VORPS_YMM_YMM_MEM),
@@ -254,6 +278,22 @@ fn packed_form(shapes: &[Shape], register: u32, memory: u32) -> Option<u32> {
     match shapes {
         [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(register),
         [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(memory),
+        _ => None,
+    }
+}
+
+fn packed_ps_form(
+    shapes: &[Shape],
+    xmm_register: u32,
+    xmm_memory: u32,
+    ymm_register: u32,
+    ymm_memory: u32,
+) -> Option<u32> {
+    match shapes {
+        [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(xmm_register),
+        [Shape::Xmm, Shape::Xmm, Shape::Mem] => Some(xmm_memory),
+        [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(ymm_register),
+        [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(ymm_memory),
         _ => None,
     }
 }
@@ -471,6 +511,14 @@ fn avx_family_differential() -> Result<(), BoxError> {
         ("vmulps_mem", "vmulps 0x500020, %ymm1, %ymm0"),
         ("vdivps_reg", "vdivps %ymm2, %ymm1, %ymm0"),
         ("vdivps_mem", "vdivps 0x500020, %ymm1, %ymm0"),
+        ("vaddps_xmm_reg", "vaddps %xmm2, %xmm1, %xmm0"),
+        ("vaddps_xmm_mem", "vaddps 0x500020, %xmm1, %xmm0"),
+        ("vsubps_xmm_reg", "vsubps %xmm2, %xmm1, %xmm0"),
+        ("vsubps_xmm_mem", "vsubps 0x500020, %xmm1, %xmm0"),
+        ("vmulps_xmm_reg", "vmulps %xmm2, %xmm1, %xmm0"),
+        ("vmulps_xmm_mem", "vmulps 0x500020, %xmm1, %xmm0"),
+        ("vdivps_xmm_reg", "vdivps %xmm2, %xmm1, %xmm0"),
+        ("vdivps_xmm_mem", "vdivps 0x500020, %xmm1, %xmm0"),
         ("vaddss_reg", "vaddss %xmm2, %xmm1, %xmm0"),
         ("vaddss_mem", "vaddss 0x500020, %xmm1, %xmm0"),
         ("vsubss_reg", "vsubss %xmm2, %xmm1, %xmm0"),
@@ -504,8 +552,8 @@ fn avx_family_differential() -> Result<(), BoxError> {
     } else {
         eprintln!("AVX differential: {count} native cases passed");
     }
-    if count != 0 && count != 44 {
-        return Err(format!("expected 44 native cases, ran {count}").into());
+    if count != 0 && count != 60 {
+        return Err(format!("expected 60 native cases, ran {count}").into());
     }
     Ok(())
 }

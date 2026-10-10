@@ -587,6 +587,14 @@ impl Intel64CorpusRegistry {
             Arc::new(VmulpsYmmYmmMem),
             Arc::new(VdivpsYmmYmmYmm),
             Arc::new(VdivpsYmmYmmMem),
+            Arc::new(VaddpsXmmXmmXmm),
+            Arc::new(VaddpsXmmXmmMem),
+            Arc::new(VsubpsXmmXmmXmm),
+            Arc::new(VsubpsXmmXmmMem),
+            Arc::new(VmulpsXmmXmmXmm),
+            Arc::new(VmulpsXmmXmmMem),
+            Arc::new(VdivpsXmmXmmXmm),
+            Arc::new(VdivpsXmmXmmMem),
             Arc::new(VaddssXmmXmmXmm),
             Arc::new(VaddssXmmXmmMem32),
             Arc::new(VsubssXmmXmmXmm),
@@ -1480,7 +1488,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1575] = [
+const ALL_FORMS: [u32; 1583] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2043,6 +2051,14 @@ const ALL_FORMS: [u32; 1575] = [
     crate::forms::VMULPS_YMM_YMM_MEM,
     crate::forms::VDIVPS_YMM_YMM_YMM,
     crate::forms::VDIVPS_YMM_YMM_MEM,
+    crate::forms::VADDPS_XMM_XMM_XMM,
+    crate::forms::VADDPS_XMM_XMM_MEM,
+    crate::forms::VSUBPS_XMM_XMM_XMM,
+    crate::forms::VSUBPS_XMM_XMM_MEM,
+    crate::forms::VMULPS_XMM_XMM_XMM,
+    crate::forms::VMULPS_XMM_XMM_MEM,
+    crate::forms::VDIVPS_XMM_XMM_XMM,
+    crate::forms::VDIVPS_XMM_XMM_MEM,
     crate::forms::VADDSS_XMM_XMM_XMM,
     crate::forms::VADDSS_XMM_XMM_MEM32,
     crate::forms::VSUBSS_XMM_XMM_XMM,
