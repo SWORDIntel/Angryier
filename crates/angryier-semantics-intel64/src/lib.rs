@@ -974,6 +974,26 @@ pub mod forms {
     pub const VMULPS_XMM_XMM_MEM: u32 = 0x041B;
     pub const VDIVPS_XMM_XMM_XMM: u32 = 0x041C;
     pub const VDIVPS_XMM_XMM_MEM: u32 = 0x041D;
+    // VEX.128 packed bitwise operations. Each operation has register and
+    // memory-source encodings; all clear bits 128..511 of the destination.
+    pub const VANDPS_XMM_XMM_XMM: u32 = 0x3010;
+    pub const VANDPS_XMM_XMM_MEM: u32 = 0x3011;
+    pub const VANDNPS_XMM_XMM_XMM: u32 = 0x3012;
+    pub const VANDNPS_XMM_XMM_MEM: u32 = 0x3013;
+    pub const VORPS_XMM_XMM_XMM: u32 = 0x3014;
+    pub const VORPS_XMM_XMM_MEM: u32 = 0x3015;
+    pub const VXORPS_XMM_XMM_MEM: u32 = 0x3016;
+    pub const VANDPD_XMM_XMM_XMM: u32 = 0x3017;
+    pub const VANDPD_XMM_XMM_MEM: u32 = 0x3018;
+    pub const VANDNPD_XMM_XMM_XMM: u32 = 0x3019;
+    pub const VANDNPD_XMM_XMM_MEM: u32 = 0x301A;
+    pub const VORPD_XMM_XMM_XMM: u32 = 0x301B;
+    pub const VORPD_XMM_XMM_MEM: u32 = 0x301C;
+    pub const VXORPD_XMM_XMM_XMM: u32 = 0x301D;
+    pub const VXORPD_XMM_XMM_MEM: u32 = 0x301E;
+    pub const VPXOR_XMM_XMM_MEM: u32 = 0x301F;
+    pub const VPOR_XMM_XMM_MEM: u32 = 0x3020;
+    pub const VPAND_XMM_XMM_MEM: u32 = 0x3021;
 
     // AVX packed-double arithmetic, scalar-double arithmetic, and packed logic.
     pub const VADDPD_YMM_YMM_YMM: u32 = 0x0F48;

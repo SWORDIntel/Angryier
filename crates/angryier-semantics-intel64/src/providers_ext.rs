@@ -10149,9 +10149,10 @@ impl SemanticProvider for Vzeroupper {
     }
 }
 
-/// `vp* xmm, xmm, xmm` — 128-bit three-operand lane-wise logical op.
-macro_rules! logic_vex128 {
-    ($name:ident, $form:expr, $op:expr, $rule:expr) => {
+/// Packed VEX.128 bitwise operations. The bit result occupies XMM while the
+/// architectural write clears the rest of the destination's ZMM parent.
+macro_rules! logic_vex128_parent {
+    ($name:ident, $form:expr, $op:expr, $invert:expr, $rule:expr) => {
         #[derive(Clone, Copy, Debug)]
         pub struct $name;
 
@@ -10171,10 +10172,28 @@ macro_rules! logic_vex128 {
                 insn: &dyn DecodedInstructionView,
                 out: &mut dyn SemanticBuilder,
             ) -> Result<SemanticReceipt, SemanticError> {
+                let destination = insn.operand(0).ok_or(SemanticError::InvalidOperand)?;
+                let parent = match destination.kind {
+                    OperandKind::Register(view) if destination.width_bits == 128 && view.width_bits == 128 => {
+                        view.parent
+                    }
+                    _ => return Err(SemanticError::InvalidOperand),
+                };
                 let left = out.read_operand(1, U128)?;
                 let right = out.read_operand(2, U128)?;
-                let result = out.emit(SemanticOp::Primitive($op), U128, &[left, right])?;
-                out.write_operand(0, result)?;
+                let left = if $invert {
+                    out.emit(SemanticOp::Primitive(PrimitiveOp::Not), U128, &[left])?
+                } else {
+                    left
+                };
+                let low = out.emit(SemanticOp::Primitive($op), U128, &[left, right])?;
+                let upper_zero = vec_const_uniform(out, F32X12, 0, 4, 12)?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    F32X16,
+                    &[low, upper_zero],
+                )?;
+                out.write_register(parent, result)?;
                 fall_through(out, insn)?;
                 Ok(receipt($rule, context))
             }
@@ -10182,10 +10201,112 @@ macro_rules! logic_vex128 {
     };
 }
 
-logic_vex128!(VpxorXmmXmmXmm, forms::VPXOR_XMM_XMM_XMM, PrimitiveOp::Xor, 0x2C4);
-logic_vex128!(VporXmmXmmXmm, forms::VPOR_XMM_XMM_XMM, PrimitiveOp::Or, 0x2C5);
-logic_vex128!(VpandXmmXmmXmm, forms::VPAND_XMM_XMM_XMM, PrimitiveOp::And, 0x2C6);
-logic_vex128!(VxorpsXmmXmmXmm, forms::VXORPS_XMM_XMM_XMM, PrimitiveOp::Xor, 0x2C7);
+logic_vex128_parent!(
+    VandpsXmmXmmXmm,
+    forms::VANDPS_XMM_XMM_XMM,
+    PrimitiveOp::And,
+    false,
+    0x3010
+);
+logic_vex128_parent!(
+    VandpsXmmXmmMem,
+    forms::VANDPS_XMM_XMM_MEM,
+    PrimitiveOp::And,
+    false,
+    0x3011
+);
+logic_vex128_parent!(
+    VandnpsXmmXmmXmm,
+    forms::VANDNPS_XMM_XMM_XMM,
+    PrimitiveOp::And,
+    true,
+    0x3012
+);
+logic_vex128_parent!(
+    VandnpsXmmXmmMem,
+    forms::VANDNPS_XMM_XMM_MEM,
+    PrimitiveOp::And,
+    true,
+    0x3013
+);
+logic_vex128_parent!(VorpsXmmXmmXmm, forms::VORPS_XMM_XMM_XMM, PrimitiveOp::Or, false, 0x3014);
+logic_vex128_parent!(VorpsXmmXmmMem, forms::VORPS_XMM_XMM_MEM, PrimitiveOp::Or, false, 0x3015);
+logic_vex128_parent!(
+    VxorpsXmmXmmMem,
+    forms::VXORPS_XMM_XMM_MEM,
+    PrimitiveOp::Xor,
+    false,
+    0x3016
+);
+logic_vex128_parent!(
+    VandpdXmmXmmXmm,
+    forms::VANDPD_XMM_XMM_XMM,
+    PrimitiveOp::And,
+    false,
+    0x3017
+);
+logic_vex128_parent!(
+    VandpdXmmXmmMem,
+    forms::VANDPD_XMM_XMM_MEM,
+    PrimitiveOp::And,
+    false,
+    0x3018
+);
+logic_vex128_parent!(
+    VandnpdXmmXmmXmm,
+    forms::VANDNPD_XMM_XMM_XMM,
+    PrimitiveOp::And,
+    true,
+    0x3019
+);
+logic_vex128_parent!(
+    VandnpdXmmXmmMem,
+    forms::VANDNPD_XMM_XMM_MEM,
+    PrimitiveOp::And,
+    true,
+    0x301A
+);
+logic_vex128_parent!(VorpdXmmXmmXmm, forms::VORPD_XMM_XMM_XMM, PrimitiveOp::Or, false, 0x301B);
+logic_vex128_parent!(VorpdXmmXmmMem, forms::VORPD_XMM_XMM_MEM, PrimitiveOp::Or, false, 0x301C);
+logic_vex128_parent!(
+    VxorpdXmmXmmXmm,
+    forms::VXORPD_XMM_XMM_XMM,
+    PrimitiveOp::Xor,
+    false,
+    0x301D
+);
+logic_vex128_parent!(
+    VxorpdXmmXmmMem,
+    forms::VXORPD_XMM_XMM_MEM,
+    PrimitiveOp::Xor,
+    false,
+    0x301E
+);
+logic_vex128_parent!(VpxorXmmXmmXmm, forms::VPXOR_XMM_XMM_XMM, PrimitiveOp::Xor, false, 0x2C4);
+logic_vex128_parent!(VporXmmXmmXmm, forms::VPOR_XMM_XMM_XMM, PrimitiveOp::Or, false, 0x2C5);
+logic_vex128_parent!(VpandXmmXmmXmm, forms::VPAND_XMM_XMM_XMM, PrimitiveOp::And, false, 0x2C6);
+logic_vex128_parent!(
+    VxorpsXmmXmmXmm,
+    forms::VXORPS_XMM_XMM_XMM,
+    PrimitiveOp::Xor,
+    false,
+    0x2C7
+);
+logic_vex128_parent!(
+    VpxorXmmXmmMem,
+    forms::VPXOR_XMM_XMM_MEM,
+    PrimitiveOp::Xor,
+    false,
+    0x301F
+);
+logic_vex128_parent!(VporXmmXmmMem, forms::VPOR_XMM_XMM_MEM, PrimitiveOp::Or, false, 0x3020);
+logic_vex128_parent!(
+    VpandXmmXmmMem,
+    forms::VPAND_XMM_XMM_MEM,
+    PrimitiveOp::And,
+    false,
+    0x3021
+);
 
 /// `vpcmpeqb xmm, xmm, xmm` — per-byte equality mask.
 #[derive(Clone, Copy, Debug)]

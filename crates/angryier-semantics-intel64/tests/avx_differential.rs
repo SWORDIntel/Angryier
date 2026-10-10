@@ -176,9 +176,83 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
             forms::VDIVPS_YMM_YMM_YMM,
             forms::VDIVPS_YMM_YMM_MEM,
         ),
-        xed::XED_ICLASS_VANDPS => packed_form(&shapes, forms::VANDPS_YMM_YMM_YMM, forms::VANDPS_YMM_YMM_MEM),
-        xed::XED_ICLASS_VANDNPS => packed_form(&shapes, forms::VANDNPS_YMM_YMM_YMM, forms::VANDNPS_YMM_YMM_MEM),
-        xed::XED_ICLASS_VORPS => packed_form(&shapes, forms::VORPS_YMM_YMM_YMM, forms::VORPS_YMM_YMM_MEM),
+        xed::XED_ICLASS_VANDPS => bitwise_vex_form(
+            &shapes,
+            forms::VANDPS_XMM_XMM_XMM,
+            forms::VANDPS_XMM_XMM_MEM,
+            forms::VANDPS_YMM_YMM_YMM,
+            Some(forms::VANDPS_YMM_YMM_MEM),
+        ),
+        xed::XED_ICLASS_VANDNPS => bitwise_vex_form(
+            &shapes,
+            forms::VANDNPS_XMM_XMM_XMM,
+            forms::VANDNPS_XMM_XMM_MEM,
+            forms::VANDNPS_YMM_YMM_YMM,
+            Some(forms::VANDNPS_YMM_YMM_MEM),
+        ),
+        xed::XED_ICLASS_VORPS => bitwise_vex_form(
+            &shapes,
+            forms::VORPS_XMM_XMM_XMM,
+            forms::VORPS_XMM_XMM_MEM,
+            forms::VORPS_YMM_YMM_YMM,
+            Some(forms::VORPS_YMM_YMM_MEM),
+        ),
+        xed::XED_ICLASS_VXORPS => bitwise_vex_form(
+            &shapes,
+            forms::VXORPS_XMM_XMM_XMM,
+            forms::VXORPS_XMM_XMM_MEM,
+            forms::VXORPS_YMM_YMM_YMM,
+            None,
+        ),
+        xed::XED_ICLASS_VANDPD => bitwise_vex_form(
+            &shapes,
+            forms::VANDPD_XMM_XMM_XMM,
+            forms::VANDPD_XMM_XMM_MEM,
+            forms::VANDPD_YMM_YMM_YMM,
+            Some(forms::VANDPD_YMM_YMM_MEM),
+        ),
+        xed::XED_ICLASS_VANDNPD => bitwise_vex_form(
+            &shapes,
+            forms::VANDNPD_XMM_XMM_XMM,
+            forms::VANDNPD_XMM_XMM_MEM,
+            forms::VANDNPD_YMM_YMM_YMM,
+            Some(forms::VANDNPD_YMM_YMM_MEM),
+        ),
+        xed::XED_ICLASS_VORPD => bitwise_vex_form(
+            &shapes,
+            forms::VORPD_XMM_XMM_XMM,
+            forms::VORPD_XMM_XMM_MEM,
+            forms::VORPD_YMM_YMM_YMM,
+            Some(forms::VORPD_YMM_YMM_MEM),
+        ),
+        xed::XED_ICLASS_VXORPD => bitwise_vex_form(
+            &shapes,
+            forms::VXORPD_XMM_XMM_XMM,
+            forms::VXORPD_XMM_XMM_MEM,
+            forms::VXORPD_YMM_YMM_YMM,
+            Some(forms::VXORPD_YMM_YMM_MEM),
+        ),
+        xed::XED_ICLASS_VPAND => bitwise_vex_form(
+            &shapes,
+            forms::VPAND_XMM_XMM_XMM,
+            forms::VPAND_XMM_XMM_MEM,
+            forms::VPAND_YMM_YMM_YMM,
+            None,
+        ),
+        xed::XED_ICLASS_VPOR => bitwise_vex_form(
+            &shapes,
+            forms::VPOR_XMM_XMM_XMM,
+            forms::VPOR_XMM_XMM_MEM,
+            forms::VPOR_YMM_YMM_YMM,
+            None,
+        ),
+        xed::XED_ICLASS_VPXOR => bitwise_vex_form(
+            &shapes,
+            forms::VPXOR_XMM_XMM_XMM,
+            forms::VPXOR_XMM_XMM_MEM,
+            forms::VPXOR_YMM_YMM_YMM,
+            None,
+        ),
         xed::XED_ICLASS_VADDSS => scalar_form(&shapes, forms::VADDSS_XMM_XMM_XMM, forms::VADDSS_XMM_XMM_MEM32),
         xed::XED_ICLASS_VSUBSS => scalar_form(&shapes, forms::VSUBSS_XMM_XMM_XMM, forms::VSUBSS_XMM_XMM_MEM32),
         xed::XED_ICLASS_VMULSS => scalar_form(&shapes, forms::VMULSS_XMM_XMM_XMM, forms::VMULSS_XMM_XMM_MEM32),
@@ -191,10 +265,6 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
         xed::XED_ICLASS_VSUBSD => scalar_double_form(&shapes, forms::VSUBSD_XMM_XMM_XMM, forms::VSUBSD_XMM_XMM_MEM64),
         xed::XED_ICLASS_VMULSD => scalar_double_form(&shapes, forms::VMULSD_XMM_XMM_XMM, forms::VMULSD_XMM_XMM_MEM64),
         xed::XED_ICLASS_VDIVSD => scalar_double_form(&shapes, forms::VDIVSD_XMM_XMM_XMM, forms::VDIVSD_XMM_XMM_MEM64),
-        xed::XED_ICLASS_VANDPD => packed_form(&shapes, forms::VANDPD_YMM_YMM_YMM, forms::VANDPD_YMM_YMM_MEM),
-        xed::XED_ICLASS_VANDNPD => packed_form(&shapes, forms::VANDNPD_YMM_YMM_YMM, forms::VANDNPD_YMM_YMM_MEM),
-        xed::XED_ICLASS_VORPD => packed_form(&shapes, forms::VORPD_YMM_YMM_YMM, forms::VORPD_YMM_YMM_MEM),
-        xed::XED_ICLASS_VXORPD => packed_form(&shapes, forms::VXORPD_YMM_YMM_YMM, forms::VXORPD_YMM_YMM_MEM),
         xed::XED_ICLASS_VCVTSS2SD => scalar_form(&shapes, forms::VCVTSS2SD_XMM_XMM_XMM, forms::VCVTSS2SD_XMM_XMM_MEM32),
         xed::XED_ICLASS_VCVTSD2SS => {
             scalar_double_form(&shapes, forms::VCVTSD2SS_XMM_XMM_XMM, forms::VCVTSD2SS_XMM_XMM_MEM64)
@@ -278,6 +348,16 @@ fn packed_form(shapes: &[Shape], register: u32, memory: u32) -> Option<u32> {
     match shapes {
         [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(register),
         [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(memory),
+        _ => None,
+    }
+}
+
+fn bitwise_vex_form(shapes: &[Shape], xmm_reg: u32, xmm_mem: u32, ymm_reg: u32, ymm_mem: Option<u32>) -> Option<u32> {
+    match shapes {
+        [Shape::Xmm, Shape::Xmm, Shape::Xmm] => Some(xmm_reg),
+        [Shape::Xmm, Shape::Xmm, Shape::Mem] => Some(xmm_mem),
+        [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(ymm_reg),
+        [Shape::Ymm, Shape::Ymm, Shape::Mem] => ymm_mem,
         _ => None,
     }
 }
@@ -391,7 +471,8 @@ fn run_engine(code: &[u8], registry: &Intel64CorpusRegistry) -> Result<[u8; 32],
         if decoded.form_id == xed_sys::XED_ICLASS_SYSCALL {
             break;
         }
-        let form = map_form(&decoded).ok_or_else(|| format!("unmapped iclass {} at {pc:#x}", decoded.form_id))?;
+        let form =
+            map_form(&decoded).ok_or_else(|| format!("unmapped iclass {} at {pc:#x}: {decoded:?}", decoded.form_id))?;
         let provider = registry
             .provider_for_form(form)
             .ok_or_else(|| format!("no provider for form {form:#x}"))?;
@@ -533,6 +614,28 @@ fn avx_family_differential() -> Result<(), BoxError> {
         ("vandnps_mem", "vandnps 0x500020, %ymm1, %ymm0"),
         ("vorps_reg", "vorps %ymm2, %ymm1, %ymm0"),
         ("vorps_mem", "vorps 0x500020, %ymm1, %ymm0"),
+        ("vandps_xmm_reg", "vandps %xmm2, %xmm1, %xmm0"),
+        ("vandps_xmm_mem", "vandps 0x500020, %xmm1, %xmm0"),
+        ("vandnps_xmm_reg", "vandnps %xmm2, %xmm1, %xmm0"),
+        ("vandnps_xmm_mem", "vandnps 0x500020, %xmm1, %xmm0"),
+        ("vorps_xmm_reg", "vorps %xmm2, %xmm1, %xmm0"),
+        ("vorps_xmm_mem", "vorps 0x500020, %xmm1, %xmm0"),
+        ("vxorps_xmm_reg", "vxorps %xmm2, %xmm1, %xmm0"),
+        ("vxorps_xmm_mem", "vxorps 0x500020, %xmm1, %xmm0"),
+        ("vandpd_xmm_reg", "vandpd %xmm2, %xmm1, %xmm0"),
+        ("vandpd_xmm_mem", "vandpd 0x500020, %xmm1, %xmm0"),
+        ("vandnpd_xmm_reg", "vandnpd %xmm2, %xmm1, %xmm0"),
+        ("vandnpd_xmm_mem", "vandnpd 0x500020, %xmm1, %xmm0"),
+        ("vorpd_xmm_reg", "vorpd %xmm2, %xmm1, %xmm0"),
+        ("vorpd_xmm_mem", "vorpd 0x500020, %xmm1, %xmm0"),
+        ("xorpd_xmm_reg", "vxorpd %xmm2, %xmm1, %xmm0"),
+        ("xorpd_xmm_mem", "vxorpd 0x500020, %xmm1, %xmm0"),
+        ("vpand_xmm_reg", "vpand %xmm2, %xmm1, %xmm0"),
+        ("vpand_xmm_mem", "vpand 0x500020, %xmm1, %xmm0"),
+        ("vpor_xmm_reg", "vpor %xmm2, %xmm1, %xmm0"),
+        ("vpor_xmm_mem", "vpor 0x500020, %xmm1, %xmm0"),
+        ("vpxor_xmm_reg", "vpxor %xmm2, %xmm1, %xmm0"),
+        ("vpxor_xmm_mem", "vpxor 0x500020, %xmm1, %xmm0"),
     ];
     let mut count = 0usize;
     for (pattern, (left, right)) in PATTERNS.into_iter().enumerate() {
@@ -552,7 +655,7 @@ fn avx_family_differential() -> Result<(), BoxError> {
     } else {
         eprintln!("AVX differential: {count} native cases passed");
     }
-    if count != 0 && count != 60 {
+    if count != 0 && count != 104 {
         return Err(format!("expected 60 native cases, ran {count}").into());
     }
     Ok(())
