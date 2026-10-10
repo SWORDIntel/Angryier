@@ -184,8 +184,8 @@ pub mod iclass {
 
 use angryier_arch::{DecodedInstruction, Decoder};
 use angryier_arch_intel64::{FeatureSet, Intel64ProfileKind, Intel64TargetProfile, IntelFeature};
-pub use angryier_decode_xed::XedIformMetadata;
-use angryier_decode_xed::{BoundXedDecoder, XedAdapterError, XedDecodeConfig, XedDecoderAdapter, XedMachineMode};
+use angryier_decode_xed::{BoundXedDecoder, XedDecodeConfig, XedDecoderAdapter};
+pub use angryier_decode_xed::{XedAdapterError, XedIformMetadata, XedMachineMode};
 use angryier_types::{Address, TargetProfileId};
 pub use evidence::{
     BatchStats, DecodeStatus, EvidenceError, EvidenceInputRecord, EvidenceOutputRecord, IformEvidence, RawJsonId,
@@ -235,10 +235,20 @@ impl XedDecoder {
     }
 
     /// Creates a new native XED decoder with a specific target profile id and
-    /// all feature families enabled.
+    /// all feature families enabled, decoding in 64-bit long mode.
     pub fn with_profile_id(profile_id: TargetProfileId) -> Self {
+        Self::with_profile_id_and_mode(profile_id, XedMachineMode::Intel64)
+    }
+
+    /// Creates a new native XED decoder with a specific target profile id, all
+    /// feature families enabled, and an explicit XED machine mode.
+    ///
+    /// The mode selects the default operand width and addressing model passed
+    /// to `xed_decoded_inst_set_mode` on every decode; this only changes how
+    /// bytes decode, not how the engine executes them.
+    pub fn with_profile_id_and_mode(profile_id: TargetProfileId, mode: XedMachineMode) -> Self {
         let config = XedDecodeConfig {
-            mode: XedMachineMode::Intel64,
+            mode,
             profile: Intel64TargetProfile {
                 id: profile_id,
                 kind: Intel64ProfileKind::Custom,

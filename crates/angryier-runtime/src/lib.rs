@@ -3478,8 +3478,34 @@ impl<D: Decoder> Decoder for XedFormTranslator<D> {
 impl Runtime<XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>> {
     /// Creates a runtime backed by the native Intel XED decoder, with XED
     /// instruction classes translated into engine-owned semantic form ids.
+    ///
+    /// The decoder runs in 64-bit long mode; this is exactly equivalent to
+    /// [`with_native_xed_mode`](Self::with_native_xed_mode) with
+    /// [`XedMachineMode::Intel64`](angryier_arch_xed_ffi::XedMachineMode::Intel64).
     pub fn with_native_xed(semantic_version: SemanticVersion, target_profile: TargetProfileId) -> Self {
-        let decoder = angryier_arch_xed_ffi::XedDecoder::with_profile_id(target_profile);
+        Self::with_native_xed_mode(
+            semantic_version,
+            target_profile,
+            angryier_arch_xed_ffi::XedMachineMode::Intel64,
+        )
+    }
+
+    /// Creates a runtime backed by the native Intel XED decoder configured for
+    /// an explicit XED machine mode, with XED instruction classes translated
+    /// into engine-owned semantic form ids.
+    ///
+    /// This is an opt-in decode-time knob: `mode` selects the operand width
+    /// and addressing model XED applies when decoding bytes. It does not
+    /// change memory layout, register files, or execution semantics — the
+    /// corpus and interpreter remain Intel 64. Instructions the legacy modes
+    /// can decode but the engine cannot model (for example 16-bit memory
+    /// addressing) still fail closed at decode/normalization boundaries.
+    pub fn with_native_xed_mode(
+        semantic_version: SemanticVersion,
+        target_profile: TargetProfileId,
+        mode: angryier_arch_xed_ffi::XedMachineMode,
+    ) -> Self {
+        let decoder = angryier_arch_xed_ffi::XedDecoder::with_profile_id_and_mode(target_profile, mode);
         Runtime::new(XedFormTranslator::new(decoder), semantic_version, target_profile)
     }
 }
