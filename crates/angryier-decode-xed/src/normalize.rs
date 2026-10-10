@@ -27,7 +27,7 @@ pub fn normalize_decoded(
     metadata: XedDecodedMetadata,
 ) -> Result<DecodedInstruction, XedAdapterError> {
     match config.mode {
-        XedMachineMode::Intel64 => {}
+        XedMachineMode::Intel64 | XedMachineMode::Legacy32 | XedMachineMode::Legacy16 => {}
     }
 
     if available_bytes == 0 {

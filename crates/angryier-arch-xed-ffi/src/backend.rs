@@ -17,22 +17,24 @@ use core::ffi::{CStr, c_uint};
 use std::mem::MaybeUninit;
 use std::sync::Once;
 use xed_sys::{
-    XED_ADDRESS_WIDTH_64b, XED_ERROR_NONE, XED_MACHINE_MODE_LONG_64, XED_OPERAND_ABSBR, XED_OPERAND_AGEN,
-    XED_OPERAND_IMM0, XED_OPERAND_IMM1, XED_OPERAND_MEM0, XED_OPERAND_MEM1, XED_OPERAND_PTR, XED_OPERAND_REG0,
-    XED_OPERAND_REG1, XED_OPERAND_REG2, XED_OPERAND_REG3, XED_OPERAND_REG4, XED_OPERAND_REG5, XED_OPERAND_REG6,
-    XED_OPERAND_REG7, XED_OPERAND_REG8, XED_OPERAND_REG9, XED_OPERAND_RELBR, xed_decode, xed_decoded_inst_get_base_reg,
-    xed_decoded_inst_get_branch_displacement, xed_decoded_inst_get_branch_displacement_width_bits,
-    xed_decoded_inst_get_iclass, xed_decoded_inst_get_iform_enum, xed_decoded_inst_get_immediate_is_signed,
-    xed_decoded_inst_get_immediate_width_bits, xed_decoded_inst_get_index_reg, xed_decoded_inst_get_isa_set,
-    xed_decoded_inst_get_length, xed_decoded_inst_get_memop_address_width, xed_decoded_inst_get_memory_displacement,
+    XED_ADDRESS_WIDTH_16b, XED_ADDRESS_WIDTH_32b, XED_ADDRESS_WIDTH_64b, XED_ERROR_NONE, XED_MACHINE_MODE_LEGACY_16,
+    XED_MACHINE_MODE_LEGACY_32, XED_MACHINE_MODE_LONG_64, XED_OPERAND_ABSBR, XED_OPERAND_AGEN, XED_OPERAND_IMM0,
+    XED_OPERAND_IMM1, XED_OPERAND_MEM0, XED_OPERAND_MEM1, XED_OPERAND_PTR, XED_OPERAND_REG0, XED_OPERAND_REG1,
+    XED_OPERAND_REG2, XED_OPERAND_REG3, XED_OPERAND_REG4, XED_OPERAND_REG5, XED_OPERAND_REG6, XED_OPERAND_REG7,
+    XED_OPERAND_REG8, XED_OPERAND_REG9, XED_OPERAND_RELBR, xed_address_width_enum_t, xed_decode,
+    xed_decoded_inst_get_base_reg, xed_decoded_inst_get_branch_displacement,
+    xed_decoded_inst_get_branch_displacement_width_bits, xed_decoded_inst_get_iclass, xed_decoded_inst_get_iform_enum,
+    xed_decoded_inst_get_immediate_is_signed, xed_decoded_inst_get_immediate_width_bits,
+    xed_decoded_inst_get_index_reg, xed_decoded_inst_get_isa_set, xed_decoded_inst_get_length,
+    xed_decoded_inst_get_memop_address_width, xed_decoded_inst_get_memory_displacement,
     xed_decoded_inst_get_memory_displacement_width_bits, xed_decoded_inst_get_memory_operand_length,
     xed_decoded_inst_get_reg, xed_decoded_inst_get_scale, xed_decoded_inst_get_seg_reg,
     xed_decoded_inst_get_signed_immediate, xed_decoded_inst_get_unsigned_immediate, xed_decoded_inst_inst,
     xed_decoded_inst_number_of_memory_operands, xed_decoded_inst_operands_const, xed_decoded_inst_set_mode,
     xed_decoded_inst_zero, xed_error_enum_t, xed_iform_enum_t2str, xed_inst_noperands, xed_inst_operand,
-    xed_operand_action_enum_t, xed_operand_enum_t, xed_operand_name, xed_operand_operand_visibility, xed_operand_rw,
-    xed_operand_values_has_lock_prefix, xed_operand_values_has_rep_prefix, xed_operand_values_has_repne_prefix,
-    xed_reg_enum_t, xed_tables_init,
+    xed_machine_mode_enum_t, xed_operand_action_enum_t, xed_operand_enum_t, xed_operand_name,
+    xed_operand_operand_visibility, xed_operand_rw, xed_operand_values_has_lock_prefix,
+    xed_operand_values_has_rep_prefix, xed_operand_values_has_repne_prefix, xed_reg_enum_t, xed_tables_init,
 };
 
 static XED_INIT: Once = Once::new();
@@ -65,18 +67,32 @@ impl XedDecodeBackend for NativeXedBackend {
         if bytes.is_empty() {
             return Err(XedAdapterError::EmptyInput);
         }
-        if config.mode != XedMachineMode::Intel64 {
-            return Err(XedAdapterError::UnsupportedMode);
-        }
+        let (machine_mode, stack_address_width) = xed_mode(config.mode);
 
         ensure_xed_initialized();
 
         // XED reads at most 15 bytes per instruction.
         let max_bytes = bytes.len().min(15) as c_uint;
 
-        let metadata = unsafe { decode_raw(bytes, max_bytes) }?;
+        let metadata = unsafe { decode_raw(bytes, max_bytes, machine_mode, stack_address_width) }?;
 
         Ok(metadata)
+    }
+}
+
+/// Maps an engine [`XedMachineMode`] to the raw XED machine mode and stack
+/// addressing width passed to `xed_decoded_inst_set_mode`.
+///
+/// XED's decoder state pairs a machine mode (default operand width and
+/// addressing model) with a separate stack addressing width; for every mode
+/// other than 64-bit long mode that width must be supplied explicitly. The
+/// mapping follows the mode selection used by XED's own decoder examples
+/// (`LEGACY_32`/`32b` for 32-bit, `LEGACY_16`/`16b` for 16-bit).
+fn xed_mode(mode: XedMachineMode) -> (xed_machine_mode_enum_t, xed_address_width_enum_t) {
+    match mode {
+        XedMachineMode::Intel64 => (XED_MACHINE_MODE_LONG_64, XED_ADDRESS_WIDTH_64b),
+        XedMachineMode::Legacy32 => (XED_MACHINE_MODE_LEGACY_32, XED_ADDRESS_WIDTH_32b),
+        XedMachineMode::Legacy16 => (XED_MACHINE_MODE_LEGACY_16, XED_ADDRESS_WIDTH_16b),
     }
 }
 
@@ -86,12 +102,17 @@ impl XedDecodeBackend for NativeXedBackend {
 ///
 /// Calls into `libxed` via `xed_sys` FFI. The `xed_decoded_inst_t` is fully
 /// owned on the stack and initialized before use.
-unsafe fn decode_raw(bytes: &[u8], max_bytes: c_uint) -> Result<XedDecodedMetadata, XedAdapterError> {
+unsafe fn decode_raw(
+    bytes: &[u8],
+    max_bytes: c_uint,
+    machine_mode: xed_machine_mode_enum_t,
+    stack_address_width: xed_address_width_enum_t,
+) -> Result<XedDecodedMetadata, XedAdapterError> {
     let mut xedd = MaybeUninit::<xed_sys::xed_decoded_inst_t>::uninit();
     let xedd_ptr = xedd.as_mut_ptr();
 
     xed_decoded_inst_zero(xedd_ptr);
-    xed_decoded_inst_set_mode(xedd_ptr, XED_MACHINE_MODE_LONG_64, XED_ADDRESS_WIDTH_64b);
+    xed_decoded_inst_set_mode(xedd_ptr, machine_mode, stack_address_width);
     xed_sys::xed3_operand_set_cet(xedd_ptr, 1);
 
     let error: xed_error_enum_t = xed_decode(xedd_ptr, bytes.as_ptr(), max_bytes);
@@ -194,51 +215,6 @@ unsafe fn extract_operands(xedd: *const xed_sys::xed_decoded_inst_t) -> Result<V
     }
 
     Ok(operands)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use angryier_arch_intel64::{FeatureSet, Intel64ProfileKind, Intel64TargetProfile};
-    use angryier_types::TargetProfileId;
-
-    fn config() -> XedDecodeConfig {
-        XedDecodeConfig {
-            mode: XedMachineMode::Intel64,
-            profile: Intel64TargetProfile {
-                id: TargetProfileId(1),
-                kind: Intel64ProfileKind::Custom,
-                features: FeatureSet {
-                    features: Vec::new(),
-                    xcr0: 0,
-                },
-            },
-        }
-    }
-
-    #[test]
-    fn live_decode_preserves_version_scoped_xed_iform_evidence() {
-        let backend = NativeXedBackend;
-        let config = config();
-
-        // Names/values are from the pinned XED generated enum tables and
-        // checked against live decode results from that same build.
-        for (bytes, name, value, engine_form) in [
-            (&[0x90][..], "XED_IFORM_NOP_90", 1735, xed_sys::XED_ICLASS_NOP),
-            (
-                &[0x48, 0x89, 0xc1][..],
-                "XED_IFORM_MOV_GPRv_GPRv_89",
-                1560,
-                xed_sys::XED_ICLASS_MOV,
-            ),
-        ] {
-            let metadata = backend.decode_metadata(&config, 0, bytes).expect("XED decode succeeds");
-            assert_eq!(metadata.xed_iform.xed_sys_version, "xed-sys 0.6.0+xed-2024.05.20");
-            assert_eq!(metadata.xed_iform.name, name);
-            assert_eq!(metadata.xed_iform.value, value);
-            assert_eq!(metadata.form_id, engine_form as u32);
-        }
-    }
 }
 
 /// Determines the `XedOperandKind` for a given XED operand name.
@@ -534,5 +510,271 @@ fn map_access(action: xed_operand_action_enum_t) -> XedAccess {
         // CR (7) -> Read (conditional read)
         7 => XedAccess::Read,
         _ => XedAccess::Read,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use angryier_arch_intel64::{FeatureSet, Intel64ProfileKind, Intel64TargetProfile};
+    use angryier_decode_xed::metadata::XedGprView;
+    use angryier_types::TargetProfileId;
+
+    fn config(mode: XedMachineMode) -> XedDecodeConfig {
+        XedDecodeConfig {
+            mode,
+            profile: Intel64TargetProfile {
+                id: TargetProfileId(1),
+                kind: Intel64ProfileKind::Custom,
+                features: FeatureSet {
+                    features: Vec::new(),
+                    xcr0: 0,
+                },
+            },
+        }
+    }
+
+    /// Returns the register kind + view of the first explicit register operand.
+    fn first_gpr(metadata: &XedDecodedMetadata) -> (u8, XedGprView, u16) {
+        for operand in &metadata.operands {
+            if let XedOperandKind::Register(XedRegisterRef::Gpr { index, view }) = operand.kind {
+                return (index, view, operand.width_bits);
+            }
+        }
+        panic!("expected a register operand in {metadata:?}");
+    }
+
+    #[test]
+    fn live_decode_preserves_version_scoped_xed_iform_evidence() {
+        let backend = NativeXedBackend;
+        let config = config(XedMachineMode::Intel64);
+
+        // Names/values are from the pinned XED generated enum tables and
+        // checked against live decode results from that same build.
+        for (bytes, name, value, engine_form) in [
+            (&[0x90][..], "XED_IFORM_NOP_90", 1735, xed_sys::XED_ICLASS_NOP),
+            (
+                &[0x48, 0x89, 0xc1][..],
+                "XED_IFORM_MOV_GPRv_GPRv_89",
+                1560,
+                xed_sys::XED_ICLASS_MOV,
+            ),
+        ] {
+            let metadata = backend.decode_metadata(&config, 0, bytes).expect("XED decode succeeds");
+            assert_eq!(metadata.xed_iform.xed_sys_version, "xed-sys 0.6.0+xed-2024.05.20");
+            assert_eq!(metadata.xed_iform.name, name);
+            assert_eq!(metadata.xed_iform.value, value);
+            assert_eq!(metadata.form_id, engine_form);
+        }
+    }
+
+    /// The same bytes must decode differently under different declared modes:
+    /// `0x40` is a bare REX prefix in 64-bit mode (undecodable alone) but
+    /// `inc r/eAX` in the legacy modes. This proves `config.mode` reaches
+    /// `xed_decoded_inst_set_mode`.
+    #[test]
+    fn byte_0x40_decodes_by_machine_mode() {
+        let backend = NativeXedBackend;
+
+        assert_eq!(
+            backend.decode_metadata(&config(XedMachineMode::Intel64), 0, &[0x40]),
+            Err(XedAdapterError::DecodeFailed)
+        );
+
+        for (mode, expected_index, expected_view, expected_width) in [
+            (XedMachineMode::Legacy32, 0u8, XedGprView::Dword, 32u16),
+            (XedMachineMode::Legacy16, 0u8, XedGprView::Word, 16u16),
+        ] {
+            let metadata = backend
+                .decode_metadata(&config(mode), 0, &[0x40])
+                .expect("legacy mode decodes 0x40 as INC");
+            assert_eq!(metadata.length, 1);
+            assert_eq!(metadata.form_id, xed_sys::XED_ICLASS_INC);
+            assert_eq!(first_gpr(&metadata), (expected_index, expected_view, expected_width));
+        }
+    }
+
+    /// The operand-size prefix `0x66` flips the default operand width, which
+    /// itself comes from the declared machine mode: identical bytes produce a
+    /// 32-bit register pair in 16-bit mode and a 16-bit pair elsewhere.
+    #[test]
+    fn identical_prefixed_bytes_flip_width_per_mode() {
+        let backend = NativeXedBackend;
+        let bytes = &[0x66, 0x89, 0xd8]; // MOV r/m, r with operand-size override
+
+        let metadata = backend
+            .decode_metadata(&config(XedMachineMode::Legacy16), 0, bytes)
+            .expect("legacy-16 decode succeeds");
+        assert_eq!(metadata.length, 3);
+        assert_eq!(metadata.form_id, xed_sys::XED_ICLASS_MOV);
+        assert_eq!(first_gpr(&metadata), (0, XedGprView::Dword, 32));
+
+        for mode in [XedMachineMode::Legacy32, XedMachineMode::Intel64] {
+            let metadata = backend
+                .decode_metadata(&config(mode), 0, bytes)
+                .expect("decode succeeds");
+            assert_eq!(metadata.length, 3);
+            assert_eq!(metadata.form_id, xed_sys::XED_ICLASS_MOV);
+            assert_eq!(first_gpr(&metadata), (0, XedGprView::Word, 16));
+        }
+    }
+
+    /// Address-size and base-register selection are machine-mode properties:
+    /// `8B 07` is `mov ax, [bx]` / `mov eax, [edi]` / `mov eax, [rdi]` purely
+    /// by declared mode. XED metadata must reflect the mode's addressing.
+    #[test]
+    fn memory_addressing_follows_machine_mode() {
+        let backend = NativeXedBackend;
+        let bytes = &[0x8b, 0x07];
+
+        for (mode, address_width, base_index, base_view) in [
+            (XedMachineMode::Legacy16, 16u16, 3u8, XedGprView::Word),
+            (XedMachineMode::Legacy32, 32u16, 7u8, XedGprView::Dword),
+            (XedMachineMode::Intel64, 64u16, 7u8, XedGprView::Qword),
+        ] {
+            let metadata = backend
+                .decode_metadata(&config(mode), 0, bytes)
+                .expect("decode succeeds");
+            assert_eq!(metadata.form_id, xed_sys::XED_ICLASS_MOV);
+            let memory = metadata
+                .operands
+                .iter()
+                .find_map(|operand| match &operand.kind {
+                    XedOperandKind::Memory(memory) => Some(memory),
+                    _ => None,
+                })
+                .expect("mov decodes a memory operand");
+            assert_eq!(memory.address_width_bits, address_width);
+            match memory.base {
+                Some(XedMemoryBase::Register(XedRegisterRef::Gpr { index, view })) => {
+                    assert_eq!((index, view), (base_index, base_view));
+                }
+                other => panic!("unexpected memory base {other:?}"),
+            }
+        }
+    }
+
+    /// Immediate width is a machine-mode property: `B8` takes a 16-bit
+    /// immediate in 16-bit mode (3-byte instruction) but a 32-bit immediate
+    /// elsewhere, so the truncated 3-byte form fails closed.
+    #[test]
+    fn immediate_width_and_truncation_follow_mode() {
+        let backend = NativeXedBackend;
+        let bytes = &[0xb8, 0x34, 0x12];
+
+        let metadata = backend
+            .decode_metadata(&config(XedMachineMode::Legacy16), 0, bytes)
+            .expect("legacy-16 decodes mov ax, imm16");
+        assert_eq!(metadata.length, 3);
+        assert_eq!(metadata.form_id, xed_sys::XED_ICLASS_MOV);
+        let immediate = metadata
+            .operands
+            .iter()
+            .find_map(|operand| match &operand.kind {
+                XedOperandKind::Immediate(immediate) => Some(immediate),
+                _ => None,
+            })
+            .expect("mov decodes an immediate operand");
+        assert_eq!(immediate.value, 0x1234);
+
+        for mode in [XedMachineMode::Legacy32, XedMachineMode::Intel64] {
+            assert_eq!(
+                backend.decode_metadata(&config(mode), 0, bytes),
+                Err(XedAdapterError::DecodeFailed)
+            );
+        }
+    }
+
+    /// IFORM evidence and feature metadata must stay version-scoped and valid
+    /// in every supported mode.
+    #[test]
+    fn mode_specific_metadata_stays_valid() {
+        let backend = NativeXedBackend;
+
+        for mode in [
+            XedMachineMode::Intel64,
+            XedMachineMode::Legacy32,
+            XedMachineMode::Legacy16,
+        ] {
+            let metadata = backend
+                .decode_metadata(&config(mode), 0, &[0x90])
+                .expect("nop decodes in every mode");
+            assert_eq!(metadata.length, 1);
+            assert_eq!(metadata.form_id, xed_sys::XED_ICLASS_NOP);
+            assert_eq!(metadata.xed_iform.xed_sys_version, "xed-sys 0.6.0+xed-2024.05.20");
+            assert!(metadata.xed_iform.name.starts_with("XED_IFORM_"));
+            assert!(metadata.xed_iform.value != 0);
+        }
+    }
+
+    /// Invalid inputs fail closed in every supported mode: empty input is
+    /// `EmptyInput` and undecodable/truncated byte strings are `DecodeFailed`.
+    #[test]
+    fn invalid_inputs_fail_closed_in_all_modes() {
+        let backend = NativeXedBackend;
+
+        for mode in [
+            XedMachineMode::Intel64,
+            XedMachineMode::Legacy32,
+            XedMachineMode::Legacy16,
+        ] {
+            assert_eq!(
+                backend.decode_metadata(&config(mode), 0, &[]),
+                Err(XedAdapterError::EmptyInput)
+            );
+            // A bare two-byte opcode lead with no second byte is undecodable.
+            assert_eq!(
+                backend.decode_metadata(&config(mode), 0, &[0x0f]),
+                Err(XedAdapterError::DecodeFailed)
+            );
+        }
+    }
+
+    /// Full normalization still works end-to-end for modes whose memory
+    /// operands fit the normalized model (32/64-bit addressing).
+    #[test]
+    fn bound_decoder_normalizes_legacy32_memory() {
+        use angryier_arch::{Decoder, MemoryBase, OperandKind};
+        use angryier_decode_xed::{BoundXedDecoder, XedDecoderAdapter};
+
+        let decoder = BoundXedDecoder {
+            adapter: XedDecoderAdapter {
+                config: config(XedMachineMode::Legacy32),
+            },
+            backend: NativeXedBackend,
+        };
+
+        // 8B 03: mov eax, [ebx] — 32-bit addressing survives normalization.
+        let decoded = decoder.decode(0x1000, &[0x8b, 0x03]).expect("decode succeeds");
+        let memory = decoded
+            .operands
+            .iter()
+            .find_map(|operand| match &operand.kind {
+                OperandKind::Memory(memory) => Some(memory),
+                _ => None,
+            })
+            .expect("memory operand present");
+        assert_eq!(memory.address_width_bits, 32);
+        let Some(MemoryBase::Register(base)) = memory.base else {
+            panic!("expected a register base");
+        };
+        assert_eq!(base.width_bits, 32);
+
+        // 16-bit addressing is outside the normalized model and fails closed
+        // at the adapter boundary rather than producing a malformed operand.
+        let decoder = BoundXedDecoder {
+            adapter: XedDecoderAdapter {
+                config: config(XedMachineMode::Legacy16),
+            },
+            backend: NativeXedBackend,
+        };
+        assert_eq!(
+            decoder.decode(0x1000, &[0x8b, 0x07]),
+            Err(XedAdapterError::InvalidMemoryAddressWidth(16))
+        );
+        // Non-memory 16-bit decodes still normalize.
+        let decoded = decoder.decode(0x1000, &[0x89, 0xd8]).expect("decode succeeds");
+        assert_eq!(decoded.length, 2);
+        assert!(matches!(decoded.operands[0].kind, OperandKind::Register(_)));
     }
 }

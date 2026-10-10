@@ -1,8 +1,21 @@
 use angryier_arch_intel64::IntelFeature;
 
+/// Engine-side Intel machine mode selection.
+///
+/// Each variant maps to exactly one raw `xed_machine_mode_enum_t` plus the
+/// `xed_address_width_enum_t` stack addressing width the native bridge passes
+/// to `xed_decoded_inst_set_mode`. Raw discriminants never cross this crate's
+/// API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum XedMachineMode {
+    /// 64-bit long mode (`XED_MACHINE_MODE_LONG_64`, 64-bit stack addressing).
     Intel64,
+    /// 32-bit legacy/protected mode (`XED_MACHINE_MODE_LEGACY_32`, 32-bit
+    /// stack addressing).
+    Legacy32,
+    /// 16-bit legacy/protected mode (`XED_MACHINE_MODE_LEGACY_16`, 16-bit
+    /// stack addressing).
+    Legacy16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
