@@ -6,6 +6,10 @@
 //! Covers:
 //! - Packed single/double precision float arithmetic: VADDPS, VSUBPS, VMULPS, VDIVPS,
 //!   VADDPD, VSUBPD, VMULPD, VDIVPD (ZMM reg-reg and reg-mem512 forms)
+//! - EVEX packed single-precision float arithmetic: VADDPS, VSUBPS, VMULPS, VDIVPS
+//!   (XMM reg-reg/reg-mem128 and YMM reg-reg/reg-mem256 forms, with opmask
+//!   merge/zero and upper-lane zeroing; embedded-broadcast memory forms are
+//!   intentionally unmapped)
 //! - Scalar single/double precision float arithmetic (EVEX forms): VADDSS, VSUBSS, VMULSS, VDIVSS,
 //!   VADDSD, VSUBSD, VMULSD, VDIVSD (XMM reg-reg and reg-mem32/mem64 forms)
 //! - Packed single/double float logic: VANDPS, VANDPD, VANDNPS, VANDNPD,
@@ -157,6 +161,30 @@ pub mod forms {
     pub const VPDPBSUDS_YMM_YMM_MEM: u32 = 0x116D;
     pub const VPDPBSUDS_ZMM_ZMM_ZMM: u32 = 0x116E;
     pub const VPDPBSUDS_ZMM_ZMM_MEM: u32 = 0x116F;
+
+    // AVX-512 EVEX packed single-precision arithmetic, 128/256-bit forms
+    // (0x1170..0x117F). EVEX decodes report the opmask operand (k0..k7) as
+    // operand 1, so the form-map shapes are [Xmm|Ymm, Reg64, Xmm|Ymm, {Xmm|Ymm,
+    // Mem128|Mem}]. The `{1to4}`/`{1to8}` embedded-broadcast memory encodings
+    // decode with a 32-bit memory operand (shape Mem32) and stay unmapped:
+    // `VectorOp::Broadcast` has no compact-IR lowering, so broadcast semantics
+    // cannot be represented end to end.
+    pub const VADDPS_EVEX_XMM_XMM_XMM: u32 = 0x1170;
+    pub const VADDPS_EVEX_XMM_XMM_MEM128: u32 = 0x1171;
+    pub const VADDPS_EVEX_YMM_YMM_YMM: u32 = 0x1172;
+    pub const VADDPS_EVEX_YMM_YMM_MEM: u32 = 0x1173;
+    pub const VSUBPS_EVEX_XMM_XMM_XMM: u32 = 0x1174;
+    pub const VSUBPS_EVEX_XMM_XMM_MEM128: u32 = 0x1175;
+    pub const VSUBPS_EVEX_YMM_YMM_YMM: u32 = 0x1176;
+    pub const VSUBPS_EVEX_YMM_YMM_MEM: u32 = 0x1177;
+    pub const VMULPS_EVEX_XMM_XMM_XMM: u32 = 0x1178;
+    pub const VMULPS_EVEX_XMM_XMM_MEM128: u32 = 0x1179;
+    pub const VMULPS_EVEX_YMM_YMM_YMM: u32 = 0x117A;
+    pub const VMULPS_EVEX_YMM_YMM_MEM: u32 = 0x117B;
+    pub const VDIVPS_EVEX_XMM_XMM_XMM: u32 = 0x117C;
+    pub const VDIVPS_EVEX_XMM_XMM_MEM128: u32 = 0x117D;
+    pub const VDIVPS_EVEX_YMM_YMM_YMM: u32 = 0x117E;
+    pub const VDIVPS_EVEX_YMM_YMM_MEM: u32 = 0x117F;
 }
 
 const U512: SemanticType = SemanticType::Scalar(ScalarType::BitVec(512));
@@ -173,6 +201,10 @@ const F32X4: SemanticType = SemanticType::Vector {
 };
 const F32X8: SemanticType = SemanticType::Vector {
     lanes: 8,
+    lane: ScalarType::Float(FloatFormat::F32),
+};
+const F32X12: SemanticType = SemanticType::Vector {
+    lanes: 12,
     lane: ScalarType::Float(FloatFormat::F32),
 };
 const F32X16: SemanticType = SemanticType::Vector {
@@ -246,6 +278,16 @@ fn const_f32(out: &mut dyn SemanticBuilder, val: f32) -> Result<ValueId, Semanti
 
 fn const_f64(out: &mut dyn SemanticBuilder, val: f64) -> Result<ValueId, SemanticError> {
     out.constant(F64, &val.to_le_bytes())
+}
+
+/// An all-zero F32 vector constant of `lanes` lanes (the upper-lane zeroing
+/// tail for EVEX.128/EVEX.256 destination writes).
+fn zero_f32_lanes(out: &mut dyn SemanticBuilder, ty: SemanticType, lanes: usize) -> Result<ValueId, SemanticError> {
+    let mut bytes = Vec::with_capacity(lanes * 4);
+    for _ in 0..lanes {
+        bytes.extend_from_slice(&0f32.to_le_bytes());
+    }
+    out.constant(ty, &bytes)
 }
 
 /// Discovers if an EVEX instruction has an opmask register (k0..k7) as operand 1.
@@ -625,6 +667,249 @@ packed_double_zmm!(
     engine_forms::VDIVPD_ZMM_ZMM_MEM,
     FloatingOp::Div,
     0x160F
+);
+
+// ---------------------------------------------------------------------------
+// Packed single-precision float arithmetic, EVEX 128/256-bit forms
+// ---------------------------------------------------------------------------
+//
+// EVEX XMM/YMM destinations are partial views of a 512-bit ZMM parent whose
+// write behavior is `SemanticDefined` (the parent is preserved unless the
+// provider says otherwise). EVEX semantics require the lanes above VL to be
+// zeroed, so each provider concatenates the masked low vector with an all-zero
+// tail and replaces the whole ZMM parent via `write_register`.
+
+macro_rules! packed_float_evex_xmm {
+    ($name:ident, $form:expr, $op:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let destination = insn.operand(0).ok_or(SemanticError::InvalidOperand)?;
+                let parent = match destination.kind {
+                    angryier_semantics::OperandKind::Register(view)
+                        if destination.width_bits == 128 && view.width_bits == 128 && view.bit_offset == 0 =>
+                    {
+                        view.parent
+                    }
+                    _ => return Err(SemanticError::InvalidOperand),
+                };
+                let (src1_idx, src2_idx) = evex_source_indices(insn);
+                let left = out.read_operand(src1_idx, F32X4)?;
+                let right = out.read_operand(src2_idx, F32X4)?;
+                let low = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat($op)),
+                    F32X4,
+                    &[left, right],
+                )?;
+                let masked_low = apply_evex_mask(insn, out, F32X4, None, low)?;
+                let upper_zero = zero_f32_lanes(out, F32X12, 12)?;
+                let full = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    F32X16,
+                    &[masked_low, upper_zero],
+                )?;
+                out.write_register(parent, full)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+// EVEX.128: VL=4 lanes, upper 384 bits (F32X12) of the ZMM parent zeroed.
+packed_float_evex_xmm!(
+    VaddpsEvexXmmXmmXmm,
+    forms::VADDPS_EVEX_XMM_XMM_XMM,
+    FloatingOp::Add,
+    0x1670
+);
+packed_float_evex_xmm!(
+    VaddpsEvexXmmXmmMem128,
+    forms::VADDPS_EVEX_XMM_XMM_MEM128,
+    FloatingOp::Add,
+    0x1671
+);
+packed_float_evex_xmm!(
+    VsubpsEvexXmmXmmXmm,
+    forms::VSUBPS_EVEX_XMM_XMM_XMM,
+    FloatingOp::Sub,
+    0x1672
+);
+packed_float_evex_xmm!(
+    VsubpsEvexXmmXmmMem128,
+    forms::VSUBPS_EVEX_XMM_XMM_MEM128,
+    FloatingOp::Sub,
+    0x1673
+);
+packed_float_evex_xmm!(
+    VmulpsEvexXmmXmmXmm,
+    forms::VMULPS_EVEX_XMM_XMM_XMM,
+    FloatingOp::Mul,
+    0x1674
+);
+packed_float_evex_xmm!(
+    VmulpsEvexXmmXmmMem128,
+    forms::VMULPS_EVEX_XMM_XMM_MEM128,
+    FloatingOp::Mul,
+    0x1675
+);
+packed_float_evex_xmm!(
+    VdivpsEvexXmmXmmXmm,
+    forms::VDIVPS_EVEX_XMM_XMM_XMM,
+    FloatingOp::Div,
+    0x1676
+);
+packed_float_evex_xmm!(
+    VdivpsEvexXmmXmmMem128,
+    forms::VDIVPS_EVEX_XMM_XMM_MEM128,
+    FloatingOp::Div,
+    0x1677
+);
+
+macro_rules! packed_float_evex_ymm {
+    ($name:ident, $form:expr, $op:expr, $rule:expr) => {
+        #[derive(Clone, Copy, Debug)]
+        pub struct $name;
+
+        impl SemanticProvider for $name {
+            fn rule_id(&self) -> SemanticRuleId {
+                rule_id($rule)
+            }
+            fn origin(&self) -> SemanticOrigin {
+                SemanticOrigin::HandwrittenOverride
+            }
+            fn matches(&self, insn: &dyn DecodedInstructionView) -> bool {
+                insn.form_id() == $form
+            }
+            fn emit(
+                &self,
+                context: &SemanticContext,
+                insn: &dyn DecodedInstructionView,
+                out: &mut dyn SemanticBuilder,
+            ) -> Result<SemanticReceipt, SemanticError> {
+                let destination = insn.operand(0).ok_or(SemanticError::InvalidOperand)?;
+                let parent = match destination.kind {
+                    angryier_semantics::OperandKind::Register(view)
+                        if destination.width_bits == 256 && view.width_bits == 256 && view.bit_offset == 0 =>
+                    {
+                        view.parent
+                    }
+                    _ => return Err(SemanticError::InvalidOperand),
+                };
+                let (src1_idx, src2_idx) = evex_source_indices(insn);
+                let left = out.read_operand(src1_idx, F32X8)?;
+                let right = out.read_operand(src2_idx, F32X8)?;
+                let off0 = const_u64(out, 0)?;
+                let off128 = const_u64(out, 128)?;
+                // Lane-wise float ops evaluate in 128-bit lanes, so the two
+                // halves are computed separately and rejoined (same chunking
+                // the ZMM providers use).
+                let left_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32X4, &[left, off0])?;
+                let left_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    F32X4,
+                    &[left, off128],
+                )?;
+                let right_lo = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), F32X4, &[right, off0])?;
+                let right_hi = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Extract),
+                    F32X4,
+                    &[right, off128],
+                )?;
+                let res_lo = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat($op)),
+                    F32X4,
+                    &[left_lo, right_lo],
+                )?;
+                let res_hi = out.emit(
+                    SemanticOp::Vector(VectorOp::LaneWiseFloat($op)),
+                    F32X4,
+                    &[left_hi, right_hi],
+                )?;
+                let result = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    F32X8,
+                    &[res_lo, res_hi],
+                )?;
+                let masked = apply_evex_mask(insn, out, F32X8, None, result)?;
+                let upper_zero = zero_f32_lanes(out, F32X8, 8)?;
+                let full = out.emit(
+                    SemanticOp::Primitive(PrimitiveOp::Concat),
+                    F32X16,
+                    &[masked, upper_zero],
+                )?;
+                out.write_register(parent, full)?;
+                fall_through(out, insn)?;
+                Ok(receipt($rule, context))
+            }
+        }
+    };
+}
+
+// EVEX.256: VL=8 lanes, upper 256 bits (F32X8) of the ZMM parent zeroed.
+packed_float_evex_ymm!(
+    VaddpsEvexYmmYmmYmm,
+    forms::VADDPS_EVEX_YMM_YMM_YMM,
+    FloatingOp::Add,
+    0x1678
+);
+packed_float_evex_ymm!(
+    VaddpsEvexYmmYmmMem,
+    forms::VADDPS_EVEX_YMM_YMM_MEM,
+    FloatingOp::Add,
+    0x1679
+);
+packed_float_evex_ymm!(
+    VsubpsEvexYmmYmmYmm,
+    forms::VSUBPS_EVEX_YMM_YMM_YMM,
+    FloatingOp::Sub,
+    0x167A
+);
+packed_float_evex_ymm!(
+    VsubpsEvexYmmYmmMem,
+    forms::VSUBPS_EVEX_YMM_YMM_MEM,
+    FloatingOp::Sub,
+    0x167B
+);
+packed_float_evex_ymm!(
+    VmulpsEvexYmmYmmYmm,
+    forms::VMULPS_EVEX_YMM_YMM_YMM,
+    FloatingOp::Mul,
+    0x167C
+);
+packed_float_evex_ymm!(
+    VmulpsEvexYmmYmmMem,
+    forms::VMULPS_EVEX_YMM_YMM_MEM,
+    FloatingOp::Mul,
+    0x167D
+);
+packed_float_evex_ymm!(
+    VdivpsEvexYmmYmmYmm,
+    forms::VDIVPS_EVEX_YMM_YMM_YMM,
+    FloatingOp::Div,
+    0x167E
+);
+packed_float_evex_ymm!(
+    VdivpsEvexYmmYmmMem,
+    forms::VDIVPS_EVEX_YMM_YMM_MEM,
+    FloatingOp::Div,
+    0x167F
 );
 
 // ---------------------------------------------------------------------------
@@ -2005,6 +2290,23 @@ pub fn providers() -> Vec<Arc<dyn SemanticProvider>> {
         Arc::new(VpdpbsudsYmmYmmMem),
         Arc::new(VpdpbsudsZmmZmmZmm),
         Arc::new(VpdpbsudsZmmZmmMem),
+        // Packed single-precision arithmetic, EVEX 128/256-bit forms (16)
+        Arc::new(VaddpsEvexXmmXmmXmm),
+        Arc::new(VaddpsEvexXmmXmmMem128),
+        Arc::new(VsubpsEvexXmmXmmXmm),
+        Arc::new(VsubpsEvexXmmXmmMem128),
+        Arc::new(VmulpsEvexXmmXmmXmm),
+        Arc::new(VmulpsEvexXmmXmmMem128),
+        Arc::new(VdivpsEvexXmmXmmXmm),
+        Arc::new(VdivpsEvexXmmXmmMem128),
+        Arc::new(VaddpsEvexYmmYmmYmm),
+        Arc::new(VaddpsEvexYmmYmmMem),
+        Arc::new(VsubpsEvexYmmYmmYmm),
+        Arc::new(VsubpsEvexYmmYmmMem),
+        Arc::new(VmulpsEvexYmmYmmYmm),
+        Arc::new(VmulpsEvexYmmYmmMem),
+        Arc::new(VdivpsEvexYmmYmmYmm),
+        Arc::new(VdivpsEvexYmmYmmMem),
     ]
 }
 

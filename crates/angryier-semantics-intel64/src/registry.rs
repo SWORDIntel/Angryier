@@ -1506,7 +1506,7 @@ impl SemanticRegistry for Intel64CorpusRegistry {
     }
 }
 
-const ALL_FORMS: [u32; 1601] = [
+const ALL_FORMS: [u32; 1617] = [
     crate::forms::MOV_R64_R64,
     crate::forms::ADD_R64_R64,
     crate::forms::SUB_R64_R64,
@@ -2975,6 +2975,22 @@ const ALL_FORMS: [u32; 1601] = [
     crate::avx512::forms::VPDPBSUDS_YMM_YMM_MEM,
     crate::avx512::forms::VPDPBSUDS_ZMM_ZMM_ZMM,
     crate::avx512::forms::VPDPBSUDS_ZMM_ZMM_MEM,
+    crate::avx512::forms::VADDPS_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VADDPS_EVEX_XMM_XMM_MEM128,
+    crate::avx512::forms::VSUBPS_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VSUBPS_EVEX_XMM_XMM_MEM128,
+    crate::avx512::forms::VMULPS_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VMULPS_EVEX_XMM_XMM_MEM128,
+    crate::avx512::forms::VDIVPS_EVEX_XMM_XMM_XMM,
+    crate::avx512::forms::VDIVPS_EVEX_XMM_XMM_MEM128,
+    crate::avx512::forms::VADDPS_EVEX_YMM_YMM_YMM,
+    crate::avx512::forms::VADDPS_EVEX_YMM_YMM_MEM,
+    crate::avx512::forms::VSUBPS_EVEX_YMM_YMM_YMM,
+    crate::avx512::forms::VSUBPS_EVEX_YMM_YMM_MEM,
+    crate::avx512::forms::VMULPS_EVEX_YMM_YMM_YMM,
+    crate::avx512::forms::VMULPS_EVEX_YMM_YMM_MEM,
+    crate::avx512::forms::VDIVPS_EVEX_YMM_YMM_YMM,
+    crate::avx512::forms::VDIVPS_EVEX_YMM_YMM_MEM,
     // AMX forms (13 forms: 0x1200..0x120C)
     crate::amx::forms::LDTILECFG_MEM,
     crate::amx::forms::STTILECFG_MEM,

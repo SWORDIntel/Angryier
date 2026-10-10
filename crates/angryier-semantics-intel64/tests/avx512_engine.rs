@@ -652,7 +652,7 @@ fn test_evex_zeroing_masking() -> Result<(), BoxError> {
 #[test]
 fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
     let providers = avx512::providers();
-    assert_eq!(providers.len(), 108, "expected 108 AVX-512/VNNI providers");
+    assert_eq!(providers.len(), 124, "expected 124 AVX-512/VNNI providers");
 
     let mut rule_ids = BTreeSet::new();
     for provider in &providers {
@@ -666,7 +666,7 @@ fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
         assert!(inserted, "duplicate rule id {:#x}", rid.0);
     }
 
-    assert_eq!(rule_ids.len(), 108, "all 108 rule IDs must be unique");
+    assert_eq!(rule_ids.len(), 124, "all 124 rule IDs must be unique");
 
     // All form constants in forms module
     let all_forms = [
@@ -778,6 +778,22 @@ fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
         avx512::forms::VPDPBSUDS_YMM_YMM_MEM,
         avx512::forms::VPDPBSUDS_ZMM_ZMM_ZMM,
         avx512::forms::VPDPBSUDS_ZMM_ZMM_MEM,
+        avx512::forms::VADDPS_EVEX_XMM_XMM_XMM,
+        avx512::forms::VADDPS_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VSUBPS_EVEX_XMM_XMM_XMM,
+        avx512::forms::VSUBPS_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VMULPS_EVEX_XMM_XMM_XMM,
+        avx512::forms::VMULPS_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VDIVPS_EVEX_XMM_XMM_XMM,
+        avx512::forms::VDIVPS_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VADDPS_EVEX_YMM_YMM_YMM,
+        avx512::forms::VADDPS_EVEX_YMM_YMM_MEM,
+        avx512::forms::VSUBPS_EVEX_YMM_YMM_YMM,
+        avx512::forms::VSUBPS_EVEX_YMM_YMM_MEM,
+        avx512::forms::VMULPS_EVEX_YMM_YMM_YMM,
+        avx512::forms::VMULPS_EVEX_YMM_YMM_MEM,
+        avx512::forms::VDIVPS_EVEX_YMM_YMM_YMM,
+        avx512::forms::VDIVPS_EVEX_YMM_YMM_MEM,
     ];
 
     let mut form_set = BTreeSet::new();
@@ -1949,6 +1965,315 @@ fn test_vnni_int8_dot_products() -> Result<(), BoxError> {
     for (i, &exp) in s8u8_exp.iter().enumerate() {
         let got = i32::from_le_bytes(out[i * 4..(i + 1) * 4].try_into().map_err(|e| format!("{e:?}"))?);
         assert_eq!(got, exp, "vpdpbsuds ymm lane {i}");
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 8. EVEX.128/EVEX.256 Packed Single Arithmetic Engine Tests
+// ---------------------------------------------------------------------------
+//
+// EVEX XMM/YMM destinations are partial views of a ZMM parent: the provider
+// must zero bits above the vector length on every write (unmasked and
+// masked), apply merge/zero opmask semantics lane-wise, and read the non-
+// destructive sources at the EVEX operand indices. Every assertion reads the
+// full 64-byte ZMM0 image, not just the XMM/YMM lanes.
+
+#[test]
+fn test_evex128_packed_single_arithmetic() -> Result<(), BoxError> {
+    let mut zmm0_init = [0u8; 64];
+    let mut left = [0u8; 64];
+    let mut right = [0u8; 64];
+    for i in 0..16 {
+        let v0 = 100.0f32 + (i as f32);
+        let f1 = (i + 1) as f32 * 2.0;
+        let f2 = (i + 1) as f32;
+        zmm0_init[i * 4..(i + 1) * 4].copy_from_slice(&v0.to_le_bytes());
+        left[i * 4..(i + 1) * 4].copy_from_slice(&f1.to_le_bytes());
+        right[i * 4..(i + 1) * 4].copy_from_slice(&f2.to_le_bytes());
+    }
+
+    // vaddps %xmm2, %xmm1, %xmm0{%k0} — 62 f1 74 08 58 c2
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x08, 0x58, 0xc2],
+        provider: &avx512::VaddpsEvexXmmXmmXmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k1: None,
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 4 {
+            assert_eq!(v, (i + 1) as f32 * 3.0, "vaddps xmm lane {i}");
+        } else {
+            assert_eq!(v, 0.0, "vaddps xmm upper lane {i} must be zeroed");
+        }
+    }
+
+    // vaddps %xmm2, %xmm1, %xmm0{%k2} merge mask 0x5 — 62 f1 74 0a 58 c2
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x0a, 0x58, 0xc2],
+        provider: &avx512::VaddpsEvexXmmXmmXmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k1: None,
+        k2: Some(0x5),
+        k3: None,
+        mem_data: None,
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 4 && i % 2 == 0 {
+            assert_eq!(v, (i + 1) as f32 * 3.0, "vaddps xmm merge lane {i}");
+        } else if i < 4 {
+            assert_eq!(v, 100.0f32 + (i as f32), "vaddps xmm merge lane {i} must keep old dst");
+        } else {
+            assert_eq!(v, 0.0, "vaddps xmm merge upper lane {i} must be zeroed");
+        }
+    }
+
+    // vaddps %xmm2, %xmm1, %xmm0{%k2}{z} zeroing mask 0x5 — 62 f1 74 8a 58 c2
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x8a, 0x58, 0xc2],
+        provider: &avx512::VaddpsEvexXmmXmmXmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k1: None,
+        k2: Some(0x5),
+        k3: None,
+        mem_data: None,
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 4 && i % 2 == 0 {
+            assert_eq!(v, (i + 1) as f32 * 3.0, "vaddps xmm zero-mask lane {i}");
+        } else {
+            assert_eq!(v, 0.0, "vaddps xmm zero-mask lane {i} must be zero");
+        }
+    }
+
+    // vaddps (%rax), %xmm1, %xmm0{%k2} merge m128 — 62 f1 74 0a 58 00
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x0a, 0x58, 0x00],
+        provider: &avx512::VaddpsEvexXmmXmmMem128,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: None,
+        k1: None,
+        k2: Some(0x5),
+        k3: None,
+        mem_data: Some(&right),
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 4 && i % 2 == 0 {
+            assert_eq!(v, (i + 1) as f32 * 3.0, "vaddps xmm mem merge lane {i}");
+        } else if i < 4 {
+            assert_eq!(
+                v,
+                100.0f32 + (i as f32),
+                "vaddps xmm mem merge lane {i} must keep old dst"
+            );
+        } else {
+            assert_eq!(v, 0.0, "vaddps xmm mem upper lane {i} must be zeroed");
+        }
+    }
+
+    // Remaining mnemonics, unmasked register forms.
+    // vsubps %xmm2, %xmm1, %xmm0{%k0} — 62 f1 74 08 5c c2
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x08, 0x5c, 0xc2],
+        provider: &avx512::VsubpsEvexXmmXmmXmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k1: None,
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 4 {
+            assert_eq!(v, (i + 1) as f32, "vsubps xmm lane {i}");
+        } else {
+            assert_eq!(v, 0.0, "vsubps xmm upper lane {i} must be zeroed");
+        }
+    }
+
+    // vmulps %xmm2, %xmm1, %xmm0{%k0} — 62 f1 74 08 59 c2
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x08, 0x59, 0xc2],
+        provider: &avx512::VmulpsEvexXmmXmmXmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k1: None,
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 4 {
+            assert_eq!(v, ((i + 1) * (i + 1) * 2) as f32, "vmulps xmm lane {i}");
+        } else {
+            assert_eq!(v, 0.0, "vmulps xmm upper lane {i} must be zeroed");
+        }
+    }
+
+    // vdivps (%rax), %xmm1, %xmm0{%k2}{z} — 62 f1 74 8a 5e 00 (mem + zero mask)
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x8a, 0x5e, 0x00],
+        provider: &avx512::VdivpsEvexXmmXmmMem128,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: None,
+        k1: None,
+        k2: Some(0x5),
+        k3: None,
+        mem_data: Some(&right),
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 4 && i % 2 == 0 {
+            assert_eq!(v, 2.0, "vdivps xmm mem zero-mask lane {i}");
+        } else {
+            assert_eq!(v, 0.0, "vdivps xmm mem zero-mask lane {i} must be zero");
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_evex256_packed_single_arithmetic() -> Result<(), BoxError> {
+    let mut zmm0_init = [0u8; 64];
+    let mut left = [0u8; 64];
+    let mut right = [0u8; 64];
+    for i in 0..16 {
+        let v0 = 100.0f32 + (i as f32);
+        let f1 = (i + 1) as f32 * 2.0;
+        let f2 = (i + 1) as f32;
+        zmm0_init[i * 4..(i + 1) * 4].copy_from_slice(&v0.to_le_bytes());
+        left[i * 4..(i + 1) * 4].copy_from_slice(&f1.to_le_bytes());
+        right[i * 4..(i + 1) * 4].copy_from_slice(&f2.to_le_bytes());
+    }
+
+    // vaddps %ymm2, %ymm1, %ymm0{%k0} — 62 f1 74 28 58 c2
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x28, 0x58, 0xc2],
+        provider: &avx512::VaddpsEvexYmmYmmYmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k1: None,
+        k2: None,
+        k3: None,
+        mem_data: None,
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 8 {
+            assert_eq!(v, (i + 1) as f32 * 3.0, "vaddps ymm lane {i}");
+        } else {
+            assert_eq!(v, 0.0, "vaddps ymm upper lane {i} must be zeroed");
+        }
+    }
+
+    // vaddps %ymm2, %ymm1, %ymm0{%k2} merge mask 0x55 — 62 f1 74 2a 58 c2
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x2a, 0x58, 0xc2],
+        provider: &avx512::VaddpsEvexYmmYmmYmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k1: None,
+        k2: Some(0x55),
+        k3: None,
+        mem_data: None,
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 8 && i % 2 == 0 {
+            assert_eq!(v, (i + 1) as f32 * 3.0, "vaddps ymm merge lane {i}");
+        } else if i < 8 {
+            assert_eq!(v, 100.0f32 + (i as f32), "vaddps ymm merge lane {i} must keep old dst");
+        } else {
+            assert_eq!(v, 0.0, "vaddps ymm merge upper lane {i} must be zeroed");
+        }
+    }
+
+    // vsubps %ymm2, %ymm1, %ymm0{%k2}{z} zero mask 0x55 — 62 f1 74 aa 5c c2
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0xaa, 0x5c, 0xc2],
+        provider: &avx512::VsubpsEvexYmmYmmYmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k1: None,
+        k2: Some(0x55),
+        k3: None,
+        mem_data: None,
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 8 && i % 2 == 0 {
+            assert_eq!(v, (i + 1) as f32, "vsubps ymm zero-mask lane {i}");
+        } else {
+            assert_eq!(v, 0.0, "vsubps ymm zero-mask lane {i} must be zero");
+        }
+    }
+
+    // vmulps (%rax), %ymm1, %ymm0{%k0} — 62 f1 74 28 59 00 (m256)
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x28, 0x59, 0x00],
+        provider: &avx512::VmulpsEvexYmmYmmMem,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: None,
+        k1: None,
+        k2: None,
+        k3: None,
+        mem_data: Some(&right),
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 8 {
+            assert_eq!(v, ((i + 1) * (i + 1) * 2) as f32, "vmulps ymm mem lane {i}");
+        } else {
+            assert_eq!(v, 0.0, "vmulps ymm upper lane {i} must be zeroed");
+        }
+    }
+
+    // vdivps %ymm2, %ymm1, %ymm0{%k2} merge — 62 f1 74 2a 5e c2
+    let s = run_engine_full(FullEngineCase {
+        code: &[0x62, 0xf1, 0x74, 0x2a, 0x5e, 0xc2],
+        provider: &avx512::VdivpsEvexYmmYmmYmm,
+        zmm0: Some(&zmm0_init),
+        zmm1: Some(&left),
+        zmm2: Some(&right),
+        k1: None,
+        k2: Some(0x55),
+        k3: None,
+        mem_data: None,
+    })?;
+    let lanes = read_f32_lanes(&read_zmm_bytes(&s, ZMM0)?)?;
+    for (i, &v) in lanes.iter().enumerate() {
+        if i < 8 && i % 2 == 0 {
+            assert_eq!(v, 2.0, "vdivps ymm merge lane {i}");
+        } else if i < 8 {
+            assert_eq!(v, 100.0f32 + (i as f32), "vdivps ymm merge lane {i} must keep old dst");
+        } else {
+            assert_eq!(v, 0.0, "vdivps ymm merge upper lane {i} must be zeroed");
+        }
     }
 
     Ok(())

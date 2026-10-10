@@ -190,6 +190,18 @@ fn shape_of(operand: &Operand) -> Shape {
     }
 }
 
+/// Whether XED's explicit EVEX opmask operand is k0 (the architectural
+/// unmasked encoding). EVEX masked memory forms must remain unmapped until
+/// the execution engine supports lane-granular fault suppression.
+fn evex_memory_is_unmasked(decoded: &DecodedInstruction) -> bool {
+    decoded.operands.get(1).is_some_and(|operand| {
+        matches!(
+            &operand.kind,
+            OperandKind::Register(register) if register.parent.0 == register_id::OPMASK_BASE
+        )
+    })
+}
+
 /// Maps a decoded instruction to an engine-owned semantic form id.
 ///
 /// Returns `None` when the instruction class or operand shape has no exact
@@ -1149,6 +1161,17 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Xmm, Shape::Xmm, Shape::Mem128] => Some(forms::VADDPS_XMM_XMM_MEM),
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VADDPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VADDPS_YMM_YMM_MEM),
+            // EVEX.128/256 carry an opmask operand at index 1. The {1to4}/{1to8}
+            // embedded-broadcast memory encodings decode with a 32-bit memory
+            // operand (Mem32) and are deliberately left unmapped.
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VADDPS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VADDPS_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VADDPS_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VADDPS_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VADDPS_ZMM_ZMM_ZMM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VADDPS_ZMM_ZMM_MEM),
             _ => None,
@@ -1158,6 +1181,14 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Xmm, Shape::Xmm, Shape::Mem128] => Some(forms::VSUBPS_XMM_XMM_MEM),
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VSUBPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VSUBPS_YMM_YMM_MEM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VSUBPS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VSUBPS_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VSUBPS_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VSUBPS_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VSUBPS_ZMM_ZMM_ZMM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VSUBPS_ZMM_ZMM_MEM),
             _ => None,
@@ -1167,6 +1198,14 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Xmm, Shape::Xmm, Shape::Mem128] => Some(forms::VMULPS_XMM_XMM_MEM),
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMULPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMULPS_YMM_YMM_MEM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VMULPS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMULPS_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VMULPS_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMULPS_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VMULPS_ZMM_ZMM_ZMM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VMULPS_ZMM_ZMM_MEM),
             _ => None,
@@ -1176,6 +1215,14 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Xmm, Shape::Xmm, Shape::Mem128] => Some(forms::VDIVPS_XMM_XMM_MEM),
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VDIVPS_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VDIVPS_YMM_YMM_MEM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VDIVPS_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VDIVPS_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VDIVPS_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VDIVPS_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VDIVPS_ZMM_ZMM_ZMM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VDIVPS_ZMM_ZMM_MEM),
             _ => None,
@@ -4309,6 +4356,93 @@ mod tests {
             mapped(&[0x62, 0xF1, 0xF5, 0x48, 0x54, 0xC2])?,
             Some(forms::VANDPD_ZMM_ZMM_ZMM)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_evex128_256_packed_single_arithmetic_forms() -> Result<(), Box<dyn std::error::Error>> {
+        // EVEX.128 (P2 L'L=00) and EVEX.256 (P2 L'L=01) packed-single
+        // arithmetic decodes as [Xmm|Ymm, Reg64(k), Xmm|Ymm, {reg, mem}], where
+        // the opmask operand is always explicit (k0 when unmasked). Distinct
+        // engine-owned EVEX form ids keep these separate from the VEX.128
+        // three-operand forms.
+        let decoder = XedDecoder::new();
+        for (opcode, xmm_reg, xmm_mem, ymm_reg, ymm_mem) in [
+            (
+                0x58u8,
+                evex_forms::VADDPS_EVEX_XMM_XMM_XMM,
+                evex_forms::VADDPS_EVEX_XMM_XMM_MEM128,
+                evex_forms::VADDPS_EVEX_YMM_YMM_YMM,
+                evex_forms::VADDPS_EVEX_YMM_YMM_MEM,
+            ),
+            (
+                0x5Cu8,
+                evex_forms::VSUBPS_EVEX_XMM_XMM_XMM,
+                evex_forms::VSUBPS_EVEX_XMM_XMM_MEM128,
+                evex_forms::VSUBPS_EVEX_YMM_YMM_YMM,
+                evex_forms::VSUBPS_EVEX_YMM_YMM_MEM,
+            ),
+            (
+                0x59u8,
+                evex_forms::VMULPS_EVEX_XMM_XMM_XMM,
+                evex_forms::VMULPS_EVEX_XMM_XMM_MEM128,
+                evex_forms::VMULPS_EVEX_YMM_YMM_YMM,
+                evex_forms::VMULPS_EVEX_YMM_YMM_MEM,
+            ),
+            (
+                0x5Eu8,
+                evex_forms::VDIVPS_EVEX_XMM_XMM_XMM,
+                evex_forms::VDIVPS_EVEX_XMM_XMM_MEM128,
+                evex_forms::VDIVPS_EVEX_YMM_YMM_YMM,
+                evex_forms::VDIVPS_EVEX_YMM_YMM_MEM,
+            ),
+        ] {
+            // v*ps %xmm2, %xmm1, %xmm0{%k0} — EVEX.128 reg form
+            let (decoded, iform) = decoder.decode_with_iform(0x401000, &[0x62, 0xF1, 0x74, 0x08, opcode, 0xC2])?;
+            assert!(
+                iform.name.ends_with("XMMf32_MASKmskw_XMMf32_XMMf32_AVX512"),
+                "{iform:?}"
+            );
+            assert_eq!(map_form(&decoded), Some(xmm_reg));
+            // Same shape with merge ({k1}) and zeroing ({k1}{z}) masks: the
+            // mask lives in modifiers + operand 1, so the form is unchanged.
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0x09, opcode, 0xC2])?, Some(xmm_reg));
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0x89, opcode, 0xC2])?, Some(xmm_reg));
+            // v*ps (%rax), %xmm1, %xmm0{%k0} — EVEX.128 m128
+            let (decoded, iform) = decoder.decode_with_iform(0x401000, &[0x62, 0xF1, 0x74, 0x08, opcode, 0x00])?;
+            assert!(
+                iform.name.ends_with("XMMf32_MASKmskw_XMMf32_MEMf32_AVX512"),
+                "{iform:?}"
+            );
+            assert_eq!(map_form(&decoded), Some(xmm_mem));
+            // Masked memory forms stay unresolved: the current IR loads the
+            // full operand and cannot suppress faults for masked-off lanes.
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0x09, opcode, 0x00])?, None);
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0x89, opcode, 0x00])?, None);
+            // {1to4} embedded broadcast decodes a 32-bit memory operand: no
+            // representable form, must stay unmapped.
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0x18, opcode, 0x00])?, None);
+            // v*ps %ymm2, %ymm1, %ymm0{%k0} — EVEX.256 reg form
+            let (decoded, iform) = decoder.decode_with_iform(0x401000, &[0x62, 0xF1, 0x74, 0x28, opcode, 0xC2])?;
+            assert!(
+                iform.name.ends_with("YMMf32_MASKmskw_YMMf32_YMMf32_AVX512"),
+                "{iform:?}"
+            );
+            assert_eq!(map_form(&decoded), Some(ymm_reg));
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0x29, opcode, 0xC2])?, Some(ymm_reg));
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0xA9, opcode, 0xC2])?, Some(ymm_reg));
+            // v*ps (%rax), %ymm1, %ymm0{%k0} — EVEX.256 m256
+            let (decoded, iform) = decoder.decode_with_iform(0x401000, &[0x62, 0xF1, 0x74, 0x28, opcode, 0x00])?;
+            assert!(
+                iform.name.ends_with("YMMf32_MASKmskw_YMMf32_MEMf32_AVX512"),
+                "{iform:?}"
+            );
+            assert_eq!(map_form(&decoded), Some(ymm_mem));
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0x29, opcode, 0x00])?, None);
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0xA9, opcode, 0x00])?, None);
+            // {1to8} embedded broadcast: unmapped for the same reason.
+            assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0x38, opcode, 0x00])?, None);
+        }
         Ok(())
     }
 
