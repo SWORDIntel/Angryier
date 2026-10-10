@@ -51,12 +51,26 @@ pub struct BoundXedDecoder<B: XedDecodeBackend> {
     pub backend: B,
 }
 
+impl<B: XedDecodeBackend> BoundXedDecoder<B> {
+    /// Decodes once and returns both the normalized instruction and the
+    /// version-scoped XED iform evidence from that same backend result.
+    pub fn decode_with_iform(
+        &self,
+        address: Address,
+        bytes: &[u8],
+    ) -> Result<(DecodedInstruction, XedIformMetadata), XedAdapterError> {
+        let metadata = self.backend.decode_metadata(&self.adapter.config, address, bytes)?;
+        let xed_iform = metadata.xed_iform.clone();
+        let decoded = normalize_decoded(&self.adapter.config, address, bytes.len(), metadata)?;
+        Ok((decoded, xed_iform))
+    }
+}
+
 impl<B: XedDecodeBackend> Decoder for BoundXedDecoder<B> {
     type Error = XedAdapterError;
 
     fn decode(&self, address: Address, bytes: &[u8]) -> Result<DecodedInstruction, Self::Error> {
-        let metadata = self.backend.decode_metadata(&self.adapter.config, address, bytes)?;
-        normalize_decoded(&self.adapter.config, address, bytes.len(), metadata)
+        self.decode_with_iform(address, bytes).map(|(decoded, _)| decoded)
     }
 }
 
@@ -66,9 +80,12 @@ mod tests {
     use angryier_arch::Decoder;
     use angryier_arch_intel64::{FeatureSet, Intel64ProfileKind};
     use angryier_types::TargetProfileId;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
-    struct FakeBackend;
+    struct FakeBackend {
+        decode_calls: AtomicUsize,
+    }
 
     impl XedDecodeBackend for FakeBackend {
         fn decode_metadata(
@@ -77,9 +94,11 @@ mod tests {
             _address: Address,
             _bytes: &[u8],
         ) -> Result<XedDecodedMetadata, XedAdapterError> {
+            self.decode_calls.fetch_add(1, Ordering::SeqCst);
             Ok(XedDecodedMetadata {
                 length: 1,
                 form_id: 1,
+                xed_iform: crate::metadata::XedIformMetadata::default(),
                 features: Vec::new(),
                 operands: Vec::new(),
                 modifiers: XedInstructionModifiers::default(),
@@ -102,7 +121,9 @@ mod tests {
                     },
                 },
             },
-            backend: FakeBackend,
+            backend: FakeBackend {
+                decode_calls: AtomicUsize::new(0),
+            },
         }
     }
 
@@ -111,6 +132,16 @@ mod tests {
         let decoded = decoder().decode(0x4000, &[0x90])?;
         assert_eq!(decoded.address, 0x4000);
         assert_eq!(decoded.length, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn bound_decoder_returns_iform_from_one_backend_decode() -> Result<(), XedAdapterError> {
+        let decoder = decoder();
+        let (decoded, iform) = decoder.decode_with_iform(0x4000, &[0x90])?;
+        assert_eq!(decoded.address, 0x4000);
+        assert_eq!(iform, XedIformMetadata::default());
+        assert_eq!(decoder.backend.decode_calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

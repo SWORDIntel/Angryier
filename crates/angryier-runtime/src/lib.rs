@@ -2497,7 +2497,13 @@ impl<D: Decoder> Runtime<D> {
         // Resolve semantic provider.
         self.registry
             .resolve(decoded, self.semantic_version)
-            .map_err(|e| RuntimeError::Semantic(format!("{e:?}")))?;
+            .map_err(|error| match error {
+                // Missing coverage is a normal, explicit runtime outcome: callers
+                // may decode and inspect forms for which semantics are not yet
+                // implemented without receiving an opaque `Semantic("UnsupportedForm(..)")`.
+                angryier_semantics::SemanticError::UnsupportedForm(form_id) => RuntimeError::UnsupportedForm(form_id),
+                other => RuntimeError::Semantic(format!("{other:?}")),
+            })?;
 
         // Look the provider up by its positional form index: resolution is
         // positional, and a duplicated hand-picked rule offset would silently
@@ -4732,6 +4738,26 @@ mod tests {
         assert_eq!(pci_config_read(0, 0, 1, 0x00), 0xFFFF_FFFF);
         assert_eq!(pci_config_read(1, 0, 0, 0x00), 0xFFFF_FFFF);
         assert_eq!(pci_config_read(0, 0, 0, 0x10), 0); // BAR reads zero
+    }
+
+    #[test]
+    fn lowering_decoded_form_without_semantics_returns_explicit_unsupported_form() -> Result<(), RuntimeError> {
+        let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
+        let mut process = minimal_process()?;
+        let decoded = DecodedInstruction {
+            address: 0x1000,
+            length: 3,
+            form_id: 0xDEAD_BEEF,
+            features: Vec::new(),
+            operands: Vec::new(),
+            modifiers: InstructionModifiers::default(),
+        };
+
+        assert!(matches!(
+            runtime.lower_at(&mut process, decoded.address, &decoded),
+            Err(RuntimeError::UnsupportedForm(0xDEAD_BEEF))
+        ));
+        Ok(())
     }
 
     /// IN/OUT port dispatch: readable 0xCF8 latch, 0xCFC config reads with

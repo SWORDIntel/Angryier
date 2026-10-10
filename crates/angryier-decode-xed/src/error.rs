@@ -4,6 +4,7 @@ use core::fmt;
 pub enum XedAdapterError {
     NotLinked,
     DecodeFailed,
+    InvalidIformMetadata,
     UnsupportedMode,
     EmptyInput,
     InvalidLength { reported: u8, available: usize },
@@ -27,6 +28,7 @@ impl fmt::Display for XedAdapterError {
         match self {
             Self::NotLinked => formatter.write_str("native Intel XED backend is not linked"),
             Self::DecodeFailed => formatter.write_str("Intel XED decode failed"),
+            Self::InvalidIformMetadata => formatter.write_str("Intel XED returned invalid iform metadata"),
             Self::UnsupportedMode => formatter.write_str("unsupported XED machine mode"),
             Self::EmptyInput => formatter.write_str("cannot decode an empty byte slice"),
             Self::InvalidLength { reported, available } => write!(

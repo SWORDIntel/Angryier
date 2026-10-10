@@ -12,6 +12,10 @@ angryier-decode-xed = { path = "../angryier-decode-xed" }
 angryier-types = { path = "../angryier-types" }
 xed-sys = "0.6"
 
+[[example]]
+name = "xed_iform_evidence"
+path = "examples/xed_iform_evidence.rs"
+
 [lints.rust]
 unsafe_code = "allow"
 unsafe_op_in_unsafe_fn = "allow"

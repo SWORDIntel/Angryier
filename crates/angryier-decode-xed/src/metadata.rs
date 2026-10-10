@@ -190,6 +190,27 @@ impl Default for XedInstructionModifiers {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct XedIformMetadata {
+    /// Exact XED package/table release that defines `value` and `name`.
+    /// Discriminants are not stable across XED releases and are not ISANITY IDs.
+    pub xed_sys_version: &'static str,
+    /// Exact symbolic spelling for this enumerant.
+    pub name: String,
+    /// Raw `xed_iform_enum_t` discriminant for `xed_sys_version` only.
+    pub value: u32,
+}
+
+impl Default for XedIformMetadata {
+    fn default() -> Self {
+        Self {
+            xed_sys_version: "xed-sys 0.6.0+xed-2024.05.20",
+            name: "XED_IFORM_INVALID".to_owned(),
+            value: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct XedDecodedMetadata {
     /// Decoded instruction length. Must be in the Intel architectural range 1..=15.
     pub length: u8,
@@ -197,6 +218,9 @@ pub struct XedDecodedMetadata {
     /// `xed_iform_enum_t` discriminant. The native bridge owns the mapping from
     /// XED's generated form namespace to this engine-owned identifier.
     pub form_id: u32,
+    /// Source-level XED iform evidence, separate from engine `form_id` and
+    /// explicitly scoped to the XED release defining the raw discriminant.
+    pub xed_iform: XedIformMetadata,
     /// Stable architecture feature families. Raw XED ISA-set discriminants are
     /// translated by the native bridge before crossing this boundary.
     pub features: Vec<IntelFeature>,

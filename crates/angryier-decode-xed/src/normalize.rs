@@ -372,6 +372,7 @@ mod tests {
         let metadata = XedDecodedMetadata {
             length: 2,
             form_id: 7,
+            xed_iform: crate::metadata::XedIformMetadata::default(),
             features: Vec::new(),
             operands: vec![XedOperand {
                 index: 0,
@@ -444,6 +445,7 @@ mod tests {
         let metadata = XedDecodedMetadata {
             length: 4,
             form_id: 9,
+            xed_iform: crate::metadata::XedIformMetadata::default(),
             features: vec![IntelFeature::Avx2],
             operands: Vec::new(),
             modifiers: XedInstructionModifiers::default(),

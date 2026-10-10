@@ -1209,6 +1209,116 @@ mod tests {
     }
 
     #[test]
+    fn lowers_mov_through_real_narrow_gpr_views() -> Result<(), String> {
+        // These are architectural aliases, not full-width mock registers:
+        // AL/AH/AX/EAX all name slices of the same RAX parent. The source is
+        // AH for the byte case so both high-byte extraction and a same-parent
+        // destination write are exercised.
+        for (width, source_view, dest_view, expected_write) in [
+            (
+                8,
+                RegisterView::partial(RegisterId(0), 8, 8, RegisterWriteBehavior::PreserveParent),
+                RegisterView::partial(RegisterId(0), 0, 8, RegisterWriteBehavior::PreserveParent),
+                RegisterWriteKind::PreserveParent {
+                    bit_offset: 0,
+                    width_bits: 8,
+                },
+            ),
+            (
+                16,
+                RegisterView::partial(RegisterId(1), 0, 16, RegisterWriteBehavior::PreserveParent),
+                RegisterView::partial(RegisterId(0), 0, 16, RegisterWriteBehavior::PreserveParent),
+                RegisterWriteKind::PreserveParent {
+                    bit_offset: 0,
+                    width_bits: 16,
+                },
+            ),
+            (
+                32,
+                RegisterView::partial(RegisterId(1), 0, 32, RegisterWriteBehavior::ZeroExtendParent),
+                RegisterView::partial(RegisterId(0), 0, 32, RegisterWriteBehavior::ZeroExtendParent),
+                RegisterWriteKind::ZeroExtendParent,
+            ),
+        ] {
+            let ty = SemanticType::Scalar(ScalarType::BitVec(width));
+            let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
+            let source = builder.read_operand(1, ty).map_err(|error| format!("{error:?}"))?;
+            builder.write_operand(0, source).map_err(|error| format!("{error:?}"))?;
+            let rich = builder
+                .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+                .map_err(|error| format!("{error:?}"))?;
+            let decoded = TestDecode {
+                address: 0x401000,
+                operands: vec![
+                    OperandDescriptor {
+                        index: 0,
+                        width_bits: width,
+                        read: false,
+                        written: true,
+                        class: OperandClass::Register,
+                        kind: OperandKind::Register(dest_view),
+                    },
+                    OperandDescriptor {
+                        index: 1,
+                        width_bits: width,
+                        read: true,
+                        written: false,
+                        class: OperandClass::Register,
+                        kind: OperandKind::Register(source_view),
+                    },
+                ],
+            };
+
+            let lowered = BasicSemanticLowerer
+                .lower_with_decode(&rich, &validity(1), &decoded)
+                .map_err(|error| format!("{width}-bit MOV lowering failed: {error}"))?;
+            let write = lowered
+                .instructions
+                .iter()
+                .find_map(|instruction| match instruction.op {
+                    IrOp::WriteRegister { register, value, kind } => Some((register, value, kind)),
+                    _ => None,
+                })
+                .ok_or_else(|| format!("{width}-bit MOV had no register write"))?;
+            assert_eq!(write.0, 0, "{width}-bit destination must target RAX parent");
+            assert_eq!(write.2, expected_write, "{width}-bit destination write semantics");
+
+            if width == 8 {
+                assert!(
+                    lowered.instructions.iter().any(|instruction| matches!(
+                        instruction.op,
+                        IrOp::ReadRegister {
+                            register: 0,
+                            ty: IrType::Bits(16)
+                        }
+                    )),
+                    "AH read must fetch the parent span covering bits 8..16"
+                );
+                assert!(
+                    lowered.instructions.iter().any(|instruction| matches!(
+                        instruction.op,
+                        IrOp::Primitive {
+                            op: IrPrimitive::Extract,
+                            ty: IrType::Bits(8),
+                            ..
+                        }
+                    )),
+                    "AH read must extract its nonzero-offset byte"
+                );
+            } else {
+                assert!(
+                    lowered.instructions.iter().any(|instruction| matches!(
+                        instruction.op,
+                        IrOp::ReadRegister { register: 1, ty: IrType::Bits(bits) } if bits == width
+                    )),
+                    "{width}-bit source must read its narrow alias from RBX parent"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn rejects_operand_write_width_mismatch() -> Result<(), String> {
         let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
         let value = builder

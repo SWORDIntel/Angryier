@@ -8,12 +8,12 @@
 use crate::feature::map_feature;
 use crate::register::{map_register, map_segment, register_width};
 use angryier_decode_xed::metadata::{
-    XedAccess, XedDecodedMetadata, XedEncoding, XedFarPointerOperand, XedImmediateOperand, XedInstructionModifiers,
-    XedMachineMode, XedMemoryBase, XedMemoryIndex, XedMemoryOperand, XedOperand, XedOperandKind, XedOperandVisibility,
-    XedRegisterRef, XedRelativeBranchOperand, XedRepetition,
+    XedAccess, XedDecodedMetadata, XedEncoding, XedFarPointerOperand, XedIformMetadata, XedImmediateOperand,
+    XedInstructionModifiers, XedMachineMode, XedMemoryBase, XedMemoryIndex, XedMemoryOperand, XedOperand,
+    XedOperandKind, XedOperandVisibility, XedRegisterRef, XedRelativeBranchOperand, XedRepetition,
 };
 use angryier_decode_xed::{XedAdapterError, XedDecodeBackend, XedDecodeConfig};
-use core::ffi::c_uint;
+use core::ffi::{CStr, c_uint};
 use std::mem::MaybeUninit;
 use std::sync::Once;
 use xed_sys::{
@@ -22,15 +22,15 @@ use xed_sys::{
     XED_OPERAND_REG1, XED_OPERAND_REG2, XED_OPERAND_REG3, XED_OPERAND_REG4, XED_OPERAND_REG5, XED_OPERAND_REG6,
     XED_OPERAND_REG7, XED_OPERAND_REG8, XED_OPERAND_REG9, XED_OPERAND_RELBR, xed_decode, xed_decoded_inst_get_base_reg,
     xed_decoded_inst_get_branch_displacement, xed_decoded_inst_get_branch_displacement_width_bits,
-    xed_decoded_inst_get_iclass, xed_decoded_inst_get_immediate_is_signed, xed_decoded_inst_get_immediate_width_bits,
-    xed_decoded_inst_get_index_reg, xed_decoded_inst_get_isa_set, xed_decoded_inst_get_length,
-    xed_decoded_inst_get_memop_address_width, xed_decoded_inst_get_memory_displacement,
+    xed_decoded_inst_get_iclass, xed_decoded_inst_get_iform_enum, xed_decoded_inst_get_immediate_is_signed,
+    xed_decoded_inst_get_immediate_width_bits, xed_decoded_inst_get_index_reg, xed_decoded_inst_get_isa_set,
+    xed_decoded_inst_get_length, xed_decoded_inst_get_memop_address_width, xed_decoded_inst_get_memory_displacement,
     xed_decoded_inst_get_memory_displacement_width_bits, xed_decoded_inst_get_memory_operand_length,
     xed_decoded_inst_get_reg, xed_decoded_inst_get_scale, xed_decoded_inst_get_seg_reg,
     xed_decoded_inst_get_signed_immediate, xed_decoded_inst_get_unsigned_immediate, xed_decoded_inst_inst,
     xed_decoded_inst_number_of_memory_operands, xed_decoded_inst_operands_const, xed_decoded_inst_set_mode,
-    xed_decoded_inst_zero, xed_error_enum_t, xed_inst_noperands, xed_inst_operand, xed_operand_action_enum_t,
-    xed_operand_enum_t, xed_operand_name, xed_operand_operand_visibility, xed_operand_rw,
+    xed_decoded_inst_zero, xed_error_enum_t, xed_iform_enum_t2str, xed_inst_noperands, xed_inst_operand,
+    xed_operand_action_enum_t, xed_operand_enum_t, xed_operand_name, xed_operand_operand_visibility, xed_operand_rw,
     xed_operand_values_has_lock_prefix, xed_operand_values_has_rep_prefix, xed_operand_values_has_repne_prefix,
     xed_reg_enum_t, xed_tables_init,
 };
@@ -109,6 +109,16 @@ unsafe fn decode_raw(bytes: &[u8], max_bytes: c_uint) -> Result<XedDecodedMetada
 
     let iclass = xed_decoded_inst_get_iclass(xedd_ptr);
     let isa_set = xed_decoded_inst_get_isa_set(xedd_ptr);
+    let xed_iform_value = xed_decoded_inst_get_iform_enum(xedd_ptr);
+    let xed_iform_name_ptr = xed_iform_enum_t2str(xed_iform_value);
+    if xed_iform_name_ptr.is_null() {
+        return Err(XedAdapterError::InvalidIformMetadata);
+    }
+    let xed_iform = XedIformMetadata {
+        xed_sys_version: "xed-sys 0.6.0+xed-2024.05.20",
+        name: format!("XED_IFORM_{}", CStr::from_ptr(xed_iform_name_ptr).to_string_lossy()),
+        value: xed_iform_value as u32,
+    };
 
     // The native bridge owns the mapping from XED's generated form namespace to
     // an engine-owned identifier. We use the instruction class as the stable
@@ -128,6 +138,7 @@ unsafe fn decode_raw(bytes: &[u8], max_bytes: c_uint) -> Result<XedDecodedMetada
     Ok(XedDecodedMetadata {
         length: length as u8,
         form_id,
+        xed_iform,
         features,
         operands,
         modifiers,
@@ -183,6 +194,51 @@ unsafe fn extract_operands(xedd: *const xed_sys::xed_decoded_inst_t) -> Result<V
     }
 
     Ok(operands)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use angryier_arch_intel64::{FeatureSet, Intel64ProfileKind, Intel64TargetProfile};
+    use angryier_types::TargetProfileId;
+
+    fn config() -> XedDecodeConfig {
+        XedDecodeConfig {
+            mode: XedMachineMode::Intel64,
+            profile: Intel64TargetProfile {
+                id: TargetProfileId(1),
+                kind: Intel64ProfileKind::Custom,
+                features: FeatureSet {
+                    features: Vec::new(),
+                    xcr0: 0,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn live_decode_preserves_version_scoped_xed_iform_evidence() {
+        let backend = NativeXedBackend;
+        let config = config();
+
+        // Names/values are from the pinned XED generated enum tables and
+        // checked against live decode results from that same build.
+        for (bytes, name, value, engine_form) in [
+            (&[0x90][..], "XED_IFORM_NOP_90", 1735, xed_sys::XED_ICLASS_NOP),
+            (
+                &[0x48, 0x89, 0xc1][..],
+                "XED_IFORM_MOV_GPRv_GPRv_89",
+                1560,
+                xed_sys::XED_ICLASS_MOV,
+            ),
+        ] {
+            let metadata = backend.decode_metadata(&config, 0, bytes).expect("XED decode succeeds");
+            assert_eq!(metadata.xed_iform.xed_sys_version, "xed-sys 0.6.0+xed-2024.05.20");
+            assert_eq!(metadata.xed_iform.name, name);
+            assert_eq!(metadata.xed_iform.value, value);
+            assert_eq!(metadata.form_id, engine_form as u32);
+        }
+    }
 }
 
 /// Determines the `XedOperandKind` for a given XED operand name.

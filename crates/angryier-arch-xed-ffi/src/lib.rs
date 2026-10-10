@@ -21,6 +21,7 @@
 //! bindings), `clang` is also required.
 
 mod backend;
+pub mod evidence;
 mod feature;
 mod register;
 
@@ -183,8 +184,13 @@ pub mod iclass {
 
 use angryier_arch::{DecodedInstruction, Decoder};
 use angryier_arch_intel64::{FeatureSet, Intel64ProfileKind, Intel64TargetProfile, IntelFeature};
+pub use angryier_decode_xed::XedIformMetadata;
 use angryier_decode_xed::{BoundXedDecoder, XedAdapterError, XedDecodeConfig, XedDecoderAdapter, XedMachineMode};
 use angryier_types::{Address, TargetProfileId};
+pub use evidence::{
+    BatchStats, DecodeStatus, EvidenceError, EvidenceInputRecord, EvidenceOutputRecord, IformEvidence, RawJsonId,
+    process_evidence_stream, process_single_line,
+};
 
 /// All Intel feature families, used for the default permissive target profile.
 const ALL_INTEL_FEATURES: [IntelFeature; 18] = [
@@ -259,6 +265,19 @@ impl XedDecoder {
         Decoder::decode(self, address, bytes)
     }
 
+    /// Decodes once and returns the normalized instruction together with its
+    /// XED-version-scoped IFORM name and discriminant.
+    pub fn decode_with_iform(
+        &self,
+        address: Address,
+        bytes: &[u8],
+    ) -> Result<(DecodedInstruction, XedIformMetadata), XedAdapterError> {
+        let (mut decoded, xed_iform) = self.inner.decode_with_iform(address, bytes)?;
+        append_system_register_operand(&mut decoded, bytes);
+        normalize_push16_stack_operand(&mut decoded);
+        Ok((decoded, xed_iform))
+    }
+
     /// Decodes a sequence of bytes into multiple instructions via linear sweep.
     ///
     /// Starting at `start_address`, each instruction is decoded and the sweep
@@ -296,10 +315,7 @@ impl Decoder for XedDecoder {
     type Error = XedAdapterError;
 
     fn decode(&self, address: Address, bytes: &[u8]) -> Result<DecodedInstruction, Self::Error> {
-        let mut decoded = self.inner.decode(address, bytes)?;
-        append_system_register_operand(&mut decoded, bytes);
-        normalize_push16_stack_operand(&mut decoded);
-        Ok(decoded)
+        self.decode_with_iform(address, bytes).map(|(decoded, _)| decoded)
     }
 }
 
@@ -516,6 +532,24 @@ mod tests {
         let decoder = XedDecoder::new();
         let decoded = decode_checked(&decoder, &[0x90], 1, ICLASS_NOP)?;
         assert!(decoded.operands.is_empty(), "NOP should have no operands");
+        Ok(())
+    }
+
+    #[test]
+    fn public_decode_with_iform_returns_live_xed_form_evidence() -> Result<(), XedAdapterError> {
+        let decoder = XedDecoder::new();
+
+        let (nop, nop_iform) = decoder.decode_with_iform(0x4000, &[0x90])?;
+        assert_eq!(nop.form_id, ICLASS_NOP);
+        assert_eq!(nop_iform.xed_sys_version, "xed-sys 0.6.0+xed-2024.05.20");
+        assert_eq!(nop_iform.name, "XED_IFORM_NOP_90");
+        assert_eq!(nop_iform.value, 1735);
+
+        let (mov, mov_iform) = decoder.decode_with_iform(0x4001, &[0x48, 0x89, 0xc1])?;
+        assert_eq!(mov.form_id, ICLASS_MOV);
+        assert_eq!(mov_iform.xed_sys_version, "xed-sys 0.6.0+xed-2024.05.20");
+        assert_eq!(mov_iform.name, "XED_IFORM_MOV_GPRv_GPRv_89");
+        assert_eq!(mov_iform.value, 1560);
         Ok(())
     }
 
