@@ -4896,6 +4896,76 @@ mod tests {
     }
 
     #[test]
+    fn fdiv_zero_denominator_folds_to_ieee754() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        // The exact fold mirrors the concrete interpreter: x/+-0 is the
+        // signed infinity, 0/0 is NaN — the masked x87/SSE hardware results.
+        for (ty, left_bits, right_bits, expected) in [
+            (
+                IrType::Float64,
+                (1.5f64).to_bits(),
+                (0.0f64).to_bits(),
+                f64::INFINITY.to_bits(),
+            ),
+            (
+                IrType::Float64,
+                (2.25f64).to_bits(),
+                (-0.0f64).to_bits(),
+                f64::NEG_INFINITY.to_bits(),
+            ),
+            (
+                IrType::Float32,
+                u64::from((-1.0f32).to_bits()),
+                u64::from((0.0f32).to_bits()),
+                u64::from(f32::NEG_INFINITY.to_bits()),
+            ),
+            (
+                IrType::Float64,
+                (0.0f64).to_bits(),
+                (0.0f64).to_bits(),
+                f64::NAN.to_bits(),
+            ),
+        ] {
+            let mut evaluator = SymbolicEvaluator::new(&arena);
+            evaluator.eval_block(&block(vec![
+                IrInstruction {
+                    result: Some(IrValueId(0)),
+                    op: const_op(ty, left_bits)?,
+                },
+                IrInstruction {
+                    result: Some(IrValueId(1)),
+                    op: const_op(ty, right_bits)?,
+                },
+                IrInstruction {
+                    result: Some(IrValueId(2)),
+                    op: IrOp::Primitive {
+                        op: IrPrimitive::FDiv,
+                        ty,
+                        inputs: vec![IrValueId(0), IrValueId(1)],
+                    },
+                },
+                write_sink(2),
+            ]))?;
+            let expression = evaluator
+                .register_value(SINK)
+                .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(2)))?;
+            let folded = constant_value(&arena, expression)
+                .map_err(|e| SymbolicEvalError::UnsupportedOperation(format!("fdiv did not fold: {e:?}")))?;
+            let is_nan_case = f64::from_bits(expected).is_nan();
+            assert!(
+                if is_nan_case {
+                    f64::from_bits(folded).is_nan()
+                } else {
+                    folded == expected
+                },
+                "fdiv {left_bits:#x}/{right_bits:#x}: folded {folded:#x}, expected {expected:#x}"
+            );
+            assert_eq!(evaluator.debt_total(), 0, "exact fold must not record debt");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn fcompare_flags_concrete_operands_mirror_rflags_layout() -> Result<(), SymbolicEvalError> {
         let arena = arena();
         // (left, right, expected flags) — CF=0/PF=2/ZF=6, NaN unordered

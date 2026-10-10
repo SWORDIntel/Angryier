@@ -904,6 +904,11 @@ fn evaluate_primitive<R, M>(
             if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
                 return Err(ConcreteExecutionError::UnsupportedType(ty));
             }
+            if width_bits > 128 {
+                // Lane math runs through u128; providers chunk wider ops into
+                // 128-bit pieces. Error rather than truncate the operands.
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
             let lanes = width_bits / lane_bits;
             let left = as_u128(resolved[0]);
             let right = as_u128(resolved[1]);
@@ -934,6 +939,9 @@ fn evaluate_primitive<R, M>(
                 _ => return Err(ConcreteExecutionError::UnsupportedType(ty)),
             };
             if lane_bits == 0 || width_bits == 0 || width_bits % lane_bits != 0 {
+                return Err(ConcreteExecutionError::UnsupportedType(ty));
+            }
+            if width_bits > 128 {
                 return Err(ConcreteExecutionError::UnsupportedType(ty));
             }
             let lanes = width_bits / lane_bits;
@@ -3778,5 +3786,207 @@ mod tests {
         // Verify by reconstructing the expected value
         let _ = expected; // expected is [11, 22, 33, 44] as 4x32-bit lanes
         Ok(())
+    }
+
+    // --- IEEE-754 masked float division (x87/SSE divide-by-zero) -----------
+    //
+    // x87 with masked ZE (the fninit state the engine models) and SSE/AVX
+    // divides produce +-Inf for x/+-0 and QNaN for 0/0; the concrete
+    // interpreter must yield those bit patterns, not reject the divide.
+
+    /// Runs a two-input primitive through the same `evaluate_primitive`
+    /// dispatch `execute_block` uses.
+    fn eval_primitive2(
+        op: IrPrimitive,
+        ty: IrType,
+        left: ConcreteValue,
+        right: ConcreteValue,
+    ) -> Result<ConcreteValue, TestError> {
+        evaluate_primitive::<RegisterError, MemoryError>(op, ty, &[IrValueId(0), IrValueId(1)], &[left, right])
+    }
+
+    fn f64_value(bits: u64) -> ConcreteValue {
+        ConcreteValue::from_bytes_le(IrType::Float64, &bits.to_le_bytes())
+    }
+
+    fn f32_value(bits: u32) -> ConcreteValue {
+        ConcreteValue::from_bytes_le(IrType::Float32, &bits.to_le_bytes())
+    }
+
+    #[test]
+    fn fdiv_f64_zero_denominator_yields_ieee754() -> Result<(), Box<dyn std::error::Error>> {
+        const POS_ZERO: u64 = 0x0000_0000_0000_0000;
+        const NEG_ZERO: u64 = 0x8000_0000_0000_0000;
+        const POS_INF: u64 = 0x7FF0_0000_0000_0000;
+        const NEG_INF: u64 = 0xFFF0_0000_0000_0000;
+        const F1_5: u64 = 0x3FF8_0000_0000_0000; // +1.5
+        const F2_25N: u64 = 0xC002_0000_0000_0000; // -2.25
+        const QNAN: u64 = 0x7FF8_0000_0000_0000;
+        const F0_5: u64 = 0x3FE0_0000_0000_0000; // +0.5
+        const F3: u64 = 0x4008_0000_0000_0000; // +3.0
+
+        // (left, right, expected); None expects any NaN payload.
+        let cases: [(u64, u64, Option<u64>); 13] = [
+            (F1_5, POS_ZERO, Some(POS_INF)),
+            (F1_5, NEG_ZERO, Some(NEG_INF)),
+            (F2_25N, POS_ZERO, Some(NEG_INF)),
+            (F2_25N, NEG_ZERO, Some(POS_INF)),
+            (POS_ZERO, POS_ZERO, None),
+            (NEG_ZERO, POS_ZERO, None),
+            (POS_ZERO, NEG_ZERO, None),
+            (NEG_ZERO, NEG_ZERO, None),
+            (POS_INF, POS_ZERO, Some(POS_INF)),
+            (POS_INF, NEG_ZERO, Some(NEG_INF)),
+            (NEG_INF, NEG_ZERO, Some(POS_INF)),
+            (QNAN, POS_ZERO, None),
+            (F1_5, F0_5, Some(F3)), // finite divisor still divides
+        ];
+        for (index, (left, right, expected)) in cases.iter().enumerate() {
+            let result = match eval_primitive2(IrPrimitive::FDiv, IrType::Float64, f64_value(*left), f64_value(*right))
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(format!("case {index}: {left:#x}/{right:#x} rejected: {error:?}").into());
+                }
+            };
+            let result_bits = u64::from_le_bytes(result.bytes_le().try_into()?);
+            match expected {
+                Some(bits) => assert_eq!(result_bits, *bits, "case {index}: {left:#x}/{right:#x}"),
+                None => assert!(
+                    f64::from_bits(result_bits).is_nan(),
+                    "case {index}: {left:#x}/{right:#x} should be NaN, got {result_bits:#x}"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fdiv_f32_zero_denominator_yields_ieee754() -> Result<(), Box<dyn std::error::Error>> {
+        const POS_INF: u32 = 0x7F80_0000;
+        const NEG_INF: u32 = 0xFF80_0000;
+        // Float32 divides compute in f64 and narrow through `as f32`; the
+        // Inf/NaN results must survive the narrowing.
+        let cases: [(u32, u32, Option<u32>); 9] = [
+            (0x3FC0_0000, 0x0000_0000, Some(POS_INF)),     // 1.5 / +0.0
+            (0x3FC0_0000, 0x8000_0000, Some(NEG_INF)),     // 1.5 / -0.0
+            (0xC020_0000, 0x0000_0000, Some(NEG_INF)),     // -2.5 / +0.0
+            (0xC020_0000, 0x8000_0000, Some(POS_INF)),     // -2.5 / -0.0
+            (0x0000_0000, 0x0000_0000, None),              // 0/0 -> NaN
+            (0x8000_0000, 0x8000_0000, None),              // -0/-0 -> NaN
+            (POS_INF, 0x8000_0000, Some(NEG_INF)),         // +Inf / -0.0 -> -Inf
+            (0x7FC0_0000, 0x0000_0000, None),              // NaN numerator stays NaN
+            (0x40C0_0000, 0x4000_0000, Some(0x4040_0000)), // 6.0/2.0 = 3.0
+        ];
+        for (index, (left, right, expected)) in cases.iter().enumerate() {
+            let result = match eval_primitive2(IrPrimitive::FDiv, IrType::Float32, f32_value(*left), f32_value(*right))
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(format!("case {index}: {left:#x}/{right:#x} rejected: {error:?}").into());
+                }
+            };
+            let result_bits = u32::from_le_bytes(result.bytes_le().try_into()?);
+            match expected {
+                Some(bits) => assert_eq!(result_bits, *bits, "case {index}: {left:#x}/{right:#x}"),
+                None => assert!(
+                    f32::from_bits(result_bits).is_nan(),
+                    "case {index}: {left:#x}/{right:#x} should be NaN, got {result_bits:#x}"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn vec_lane_fdiv_zero_denominator_lanes_yield_ieee754() -> Result<(), Box<dyn std::error::Error>> {
+        // 4xf32 lanes: [1.0, -1.0, +0.0, 2.5] / [+0.0, -0.0, +0.0, 5.0]
+        //            -> [+Inf, +Inf, NaN, 0.5]
+        let ty32 = IrType::Vector {
+            width_bits: 128,
+            lane_bits: 32,
+        };
+        let left32: u128 = 0x3F80_0000u128 | (0xBF80_0000u128 << 32) | (0x4020_0000u128 << 96);
+        let right32: u128 = 0x8000_0000u128 << 32 | (0x40A0_0000u128 << 96);
+        let result = eval_primitive2(
+            IrPrimitive::VecLaneFDiv,
+            ty32,
+            ConcreteValue::from_bytes_le(ty32, &left32.to_le_bytes()),
+            ConcreteValue::from_bytes_le(ty32, &right32.to_le_bytes()),
+        )?;
+        let bytes = result.bytes_le();
+        assert_eq!(bytes.len(), 16);
+        let lane = |i: usize| u32::from_le_bytes([bytes[i * 4], bytes[i * 4 + 1], bytes[i * 4 + 2], bytes[i * 4 + 3]]);
+        assert_eq!(lane(0), 0x7F80_0000, "1.0 / +0.0");
+        assert_eq!(lane(1), 0x7F80_0000, "-1.0 / -0.0");
+        assert!(f32::from_bits(lane(2)).is_nan(), "0.0 / 0.0");
+        assert_eq!(lane(3), 0x3F00_0000, "2.5 / 5.0");
+
+        // 2xf64 lanes: [2.5, -3.5] / [+0.0, +0.0] -> [+Inf, -Inf]
+        let ty64 = IrType::Vector {
+            width_bits: 128,
+            lane_bits: 64,
+        };
+        let left64: u128 = 0x4004_0000_0000_0000u128 | (0xC00C_0000_0000_0000u128 << 64);
+        let right64: u128 = 0;
+        let result = eval_primitive2(
+            IrPrimitive::VecLaneFDiv,
+            ty64,
+            ConcreteValue::from_bytes_le(ty64, &left64.to_le_bytes()),
+            ConcreteValue::from_bytes_le(ty64, &right64.to_le_bytes()),
+        )?;
+        let bytes = result.bytes_le();
+        assert_eq!(bytes.len(), 16);
+        let lane = |i: usize| {
+            u64::from_le_bytes([
+                bytes[i * 8],
+                bytes[i * 8 + 1],
+                bytes[i * 8 + 2],
+                bytes[i * 8 + 3],
+                bytes[i * 8 + 4],
+                bytes[i * 8 + 5],
+                bytes[i * 8 + 6],
+                bytes[i * 8 + 7],
+            ])
+        };
+        assert_eq!(lane(0), 0x7FF0_0000_0000_0000, "2.5 / +0.0");
+        assert_eq!(lane(1), 0xFFF0_0000_0000_0000, "-3.5 / +0.0");
+        Ok(())
+    }
+
+    #[test]
+    fn sdiv_by_zero_still_fails() {
+        // Integer #DE semantics are unchanged: only the float paths yield
+        // IEEE-754 results on a zero denominator.
+        let left = ConcreteValue::from_u128(IrType::Bits(64), 10, 64);
+        let right = ConcreteValue::from_u128(IrType::Bits(64), 0, 64);
+        assert!(matches!(
+            eval_primitive2(IrPrimitive::SDiv, IrType::Bits(64), left, right),
+            Err(TestError::DivisionByZero)
+        ));
+    }
+
+    #[test]
+    fn vec_lane_float_ops_reject_vectors_wider_than_128_bits() {
+        // Lane evaluation goes through u128 and providers always chunk wider
+        // ops; a >128-bit IR vector must error cleanly, not panic.
+        let ty = IrType::Vector {
+            width_bits: 256,
+            lane_bits: 32,
+        };
+        let wide = ConcreteValue::from_bytes_le(ty, &[0u8; 32]);
+        assert!(matches!(
+            eval_primitive2(IrPrimitive::VecLaneFDiv, ty, wide.clone(), wide.clone()),
+            Err(TestError::UnsupportedType(t)) if t == ty
+        ));
+        assert!(matches!(
+            evaluate_primitive::<RegisterError, MemoryError>(
+                IrPrimitive::VecLaneFSqrt,
+                ty,
+                &[IrValueId(0)],
+                &[wide],
+            ),
+            Err(TestError::UnsupportedType(t)) if t == ty
+        ));
     }
 }

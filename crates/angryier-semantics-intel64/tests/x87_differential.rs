@@ -674,25 +674,27 @@ fn x87_semantics_match_hardware() -> Result<(), BoxError> {
         ("fdivrs", "fdivrs"),
         ("fdivrl", "fdivrl"),
     ] {
-        // m64 forms sweep the f64 seed pairs. The m32 forms run only on the
-        // genuine f32 seeds below: an f64 seed's low word is +0.0, and the
-        // interpreter rejects float division by zero (x87 would produce an
-        // infinity), so the m32 sweep would not be honest coverage.
+        // m64 forms sweep the f64 seed pairs. Every f64 seed's low word is
+        // +0.0, so an m32 operand seeded this way always reads +0.0 — which
+        // makes the divide forms a masked divide-by-zero probe: x87 masked
+        // semantics yield +-Inf (fdivs) / signed zero (fdivrs), and the
+        // concrete interpreter has produced those IEEE-754 results since
+        // 5ed3f30 rather than rejecting the divide. One b-seed suffices:
+        // the f32 read collapses every f64 seed to the same +0.0.
         let is_m32 = name.ends_with('s');
-        if !is_m32 {
-            for &a in &SEEDS_A {
-                for &b in &SEEDS_B {
-                    let full = format!(
-                        "{}{}    fninit\n    fldl 0x{:x}\n    {} 0x{:x}\n    fstpl {OUT0}\n    {}\n",
-                        seed64(0, a),
-                        seed64(16, b),
-                        SCRATCH,
-                        op,
-                        SCRATCH + 0x80,
-                        observe(0)
-                    );
-                    case(format!("{name}_{a:x}_{b:x}"), full, 0, &mut executed, &mut skipped)?;
-                }
+        let b_seeds: &[u64] = if is_m32 { &[F0_5] } else { &SEEDS_B };
+        for &a in &SEEDS_A {
+            for &b in b_seeds {
+                let full = format!(
+                    "{}{}    fninit\n    fldl 0x{:x}\n    {} 0x{:x}\n    fstpl {OUT0}\n    {}\n",
+                    seed64(0, a),
+                    seed64(16, b),
+                    SCRATCH,
+                    op,
+                    SCRATCH + 0x80,
+                    observe(0)
+                );
+                case(format!("{name}_{a:x}_{b:x}"), full, 0, &mut executed, &mut skipped)?;
             }
         }
         // Genuine f32 memory operands (exact widening into the 64-bit model).
@@ -708,6 +710,58 @@ fn x87_semantics_match_hardware() -> Result<(), BoxError> {
             );
             case(format!("{name}_f32_{bits:x}"), full, 0, &mut executed, &mut skipped)?;
         }
+    }
+
+    // Masked divide-by-zero end-to-end: fninit leaves ZE masked, so silicon
+    // produces +-Inf for x/+-0 and the QNaN real indefinite for 0/0; the
+    // engine must match byte-for-byte (pre-5ed3f30 the concrete interpreter
+    // rejected the divide outright).
+    for (name, a, denom32) in [
+        ("fdivs_pos_zero", F1_5, 0x0000_0000u32),
+        ("fdivs_neg_zero", F1_5, 0x8000_0000u32),
+        ("fdivs_neg_num", F2_25N, 0x0000_0000u32),
+        ("fdivrs_neg_num", F2_25N, 0x0000_0000u32), // +0.0 / -2.25 -> -0.0
+        ("fdivs_zero_over_zero", 0x0u64, 0x0000_0000u32),
+    ] {
+        let full = format!(
+            "{}{}    fninit\n    fldl 0x{:x}\n    fdiv{} 0x{:x}\n    fstpl {OUT0}\n    {}\n",
+            seed64(0, a),
+            seed32(16, denom32),
+            SCRATCH,
+            if name.starts_with("fdivr") { "rs" } else { "s" },
+            SCRATCH + 0x80,
+            observe(0)
+        );
+        case(
+            format!("{name}_{a:x}_{denom32:x}"),
+            full,
+            0,
+            &mut executed,
+            &mut skipped,
+        )?;
+    }
+    for (name, op, a, denom64) in [
+        ("fdivl_pos_zero", "fdivl", F2_5, 0x0u64),
+        ("fdivl_neg_zero", "fdivl", F2_5, 0x8000_0000_0000_0000u64),
+        ("fdivrl_neg_num", "fdivrl", F2_25N, 0x0u64), // +0.0 / -2.25 -> -0.0
+        ("fdivl_zero_over_zero", "fdivl", 0x0u64, 0x0u64),
+    ] {
+        let full = format!(
+            "{}{}    fninit\n    fldl 0x{:x}\n    {} 0x{:x}\n    fstpl {OUT0}\n    {}\n",
+            seed64(0, a),
+            seed64(16, denom64),
+            SCRATCH,
+            op,
+            SCRATCH + 0x80,
+            observe(0)
+        );
+        case(
+            format!("{name}_{a:x}_{denom64:x}"),
+            full,
+            0,
+            &mut executed,
+            &mut skipped,
+        )?;
     }
 
     // FCOMI family: ZF/PF/CF compared on the defined bits; the stack stores

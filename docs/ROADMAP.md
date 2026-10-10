@@ -322,6 +322,17 @@ default-feature workspace suite green again.
   `Ult/Ule/Slt/Sle`, and `RotL`/`RotR` work end-to-end (arena, symbolic +
   concolic evaluation, Z3, Bitwuzla, fuzzy tier). Remaining: concrete
   division by zero rejects where x87 masked semantics yield ±Inf.
+  **CLOSED 2026-09-27 (5ed3f30), regression-pinned 2026-10-10:** scalar
+  `FDiv`, `VecLaneFDiv`, and both concolic exact-float folds return
+  IEEE-754 ±Inf/NaN; integer `UDiv`/`SDiv` still reject (correct #DE
+  shape). Residual sub-gaps, now scoped precisely: the masked x87 model
+  leaves the `X87_SW` exception flags at 0 (hardware sets ZE+ES on a
+  masked divide-by-zero), the `X87_CW` ZE mask bit is stored but never
+  consulted so the unmasked → #DE path is unmodeled, and the `VecLane*`
+  lane loops assume ≤128-bit vectors (providers always chunk wider ops;
+  the float lane arms now error `UnsupportedType` past 128 bits instead
+  of truncating, the integer lane arms retain the old unchecked shape —
+  no producer emits such IR today).
 - Memory is sparse-map backed, not OS-page-table COW; the 10k-live-state
   footprint and depth-500 solver-migration numbers are unmeasured.
 - Concolic fast-path speedup (5–10× target) unmeasured on long traces.
