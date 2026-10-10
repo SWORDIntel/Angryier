@@ -1285,6 +1285,14 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_VADDPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VADDPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VADDPD_YMM_YMM_MEM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VADDPD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VADDPD_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VADDPD_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VADDPD_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VADDPD_ZMM_ZMM_ZMM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VADDPD_ZMM_ZMM_MEM),
             _ => None,
@@ -1292,6 +1300,14 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_VSUBPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VSUBPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VSUBPD_YMM_YMM_MEM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VSUBPD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VSUBPD_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VSUBPD_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VSUBPD_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VSUBPD_ZMM_ZMM_ZMM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VSUBPD_ZMM_ZMM_MEM),
             _ => None,
@@ -1299,6 +1315,14 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_VMULPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VMULPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VMULPD_YMM_YMM_MEM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VMULPD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMULPD_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VMULPD_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VMULPD_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VMULPD_ZMM_ZMM_ZMM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VMULPD_ZMM_ZMM_MEM),
             _ => None,
@@ -1306,6 +1330,14 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
         iclass::XED_ICLASS_VDIVPD => match shapes {
             [Shape::Ymm, Shape::Ymm, Shape::Ymm] => Some(forms::VDIVPD_YMM_YMM_YMM),
             [Shape::Ymm, Shape::Ymm, Shape::Mem] => Some(forms::VDIVPD_YMM_YMM_MEM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Xmm] => Some(evex_forms::VDIVPD_EVEX_XMM_XMM_XMM),
+            [Shape::Xmm, Shape::Reg64, Shape::Xmm, Shape::Mem128] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VDIVPD_EVEX_XMM_XMM_MEM128)
+            }
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Ymm] => Some(evex_forms::VDIVPD_EVEX_YMM_YMM_YMM),
+            [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if evex_memory_is_unmasked(decoded) => {
+                Some(evex_forms::VDIVPD_EVEX_YMM_YMM_MEM)
+            }
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VDIVPD_ZMM_ZMM_ZMM),
             [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] => Some(forms::VDIVPD_ZMM_ZMM_MEM),
             _ => None,
@@ -4442,6 +4474,80 @@ mod tests {
             assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0xA9, opcode, 0x00])?, None);
             // {1to8} embedded broadcast: unmapped for the same reason.
             assert_eq!(mapped(&[0x62, 0xF1, 0x74, 0x38, opcode, 0x00])?, None);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn maps_evex128_256_packed_double_arithmetic_forms() -> Result<(), Box<dyn std::error::Error>> {
+        let decoder = XedDecoder::new();
+        for (opcode, xmm_reg, xmm_mem, ymm_reg, ymm_mem) in [
+            (
+                0x58u8,
+                evex_forms::VADDPD_EVEX_XMM_XMM_XMM,
+                evex_forms::VADDPD_EVEX_XMM_XMM_MEM128,
+                evex_forms::VADDPD_EVEX_YMM_YMM_YMM,
+                evex_forms::VADDPD_EVEX_YMM_YMM_MEM,
+            ),
+            (
+                0x5Cu8,
+                evex_forms::VSUBPD_EVEX_XMM_XMM_XMM,
+                evex_forms::VSUBPD_EVEX_XMM_XMM_MEM128,
+                evex_forms::VSUBPD_EVEX_YMM_YMM_YMM,
+                evex_forms::VSUBPD_EVEX_YMM_YMM_MEM,
+            ),
+            (
+                0x59u8,
+                evex_forms::VMULPD_EVEX_XMM_XMM_XMM,
+                evex_forms::VMULPD_EVEX_XMM_XMM_MEM128,
+                evex_forms::VMULPD_EVEX_YMM_YMM_YMM,
+                evex_forms::VMULPD_EVEX_YMM_YMM_MEM,
+            ),
+            (
+                0x5Eu8,
+                evex_forms::VDIVPD_EVEX_XMM_XMM_XMM,
+                evex_forms::VDIVPD_EVEX_XMM_XMM_MEM128,
+                evex_forms::VDIVPD_EVEX_YMM_YMM_YMM,
+                evex_forms::VDIVPD_EVEX_YMM_YMM_MEM,
+            ),
+        ] {
+            let (decoded, iform) = decoder.decode_with_iform(0x401000, &[0x62, 0xF1, 0xF5, 0x08, opcode, 0xC2])?;
+            assert!(
+                iform.name.ends_with("XMMf64_MASKmskw_XMMf64_XMMf64_AVX512"),
+                "{iform:?}"
+            );
+            assert_eq!(map_form(&decoded), Some(xmm_reg));
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x09, opcode, 0xC2])?, Some(xmm_reg));
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x89, opcode, 0xC2])?, Some(xmm_reg));
+
+            let (decoded, iform) = decoder.decode_with_iform(0x401000, &[0x62, 0xF1, 0xF5, 0x08, opcode, 0x00])?;
+            assert!(
+                iform.name.ends_with("XMMf64_MASKmskw_XMMf64_MEMf64_AVX512"),
+                "{iform:?}"
+            );
+            assert_eq!(map_form(&decoded), Some(xmm_mem));
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x09, opcode, 0x00])?, None);
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x89, opcode, 0x00])?, None);
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x18, opcode, 0x00])?, None);
+
+            let (decoded, iform) = decoder.decode_with_iform(0x401000, &[0x62, 0xF1, 0xF5, 0x28, opcode, 0xC2])?;
+            assert!(
+                iform.name.ends_with("YMMf64_MASKmskw_YMMf64_YMMf64_AVX512"),
+                "{iform:?}"
+            );
+            assert_eq!(map_form(&decoded), Some(ymm_reg));
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x29, opcode, 0xC2])?, Some(ymm_reg));
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0xA9, opcode, 0xC2])?, Some(ymm_reg));
+
+            let (decoded, iform) = decoder.decode_with_iform(0x401000, &[0x62, 0xF1, 0xF5, 0x28, opcode, 0x00])?;
+            assert!(
+                iform.name.ends_with("YMMf64_MASKmskw_YMMf64_MEMf64_AVX512"),
+                "{iform:?}"
+            );
+            assert_eq!(map_form(&decoded), Some(ymm_mem));
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x29, opcode, 0x00])?, None);
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0xA9, opcode, 0x00])?, None);
+            assert_eq!(mapped(&[0x62, 0xF1, 0xF5, 0x38, opcode, 0x00])?, None);
         }
         Ok(())
     }

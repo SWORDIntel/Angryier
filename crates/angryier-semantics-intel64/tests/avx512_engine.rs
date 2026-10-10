@@ -652,21 +652,21 @@ fn test_evex_zeroing_masking() -> Result<(), BoxError> {
 #[test]
 fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
     let providers = avx512::providers();
-    assert_eq!(providers.len(), 124, "expected 124 AVX-512/VNNI providers");
+    assert_eq!(providers.len(), 140, "expected 140 AVX-512/VNNI providers");
 
     let mut rule_ids = BTreeSet::new();
     for provider in &providers {
         let rid = provider.rule_id();
         assert!(
-            rid.0 >= 0x2600 && rid.0 <= 0x2680,
-            "rule id {:#x} outside assigned band 0x2600..0x2680",
+            rid.0 >= 0x2600 && rid.0 <= 0x268F,
+            "rule id {:#x} outside assigned band 0x2600..0x268F",
             rid.0
         );
         let inserted = rule_ids.insert(rid.0);
         assert!(inserted, "duplicate rule id {:#x}", rid.0);
     }
 
-    assert_eq!(rule_ids.len(), 124, "all 124 rule IDs must be unique");
+    assert_eq!(rule_ids.len(), 140, "all 140 rule IDs must be unique");
 
     // All form constants in forms module
     let all_forms = [
@@ -794,6 +794,22 @@ fn test_registry_and_rule_id_conformance() -> Result<(), BoxError> {
         avx512::forms::VMULPS_EVEX_YMM_YMM_MEM,
         avx512::forms::VDIVPS_EVEX_YMM_YMM_YMM,
         avx512::forms::VDIVPS_EVEX_YMM_YMM_MEM,
+        avx512::forms::VADDPD_EVEX_XMM_XMM_XMM,
+        avx512::forms::VADDPD_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VSUBPD_EVEX_XMM_XMM_XMM,
+        avx512::forms::VSUBPD_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VMULPD_EVEX_XMM_XMM_XMM,
+        avx512::forms::VMULPD_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VDIVPD_EVEX_XMM_XMM_XMM,
+        avx512::forms::VDIVPD_EVEX_XMM_XMM_MEM128,
+        avx512::forms::VADDPD_EVEX_YMM_YMM_YMM,
+        avx512::forms::VADDPD_EVEX_YMM_YMM_MEM,
+        avx512::forms::VSUBPD_EVEX_YMM_YMM_YMM,
+        avx512::forms::VSUBPD_EVEX_YMM_YMM_MEM,
+        avx512::forms::VMULPD_EVEX_YMM_YMM_YMM,
+        avx512::forms::VMULPD_EVEX_YMM_YMM_MEM,
+        avx512::forms::VDIVPD_EVEX_YMM_YMM_YMM,
+        avx512::forms::VDIVPD_EVEX_YMM_YMM_MEM,
     ];
 
     let mut form_set = BTreeSet::new();
@@ -2276,5 +2292,148 @@ fn test_evex256_packed_single_arithmetic() -> Result<(), BoxError> {
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn test_evex_packed_double_bounded_differential_against_rust_oracle() -> Result<(), BoxError> {
+    let mut old = [0u8; 64];
+    let mut left = [0u8; 64];
+    let mut right = [0u8; 64];
+    for lane in 0..8 {
+        old[lane * 8..(lane + 1) * 8].copy_from_slice(&(100.0 + lane as f64).to_le_bytes());
+        left[lane * 8..(lane + 1) * 8].copy_from_slice(&((lane as f64 + 1.0) * 6.0).to_le_bytes());
+        right[lane * 8..(lane + 1) * 8].copy_from_slice(&((lane as f64 + 1.0) * 2.0).to_le_bytes());
+    }
+
+    // Bounded engine-vs-Rust differential: each lane's independently computed
+    // host f64 result is the oracle, while mask and upper-lane state are also
+    // checked. This is intentionally not a native-hardware claim.
+    let cases: [(u8, &dyn SemanticProvider, fn(f64, f64) -> f64); 4] = [
+        (0x58, &avx512::VaddpdEvexXmmXmmXmm, |a, b| a + b),
+        (0x5C, &avx512::VsubpdEvexXmmXmmXmm, |a, b| a - b),
+        (0x59, &avx512::VmulpdEvexXmmXmmXmm, |a, b| a * b),
+        (0x5E, &avx512::VdivpdEvexXmmXmmXmm, |a, b| a / b),
+    ];
+
+    // EVEX.128: merge mask k2=0b10; exactly one 64-bit lane is selected.
+    // Every lane above VL=128 must be cleared even where the writemask is off.
+    for (opcode, provider, operation) in cases {
+        let state = run_engine_full(FullEngineCase {
+            code: &[0x62, 0xF1, 0xF5, 0x0A, opcode, 0xC2],
+            provider,
+            zmm0: Some(&old),
+            zmm1: Some(&left),
+            zmm2: Some(&right),
+            k1: None,
+            k2: Some(0b10),
+            k3: None,
+            mem_data: None,
+        })?;
+        let lanes = read_f64_lanes(&read_zmm_bytes(&state, ZMM0)?)?;
+        assert_eq!(lanes[0], 100.0, "EVEX.128 merge keeps masked-off lane");
+        assert_eq!(lanes[1], operation(12.0, 4.0), "EVEX.128 active lane");
+        assert!(
+            lanes[2..].iter().all(|lane| *lane == 0.0),
+            "EVEX.128 upper ZMM lanes must be zero"
+        );
+    }
+
+    let cases: [(u8, &dyn SemanticProvider, fn(f64, f64) -> f64); 4] = [
+        (0x58, &avx512::VaddpdEvexYmmYmmYmm, |a, b| a + b),
+        (0x5C, &avx512::VsubpdEvexYmmYmmYmm, |a, b| a - b),
+        (0x59, &avx512::VmulpdEvexYmmYmmYmm, |a, b| a * b),
+        (0x5E, &avx512::VdivpdEvexYmmYmmYmm, |a, b| a / b),
+    ];
+
+    // EVEX.256: zero mask k2=0b0101 checks lane-width handling and zeroing.
+    for (opcode, provider, operation) in cases {
+        let state = run_engine_full(FullEngineCase {
+            code: &[0x62, 0xF1, 0xF5, 0xAA, opcode, 0xC2],
+            provider,
+            zmm0: Some(&old),
+            zmm1: Some(&left),
+            zmm2: Some(&right),
+            k1: None,
+            k2: Some(0b0101),
+            k3: None,
+            mem_data: None,
+        })?;
+        let lanes = read_f64_lanes(&read_zmm_bytes(&state, ZMM0)?)?;
+        for lane in 0..4 {
+            if lane == 0 || lane == 2 {
+                assert_eq!(
+                    lanes[lane],
+                    operation((lane as f64 + 1.0) * 6.0, (lane as f64 + 1.0) * 2.0)
+                );
+            } else {
+                assert_eq!(lanes[lane], 0.0, "EVEX.256 masked-off zero lane {lane}");
+            }
+        }
+        assert!(
+            lanes[4..].iter().all(|lane| *lane == 0.0),
+            "EVEX.256 upper ZMM lanes must be zero"
+        );
+    }
+
+    let xmm_memory_cases: [(u8, &dyn SemanticProvider, fn(f64, f64) -> f64); 4] = [
+        (0x58, &avx512::VaddpdEvexXmmXmmMem128, |a, b| a + b),
+        (0x5C, &avx512::VsubpdEvexXmmXmmMem128, |a, b| a - b),
+        (0x59, &avx512::VmulpdEvexXmmXmmMem128, |a, b| a * b),
+        (0x5E, &avx512::VdivpdEvexXmmXmmMem128, |a, b| a / b),
+    ];
+    for (opcode, provider, operation) in xmm_memory_cases {
+        let state = run_engine_full(FullEngineCase {
+            code: &[0x62, 0xF1, 0xF5, 0x08, opcode, 0x00],
+            provider,
+            zmm0: Some(&old),
+            zmm1: Some(&left),
+            zmm2: None,
+            k1: None,
+            k2: None,
+            k3: None,
+            mem_data: Some(&right),
+        })?;
+        let lanes = read_f64_lanes(&read_zmm_bytes(&state, ZMM0)?)?;
+        for lane in 0..2 {
+            let a = (lane as f64 + 1.0) * 6.0;
+            let b = (lane as f64 + 1.0) * 2.0;
+            assert_eq!(lanes[lane], operation(a, b), "EVEX.128 k0 memory lane {lane}");
+        }
+        assert!(
+            lanes[2..].iter().all(|lane| *lane == 0.0),
+            "EVEX.128 memory upper ZMM lanes must be zero"
+        );
+    }
+
+    let ymm_memory_cases: [(u8, &dyn SemanticProvider, fn(f64, f64) -> f64); 4] = [
+        (0x58, &avx512::VaddpdEvexYmmYmmMem, |a, b| a + b),
+        (0x5C, &avx512::VsubpdEvexYmmYmmMem, |a, b| a - b),
+        (0x59, &avx512::VmulpdEvexYmmYmmMem, |a, b| a * b),
+        (0x5E, &avx512::VdivpdEvexYmmYmmMem, |a, b| a / b),
+    ];
+    for (opcode, provider, operation) in ymm_memory_cases {
+        let state = run_engine_full(FullEngineCase {
+            code: &[0x62, 0xF1, 0xF5, 0x28, opcode, 0x00],
+            provider,
+            zmm0: Some(&old),
+            zmm1: Some(&left),
+            zmm2: None,
+            k1: None,
+            k2: None,
+            k3: None,
+            mem_data: Some(&right),
+        })?;
+        let lanes = read_f64_lanes(&read_zmm_bytes(&state, ZMM0)?)?;
+        for lane in 0..4 {
+            let a = (lane as f64 + 1.0) * 6.0;
+            let b = (lane as f64 + 1.0) * 2.0;
+            assert_eq!(lanes[lane], operation(a, b), "EVEX.256 k0 memory lane {lane}");
+        }
+        assert!(
+            lanes[4..].iter().all(|lane| *lane == 0.0),
+            "EVEX.256 memory upper ZMM lanes must be zero"
+        );
+    }
     Ok(())
 }
