@@ -293,6 +293,26 @@ fn map_evex_integer_add_sub(decoded: &DecodedInstruction, shapes: &[Shape]) -> O
             avx10_forms::VPSUBQ_YMM_YMM_YMM,
             avx10_forms::VPSUBQ_ZMM_ZMM_ZMM,
         ],
+        iclass::XED_ICLASS_VPMINSD => [
+            avx10_forms::VPMINSD_XMM_XMM_XMM,
+            avx10_forms::VPMINSD_YMM_YMM_YMM,
+            avx10_forms::VPMINSD_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPMINUD => [
+            avx10_forms::VPMINUD_XMM_XMM_XMM,
+            avx10_forms::VPMINUD_YMM_YMM_YMM,
+            avx10_forms::VPMINUD_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPMAXSD => [
+            avx10_forms::VPMAXSD_XMM_XMM_XMM,
+            avx10_forms::VPMAXSD_YMM_YMM_YMM,
+            avx10_forms::VPMAXSD_ZMM_ZMM_ZMM,
+        ],
+        iclass::XED_ICLASS_VPMAXUD => [
+            avx10_forms::VPMAXUD_XMM_XMM_XMM,
+            avx10_forms::VPMAXUD_YMM_YMM_YMM,
+            avx10_forms::VPMAXUD_ZMM_ZMM_ZMM,
+        ],
         _ => return None,
     };
     match width {
@@ -4863,6 +4883,73 @@ mod tests {
         assert_eq!(mapped(&[0xC5, 0xF5, 0xDB, 0xC2])?, Some(forms::VPAND_YMM_YMM_YMM));
         assert_eq!(mapped(&[0xC5, 0xF5, 0xEB, 0xC2])?, Some(forms::VPOR_YMM_YMM_YMM));
         assert_eq!(mapped(&[0xC5, 0xF5, 0xEF, 0xC2])?, Some(forms::VPXOR_YMM_YMM_YMM));
+        Ok(())
+    }
+
+    #[test]
+    fn maps_evex_signed_and_unsigned_dword_minmax_forms_by_width() -> Result<(), Box<dyn std::error::Error>> {
+        // XED IFORM names and bytes pin the four source instruction families;
+        // EVEX.L'L selects the provider width, while register-only shapes keep
+        // memory and broadcast forms out of this exact mapping.
+        let cases = [
+            (
+                "VPMINSD",
+                0x39,
+                [
+                    avx10_forms::VPMINSD_XMM_XMM_XMM,
+                    avx10_forms::VPMINSD_YMM_YMM_YMM,
+                    avx10_forms::VPMINSD_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPMINUD",
+                0x3B,
+                [
+                    avx10_forms::VPMINUD_XMM_XMM_XMM,
+                    avx10_forms::VPMINUD_YMM_YMM_YMM,
+                    avx10_forms::VPMINUD_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPMAXSD",
+                0x3D,
+                [
+                    avx10_forms::VPMAXSD_XMM_XMM_XMM,
+                    avx10_forms::VPMAXSD_YMM_YMM_YMM,
+                    avx10_forms::VPMAXSD_ZMM_ZMM_ZMM,
+                ],
+            ),
+            (
+                "VPMAXUD",
+                0x3F,
+                [
+                    avx10_forms::VPMAXUD_XMM_XMM_XMM,
+                    avx10_forms::VPMAXUD_YMM_YMM_YMM,
+                    avx10_forms::VPMAXUD_ZMM_ZMM_ZMM,
+                ],
+            ),
+        ];
+        let decoder = XedDecoder::new();
+        for (mnemonic, opcode, expected) in cases {
+            for (p2, expected_form) in [(0x08, expected[0]), (0x28, expected[1]), (0x48, expected[2])] {
+                let bytes = [0x62, 0xF2, 0x7D, p2, opcode, 0xC2];
+                let (decoded, iform) = decoder
+                    .decode_with_iform(0x401000, &bytes)
+                    .unwrap_or_else(|error| panic!("{mnemonic} p2={p2:#04x}: {error}"));
+                assert!(
+                    iform.name.starts_with(&format!("XED_IFORM_{mnemonic}_")),
+                    "{}",
+                    iform.name
+                );
+                assert_eq!(map_form(&decoded), Some(expected_form), "{}", iform.name);
+            }
+        }
+
+        // The same opcode under VEX remains on its established AVX2 provider.
+        assert_eq!(
+            mapped(&[0xC4, 0xE2, 0x75, 0x39, 0xC2])?,
+            Some(forms::VPMINSD_YMM_YMM_YMM)
+        );
         Ok(())
     }
 }
