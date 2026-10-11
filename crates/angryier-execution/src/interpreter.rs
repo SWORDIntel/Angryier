@@ -3391,6 +3391,64 @@ mod tests {
     }
 
     #[test]
+    fn vector_mask_after_load_cannot_suppress_inaccessible_lanes() -> Result<(), Box<dyn std::error::Error>> {
+        let initial = state()?;
+        let vector = IrType::Vector {
+            width_bits: 512,
+            lane_bits: 32,
+        };
+        for operation in [IrPrimitive::VecMaskMerge, IrPrimitive::VecMaskZero] {
+            for (address, mask, should_fault) in [
+                (0x3fc0_u64, 1_u64, false), // every byte is accessible
+                (0x3ffc_u64, 0_u64, true),  // all lanes are masked off
+                (0x3ffc_u64, 1_u64, true),  // only active lane 0 is accessible
+                (0x3ffc_u64, 2_u64, true),  // active lane 1 is inaccessible
+            ] {
+                let candidate = block(
+                    &initial.memory,
+                    vec![
+                        constant(0, address),
+                        IrInstruction {
+                            result: Some(IrValueId(1)),
+                            op: IrOp::Constant {
+                                ty: vector,
+                                bytes_le: vec![0; 64],
+                            },
+                        },
+                        constant(2, mask),
+                        IrInstruction {
+                            result: Some(IrValueId(3)),
+                            op: IrOp::Load {
+                                address: IrValueId(0),
+                                ty: vector,
+                            },
+                        },
+                        IrInstruction {
+                            result: Some(IrValueId(4)),
+                            op: IrOp::Primitive {
+                                op: operation,
+                                ty: vector,
+                                inputs: vec![IrValueId(1), IrValueId(3), IrValueId(2)],
+                            },
+                        },
+                        IrInstruction {
+                            result: None,
+                            op: IrOp::Return,
+                        },
+                    ],
+                )?;
+                let result = interpreter().execute_block(&initial, &candidate, ExecutionMode::Concrete);
+                if should_fault {
+                    assert!(matches!(result, Err(TestError::Memory(_))));
+                } else {
+                    assert!(result.is_ok());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn division_by_zero_fails_without_publishing_state() -> Result<(), Box<dyn std::error::Error>> {
         let initial = state()?;
         let candidate = block(
