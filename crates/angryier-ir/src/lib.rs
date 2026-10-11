@@ -192,6 +192,15 @@ pub enum IrOp {
         address: IrValueId,
         ty: IrType,
     },
+    /// Future lane-fault-suppressing load. Mask bit 0 selects the lowest lane;
+    /// higher bits beyond the vector lane count are ignored. Inactive lanes
+    /// produce zero bytes. No producer currently
+    /// emits this op, and executors reject it until lane-safe reads exist.
+    PredicatedVectorLoad {
+        address: IrValueId,
+        mask: IrValueId,
+        ty: IrType,
+    },
     Store {
         address: IrValueId,
         value: IrValueId,

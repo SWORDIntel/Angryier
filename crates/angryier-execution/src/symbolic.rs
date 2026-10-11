@@ -697,6 +697,11 @@ impl<'a> SymbolicEvaluator<'a> {
                     }
                     Some((expr, *ty))
                 }
+                IrOp::PredicatedVectorLoad { .. } => {
+                    return Err(SymbolicEvalError::UnsupportedOperation(
+                        "predicated vector load requires lane-safe execution".into(),
+                    ));
+                }
                 IrOp::Store { address, value } => {
                     let (addr_expr, _) = get_value(&values, *address)?;
                     let addr = self.resolve_address(addr_expr)?;
@@ -2175,6 +2180,11 @@ impl<'a> ConcolicEvaluator<'a> {
                     let (expression, concrete) = self.load(image, address, concrete_address, *ty)?;
                     Some((expression, concrete, *ty))
                 }
+                IrOp::PredicatedVectorLoad { .. } => {
+                    return Err(SymbolicEvalError::UnsupportedOperation(
+                        "predicated vector load requires lane-safe execution".into(),
+                    ));
+                }
                 IrOp::Store { address, value } => {
                     let (address, concrete_address, _) = get_value_c(&values, *address)?;
                     let (value, _, ty) = get_value_c(&values, *value)?;
@@ -2380,6 +2390,7 @@ impl<'a> ConcolicEvaluator<'a> {
                     }
                     Some((concrete, *ty))
                 }
+                IrOp::PredicatedVectorLoad { .. } => return None,
                 IrOp::Store { address, value } => {
                     let (address, _) = concrete_value(&values, *address)?;
                     let base = u64::try_from(address).ok()?;
@@ -3650,6 +3661,45 @@ mod tests {
     }
 
     #[test]
+    fn predicated_load_stage_is_explicitly_unsupported() {
+        let arena = arena();
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        let candidate = block(vec![
+            IrInstruction {
+                result: Some(IrValueId(0)),
+                op: IrOp::Constant {
+                    ty: bits(64),
+                    bytes_le: 0x3ffcu64.to_le_bytes().to_vec(),
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(1)),
+                op: IrOp::Constant {
+                    ty: bits(64),
+                    bytes_le: 0u64.to_le_bytes().to_vec(),
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(2)),
+                op: IrOp::PredicatedVectorLoad {
+                    address: IrValueId(0),
+                    mask: IrValueId(1),
+                    ty: IrType::Vector {
+                        width_bits: 512,
+                        lane_bits: 32,
+                    },
+                },
+            },
+        ]);
+        assert_eq!(
+            evaluator.eval_block(&candidate),
+            Err(SymbolicEvalError::UnsupportedOperation(
+                "predicated vector load requires lane-safe execution".into()
+            )),
+        );
+    }
+
+    #[test]
     fn unsupported_primitives_are_refused_explicitly() {
         let arena = arena();
         let mut evaluator = SymbolicEvaluator::new(&arena);
@@ -4292,6 +4342,34 @@ mod tests {
             }
             Some(out)
         }
+    }
+
+    #[test]
+    fn concolic_predicated_load_stage_rejects_without_image_read() {
+        let arena = arena();
+        let mut evaluator = ConcolicEvaluator::new(&arena);
+        let image = VecImage {
+            regs: BTreeMap::new(),
+            mem: BTreeMap::new(),
+        };
+        let candidate = block(vec![
+            with_result(0, const_bytes(bits(64), 0x3ffcu64.to_le_bytes().to_vec())),
+            with_result(1, const_bytes(bits(64), 0u64.to_le_bytes().to_vec())),
+            IrInstruction {
+                result: Some(IrValueId(2)),
+                op: IrOp::PredicatedVectorLoad {
+                    address: IrValueId(0),
+                    mask: IrValueId(1),
+                    ty: vec_ty(512, 32),
+                },
+            },
+        ]);
+        assert_eq!(
+            evaluator.eval_block(&image, &candidate),
+            Err(SymbolicEvalError::UnsupportedOperation(
+                "predicated vector load requires lane-safe execution".into()
+            )),
+        );
     }
 
     #[test]

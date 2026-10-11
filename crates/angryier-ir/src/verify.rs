@@ -11,6 +11,7 @@ pub enum IrVerificationError {
     UndefinedValue(IrValueId),
     InvalidType(IrType),
     InvalidConstantWidth,
+    InvalidPredicatedVectorLoad(&'static str),
     InstructionAfterTerminator,
 }
 
@@ -30,6 +31,7 @@ impl core::fmt::Display for IrVerificationError {
             Self::UndefinedValue(value) => write!(formatter, "IR references undefined value {}", value.0),
             Self::InvalidType(ty) => write!(formatter, "invalid IR type: {ty:?}"),
             Self::InvalidConstantWidth => formatter.write_str("IR constant byte width does not match its type"),
+            Self::InvalidPredicatedVectorLoad(reason) => write!(formatter, "invalid predicated vector load: {reason}"),
             Self::InstructionAfterTerminator => formatter.write_str("IR instruction appears after a terminator"),
         }
     }
@@ -100,6 +102,43 @@ fn verify_inputs(instruction: &IrInstruction, values: &[IrType]) -> Result<(), I
         IrOp::Primitive { inputs, .. } => inputs.iter().copied().try_for_each(&mut require),
         IrOp::WriteRegister { value, .. } => require(*value),
         IrOp::Load { address, .. } => require(*address),
+        IrOp::PredicatedVectorLoad { address, mask, ty } => {
+            require(*address)?;
+            require(*mask)?;
+            let IrType::Vector { width_bits, lane_bits } = ty else {
+                return Err(IrVerificationError::InvalidPredicatedVectorLoad(
+                    "result must be a vector",
+                ));
+            };
+            if !matches!(*width_bits, 128 | 256 | 512) || !matches!(*lane_bits, 32 | 64) || width_bits % lane_bits != 0
+            {
+                return Err(IrVerificationError::InvalidPredicatedVectorLoad(
+                    "unsupported vector or lane width",
+                ));
+            }
+            let address_type =
+                values[usize::try_from(address.0).map_err(|_| IrVerificationError::UndefinedValue(*address))?];
+            if address_type != IrType::Bits(64) {
+                return Err(IrVerificationError::InvalidPredicatedVectorLoad(
+                    "address must be 64-bit",
+                ));
+            }
+            let mask_type = values[usize::try_from(mask.0).map_err(|_| IrVerificationError::UndefinedValue(*mask))?];
+            let mask_width = match mask_type {
+                IrType::Bits(bits) | IrType::Opmask { width_bits: bits } => bits,
+                _ => {
+                    return Err(IrVerificationError::InvalidPredicatedVectorLoad(
+                        "mask must be bits or opmask",
+                    ));
+                }
+            };
+            if mask_width < width_bits / lane_bits || mask_width > 64 {
+                return Err(IrVerificationError::InvalidPredicatedVectorLoad(
+                    "mask width cannot address each lane",
+                ));
+            }
+            Ok(())
+        }
         IrOp::Store { address, value } => {
             require(*address)?;
             require(*value)
@@ -123,6 +162,7 @@ fn produced_type(op: &IrOp) -> Option<IrType> {
         | IrOp::Primitive { ty, .. }
         | IrOp::ReadRegister { ty, .. }
         | IrOp::Load { ty, .. } => Some(*ty),
+        IrOp::PredicatedVectorLoad { ty, .. } => Some(*ty),
         _ => None,
     }
 }
@@ -199,6 +239,156 @@ mod tests {
         assert_eq!(
             BasicIrVerifier.verify(&candidate),
             Err(IrVerificationError::UndefinedValue(IrValueId(0)))
+        );
+    }
+
+    fn predicated_load(address_ty: IrType, mask_ty: IrType, ty: IrType) -> IrBlock {
+        let address_bytes = vec![0; expected_bytes(address_ty).unwrap_or_default()];
+        let mask_bytes = vec![0; expected_bytes(mask_ty).unwrap_or_default()];
+        block(vec![
+            IrInstruction {
+                result: Some(IrValueId(0)),
+                op: IrOp::Constant {
+                    ty: address_ty,
+                    bytes_le: address_bytes,
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(1)),
+                op: IrOp::Constant {
+                    ty: mask_ty,
+                    bytes_le: mask_bytes,
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(2)),
+                op: IrOp::PredicatedVectorLoad {
+                    address: IrValueId(0),
+                    mask: IrValueId(1),
+                    ty,
+                },
+            },
+            IrInstruction {
+                result: None,
+                op: IrOp::Return,
+            },
+        ])
+    }
+
+    #[test]
+    fn predicated_load_verifies_bounded_lanes_and_mask_types() {
+        for (width_bits, lane_bits, mask_ty) in [
+            (128, 32, IrType::Bits(4)),
+            (256, 64, IrType::Opmask { width_bits: 4 }),
+            (512, 32, IrType::Bits(64)),
+            (512, 64, IrType::Bits(8)),
+        ] {
+            let candidate = predicated_load(IrType::Bits(64), mask_ty, IrType::Vector { width_bits, lane_bits });
+            assert_eq!(BasicIrVerifier.verify(&candidate), Ok(()));
+        }
+    }
+
+    #[test]
+    fn predicated_load_rejects_bad_widths_mask_and_address() {
+        for (address_ty, mask_ty, ty, reason) in [
+            (
+                IrType::Bits(64),
+                IrType::Bits(4),
+                IrType::Bits(128),
+                "result must be a vector",
+            ),
+            (
+                IrType::Bits(64),
+                IrType::Bits(4),
+                IrType::Vector {
+                    width_bits: 128,
+                    lane_bits: 0,
+                },
+                "unsupported vector or lane width",
+            ),
+            (
+                IrType::Bits(64),
+                IrType::Bits(4),
+                IrType::Vector {
+                    width_bits: 128,
+                    lane_bits: 16,
+                },
+                "unsupported vector or lane width",
+            ),
+            (
+                IrType::Bits(64),
+                IrType::Bits(4),
+                IrType::Vector {
+                    width_bits: 192,
+                    lane_bits: 32,
+                },
+                "unsupported vector or lane width",
+            ),
+            (
+                IrType::Bits(32),
+                IrType::Bits(4),
+                IrType::Vector {
+                    width_bits: 128,
+                    lane_bits: 32,
+                },
+                "address must be 64-bit",
+            ),
+            (
+                IrType::Bits(64),
+                IrType::Vector {
+                    width_bits: 128,
+                    lane_bits: 32,
+                },
+                IrType::Vector {
+                    width_bits: 128,
+                    lane_bits: 32,
+                },
+                "mask must be bits or opmask",
+            ),
+            (
+                IrType::Bits(64),
+                IrType::Bits(3),
+                IrType::Vector {
+                    width_bits: 128,
+                    lane_bits: 32,
+                },
+                "mask width cannot address each lane",
+            ),
+            (
+                IrType::Bits(64),
+                IrType::Bits(65),
+                IrType::Vector {
+                    width_bits: 128,
+                    lane_bits: 32,
+                },
+                "mask width cannot address each lane",
+            ),
+        ] {
+            let candidate = predicated_load(address_ty, mask_ty, ty);
+            assert_eq!(
+                BasicIrVerifier.verify(&candidate),
+                Err(IrVerificationError::InvalidPredicatedVectorLoad(reason))
+            );
+        }
+        let mut undefined = predicated_load(
+            IrType::Bits(64),
+            IrType::Bits(4),
+            IrType::Vector {
+                width_bits: 128,
+                lane_bits: 32,
+            },
+        );
+        undefined.instructions[2].op = IrOp::PredicatedVectorLoad {
+            address: IrValueId(0),
+            mask: IrValueId(3),
+            ty: IrType::Vector {
+                width_bits: 128,
+                lane_bits: 32,
+            },
+        };
+        assert_eq!(
+            BasicIrVerifier.verify(&undefined),
+            Err(IrVerificationError::UndefinedValue(IrValueId(3)))
         );
     }
 
