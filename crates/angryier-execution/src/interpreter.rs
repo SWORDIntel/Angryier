@@ -383,7 +383,54 @@ where
             };
             Some(val)
         }
-        IrOp::PredicatedVectorLoad { .. } => return Err(ConcreteExecutionError::UnsupportedPredicatedVectorLoad),
+        IrOp::PredicatedVectorLoad { address, mask, ty } => {
+            let base = value_address(get_value(values, *address)?)?;
+            let mask_value = get_value(values, *mask)?;
+            let mask_bytes = mask_value.bytes_le();
+            if mask_bytes.len() > 8 {
+                return Err(ConcreteExecutionError::TypeMismatch);
+            }
+            let mut encoded_mask = [0_u8; 8];
+            encoded_mask[..mask_bytes.len()].copy_from_slice(mask_bytes);
+            let active = u64::from_le_bytes(encoded_mask);
+            let IrType::Vector { width_bits, lane_bits } = ty else {
+                return Err(ConcreteExecutionError::UnsupportedType(*ty));
+            };
+            let lane_bytes = usize::from(*lane_bits / 8);
+            let lane_count = usize::from(*width_bits / *lane_bits);
+            let mut result = [0_u8; 64];
+            for lane in 0..lane_count {
+                if active & (1_u64 << lane) == 0 {
+                    continue;
+                }
+                let offset = lane * lane_bytes;
+                let lane_address = base
+                    .checked_add(u64::try_from(offset).map_err(|_| ConcreteExecutionError::InvalidAddress)?)
+                    .ok_or(ConcreteExecutionError::InvalidAddress)?;
+                let mut buffer = [ByteValue::Concrete(0); 8];
+                state
+                    .memory
+                    .read_into(lane_address, &mut buffer[..lane_bytes])
+                    .map_err(ConcreteExecutionError::Memory)?;
+                for (byte_offset, byte) in buffer[..lane_bytes].iter().enumerate() {
+                    result[offset + byte_offset] = match byte {
+                        ByteValue::Concrete(value) => *value,
+                        ByteValue::Symbolic(_) => {
+                            let address = lane_address
+                                .checked_add(
+                                    u64::try_from(byte_offset).map_err(|_| ConcreteExecutionError::InvalidAddress)?,
+                                )
+                                .ok_or(ConcreteExecutionError::InvalidAddress)?;
+                            return Err(ConcreteExecutionError::SymbolicMemory(address));
+                        }
+                    };
+                }
+            }
+            Some(ConcreteValue::from_bytes_le(
+                *ty,
+                &result[..usize::from(*width_bits / 8)],
+            ))
+        }
         IrOp::Store { address, value } => {
             let address = value_address(get_value(values, *address)?)?;
             let value = get_value(values, *value)?;
@@ -3453,21 +3500,163 @@ mod tests {
         Ok(())
     }
 
+    fn predicated_load_block(
+        memory: &PersistentMemory,
+        address: u64,
+        mask: u64,
+        ty: IrType,
+        predicated: bool,
+    ) -> Result<IrBlock, MemoryError> {
+        block(
+            memory,
+            vec![
+                constant(0, address),
+                constant(1, mask),
+                IrInstruction {
+                    result: Some(IrValueId(2)),
+                    op: if predicated {
+                        IrOp::PredicatedVectorLoad {
+                            address: IrValueId(0),
+                            mask: IrValueId(1),
+                            ty,
+                        }
+                    } else {
+                        IrOp::Load {
+                            address: IrValueId(0),
+                            ty,
+                        }
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::WriteRegister {
+                        register: 1,
+                        value: IrValueId(2),
+                        kind: RegisterWriteKind::ReplaceParent,
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Return,
+                },
+            ],
+        )
+    }
+
     #[test]
-    fn predicated_load_stage_rejects_before_touching_memory() -> Result<(), Box<dyn std::error::Error>> {
+    fn predicated_load_reads_only_active_lanes_and_matches_full_load() -> Result<(), Box<dyn std::error::Error>> {
+        for width_bits in [128, 256, 512] {
+            for lane_bits in [32, 64] {
+                let ty = IrType::Vector { width_bits, lane_bits };
+                let width_bytes = usize::from(width_bits / 8);
+                let lane_bytes = usize::from(lane_bits / 8);
+                let lanes = width_bytes / lane_bytes;
+                let payload: Vec<_> = (0..width_bytes)
+                    .map(|byte| ByteValue::Concrete(byte as u8 + 1))
+                    .collect();
+                let mut initial = state()?;
+                initial.registers = PersistentRegisters::from_widths([(1, width_bytes)])?;
+                initial = initial.write_memory(0x3f00, &payload)?;
+
+                let all_on = (1_u64 << lanes) - 1;
+                let full = predicated_load_block(&initial.memory, 0x3f00, all_on, ty, false)?;
+                let predicated = predicated_load_block(&initial.memory, 0x3f00, u64::MAX, ty, true)?;
+                let (full_state, _) = interpreter().execute_block(&initial, &full, ExecutionMode::Concrete)?;
+                let (predicated_state, _) =
+                    interpreter().execute_block(&initial, &predicated, ExecutionMode::Concrete)?;
+                assert_eq!(predicated_state.registers.read(1)?, full_state.registers.read(1)?);
+                assert_eq!(
+                    predicated_state.memory.read(0x3f00, width_bytes)?,
+                    full_state.memory.read(0x3f00, width_bytes)?
+                );
+
+                let alternating = (0..lanes)
+                    .filter(|lane| lane % 2 == 0)
+                    .fold(0_u64, |mask, lane| mask | (1 << lane));
+                let partial = predicated_load_block(&initial.memory, 0x3f00, alternating, ty, true)?;
+                let (partial_state, _) = interpreter().execute_block(&initial, &partial, ExecutionMode::Concrete)?;
+                let actual = partial_state.registers.read(1)?;
+                for lane in 0..lanes {
+                    let expected: Vec<u8> = if lane % 2 == 0 {
+                        payload[lane * lane_bytes..(lane + 1) * lane_bytes]
+                            .iter()
+                            .map(|byte| match byte {
+                                ByteValue::Concrete(value) => *value,
+                                _ => unreachable!(),
+                            })
+                            .collect()
+                    } else {
+                        vec![0; lane_bytes]
+                    };
+                    assert_eq!(&actual[lane * lane_bytes..(lane + 1) * lane_bytes], expected);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn predicated_load_suppresses_inactive_faults_and_keeps_input_on_active_fault()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for width_bits in [128, 256, 512] {
+            for lane_bits in [32, 64] {
+                let ty = IrType::Vector { width_bits, lane_bits };
+                let lane_bytes = usize::from(lane_bits / 8);
+                let address = 0x4000 - lane_bytes as u64;
+                let mut initial = state()?;
+                initial.registers = PersistentRegisters::from_widths([(1, usize::from(width_bits / 8))])?;
+                initial = initial.write_memory(address, &vec![ByteValue::Concrete(0xa5); lane_bytes])?;
+
+                for mask in [0, 1] {
+                    let candidate = predicated_load_block(&initial.memory, address, mask, ty, true)?;
+                    let (executed, _) = interpreter().execute_block(&initial, &candidate, ExecutionMode::Concrete)?;
+                    let bytes = executed.registers.read(1)?;
+                    assert_eq!(
+                        &bytes[..lane_bytes],
+                        &vec![if mask == 0 { 0 } else { 0xa5 }; lane_bytes]
+                    );
+                    assert!(bytes[lane_bytes..].iter().all(|byte| *byte == 0));
+                }
+
+                let candidate = predicated_load_block(&initial.memory, address, 2, ty, true)?;
+                assert!(matches!(
+                    interpreter().execute_block(&initial, &candidate, ExecutionMode::Concrete),
+                    Err(TestError::Memory(_)),
+                ));
+                assert_eq!(initial.registers.read(1)?, vec![0; usize::from(width_bits / 8)]);
+                assert_eq!(
+                    initial.memory.read(address, lane_bytes)?,
+                    vec![ByteValue::Concrete(0xa5); lane_bytes]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn active_lane_fault_does_not_publish_earlier_register_write() -> Result<(), Box<dyn std::error::Error>> {
         let initial = state()?;
         let candidate = block(
             &initial.memory,
             vec![
-                constant(0, 0x3ffc),
-                constant(1, 0),
+                constant(0, 0xfeed),
                 IrInstruction {
-                    result: Some(IrValueId(2)),
+                    result: None,
+                    op: IrOp::WriteRegister {
+                        register: 1,
+                        value: IrValueId(0),
+                        kind: RegisterWriteKind::ReplaceParent,
+                    },
+                },
+                constant(1, 0x3ffc),
+                constant(2, 2),
+                IrInstruction {
+                    result: Some(IrValueId(3)),
                     op: IrOp::PredicatedVectorLoad {
-                        address: IrValueId(0),
-                        mask: IrValueId(1),
+                        address: IrValueId(1),
+                        mask: IrValueId(2),
                         ty: IrType::Vector {
-                            width_bits: 512,
+                            width_bits: 128,
                             lane_bits: 32,
                         },
                     },
@@ -3480,9 +3669,9 @@ mod tests {
         )?;
         assert!(matches!(
             interpreter().execute_block(&initial, &candidate, ExecutionMode::Concrete),
-            Err(TestError::UnsupportedPredicatedVectorLoad),
+            Err(TestError::Memory(_)),
         ));
-        assert_eq!(initial.memory.read(0x3ffc, 4)?, vec![ByteValue::Concrete(0); 4]);
+        assert_eq!(initial.registers.read(1)?, vec![0; 8]);
         Ok(())
     }
 
