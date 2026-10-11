@@ -31,6 +31,7 @@ pub enum ConcreteExecutionError<RegisterError, MemoryError> {
     },
     UnsupportedType(IrType),
     UnsupportedOperation(IrPrimitive),
+    UnsupportedPredicatedVectorLoad,
     UnsupportedRegisterWrite(u32),
     SymbolicExpression,
     SymbolicMemory(Address),
@@ -69,6 +70,9 @@ impl<R: core::fmt::Display, M: core::fmt::Display> core::fmt::Display for Concre
             Self::UnsupportedType(ty) => write!(formatter, "unsupported concrete IR type: {ty:?}"),
             Self::UnsupportedOperation(operation) => {
                 write!(formatter, "unsupported concrete IR operation: {operation:?}")
+            }
+            Self::UnsupportedPredicatedVectorLoad => {
+                formatter.write_str("predicated vector load requires lane-safe execution")
             }
             Self::SymbolicExpression => formatter.write_str("symbolic expression reached the concrete interpreter"),
             Self::SymbolicMemory(address) => {
@@ -379,6 +383,7 @@ where
             };
             Some(val)
         }
+        IrOp::PredicatedVectorLoad { .. } => return Err(ConcreteExecutionError::UnsupportedPredicatedVectorLoad),
         IrOp::Store { address, value } => {
             let address = value_address(get_value(values, *address)?)?;
             let value = get_value(values, *value)?;
@@ -3445,6 +3450,39 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn predicated_load_stage_rejects_before_touching_memory() -> Result<(), Box<dyn std::error::Error>> {
+        let initial = state()?;
+        let candidate = block(
+            &initial.memory,
+            vec![
+                constant(0, 0x3ffc),
+                constant(1, 0),
+                IrInstruction {
+                    result: Some(IrValueId(2)),
+                    op: IrOp::PredicatedVectorLoad {
+                        address: IrValueId(0),
+                        mask: IrValueId(1),
+                        ty: IrType::Vector {
+                            width_bits: 512,
+                            lane_bits: 32,
+                        },
+                    },
+                },
+                IrInstruction {
+                    result: None,
+                    op: IrOp::Return,
+                },
+            ],
+        )?;
+        assert!(matches!(
+            interpreter().execute_block(&initial, &candidate, ExecutionMode::Concrete),
+            Err(TestError::UnsupportedPredicatedVectorLoad),
+        ));
+        assert_eq!(initial.memory.read(0x3ffc, 4)?, vec![ByteValue::Concrete(0); 4]);
         Ok(())
     }
 
