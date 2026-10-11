@@ -718,6 +718,11 @@ memory and embedded-broadcast instances remain unmapped because the current
 executor cannot guarantee lane-level memory fault suppression or broadcast
 semantics. See `docs/status/xed-packed-f32-vex-evex-gap.md` for the packed-
 single boundary; the packed-double slice follows the same memory constraints.
+The runtime form mapper now enforces this as a central fail-closed EVEX
+predicate-plus-visible-memory guard. A regression fixture shows that the
+current IR performs a full-width load before mask merge/zero and faults on
+inaccessible masked-off lanes; true support needs predicated load semantics in
+both concrete and symbolic execution before any guarded forms are remapped.
 **EVEX.128/256 packed MIN/MAX slice landed 2026-10-10**: VMINPS, VMAXPS,
 VMINPD, and VMAXPD now have 16 distinct XMM/YMM forms and providers using the
 existing AVX `VectorOp::FMin/FMax` semantics. Exact XED IFORM names are pinned
