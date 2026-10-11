@@ -697,10 +697,38 @@ impl<'a> SymbolicEvaluator<'a> {
                     }
                     Some((expr, *ty))
                 }
-                IrOp::PredicatedVectorLoad { .. } => {
-                    return Err(SymbolicEvalError::UnsupportedOperation(
-                        "predicated vector load requires lane-safe execution".into(),
-                    ));
+                IrOp::PredicatedVectorLoad { address, mask, ty } => {
+                    let (mask_expr, _) = get_value(&values, *mask)?;
+                    let active = constant_value(self.arena, mask_expr).map_err(|_| {
+                        SymbolicEvalError::UnsupportedOperation("predicated vector load with symbolic mask".into())
+                    })?;
+                    let (width_bits, lane_bits) = predicated_vector_shape(*ty)?;
+                    let lane_count = width_bits / lane_bits;
+                    let base = if active & ((1_u64 << lane_count) - 1) == 0 {
+                        None
+                    } else {
+                        let (addr_expr, _) = get_value(&values, *address)?;
+                        Some(self.resolve_address(addr_expr)?)
+                    };
+                    let mut lanes = Vec::with_capacity(usize::from(lane_count));
+                    for lane in 0..lane_count {
+                        let value = if active & (1_u64 << lane) == 0 {
+                            zero_lane(self.arena, lane_bits)?
+                        } else {
+                            let offset = u64::from(lane) * u64::from(lane_bits / 8);
+                            let at = base
+                                .ok_or_else(|| {
+                                    SymbolicEvalError::UnsupportedOperation("missing active-lane base".into())
+                                })?
+                                .checked_add(offset)
+                                .ok_or_else(|| {
+                                    SymbolicEvalError::UnsupportedOperation("predicated load address overflow".into())
+                                })?;
+                            memory.read(self.arena, at, lane_bits)?
+                        };
+                        lanes.push(value);
+                    }
+                    Some((concat_lanes(self.arena, &lanes, lane_bits)?, *ty))
                 }
                 IrOp::Store { address, value } => {
                     let (addr_expr, _) = get_value(&values, *address)?;
@@ -958,6 +986,54 @@ fn intern(
     arena
         .intern(node)
         .map_err(|error| SymbolicEvalError::Expression(format!("{error:?} while interning {op:?} node")))
+}
+
+fn predicated_vector_shape(ty: IrType) -> Result<(u16, u16), SymbolicEvalError> {
+    match ty {
+        IrType::Vector { width_bits, lane_bits }
+            if matches!(width_bits, 128 | 256 | 512) && matches!(lane_bits, 32 | 64) && width_bits % lane_bits == 0 =>
+        {
+            Ok((width_bits, lane_bits))
+        }
+        _ => Err(SymbolicEvalError::UnsupportedType(format!(
+            "predicated vector load {ty:?}"
+        ))),
+    }
+}
+
+fn zero_lane(arena: &SymbolicArena, lane_bits: u16) -> Result<ExprId, SymbolicEvalError> {
+    intern(
+        arena,
+        ExprSort::BitVec(lane_bits),
+        ExprOp::Constant,
+        Vec::new(),
+        vec![0; usize::from(lane_bits / 8)],
+    )
+}
+
+fn concat_lanes(
+    arena: &SymbolicArena,
+    lanes_low_first: &[ExprId],
+    lane_bits: u16,
+) -> Result<ExprId, SymbolicEvalError> {
+    let Some((&first, rest)) = lanes_low_first.split_first() else {
+        return Err(SymbolicEvalError::UnsupportedOperation(
+            "empty predicated vector".into(),
+        ));
+    };
+    let mut value = first;
+    let mut width = lane_bits;
+    for &high in rest {
+        width += lane_bits;
+        value = intern(
+            arena,
+            ExprSort::BitVec(width),
+            ExprOp::Concat,
+            vec![high, value],
+            Vec::new(),
+        )?;
+    }
+    Ok(value)
 }
 
 /// Converts a 1-bit bitvector expression into a boolean expression.
@@ -2180,10 +2256,62 @@ impl<'a> ConcolicEvaluator<'a> {
                     let (expression, concrete) = self.load(image, address, concrete_address, *ty)?;
                     Some((expression, concrete, *ty))
                 }
-                IrOp::PredicatedVectorLoad { .. } => {
-                    return Err(SymbolicEvalError::UnsupportedOperation(
-                        "predicated vector load requires lane-safe execution".into(),
-                    ));
+                IrOp::PredicatedVectorLoad { address, mask, ty } => {
+                    let (mask_expr, _, _) = get_value_c(&values, *mask)?;
+                    let active = constant_value(self.arena, mask_expr).map_err(|_| {
+                        SymbolicEvalError::UnsupportedOperation("predicated vector load with symbolic mask".into())
+                    })?;
+                    let (width_bits, lane_bits) = predicated_vector_shape(*ty)?;
+                    let lane_count = width_bits / lane_bits;
+                    let base = if active & ((1_u64 << lane_count) - 1) == 0 {
+                        None
+                    } else {
+                        let (addr_expr, concrete, _) = get_value_c(&values, *address)?;
+                        Some(
+                            concrete
+                                .and_then(|value| u64::try_from(value).ok())
+                                .or_else(|| constant_value(self.arena, addr_expr).ok())
+                                .ok_or_else(|| {
+                                    SymbolicEvalError::UnsupportedOperation(
+                                        "predicated vector load with symbolic address".into(),
+                                    )
+                                })?,
+                        )
+                    };
+                    let mut lanes = Vec::with_capacity(usize::from(lane_count));
+                    let mut concrete_value = Some(0_u128);
+                    for lane in 0..lane_count {
+                        let (value, concrete) = if active & (1_u64 << lane) == 0 {
+                            (zero_lane(self.arena, lane_bits)?, Some(0))
+                        } else {
+                            let offset = u64::from(lane) * u64::from(lane_bits / 8);
+                            let at = base
+                                .ok_or_else(|| {
+                                    SymbolicEvalError::UnsupportedOperation("missing active-lane base".into())
+                                })?
+                                .checked_add(offset)
+                                .ok_or_else(|| {
+                                    SymbolicEvalError::UnsupportedOperation("predicated load address overflow".into())
+                                })?;
+                            let addr_expr = intern(
+                                self.arena,
+                                ExprSort::BitVec(64),
+                                ExprOp::Constant,
+                                Vec::new(),
+                                at.to_le_bytes().to_vec(),
+                            )?;
+                            self.load(image, addr_expr, Some(u128::from(at)), IrType::Bits(lane_bits))?
+                        };
+                        if width_bits <= 128 {
+                            concrete_value = concrete_value
+                                .zip(concrete)
+                                .map(|(old, part)| old | (part << (u32::from(lane) * u32::from(lane_bits))));
+                        } else {
+                            concrete_value = None;
+                        }
+                        lanes.push(value);
+                    }
+                    Some((concat_lanes(self.arena, &lanes, lane_bits)?, concrete_value, *ty))
                 }
                 IrOp::Store { address, value } => {
                     let (address, concrete_address, _) = get_value_c(&values, *address)?;
@@ -3661,7 +3789,7 @@ mod tests {
     }
 
     #[test]
-    fn predicated_load_stage_is_explicitly_unsupported() {
+    fn predicated_load_zero_mask_skips_unmapped_memory() {
         let arena = arena();
         let mut evaluator = SymbolicEvaluator::new(&arena);
         let candidate = block(vec![
@@ -3691,11 +3819,29 @@ mod tests {
                 },
             },
         ]);
+        assert!(evaluator.eval_block(&candidate).is_ok());
+        let mut active = candidate.clone();
+        active.instructions[1].op = IrOp::Constant {
+            ty: bits(64),
+            bytes_le: 1u64.to_le_bytes().to_vec(),
+        };
+        assert!(matches!(
+            evaluator.eval_block(&active),
+            Err(SymbolicEvalError::UnsupportedOperation(_))
+        ));
+
+        let mut symbolic_mask = candidate;
+        symbolic_mask.instructions[1].op = IrOp::ReadRegister {
+            register: 7,
+            ty: bits(64),
+        };
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        assert!(evaluator.mark_register(7, bits(64)).is_ok());
         assert_eq!(
-            evaluator.eval_block(&candidate),
+            evaluator.eval_block(&symbolic_mask),
             Err(SymbolicEvalError::UnsupportedOperation(
-                "predicated vector load requires lane-safe execution".into()
-            )),
+                "predicated vector load with symbolic mask".into()
+            ))
         );
     }
 
@@ -4344,8 +4490,97 @@ mod tests {
         }
     }
 
+    fn constant_vector_bytes(arena: &ShardedExprArena, expression: ExprId) -> Result<Vec<u8>, String> {
+        let node = arena.get(expression).ok_or("missing vector expression")?;
+        match node.op {
+            ExprOp::Constant => Ok(node.immediate),
+            ExprOp::Concat => {
+                let high = *node.operands.first().ok_or("missing high lane")?;
+                let low = *node.operands.get(1).ok_or("missing low lane")?;
+                let mut bytes = constant_vector_bytes(arena, low)?;
+                bytes.extend(constant_vector_bytes(arena, high)?);
+                Ok(bytes)
+            }
+            _ => Err(format!("non-constant vector node: {:?}", node.op)),
+        }
+    }
+
     #[test]
-    fn concolic_predicated_load_stage_rejects_without_image_read() {
+    fn predicated_symbolic_and_concolic_active_lane_bytes_match() -> Result<(), Box<dyn std::error::Error>> {
+        for width_bits in [128, 256, 512] {
+            for lane_bits in [32, 64] {
+                let lane_bytes = usize::from(lane_bits / 8);
+                let payload: Vec<u8> = (1..=lane_bytes as u8).collect();
+                let ty = vec_ty(width_bits, lane_bits);
+                let candidate = block(vec![
+                    with_result(
+                        0,
+                        const_bytes(bits(64), (0x4000u64 - lane_bytes as u64).to_le_bytes().to_vec()),
+                    ),
+                    with_result(1, const_bytes(bits(64), 1u64.to_le_bytes().to_vec())),
+                    with_result(
+                        2,
+                        IrInstruction {
+                            result: None,
+                            op: IrOp::PredicatedVectorLoad {
+                                address: IrValueId(0),
+                                mask: IrValueId(1),
+                                ty,
+                            },
+                        },
+                    ),
+                    IrInstruction {
+                        result: None,
+                        op: IrOp::WriteRegister {
+                            register: ZMM0,
+                            value: IrValueId(2),
+                            kind: RegisterWriteKind::ReplaceParent,
+                        },
+                    },
+                ]);
+                let expected: Vec<u8> = payload
+                    .iter()
+                    .copied()
+                    .chain(std::iter::repeat_n(0, usize::from(width_bits / 8) - lane_bytes))
+                    .collect();
+
+                let image = VecImage {
+                    regs: BTreeMap::new(),
+                    mem: payload
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &byte)| (0x4000 - lane_bytes as u64 + index as u64, byte))
+                        .collect(),
+                };
+                let concolic_arena = arena();
+                let mut concolic = ConcolicEvaluator::new(&concolic_arena);
+                concolic.eval_block(&image, &candidate)?;
+                let expression = concolic.register_value(ZMM0).ok_or("missing concolic register")?;
+                assert_eq!(constant_vector_bytes(&concolic_arena, expression)?, expected);
+
+                let inner = angryier_memory::PersistentMemory::new(vec![angryier_memory::MemoryRegion {
+                    object: angryier_types::ObjectId(1),
+                    base: 0x3000,
+                    size: 0x1000,
+                    readable: true,
+                    writable: true,
+                    executable: false,
+                }])?;
+                let mut memory = SymbolicSessionMemory::new(inner);
+                let bytes: Vec<_> = payload.iter().copied().map(ByteValue::Concrete).collect();
+                memory.write_bytes(0x4000 - lane_bytes as u64, &bytes)?;
+                let arena = arena();
+                let mut symbolic = SymbolicEvaluator::new(&arena);
+                symbolic.eval_block_with_memory(&candidate, &mut memory)?;
+                let expression = symbolic.register_value(ZMM0).ok_or("missing symbolic register")?;
+                assert_eq!(constant_vector_bytes(&arena, expression)?, expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn concolic_predicated_load_zero_mask_skips_unmapped_image() {
         let arena = arena();
         let mut evaluator = ConcolicEvaluator::new(&arena);
         let image = VecImage {
@@ -4364,12 +4599,16 @@ mod tests {
                 },
             },
         ]);
-        assert_eq!(
-            evaluator.eval_block(&image, &candidate),
-            Err(SymbolicEvalError::UnsupportedOperation(
-                "predicated vector load requires lane-safe execution".into()
-            )),
-        );
+        assert!(evaluator.eval_block(&image, &candidate).is_ok());
+        let mut active = candidate.clone();
+        active.instructions[1].op = IrOp::Constant {
+            ty: bits(64),
+            bytes_le: 1u64.to_le_bytes().to_vec(),
+        };
+        assert!(matches!(
+            evaluator.eval_block(&image, &active),
+            Err(SymbolicEvalError::UnsupportedOperation(_))
+        ));
     }
 
     #[test]

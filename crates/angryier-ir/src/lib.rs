@@ -194,8 +194,9 @@ pub enum IrOp {
     },
     /// Lane-fault-suppressing load. Mask bit 0 selects the lowest lane;
     /// higher bits beyond the vector lane count are ignored. Inactive lanes
-    /// produce zero bytes. No producer currently emits this op. The concrete
-    /// interpreter reads only active lanes; symbolic execution rejects it.
+    /// produce zero bytes. No producer currently emits this op. Concrete
+    /// execution reads only active lanes. Symbolic/concolic evaluation does
+    /// likewise for a provably constant mask; symbolic masks are rejected.
     PredicatedVectorLoad {
         address: IrValueId,
         mask: IrValueId,
