@@ -33,10 +33,11 @@ The compact IR now reserves a verifier-checked `PredicatedVectorLoad` contract
 for 128/256/512-bit vectors with 32/64-bit lanes, a 64-bit address, and a mask
 wide enough to select every lane. Its specified inactive-lane value is zero,
 with destination merge/zero behavior remaining a separate operation. This is
-only a staging boundary: no semantic provider emits the op, the concrete
-interpreter reads active lanes only, symbolic executors reject it, and the
-central k1-k7 masked-memory mapping guard stays in force. Enabling forms
-additionally needs lane-only reads in every executor and proof that masked
-arithmetic does not perform suppressed-lane effects.
+only a staging boundary: no semantic provider emits the op. The concrete
+interpreter reads active lanes only; symbolic and concolic evaluators do so
+when the mask is provably constant, and explicitly reject symbolic masks.
+The central k1-k7 masked-memory mapping guard stays in force. Enabling forms
+additionally needs safe symbolic-mask handling, provider/lowering integration,
+and proof that masked arithmetic does not perform suppressed-lane effects.
 
 The 8 embedded-broadcast instruction/shape combinations (`*PS_XMM...{1to4}`/`*PS_YMM...{1to8}` memory operands) stay unsupported until the IR lowering grows broadcast support; they reuse the regular EVEX memory IFORM names. The 8 regular EVEX.128/256 masked-memory instruction/shape combinations (k1-k7) also stay unmapped until masked lane loads suppress faults correctly. No EVEX.128/256 rounding-control (`{rn-sae}` etc.) IFORMs exist for these mnemonics — `b=1` decodings round up to the ZMM IFORMs, which are already covered.
