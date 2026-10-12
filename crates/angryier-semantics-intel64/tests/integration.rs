@@ -236,6 +236,9 @@ fn run_pipeline(
 const ZF_BIT: u64 = 1 << 6;
 const SF_BIT: u64 = 1 << 7;
 const CF_BIT: u64 = 1 << 0;
+const PF_BIT: u64 = 1 << 2;
+const AF_BIT: u64 = 1 << 4;
+const OF_BIT: u64 = 1 << 11;
 
 #[test]
 fn mov_r64_r64_executes() -> Result<(), Box<dyn std::error::Error>> {
@@ -421,11 +424,58 @@ fn cmp_r64_r64_does_not_write_register() -> Result<(), Box<dyn std::error::Error
         ],
     );
 
-    let (executed, _) = run_pipeline(&decoded, &initial)?;
+    let (executed, outcome) = run_pipeline(&decoded, &initial)?;
 
     assert_eq!(read_reg(&executed, RAX)?, 10, "RAX should be unchanged by CMP");
+    assert_eq!(read_reg(&executed, RCX)?, 10, "RCX should be unchanged by CMP");
     let rflags = read_reg(&executed, RFLAGS)?;
     assert_ne!(rflags & ZF_BIT, 0, "ZF should be set (10 - 10 == 0)");
+    assert_ne!(rflags & PF_BIT, 0, "PF should be set for zero result");
+    assert_eq!(rflags & (CF_BIT | AF_BIT | SF_BIT | OF_BIT), 0);
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::Continue {
+            state: StateId(7),
+            next_pc: BLOCK_ADDR + 3,
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn cmp_r64_r64_borrow_sets_subtraction_flags_without_register_writes() -> Result<(), Box<dyn std::error::Error>> {
+    let initial = with_reg(&with_reg(&with_reg(&make_state()?, RAX, 0)?, RCX, 1)?, RFLAGS, 0)?;
+
+    let decoded = make_decoded(
+        forms::CMP_R64_R64,
+        vec![
+            reg_operand(0, RAX, AccessKind::Read),
+            reg_operand(1, RCX, AccessKind::Read),
+        ],
+    );
+
+    let (executed, outcome) = run_pipeline(&decoded, &initial)?;
+
+    assert_eq!(read_reg(&executed, RAX)?, 0, "RAX should be unchanged by CMP");
+    assert_eq!(read_reg(&executed, RCX)?, 1, "RCX should be unchanged by CMP");
+    let rflags = read_reg(&executed, RFLAGS)?;
+    assert_ne!(rflags & CF_BIT, 0, "CF should report unsigned borrow");
+    assert_ne!(rflags & PF_BIT, 0, "all-ones result has even low-byte parity");
+    assert_ne!(rflags & AF_BIT, 0, "0 - 1 borrows from bit 4");
+    assert_eq!(rflags & ZF_BIT, 0, "result should be nonzero");
+    assert_ne!(rflags & SF_BIT, 0, "all-ones result is negative");
+    assert_eq!(
+        rflags & OF_BIT,
+        0,
+        "unsigned borrow does not imply signed overflow here"
+    );
+    assert_eq!(
+        outcome,
+        ExecutionOutcome::Continue {
+            state: StateId(7),
+            next_pc: BLOCK_ADDR + 3,
+        }
+    );
     Ok(())
 }
 
@@ -911,10 +961,11 @@ fn cmovz_r64_r64_moves_when_zf_set() -> Result<(), Box<dyn std::error::Error>> {
     let decoded = make_decoded(
         forms::CMOVZ_R64_R64,
         vec![
-            reg_operand(0, RAX, AccessKind::ReadWrite),
+            reg_operand(0, RAX, AccessKind::ConditionalWrite),
             reg_operand(1, RCX, AccessKind::Read),
         ],
     );
+    assert_eq!(decoded.operands[0].access, AccessKind::ConditionalWrite);
 
     let (executed, outcome) = run_pipeline(&decoded, &initial)?;
 
@@ -939,10 +990,11 @@ fn cmovz_r64_r64_keeps_dest_when_zf_clear() -> Result<(), Box<dyn std::error::Er
     let decoded = make_decoded(
         forms::CMOVZ_R64_R64,
         vec![
-            reg_operand(0, RAX, AccessKind::ReadWrite),
+            reg_operand(0, RAX, AccessKind::ConditionalWrite),
             reg_operand(1, RCX, AccessKind::Read),
         ],
     );
+    assert_eq!(decoded.operands[0].access, AccessKind::ConditionalWrite);
 
     let (executed, outcome) = run_pipeline(&decoded, &initial)?;
 
@@ -967,10 +1019,11 @@ fn cmovnz_r64_r64_moves_when_zf_clear() -> Result<(), Box<dyn std::error::Error>
     let decoded = make_decoded(
         forms::CMOVNZ_R64_R64,
         vec![
-            reg_operand(0, RAX, AccessKind::ReadWrite),
+            reg_operand(0, RAX, AccessKind::ConditionalWrite),
             reg_operand(1, RCX, AccessKind::Read),
         ],
     );
+    assert_eq!(decoded.operands[0].access, AccessKind::ConditionalWrite);
 
     let (executed, outcome) = run_pipeline(&decoded, &initial)?;
 
@@ -995,10 +1048,11 @@ fn cmovnz_r64_r64_keeps_dest_when_zf_set() -> Result<(), Box<dyn std::error::Err
     let decoded = make_decoded(
         forms::CMOVNZ_R64_R64,
         vec![
-            reg_operand(0, RAX, AccessKind::ReadWrite),
+            reg_operand(0, RAX, AccessKind::ConditionalWrite),
             reg_operand(1, RCX, AccessKind::Read),
         ],
     );
+    assert_eq!(decoded.operands[0].access, AccessKind::ConditionalWrite);
 
     let (executed, outcome) = run_pipeline(&decoded, &initial)?;
 

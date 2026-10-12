@@ -383,10 +383,14 @@ fn extract_pure_function(cfg: &angryier_cfg::Cfg, function: &angryier_cfg::Funct
             for operand in &insn.operands {
                 if let OperandKind::Register(view) = &operand.kind {
                     match operand.access {
-                        angryier_arch::AccessKind::Read | angryier_arch::AccessKind::ReadWrite => {
+                        angryier_arch::AccessKind::Read
+                        | angryier_arch::AccessKind::ReadWrite
+                        | angryier_arch::AccessKind::ConditionalRead
+                        | angryier_arch::AccessKind::ReadConditionalWrite
+                        | angryier_arch::AccessKind::ConditionalReadWrite => {
                             reads.insert(view.parent.0, ());
                         }
-                        angryier_arch::AccessKind::Write => {}
+                        angryier_arch::AccessKind::Write | angryier_arch::AccessKind::ConditionalWrite => {}
                     }
                     width = width.max(operand.width_bits);
                 }

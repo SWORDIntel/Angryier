@@ -418,6 +418,15 @@ mod tests {
         Ok(decoded)
     }
 
+    #[test]
+    fn cmovz_decoder_preserves_conditional_write_action() {
+        let decoder = XedDecoder::new();
+        let bytes = [0x48, 0x0f, 0x44, 0xc1]; // cmovz rax, rcx
+        let decoded = decoder.decode(0x4000, &bytes).expect("CMOVZ decodes");
+        assert_eq!(decoded.operands[0].access, AccessKind::ConditionalWrite);
+        assert_eq!(decoded.operands[1].access, AccessKind::Read);
+    }
+
     /// Extracts a register view from an operand, asserting it is a register.
     fn as_register(operand: &angryier_arch::Operand) -> &angryier_arch::RegisterView {
         assert!(

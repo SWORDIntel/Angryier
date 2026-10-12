@@ -337,7 +337,10 @@ fn trace_tbt_indirect_target() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut text_writes = Vec::new();
         for operand in &decoded.operands {
-            if !matches!(operand.access, AccessKind::Write | AccessKind::ReadWrite) {
+            if !matches!(
+                operand.access,
+                AccessKind::Write | AccessKind::ReadWrite | AccessKind::ConditionalWrite
+            ) {
                 continue;
             }
             let OperandKind::Memory(mem) = operand.kind else {

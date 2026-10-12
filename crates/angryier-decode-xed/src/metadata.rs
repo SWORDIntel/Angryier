@@ -31,6 +31,14 @@ pub enum XedAccess {
     Read,
     Write,
     ReadWrite,
+    /// XED's `CW` action: the operand is written conditionally.
+    ConditionalWrite,
+    /// XED's `CR` action: the operand is read conditionally.
+    ConditionalRead,
+    /// XED's `RCW` action: unconditional read, conditional write.
+    ReadConditionalWrite,
+    /// XED's `CRW` action: conditional read, unconditional write.
+    ConditionalReadWrite,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
