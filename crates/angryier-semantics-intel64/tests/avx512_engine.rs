@@ -245,6 +245,26 @@ fn masked_evex_packed_single_memory_emits_only_predicated_loads() -> Result<(), 
             &avx512::VaddpsEvexYmmYmmMem as &dyn SemanticProvider,
             256,
         ),
+        (
+            [0x62, 0xF1, 0x74, 0x49, 0x58, 0x00],
+            &avx512::VaddpsZmmZmmMem as &dyn SemanticProvider,
+            512,
+        ),
+        (
+            [0x62, 0xF1, 0x74, 0x49, 0x5C, 0x00],
+            &avx512::VsubpsZmmZmmMem as &dyn SemanticProvider,
+            512,
+        ),
+        (
+            [0x62, 0xF1, 0x74, 0x49, 0x59, 0x00],
+            &avx512::VmulpsZmmZmmMem as &dyn SemanticProvider,
+            512,
+        ),
+        (
+            [0x62, 0xF1, 0x74, 0x49, 0x5E, 0x00],
+            &avx512::VdivpsZmmZmmMem as &dyn SemanticProvider,
+            512,
+        ),
     ] {
         let decoded = decoder.decode(CODE_BASE, &code)?;
         let mut builder = SemanticBlockBuilder::new(SEMANTIC_VERSION);
@@ -290,6 +310,74 @@ fn masked_evex_packed_single_memory_emits_only_predicated_loads() -> Result<(), 
             .iter()
             .all(|value| !matches!(value.definition, SemanticValueDefinition::ReadPredicatedOperand { .. }))
     );
+    Ok(())
+}
+
+#[test]
+fn staged_zmm_masked_memory_reads_only_mapped_active_lane() -> Result<(), BoxError> {
+    // Only one dword is within the data region; the other 15 lanes lie beyond
+    // one edge or the other. A full-span load would fault. This exercises the
+    // provider directly, not runtime mapping.
+    let code = [0x62, 0xF1, 0x74, 0x49, 0x58, 0x00];
+    let decoded = XedDecoder::new().decode(CODE_BASE, &code)?;
+    let mut builder = SemanticBlockBuilder::new(SEMANTIC_VERSION);
+    avx512::VaddpsZmmZmmMem
+        .emit(&context(), &decoded, &mut builder)
+        .map_err(|error| format!("emit: {error:?}"))?;
+    let sealed = builder
+        .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+        .map_err(|error| format!("seal: {error:?}"))?;
+    let mut left = [0_u8; 64];
+    for lane in 0..16 {
+        left[lane * 4..lane * 4 + 4].copy_from_slice(&1.0_f32.to_le_bytes());
+    }
+    let state = create_state(&code, None)?;
+    let key = BlockValidityKey {
+        image: ImageId(1),
+        block: BlockId(1),
+        address: decoded.address,
+        semantic_version: SEMANTIC_VERSION,
+        target_profile: TARGET_PROFILE,
+        code_versions: state
+            .memory
+            .code_version_guards_for_range(decoded.address, usize::from(decoded.length))?,
+    };
+    let ir = BasicSemanticLowerer.lower_with_decode(&sealed, &key, &decoded)?;
+    assert!(ir.instructions.iter().any(|instruction| matches!(
+        instruction.op,
+        IrOp::PredicatedVectorLoad {
+            ty: IrType::Vector {
+                width_bits: 512,
+                lane_bits: 32
+            },
+            ..
+        }
+    )));
+    assert!(
+        !ir.instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, IrOp::Load { .. }))
+    );
+    for (base, active_lane, mapped_dword) in [
+        (DATA_BASE + 0x1000 - 4, 0_usize, DATA_BASE + 0x1000 - 4),
+        (DATA_BASE - 60, 15_usize, DATA_BASE),
+    ] {
+        let mut trial = state.clone();
+        trial.memory = trial
+            .memory
+            .write(mapped_dword, &4.0_f32.to_le_bytes().map(ByteValue::Concrete))?;
+        trial.registers.write_in_place(RAX, &base.to_le_bytes())?;
+        trial
+            .registers
+            .write_in_place(K1, &(1_u64 << active_lane).to_le_bytes())?;
+        trial.registers.write_in_place(ZMM1, &left)?;
+        let (final_state, outcome) = ConcreteInterpreter::new().execute_block(&trial, &ir, ExecutionMode::Concrete)?;
+        assert!(matches!(outcome, ExecutionOutcome::Continue { .. }));
+        let lanes = read_zmm_f32(&final_state, ZMM0)?;
+        for (lane, value) in lanes.iter().enumerate() {
+            assert_eq!(*value, if lane == active_lane { 5.0 } else { 0.0 }, "lane {lane}");
+        }
+    }
     Ok(())
 }
 
