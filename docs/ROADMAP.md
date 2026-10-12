@@ -714,15 +714,16 @@ verified end-to-end, `maps_avx512_scalar_and_opmask_forms`).
 VADDPS/VSUBPS/VMULPS/VDIVPS and VADDPD/VSUBPD/VMULPD/VDIVPD have dedicated
 register/memory providers at XMM/YMM widths, aligned registry entries, and
 engine-oracle coverage. Unmasked k0 memory maps and executes; k1-k7 masked
-memory and embedded-broadcast instances remain unmapped because the current
-executor cannot guarantee lane-level memory fault suppression or broadcast
-semantics. See `docs/status/xed-packed-f32-vex-evex-gap.md` for the packed-
+memory and embedded-broadcast instances remain unmapped. A staged packed-single
+provider/lowering path now emits lane-only `PredicatedVectorLoad` for masked
+memory, but symbolic masks and other providers are not yet supported;
+broadcast semantics also remain unsupported. See `docs/status/xed-packed-f32-vex-evex-gap.md` for the packed-
 single boundary; the packed-double slice follows the same memory constraints.
 The runtime form mapper now enforces this as a central fail-closed EVEX
 predicate-plus-visible-memory guard. A regression fixture shows that the
-current IR performs a full-width load before mask merge/zero and faults on
-inaccessible masked-off lanes; true support needs predicated load semantics in
-both concrete and symbolic execution before any guarded forms are remapped.
+previous IR performed a full-width load before mask merge/zero and faulted on
+inaccessible masked-off lanes; the central guard remains until masked-load
+semantics are safe in all execution modes and providers before forms are remapped.
 **EVEX.128/256 packed MIN/MAX slice landed 2026-10-10**: VMINPS, VMAXPS,
 VMINPD, and VMAXPD now have 16 distinct XMM/YMM forms and providers using the
 existing AVX `VectorOp::FMin/FMax` semantics. Exact XED IFORM names are pinned

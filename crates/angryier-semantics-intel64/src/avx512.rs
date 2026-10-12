@@ -413,6 +413,26 @@ fn evex_source_indices(insn: &dyn DecodedInstructionView) -> (u8, u8) {
     if insn.operand_count() >= 4 { (2, 3) } else { (1, 2) }
 }
 
+/// A masked EVEX memory source must enter the rich IR as a predicated read.
+/// Runtime form mapping still rejects k1..k7 memory forms; this producer is
+/// staged so later mapping cannot accidentally reintroduce eager reads.
+fn read_evex_vector_source(
+    insn: &dyn DecodedInstructionView,
+    out: &mut dyn SemanticBuilder,
+    index: u8,
+    ty: SemanticType,
+) -> Result<ValueId, SemanticError> {
+    let Some(operand) = insn.operand(index) else {
+        return Err(SemanticError::InvalidOperand);
+    };
+    if matches!(operand.kind, angryier_semantics::OperandKind::Memory(_)) && evex_opmask(insn).is_some_and(|k| k != 0) {
+        let mask = out.read_operand(1, U64)?;
+        out.read_predicated_operand(index, mask, ty)
+    } else {
+        out.read_operand(index, ty)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Packed single-precision float arithmetic (512-bit ZMM)
 // ---------------------------------------------------------------------------
@@ -763,7 +783,7 @@ macro_rules! packed_float_evex_xmm {
                 };
                 let (src1_idx, src2_idx) = evex_source_indices(insn);
                 let left = out.read_operand(src1_idx, F32X4)?;
-                let right = out.read_operand(src2_idx, F32X4)?;
+                let right = read_evex_vector_source(insn, out, src2_idx, F32X4)?;
                 let low = out.emit(
                     SemanticOp::Vector(VectorOp::LaneWiseFloat($op)),
                     F32X4,
@@ -866,7 +886,7 @@ macro_rules! packed_float_evex_ymm {
                 };
                 let (src1_idx, src2_idx) = evex_source_indices(insn);
                 let left = out.read_operand(src1_idx, F32X8)?;
-                let right = out.read_operand(src2_idx, F32X8)?;
+                let right = read_evex_vector_source(insn, out, src2_idx, F32X8)?;
                 let off0 = const_u64(out, 0)?;
                 let off128 = const_u64(out, 128)?;
                 // Lane-wise float ops evaluate in 128-bit lanes, so the two
