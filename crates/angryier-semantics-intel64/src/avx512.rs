@@ -460,7 +460,7 @@ macro_rules! packed_float_zmm {
             ) -> Result<SemanticReceipt, SemanticError> {
                 let (src1_idx, src2_idx) = evex_source_indices(insn);
                 let left = out.read_operand(src1_idx, F32X16)?;
-                let right = out.read_operand(src2_idx, F32X16)?;
+                let right = read_evex_vector_source(insn, out, src2_idx, F32X16)?;
                 let off0 = const_u64(out, 0)?;
                 let off128 = const_u64(out, 128)?;
                 let off256 = const_u64(out, 256)?;

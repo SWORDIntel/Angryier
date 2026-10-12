@@ -8,6 +8,7 @@ The remaining gaps are encoding-instance constraints, not additional IFORM names
 | --- | ---: | --- |
 | EVEX.128 masked memory (k1-k7) | 4 | Unmapped — packed-single provider/lowering stage lane-only reads, but symbolic masks remain unsupported |
 | EVEX.256 masked memory (k1-k7) | 4 | Unmapped — packed-single provider/lowering stage lane-only reads, but symbolic masks remain unsupported |
+| EVEX.512 masked memory (k1-k7) | 4 | Unmapped — packed-single provider/lowering stage lane-only reads, but symbolic masks remain unsupported |
 | EVEX.128 `{1to4}` | 4 | Unsupported — broadcast semantics not representable |
 | EVEX.256 `{1to8}` | 4 | Unsupported — broadcast semantics not representable |
 
@@ -36,11 +37,18 @@ with destination merge/zero behavior remaining a separate operation. The
 packed-single EVEX.128/.256 providers now emit a rich-semantic
 `ReadPredicatedOperand` for k1-k7 memory sources and the decoded lowerer
 translates it to this compact op; width and memory-kind mismatches reject.
-Other providers have not been converted. The concrete
+The four EVEX.512 packed-single providers now use the same predicated source
+path. Their existing arithmetic splits the 512-bit value into four 128-bit
+`LaneWiseFloat` operations before rejoining, so the concrete `VecLaneF*`
+128-bit limit does not truncate the result. A direct provider/lowerer/concrete
+test places only lane 0 or lane 15 inside a readable memory region and proves
+the other 15 masked-off lanes are not read. This is a staged path, not runtime
+support: `form_map` still rejects k1-k7 memory encodings before the provider
+is selected. Other providers have not been converted. The concrete
 interpreter reads active lanes only; symbolic and concolic evaluators do so
 when the mask is provably constant, and explicitly reject symbolic masks.
 The central k1-k7 masked-memory mapping guard stays in force. Enabling forms
 additionally needs safe symbolic-mask handling and remaining provider integration,
 and proof that masked arithmetic does not perform suppressed-lane effects.
 
-The 8 embedded-broadcast instruction/shape combinations (`*PS_XMM...{1to4}`/`*PS_YMM...{1to8}` memory operands) stay unsupported until the IR lowering grows broadcast support; they reuse the regular EVEX memory IFORM names. The 8 regular EVEX.128/256 masked-memory instruction/shape combinations (k1-k7) also stay unmapped until masked lane loads suppress faults correctly. No EVEX.128/256 rounding-control (`{rn-sae}` etc.) IFORMs exist for these mnemonics — `b=1` decodings round up to the ZMM IFORMs, which are already covered.
+The 8 embedded-broadcast instruction/shape combinations (`*PS_XMM...{1to4}`/`*PS_YMM...{1to8}` memory operands) stay unsupported until the IR lowering grows broadcast support; they reuse the regular EVEX memory IFORM names. The 12 regular EVEX.128/256/512 masked-memory instruction/shape combinations (k1-k7) also stay unmapped until end-to-end masked-memory execution is validated. No EVEX.128/256 rounding-control (`{rn-sae}` etc.) IFORMs exist for these mnemonics — `b=1` decodings round up to the ZMM IFORMs, which are already covered.
