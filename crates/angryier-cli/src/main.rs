@@ -1791,7 +1791,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
             cfg.regs = vec![("rdi".to_string(), 42), ("r15".to_string(), u64::MAX)];
             let lua = default_driver_lua(&cfg);
             assert!(lua.contains("rdi = 42"), "{lua}");
-            assert!(lua.contains(r#"r15_hex = \"0xffffffffffffffff\""#), "{lua}");
+            assert!(lua.contains(r#"r15_hex = "0xffffffffffffffff""#), "{lua}");
         }
 
         #[test]
@@ -1961,10 +1961,10 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 "ABI-controlled inputs",
                 "intermediate --find waypoint",
                 "solve=true",
-                "unsupported semantic fallback",
-                "under-constrained memory",
-                "vector operations",
-                "retained trace as a seed",
+                "Unsupported semantic fallback",
+                "Under-constrained memory",
+                "Vector operations were replaced with under-constrained symbols",
+                "Use the retained trace as a seed for the next run",
             ] {
                 assert!(lua.contains(expected), "missing diagnostic/advice text: {expected}");
             }

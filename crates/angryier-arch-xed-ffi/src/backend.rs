@@ -503,12 +503,16 @@ fn map_access(action: xed_operand_action_enum_t) -> XedAccess {
         2 => XedAccess::Read,
         // XED_OPERAND_ACTION_W (3)
         3 => XedAccess::Write,
-        // RW (1), RCW (4), CRW (6) -> ReadWrite
-        1 | 4 | 6 => XedAccess::ReadWrite,
-        // CW (5) -> Write (conditional write)
-        5 => XedAccess::Write,
-        // CR (7) -> Read (conditional read)
-        7 => XedAccess::Read,
+        // RW (1)
+        1 => XedAccess::ReadWrite,
+        // RCW (4): unconditional read, conditional write.
+        4 => XedAccess::ReadConditionalWrite,
+        // CW (5): conditional write.
+        5 => XedAccess::ConditionalWrite,
+        // CRW (6): conditional read, unconditional write.
+        6 => XedAccess::ConditionalReadWrite,
+        // CR (7): conditional read.
+        7 => XedAccess::ConditionalRead,
         _ => XedAccess::Read,
     }
 }
@@ -519,6 +523,21 @@ mod tests {
     use angryier_arch_intel64::{FeatureSet, Intel64ProfileKind, Intel64TargetProfile};
     use angryier_decode_xed::metadata::XedGprView;
     use angryier_types::TargetProfileId;
+
+    #[test]
+    fn xed_operand_actions_preserve_conditional_access_distinctions() {
+        for (action, expected) in [
+            (2, XedAccess::Read),
+            (3, XedAccess::Write),
+            (1, XedAccess::ReadWrite),
+            (4, XedAccess::ReadConditionalWrite),
+            (5, XedAccess::ConditionalWrite),
+            (6, XedAccess::ConditionalReadWrite),
+            (7, XedAccess::ConditionalRead),
+        ] {
+            assert_eq!(map_access(action), expected, "XED action {action}");
+        }
+    }
 
     fn config(mode: XedMachineMode) -> XedDecodeConfig {
         XedDecodeConfig {

@@ -325,8 +325,24 @@ impl DecodedInstructionView for DecodedInstruction {
             .map(|operand| OperandDescriptor {
                 index: operand.index,
                 width_bits: operand.width_bits,
-                read: matches!(operand.access, AccessKind::Read | AccessKind::ReadWrite),
-                written: matches!(operand.access, AccessKind::Write | AccessKind::ReadWrite),
+                // These booleans grant lowering permission for a possible
+                // access; conditional actions are not unconditional effects.
+                read: matches!(
+                    operand.access,
+                    AccessKind::Read
+                        | AccessKind::ReadWrite
+                        | AccessKind::ConditionalRead
+                        | AccessKind::ReadConditionalWrite
+                        | AccessKind::ConditionalReadWrite
+                ),
+                written: matches!(
+                    operand.access,
+                    AccessKind::Write
+                        | AccessKind::ReadWrite
+                        | AccessKind::ConditionalWrite
+                        | AccessKind::ReadConditionalWrite
+                        | AccessKind::ConditionalReadWrite
+                ),
                 class: match operand.kind {
                     OperandKind::Register(_) => OperandClass::Register,
                     OperandKind::Memory(_) => OperandClass::Memory,
@@ -496,5 +512,36 @@ mod tests {
             })
         );
         assert_eq!(DecodedInstructionView::operand(&decoded, 0), None);
+    }
+
+    #[test]
+    fn conditional_access_projection_preserves_possible_read_write_permissions() {
+        let cases = [
+            (AccessKind::Read, true, false),
+            (AccessKind::Write, false, true),
+            (AccessKind::ReadWrite, true, true),
+            (AccessKind::ConditionalRead, true, false),
+            (AccessKind::ConditionalWrite, false, true),
+            (AccessKind::ReadConditionalWrite, true, true),
+            (AccessKind::ConditionalReadWrite, true, true),
+        ];
+        for (access, read, written) in cases {
+            let decoded = DecodedInstruction {
+                address: 0x401000,
+                length: 3,
+                form_id: 42,
+                features: vec![],
+                operands: vec![Operand {
+                    index: 0,
+                    width_bits: 64,
+                    access,
+                    visibility: OperandVisibility::Explicit,
+                    kind: OperandKind::Register(RegisterView::full(RegisterId(3), 64)),
+                }],
+                modifiers: InstructionModifiers::default(),
+            };
+            let descriptor = DecodedInstructionView::operand(&decoded, 0).expect("operand");
+            assert_eq!((descriptor.read, descriptor.written), (read, written), "{access:?}");
+        }
     }
 }

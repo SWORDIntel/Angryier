@@ -117,6 +117,10 @@ fn normalize_operand(operand: XedOperand) -> Result<Operand, XedAdapterError> {
             XedAccess::Read => AccessKind::Read,
             XedAccess::Write => AccessKind::Write,
             XedAccess::ReadWrite => AccessKind::ReadWrite,
+            XedAccess::ConditionalWrite => AccessKind::ConditionalWrite,
+            XedAccess::ConditionalRead => AccessKind::ConditionalRead,
+            XedAccess::ReadConditionalWrite => AccessKind::ReadConditionalWrite,
+            XedAccess::ConditionalReadWrite => AccessKind::ConditionalReadWrite,
         },
         visibility: match operand.visibility {
             XedOperandVisibility::Explicit => OperandVisibility::Explicit,

@@ -14,7 +14,7 @@ strip = true
 
 [workspace.package]
 edition = "2024"
-license = "AGPL-3.0-or-later"
+license = "LicenseRef-SRSL-1.0"
 version = "1.0.0"
 
 [workspace.lints.rust]

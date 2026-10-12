@@ -63,6 +63,21 @@ pub mod script;
 pub use mlua;
 
 pub mod function_summaries;
+pub mod isanity_accumulator_immediates;
+pub mod isanity_branch;
+pub mod isanity_catalogue_forms;
+pub mod isanity_fixed_modrm;
+pub mod isanity_fixed_opcode_immediates;
+pub mod isanity_handoff;
+#[cfg(feature = "xed")]
+pub mod isanity_mov_memory;
+pub mod isanity_simm8_modrm;
+pub mod isanity_uimm16_32_direct_modrm;
+pub mod isanity_uimm32_memory;
+pub mod isanity_uimm8_modrm;
+pub mod isanity_x87_memory;
+#[cfg(feature = "xed")]
+pub mod isanity_zero_operand;
 pub mod pipeline_speculation;
 pub mod speculative_concolic;
 pub mod speculative_fork;
@@ -2420,7 +2435,10 @@ impl<D: Decoder> Runtime<D> {
         // compute concrete addresses for register-based operands).
         if process.kernel_pool.is_some() {
             for operand in &decoded.operands {
-                if operand.access != AccessKind::Write && operand.access != AccessKind::ReadWrite {
+                if !matches!(
+                    operand.access,
+                    AccessKind::Write | AccessKind::ReadWrite | AccessKind::ConditionalWrite
+                ) {
                     continue;
                 }
                 let OperandKind::Memory(mem) = &operand.kind else {

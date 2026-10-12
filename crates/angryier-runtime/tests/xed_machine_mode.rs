@@ -284,3 +284,38 @@ fn default_constructor_matches_explicit_intel64_mode() -> Result<(), XedAdapterE
     }
     Ok(())
 }
+
+/// The non-long64 UIMM8 handoff is backed by real XED decode witnesses in
+/// Legacy32. Legacy16 is deliberately rejected at Angryier normalization:
+/// its memory-address model is 16-bit, which the Intel64 execution IR does
+/// not represent. Compatibility and real-address modes are not XED machine
+/// mode variants and must not be silently aliased to these modes.
+#[test]
+fn nonlong64_uimm8_witnesses_decode_only_in_represented_legacy32_mode() {
+    let witnesses = [
+        (&[0xf0, 0x82, 0x20, 0x00][..], "XED_IFORM_AND_LOCK_MEMb_IMMb_82r4", 225),
+        (&[0x82, 0x20, 0x00][..], "XED_IFORM_AND_MEMb_IMMb_82r4", 197),
+        (&[0xf0, 0x82, 0x30, 0x00][..], "XED_IFORM_XOR_LOCK_MEMb_IMMb_82r6", 8065),
+        (&[0x82, 0x30, 0x00][..], "XED_IFORM_XOR_MEMb_IMMb_82r6", 8049),
+    ];
+
+    let legacy32 = XedDecoder::with_profile_id_and_mode(TargetProfileId(1), XedMachineMode::Legacy32);
+    for (bytes, expected_iform, expected_value) in witnesses {
+        let (decoded, iform) = legacy32
+            .decode_with_iform(0x1000, bytes)
+            .unwrap_or_else(|error| panic!("Legacy32 failed {bytes:02x?}: {error:?}"));
+        assert_eq!(decoded.length as usize, bytes.len(), "{expected_iform}");
+        assert_eq!(iform.xed_sys_version, "xed-sys 0.6.0+xed-2024.05.20");
+        assert_eq!(iform.name, expected_iform, "{bytes:02x?}");
+        assert_eq!(iform.value, expected_value, "{expected_iform}");
+    }
+
+    let legacy16 = XedDecoder::with_profile_id_and_mode(TargetProfileId(1), XedMachineMode::Legacy16);
+    for (bytes, expected_iform, _) in witnesses {
+        assert_eq!(
+            legacy16.decode_with_iform(0x1000, bytes),
+            Err(XedAdapterError::InvalidMemoryAddressWidth(16)),
+            "{expected_iform}: XED's 16-bit address metadata is unsupported by normalization"
+        );
+    }
+}

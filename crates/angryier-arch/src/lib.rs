@@ -23,6 +23,16 @@ pub enum AccessKind {
     Read,
     Write,
     ReadWrite,
+    /// The operand may be written only when an instruction predicate holds.
+    /// This is decoder/access metadata; it does not specify the predicate or
+    /// the effects of the false path.
+    ConditionalWrite,
+    /// The operand is read only when an instruction predicate holds.
+    ConditionalRead,
+    /// The operand is read unconditionally and written only conditionally.
+    ReadConditionalWrite,
+    /// The operand is read conditionally and written unconditionally.
+    ConditionalReadWrite,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

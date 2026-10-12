@@ -79,4 +79,4 @@ Focus on **why** the change is needed, not **what** changed (the diff shows that
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later), as specified in the [`LICENSE`](LICENSE) file and `Cargo.toml`.
+By contributing, you agree that your contributions are licensed under the SWORD Restricted Source Licence (SRSL-1.0), as specified in [`LICENSE`](LICENSE) and the workspace Cargo metadata. Third-party components retain their own applicable licenses.

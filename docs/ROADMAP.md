@@ -1,6 +1,10 @@
 # Angryier — Consolidated Roadmap and Architecture-as-Built
 
-Cross-project delivery order for ISANITY, METHRA, radare3, and Angryier on KP14-SUITE / VM 9211: [Four-product unified roadmap](https://github.com/SWORDIntel/METHRA/blob/main/docs/VM9211_CORE_ROADMAP.md). Shared instruction identities and semantics: [ISANITY](https://github.com/SWORDIntel/ISANITY). This file remains the source of truth for Angryier-specific implementation status.
+Cross-project delivery order for ISANITY, VEXEL, METHRA, radare3, Angryier, QIHSE, and KEYSTONE on the rebuilt KP14-SUITE / VM 9211: [unified roadmap](https://github.com/SWORDIntel/METHRA/blob/main/docs/VM9211_CORE_ROADMAP.md). Shared instruction identities and semantics: [ISANITY](https://github.com/SWORDIntel/ISANITY). This file remains the source of truth for Angryier-specific implementation status.
+
+**Cross-project pin status (2026-10-11):** Conditional-write/read source-access metadata is published as revision `0ef740bd86043c33b64365ea803f677b30475217` on `codex/conditional-xed-access`, not on `main`. METHRA's direct Angryier dependency pins target that revision and pass its local verification, but the METHRA pin edits are still uncommitted. This is a shared metadata/ABI prerequisite, not evidence that Angryier has consumed ISANITY's full catalogue, completed instruction semantics, or passed POPKORN parity.
+
+**Status refresh: 2026-10-12.** The current working tree adds generated, exact-witness ISANITY identity adapters across bounded instruction slices; these preserve unsupported residue and do not add semantics or fidelity claims. Full Angryier workspace validation and upstream SRSL-1.0 reconciliation are required before this snapshot can be treated as published `main` status.
 
 > **Single source of truth — 2026-09-28.** This file merges the former phase
 > tracker (ROADMAP.md), the implementation-status annotations of the
@@ -696,6 +700,90 @@ primitive directly (2026-09-25) — the rewiring exposed and fixed two
 latent r32 bugs (`roll $imm` was a udiv no-op; r32-CL read at the wrong
 width and never executed on real decodes) and r32-CL rotates are now
 routed in the runtime form map.**
+**ISANITY candidate identity adapter (2026-10-11):** Angryier's separate,
+source-generated handoff now includes the 18-record fixed-ModRM zero-operand
+slice and 24 MOV B0..BF opcode-register selector records alongside the
+register-direct and near-Jcc slices. The MOV rows bind each exact opcode and
+IFORM to long64 bytes and register/immediate metadata; B8..BF keeps its
+default-32 and REX.W-64 identities distinct. This adds canonical identity
+provenance only: it does not add executor providers, claim semantic validation
+or fidelity, or imply general 8,085-IFORM coverage. See
+`tools/isanity-map/README.md`; the broad ISANITY integration and semantic
+coverage gates remain open.
+**ISANITY opcode-82 SIMM8 identity slice (2026-10-11):** a separate
+hash-pinned adapter consumes all 66 identities from the non-long64 SIMM8
+catalogue. It maps the 11 `legacy32` tuples confirmed selectable through
+Angryier's current XED decode/operand-normalization path; all 55 other records
+remain reason-coded unsupported (including legacy16, where normalization
+rejects 16-bit memory-address metadata). Positive XED tests cover every
+immediate byte and all 24 memory ModRM mode/rm combinations per mapped IFORM;
+near-miss opcode, lock, extension, register-form, mode, and operand checks
+remain negative. This remains identity-only: semantics are unmapped and
+fidelity unassessed.
+**ISANITY non-long64 opcode-82 UIMM8 slice (2026-10-11):** Angryier now
+consumes the pinned 24-record ISANITY UIMM8 slice. Four `legacy32` identities
+are mapped only for their exact recorded XED witness bytes, IFORM name/value,
+mode, and unsigned-immediate metadata; the other 20 source-mode identities
+remain reason-coded unsupported. This is candidate-identity provenance only,
+not semantic validation or fidelity evidence. A real-provider machine-mode test
+decodes all four witness byte strings in Legacy32 and confirms Legacy16 remains
+unsupported because its 16-bit memory-address metadata cannot yet be normalized.
+**ISANITY XOP UIMM32 memory identity slice (2026-10-11):** Angryier now
+consumes all 15 identities from ISANITY's pinned `x86-uimm32-memory-v2.json`
+candidate artifact. Six identities in explicit long64/legacy32 modes are
+recognized only for exact recorded XED profile witnesses, IFORM name/value,
+and normalized register-memory-UIMM32 operand metadata. Nine identities remain
+reason-coded unsupported: legacy16 because Angryier rejects 16-bit memory
+address metadata during normalization; the 16-bit-address override witnesses
+within legacy32 identities are likewise excluded; and compat16/32 because the
+current XED machine-mode selector cannot distinguish compatibility mode from
+legacy mode. Recognition is identity provenance only: semantics remain unmapped
+and fidelity unassessed. The generated adapter also retains 69 exact
+reason-coded unsupported profile observations (57 chip-profile decode rejects
+and 12 legacy32 16-bit-address overrides), rather than discarding the residue.
+Regenerate and verify with
+`python3 tools/isanity-map/generate_uimm32_memory.py` and `--check`.
+**ISANITY x87 memory identity slice (2026-10-11):** Angryier consumes the
+reviewed, SHA-pinned XED x87 memory candidate sidecar. Its 53 long64 identities
+are selectable only by their exact recorded bytes, explicit `Long64` mode,
+exact XED IFORM name/value, and a successful pinned-provider decode with a
+normalized explicit memory operand. The 318 identities from legacy32/16,
+compat32/16, and real32/16 remain individually reason-coded unsupported; no
+mode is inferred or folded into long64. Each candidate has only one concrete
+`MOD=0, RM=0` witness: this does not claim complete ModRM/addressing coverage,
+encoding legality, semantics, or fidelity. The source rows retain their
+partial compiled-pattern parser status. Regenerate and verify with
+`python3 tools/isanity-map/generate_x87_memory.py` and `--check`.
+**ISANITY fixed-opcode immediate identity slice (2026-10-11):** Angryier
+consumes the SHA-pinned fixed-opcode UIMM8 scout. It maps only the four
+long64 IN/OUT accumulator-port identities, each through all 256 exact byte
+witnesses, explicit `Long64` mode, exact XED IFORM name/value, and the full
+provider operand shape (implicit accumulator, unsigned UIMM8, suppressed
+RFLAGS). Resolver callers must pass the pinned `Intel XED` provider and
+`xed-sys 0.6.0+xed-2024.05.20` version; mismatches are rejected. Immediate
+values are range-checked before comparison and cannot alias via low-byte
+truncation. The remaining 36 mode-qualified identities are reason-coded
+unsupported. AAD/AAM are explicitly rejected from long64 because their source
+patterns are `not64`; no long64 AAD/AAM identity is synthesized. This remains
+candidate identity metadata only: no instruction semantics, legality,
+fidelity, profile support, or prefix-combination claims. Regenerate and check
+with `python3 tools/isanity-map/generate_fixed_opcode_immediates.py` and
+`--check`.
+**ISANITY direct-ModRM UIMM16/UIMM32 identity slice (2026-10-11):** Angryier
+consumes the final SHA-pinned 17-row direct-ModRM candidate sidecar. It maps
+nine representable legacy/long-mode identities across 240 exact XED witnesses;
+six compatibility-mode rows (160 witnesses) remain mode-unsupported, and the
+two long64 URDMSR/UWRMSR rows (16 witnesses) are reason-coded unobservable
+because Angryier's normalized operands omit the source-declared implicit MSR
+register. All 416 accepted observations, 1,024 profile residues, and 10,249
+excluded source alternatives remain accounted for. Resolver checks provider,
+version, default-chip provenance, explicit mode, XED IFORM name/value, complete
+bytes and length, unsigned immediate width/value, ordered source operand shape,
+and decoded ModRM register selectors. The provider-only suppressed-RFLAGS
+projection is separately pinned per IFORM and mutation-tested; it is not folded
+into the source identity. No semantics, legality, or fidelity are inferred.
+Regenerate and check with
+`python3 tools/isanity-map/generate_uimm16_32_direct_modrm.py` and `--check`.
 **Remaining (superseded by 2026-09-27 rounds):** **x87 status word & FNSTSW AX — CLOSED 2026-09-28** (`X87_SW` 0x0211 modeled with TOP tracking and FCOM C0/C2/C3 updates; FNSTSW AX mapped; oracle-validated with 5 engine tests including 9 native differential cases in `x87_status_word_engine.rs`); **SHL/SHR/SAR r32 count masking — CLOSED 2026-09-27
 (r32 shifts/rotates now mask counts mod width; 318 hardware differential
 cases)**; r32 rotate flag modeling (CF) — CLOSED with the same round; **x87 transcendental family — FULLY IMPLEMENTED & ORACLE-VALIDATED 2026-09-28** (FloatingOp / IrPrimitive extended with Sin, Cos, Tan, Atan2, Exp2, Log2, Scale; concrete interpreter implemented; providers for FSIN, FCOS, FPTAN, FPATAN, F2XM1, FYL2X, FYL2XP1, FSCALE live under rules `0x1400..0x1407` and forms `0x0F40..0x0F47`; 31 engine + hardware differential tests passing in `x87_trans_engine.rs`); **r64-CL OF — CLOSED 2026-09-28** (zero-count flag preservation across shift/rotate families; RCL/RCR r64 imm8+CL OF modeling; count-aware `write_rotate_flags_width_count` everywhere; 492 cases matched hardware byte-for-byte in `shift_differential.rs`); **AVX double-precision vector & scalar arithmetic + packed logic — CLOSED 2026-09-28** (VADDPD, VSUBPD, VMULPD, VDIVPD, VADDSD, VSUBSD, VMULSD, VDIVSD, VANDPD, VANDNPD, VORPD, VXORPD across register and memory forms; 24 providers under rules `0x1410..0x1427` and forms `0x0F48..0x0F5F`; wired into runtime form map and xed-ffi; 48 native differential cases + hardware divide-by-zero probe in `avx_differential.rs`); **AVX conversions, blends, and permutations — CLOSED 2026-09-28** (VCVTSS2SD, VCVTSD2SS, VBLENDPS, VBLENDPD, VBLENDVPS, VBLENDVPD, VPERM2F128, VPERMILPS, VPERMILPD across register and memory forms; 18 providers under rules `0x1428..0x1439` and forms `0x0F60..0x0F71`; wired into runtime form map and xed-ffi; 36 native differential cases in `avx_differential.rs`); **AVX shuffles and unpacks — CLOSED 2026-09-28** (VSHUFPS, VSHUFPD, VUNPCKLPS, VUNPCKHPS, VUNPCKLPD, VUNPCKHPD across register and memory forms; 12 providers under rules `0x143A..0x1445` and forms `0x0F72..0x0F7D`; wired into runtime form map and xed-ffi; 24 native differential cases in `avx_differential.rs`); **AVX min/max and square-root family — CLOSED 2026-09-28** (VMINPS, VMAXPS, VMINPD, VMAXPD, VMINSS, VMAXSS, VMINSD, VMAXSD, VSQRTPS, VSQRTPD, VSQRTSS, VSQRTSD across register and memory forms; 24 providers under rules `0x14A0..0x14B7` and forms `0x0880..0x0897`; wired into runtime form map and xed-ffi); **x87 extended family + Intel 64 system forms — CLOSED 2026-09-28** (x87 constants FLDPI/FLDL2E/FLDL2T/FLDLG2/FLDLN2, FST st(i) + FNOP, (F)NSTSW m16, FLDCW/FNSTCW m16 backed by the new `X87_CW` control-word register (0x0212), FNCLEX, FTST, FXAM, FDECSTP/FINCSTP, FFREE st(i), FRNDINT, FSINCOS, and the FCMOVcc family ×8 (B/E/BE/U/NB/NE/NBE/NU gated on CF/ZF/PF); system forms RDTSCP, XGETBV, WBINVD, INVD; 30 providers under rules `0x333..0x34C` + `0x550..0x553` and forms `0x0825..0x0842`; 16 engine tests in `x87_extended_engine.rs`); **BMI1 & BMI2 instruction sets — CLOSED 2026-09-28** (ANDN, BEXTR, BLSI, BLSMSK, BLSR, BZHI, MULX, RORX, SARX, SHLX, SHRX across 32-bit and 64-bit register and memory forms; 44 providers under rules `0x1450..0x147B` and forms `0x0850..0x087B`; wired into runtime form map and xed-ffi; 7 engine test suites passing in `bmi_engine.rs`); **AVX2 variable shifts & cross-lane permutes — CLOSED 2026-09-28** (VPSLLVD, VPSLLVQ, VPSRAVD, VPSRLVD, VPSRLVQ across XMM and YMM register and memory forms [20 forms]; VPERMD, VPERMPS, VPERMQ, VPERMPD, VPERM2I128 across YMM register, memory, and immediate forms [10 forms]; 30 providers under rules `0x14B8..0x14D5` and forms `0x08A0..0x08BD` — corpus now **1,275 registered providers**; `IrPrimitive::VecPermute32` and `VectorOp::Permute` implemented in IR lowerer and concrete interpreter; wired into runtime form map and xed-ffi; 7 engine tests passing in `avx2_engine.rs` and 19 runtime form-map unit tests passing); then
@@ -1032,6 +1120,15 @@ GUI, other ISAs, CUDA/OpenCL planning.
 ---
 
 ## 7. Go/No-Go gates
+
+**ISANITY identity handoff update (2026-10-11):** the source-pinned exact
+identity snapshot now recognizes 316 identities, including all 241 primary
+register-direct records and 24 source-pinned MOV B0..BF opcode-register
+selectors. The 48 CMOVcc width records preserve XED `CW` via the
+shared `AccessKind::ConditionalWrite`; no source access distinction is folded
+into ordinary `Write`/`ReadWrite`. The identity mapping remains separate from
+legacy form IDs and all mapped catalogue records retain `semantic_status:
+unmapped` and `fidelity_status: unassessed`.
 
 - **Gate 0 — pipeline wiring.** Real binary loads, decodes, executes
   end-to-end with concrete replay validation. **Passed** (static musl/glibc,
