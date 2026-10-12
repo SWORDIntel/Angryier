@@ -57,6 +57,8 @@ use angryier_types::{
 #[cfg(feature = "xed")]
 pub mod form_map;
 
+pub mod isanity_evidence;
+
 #[cfg(feature = "script")]
 pub mod script;
 #[cfg(feature = "script")]
