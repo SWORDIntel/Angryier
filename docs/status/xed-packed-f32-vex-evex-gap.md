@@ -6,8 +6,9 @@ The remaining gaps are encoding-instance constraints, not additional IFORM names
 
 | Encoding/width | Instruction/shape combinations | Status |
 | --- | ---: | --- |
-| EVEX.128 masked memory (k1-k7) | 4 | Unsupported — lane-level memory fault suppression not representable |
-| EVEX.256 masked memory (k1-k7) | 4 | Unsupported — lane-level memory fault suppression not representable |
+| EVEX.128 masked memory (k1-k7) | 4 | Unmapped — packed-single provider/lowering stage lane-only reads, but symbolic masks remain unsupported |
+| EVEX.256 masked memory (k1-k7) | 4 | Unmapped — packed-single provider/lowering stage lane-only reads, but symbolic masks remain unsupported |
+| EVEX.512 masked memory (k1-k7) | 4 | Unmapped — packed-single provider/lowering stage lane-only reads, but symbolic masks remain unsupported |
 | EVEX.128 `{1to4}` | 4 | Unsupported — broadcast semantics not representable |
 | EVEX.256 `{1to8}` | 4 | Unsupported — broadcast semantics not representable |
 
@@ -18,7 +19,7 @@ The broadcast memory encodings share an IFORM name with the ordinary memory form
 - `crates/angryier-semantics-intel64/src/avx512.rs`: 16 new form ids `0x1170..0x117F` and 16 dedicated providers (rules `0x1670..0x167F`) built on `packed_float_evex_xmm`/`packed_float_evex_ymm` macros. EVEX operand layout is `[dst, opmask, src1, src2]`; `evex_source_indices` selects (2, 3) under XED's normalized decode and (1, 2) for synthetic views. Mask merge/zero goes through `apply_evex_mask` (`MaskMerge`/`MaskZero` on operand 1, with `k0`/no-mask treated as unmasked).
 - Upper-lane clearing: EVEX XMM/YMM destinations are partial views of a ZMM parent whose writes are `SemanticDefined`. Each provider concatenates the masked low vector with an all-zero tail (`Concat(low, zero)` → full F32X16) and replaces the whole parent via `write_register`, so all 64 destination bytes are architecturally correct — unlike `write_operand`, which would preserve stale upper parent bits.
 - 256-bit float lanewise work is chunked into two 128-bit `LaneWiseFloat` halves (the concrete interpreter's `VecLaneF*` path evaluates ≤128-bit vectors), then rejoined; masking stays at full YMM granularity, which the byte-level `VecMaskMerge`/`VecMaskZero` evaluators handle at any width.
-- `crates/angryier-runtime/src/form_map.rs`: the four instruction-class arms map EVEX XMM/YMM register forms for k0-k7, but EVEX memory shapes resolve only when the explicit opmask operand is k0. k1-k7 memory forms remain unmapped because the lowerer/interpreter currently reads the entire source span before masking; masked-off inaccessible lanes could otherwise fault incorrectly. VEX forms still resolve to their pre-existing mappings.
+- `crates/angryier-runtime/src/form_map.rs`: the four instruction-class arms map EVEX XMM/YMM register forms for k0-k7, but EVEX memory shapes resolve only when the explicit opmask operand is k0. k1-k7 memory forms remain unmapped pending end-to-end symbolic-mask fault suppression and broader provider coverage. VEX forms still resolve to their pre-existing mappings.
 - `crates/angryier-semantics-intel64/src/registry.rs`: the 16 forms are registered in `ALL_FORMS` at the same positions as the new providers (total 1617 forms).
 
 ## Tests
@@ -29,4 +30,25 @@ The broadcast memory encodings share an IFORM name with the ordinary memory form
 
 ## Remaining gap
 
-The 8 embedded-broadcast instruction/shape combinations (`*PS_XMM...{1to4}`/`*PS_YMM...{1to8}` memory operands) stay unsupported until the IR lowering grows broadcast support; they reuse the regular EVEX memory IFORM names. The 8 regular EVEX.128/256 masked-memory instruction/shape combinations (k1-k7) also stay unmapped until masked lane loads suppress faults correctly. No EVEX.128/256 rounding-control (`{rn-sae}` etc.) IFORMs exist for these mnemonics — `b=1` decodings round up to the ZMM IFORMs, which are already covered.
+The compact IR now reserves a verifier-checked `PredicatedVectorLoad` contract
+for 128/256/512-bit vectors with 32/64-bit lanes, a 64-bit address, and a mask
+wide enough to select every lane. Its specified inactive-lane value is zero,
+with destination merge/zero behavior remaining a separate operation. The
+packed-single EVEX.128/.256 providers now emit a rich-semantic
+`ReadPredicatedOperand` for k1-k7 memory sources and the decoded lowerer
+translates it to this compact op; width and memory-kind mismatches reject.
+The four EVEX.512 packed-single providers now use the same predicated source
+path. Their existing arithmetic splits the 512-bit value into four 128-bit
+`LaneWiseFloat` operations before rejoining, so the concrete `VecLaneF*`
+128-bit limit does not truncate the result. A direct provider/lowerer/concrete
+test places only lane 0 or lane 15 inside a readable memory region and proves
+the other 15 masked-off lanes are not read. This is a staged path, not runtime
+support: `form_map` still rejects k1-k7 memory encodings before the provider
+is selected. Other providers have not been converted. The concrete
+interpreter reads active lanes only; symbolic and concolic evaluators do so
+when the mask is provably constant, and explicitly reject symbolic masks.
+The central k1-k7 masked-memory mapping guard stays in force. Enabling forms
+additionally needs safe symbolic-mask handling and remaining provider integration,
+and proof that masked arithmetic does not perform suppressed-lane effects.
+
+The 8 embedded-broadcast instruction/shape combinations (`*PS_XMM...{1to4}`/`*PS_YMM...{1to8}` memory operands) stay unsupported until the IR lowering grows broadcast support; they reuse the regular EVEX memory IFORM names. The 12 regular EVEX.128/256/512 masked-memory instruction/shape combinations (k1-k7) also stay unmapped until end-to-end masked-memory execution is validated. No EVEX.128/256 rounding-control (`{rn-sae}` etc.) IFORMs exist for these mnemonics — `b=1` decodings round up to the ZMM IFORMs, which are already covered.

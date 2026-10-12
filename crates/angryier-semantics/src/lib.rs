@@ -386,6 +386,15 @@ pub trait SemanticBuilder {
     fn constant(&mut self, ty: SemanticType, bytes_le: &[u8]) -> Result<ValueId, SemanticError>;
     fn read_register(&mut self, reg: RegisterId, ty: SemanticType) -> Result<ValueId, SemanticError>;
     fn read_operand(&mut self, operand_index: u8, ty: SemanticType) -> Result<ValueId, SemanticError>;
+    /// Read only lanes selected by `mask` from a vector memory operand. The
+    /// zero-filled inactive lanes can subsequently be merged with the old
+    /// destination; unlike `read_operand`, this must not eagerly read memory.
+    fn read_predicated_operand(
+        &mut self,
+        operand_index: u8,
+        mask: ValueId,
+        ty: SemanticType,
+    ) -> Result<ValueId, SemanticError>;
     fn emit(&mut self, op: SemanticOp, ty: SemanticType, inputs: &[ValueId]) -> Result<ValueId, SemanticError>;
     fn write_register(&mut self, reg: RegisterId, value: ValueId) -> Result<EffectId, SemanticError>;
     fn write_operand(&mut self, operand_index: u8, value: ValueId) -> Result<EffectId, SemanticError>;

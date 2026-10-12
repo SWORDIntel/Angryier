@@ -104,6 +104,28 @@ impl BasicSemanticLowerer {
                         OperandRead::Alias(id) => emitter.alias(value.id, id),
                     }
                 }
+                SemanticValueDefinition::ReadPredicatedOperand { operand_index, mask } => {
+                    let decoded = decoded.ok_or(IrLoweringError::UnsupportedValue("decoded operand binding"))?;
+                    let operand = decoded
+                        .operand(*operand_index)
+                        .ok_or(IrLoweringError::MissingOperand(*operand_index))?;
+                    let OperandKind::Memory(memory) = operand.kind else {
+                        return Err(IrLoweringError::OperandTypeMismatch(*operand_index));
+                    };
+                    if !operand.read || operand.width_bits != semantic_vector_bits(value.ty)? {
+                        return Err(IrLoweringError::OperandTypeMismatch(*operand_index));
+                    }
+                    let address = lower_memory_address(decoded, &memory, &mut emitter)?;
+                    let mask = emitter.map(*mask)?;
+                    emitter.bind(
+                        value.id,
+                        IrOp::PredicatedVectorLoad {
+                            address,
+                            mask,
+                            ty: lower_type(value.ty)?,
+                        },
+                    );
+                }
                 // A value-producing load from a computed address (for example
                 // the APX POP2 stack read) lowers directly to `IrOp::Load`:
                 // its single input is the address value and the semantic
@@ -145,6 +167,9 @@ impl BasicSemanticLowerer {
                         },
                         SemanticValueDefinition::ReadOperand(_) => {
                             return Err(IrLoweringError::UnsupportedValue("nested operand read"));
+                        }
+                        SemanticValueDefinition::ReadPredicatedOperand { .. } => {
+                            return Err(IrLoweringError::UnsupportedValue("nested predicated operand read"));
                         }
                     };
                     emitter.bind(value.id, op);
@@ -742,6 +767,13 @@ fn lower_type(ty: SemanticType) -> Result<IrType, IrLoweringError> {
     })
 }
 
+fn semantic_vector_bits(ty: SemanticType) -> Result<u16, IrLoweringError> {
+    match lower_type(ty)? {
+        IrType::Vector { width_bits, .. } => Ok(width_bits),
+        _ => Err(IrLoweringError::UnsupportedValue("predicated operand must be vector")),
+    }
+}
+
 fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
     match op {
         SemanticOp::Primitive(op) => Ok(match op {
@@ -1022,8 +1054,8 @@ impl SemanticLowerer for CachedSemanticLowerer {
 mod tests {
     use super::*;
     use angryier_semantics::{
-        FarPointerOperand, FeatureId, ImmediateOperand, OperandClass, OperandDescriptor, RegisterId, RegisterView,
-        ScalarType, SemanticBlockBuilder, SemanticBuilder, SemanticError, SideEffect,
+        FarPointerOperand, FeatureId, ImmediateOperand, MemoryBase, MemoryOperand, OperandClass, OperandDescriptor,
+        RegisterId, RegisterView, ScalarType, SemanticBlockBuilder, SemanticBuilder, SemanticError, SideEffect,
     };
     use angryier_types::{
         BlockId, CodePageId, CodePageVersion, CodeVersionGuard, ContentIdentitySchemaVersion, ImageId,
@@ -1129,6 +1161,77 @@ mod tests {
         assert_eq!(
             BasicSemanticLowerer.lower(&rich, &validity(1)),
             Err(IrLoweringError::UnsupportedValue("decoded operand binding"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn predicated_operand_requires_exact_width_memory_and_never_lowers_to_eager_load() -> Result<(), String> {
+        let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
+        let mask = builder
+            .read_register(RegisterId(0x141), SemanticType::Scalar(ScalarType::BitVec(64)))
+            .map_err(|error| format!("{error:?}"))?;
+        builder
+            .read_predicated_operand(
+                3,
+                mask,
+                SemanticType::Vector {
+                    lanes: 4,
+                    lane: ScalarType::Float(FloatFormat::F32),
+                },
+            )
+            .map_err(|error| format!("{error:?}"))?;
+        let rich = builder
+            .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+            .map_err(|error| format!("{error:?}"))?;
+        let mut decoded = TestDecode {
+            address: 0x401000,
+            operands: vec![OperandDescriptor {
+                index: 3,
+                width_bits: 32,
+                read: true,
+                written: false,
+                class: OperandClass::Memory,
+                kind: OperandKind::Memory(MemoryOperand {
+                    memory_index: 0,
+                    address_width_bits: 64,
+                    segment: None,
+                    segment_base: None,
+                    base: Some(MemoryBase::Register(RegisterView::full(RegisterId(0), 64))),
+                    index: None,
+                    scale: 1,
+                    displacement: 0,
+                    displacement_width_bits: 0,
+                }),
+            }],
+        };
+        assert_eq!(
+            BasicSemanticLowerer.lower_with_decode(&rich, &validity(1), &decoded),
+            Err(IrLoweringError::OperandTypeMismatch(3))
+        );
+        decoded.operands[0].width_bits = 128;
+        let ir = BasicSemanticLowerer
+            .lower_with_decode(&rich, &validity(1), &decoded)
+            .map_err(|error| error.to_string())?;
+        assert!(ir.instructions.iter().any(|instruction| matches!(
+            instruction.op,
+            IrOp::PredicatedVectorLoad {
+                ty: IrType::Vector {
+                    width_bits: 128,
+                    lane_bits: 32
+                },
+                ..
+            }
+        )));
+        assert!(
+            !ir.instructions
+                .iter()
+                .any(|instruction| matches!(instruction.op, IrOp::Load { .. }))
+        );
+        decoded.operands[0].kind = OperandKind::Register(RegisterView::full(RegisterId(1), 128));
+        assert_eq!(
+            BasicSemanticLowerer.lower_with_decode(&rich, &validity(1), &decoded),
+            Err(IrLoweringError::OperandTypeMismatch(3))
         );
         Ok(())
     }

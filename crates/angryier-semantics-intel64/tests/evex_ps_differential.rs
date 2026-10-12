@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Native differential oracle for the EVEX.128/EVEX.256 packed single-precision
+//! Native differential oracle for the EVEX.128/EVEX.256/EVEX.512 packed single-precision
 //! forms (VADDPS, VSUBPS, VMULPS, VDIVPS).
 //!
 //! The corpus has no ZMM move or KMOV semantics yet, so the native binary is
@@ -13,8 +13,8 @@
 //!
 //! Even without an AVX-512-capable host the engine output is still checked
 //! against a Rust oracle, so regressions are caught everywhere; native
-//! execution additionally requires AVX512F+AVX512VL (EVEX.128/256 forms are
-//! VL-gated) and is skipped cleanly otherwise.
+//! execution additionally requires AVX512F (and AVX512VL for EVEX.128/256)
+//! and is skipped cleanly otherwise.
 
 use angryier_arch::{OperandKind, OperandVisibility};
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
@@ -26,7 +26,7 @@ use angryier_semantics::{
     BlockValidityKey, FloatingPointPolicy, SemanticBlockBuilder, SemanticContext, TileRepresentation,
     VectorRepresentation,
 };
-use angryier_semantics_intel64::{Intel64CorpusRegistry, evex_forms};
+use angryier_semantics_intel64::{Intel64CorpusRegistry, evex_forms, forms};
 use angryier_state::{ExecutionState, FidelityLedger, PersistentConstraintLineage, PersistentRegisters, RegisterState};
 use angryier_types::{
     BlockId, ContentIdentitySchemaVersion, FidelityProfile, ImageId, ObjectId, SemanticFingerprintSchemaVersion,
@@ -120,7 +120,7 @@ fn assemble_one(dir: &Path, name: &str, instruction: &str) -> Option<Vec<u8>> {
 
 /// True when the host can execute EVEX.128/256 packed-single encodings
 /// (AVX512F plus the vector-length extension AVX512VL).
-fn host_has_avx512() -> bool {
+fn host_has_avx512(need_vl: bool) -> bool {
     let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") else {
         return false;
     };
@@ -129,7 +129,7 @@ fn host_has_avx512() -> bool {
         .find(|line| line.starts_with("flags"))
         .map(str::to_owned)
         .unwrap_or_default();
-    flags.split_whitespace().any(|f| f == "avx512f") && flags.split_whitespace().any(|f| f == "avx512vl")
+    flags.split_whitespace().any(|f| f == "avx512f") && (!need_vl || flags.split_whitespace().any(|f| f == "avx512vl"))
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,7 @@ enum Shape {
     Mem,
     Xmm,
     Ymm,
+    Zmm,
 }
 
 fn shape_of(operand: &angryier_arch::Operand) -> Option<Shape> {
@@ -151,8 +152,10 @@ fn shape_of(operand: &angryier_arch::Operand) -> Option<Shape> {
         OperandKind::Register(view) if view.width_bits == 64 => Some(Shape::Reg64),
         OperandKind::Register(view) if view.width_bits == 128 => Some(Shape::Xmm),
         OperandKind::Register(view) if view.width_bits == 256 => Some(Shape::Ymm),
+        OperandKind::Register(view) if view.width_bits == 512 => Some(Shape::Zmm),
         OperandKind::Memory(_) if operand.width_bits == 128 => Some(Shape::Mem128),
         OperandKind::Memory(_) if operand.width_bits == 256 => Some(Shape::Mem),
+        OperandKind::Memory(_) if operand.width_bits == 512 => Some(Shape::Mem),
         _ => None,
     }
 }
@@ -185,6 +188,8 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if unmasked_memory => {
                 Some(evex_forms::VADDPS_EVEX_YMM_YMM_MEM)
             }
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VADDPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] if unmasked_memory => Some(forms::VADDPS_ZMM_ZMM_MEM),
             _ => None,
         },
         xed::XED_ICLASS_VSUBPS => match shapes.as_slice() {
@@ -196,6 +201,8 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if unmasked_memory => {
                 Some(evex_forms::VSUBPS_EVEX_YMM_YMM_MEM)
             }
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VSUBPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] if unmasked_memory => Some(forms::VSUBPS_ZMM_ZMM_MEM),
             _ => None,
         },
         xed::XED_ICLASS_VMULPS => match shapes.as_slice() {
@@ -207,6 +214,8 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if unmasked_memory => {
                 Some(evex_forms::VMULPS_EVEX_YMM_YMM_MEM)
             }
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VMULPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] if unmasked_memory => Some(forms::VMULPS_ZMM_ZMM_MEM),
             _ => None,
         },
         xed::XED_ICLASS_VDIVPS => match shapes.as_slice() {
@@ -218,6 +227,8 @@ fn map_form(decoded: &angryier_arch::DecodedInstruction) -> Option<u32> {
             [Shape::Ymm, Shape::Reg64, Shape::Ymm, Shape::Mem] if unmasked_memory => {
                 Some(evex_forms::VDIVPS_EVEX_YMM_YMM_MEM)
             }
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Zmm] => Some(forms::VDIVPS_ZMM_ZMM_ZMM),
+            [Shape::Zmm, Shape::Reg64, Shape::Zmm, Shape::Mem] if unmasked_memory => Some(forms::VDIVPS_ZMM_ZMM_MEM),
             _ => None,
         },
         _ => None,
@@ -451,7 +462,7 @@ struct Case {
     mnemonic: &'static str,
     opcode: u8,
     op: char,
-    ymm: bool,
+    vl_lanes: usize,
     mem: bool,
     mask: Option<u64>,
     zeroing: bool,
@@ -462,7 +473,12 @@ fn instruction(case: &Case) -> String {
     // a legal writemask), so the true unmasked EVEX encoding (EVEX aaa=000) is
     // emitted as raw bytes. Masked forms assemble normally.
     let Some(_) = case.mask else {
-        let p2 = if case.ymm { 0x28 } else { 0x08 };
+        let p2 = match case.vl_lanes {
+            4 => 0x08,
+            8 => 0x28,
+            16 => 0x48,
+            _ => unreachable!(),
+        };
         let tail = if case.mem {
             // modrm 0x04 (SIB), sib 0x25 (disp32), disp 0x00500040 LE
             ",0x04,0x25,0x40,0x00,0x50,0x00"
@@ -472,15 +488,15 @@ fn instruction(case: &Case) -> String {
         return format!(".byte 0x62,0xf1,0x74,{p2:#x},{:#x}{tail}", case.opcode);
     };
     let suffix = if case.zeroing { "{%k2}{z}" } else { "{%k2}" };
-    let (w1, w0) = if case.ymm {
-        ("%ymm1", "%ymm0")
-    } else {
-        ("%xmm1", "%xmm0")
+    let (w1, w0, w2) = match case.vl_lanes {
+        4 => ("%xmm1", "%xmm0", "%xmm2"),
+        8 => ("%ymm1", "%ymm0", "%ymm2"),
+        16 => ("%zmm1", "%zmm0", "%zmm2"),
+        _ => unreachable!(),
     };
     if case.mem {
         format!("{} {SRC2_ADDR:#x}, {w1}, {w0}{suffix}", case.mnemonic)
     } else {
-        let w2 = if case.ymm { "%ymm2" } else { "%xmm2" };
         format!("{} {w2}, {w1}, {w0}{suffix}", case.mnemonic)
     }
 }
@@ -493,9 +509,7 @@ fn cases() -> Vec<Case> {
         ("vmulps", 0x59u8, '*'),
         ("vdivps", 0x5eu8, '/'),
     ] {
-        for ymm in [false, true] {
-            let tag = if ymm { "ymm" } else { "xmm" };
-            let mask = if ymm { 0x55u64 } else { 0x5u64 };
+        for (tag, vl_lanes, mask) in [("xmm", 4, 0x5u64), ("ymm", 8, 0x55), ("zmm", 16, 0x5555)] {
             for (suffix, mem, mask, zeroing) in [
                 ("reg_nomask", false, None, false),
                 ("reg_merge", false, Some(mask), false),
@@ -507,7 +521,7 @@ fn cases() -> Vec<Case> {
                     mnemonic,
                     opcode,
                     op,
-                    ymm,
+                    vl_lanes,
                     mem,
                     mask,
                     zeroing,
@@ -519,14 +533,17 @@ fn cases() -> Vec<Case> {
 }
 
 #[test]
-fn evex128_256_packed_single_differential() -> Result<(), BoxError> {
+fn evex_packed_single_differential() -> Result<(), BoxError> {
     let Some(dir) = temp_dir("ps-differential") else {
         eprintln!("SKIP: temp dir unavailable");
         return Ok(());
     };
-    let native_ok = host_has_avx512();
-    if !native_ok {
-        eprintln!("NOTE: host lacks AVX512F+AVX512VL; native oracle skipped, engine checked against Rust oracle only");
+    let native_vl = host_has_avx512(true);
+    let native_zmm = host_has_avx512(false);
+    if !native_vl || !native_zmm {
+        eprintln!(
+            "NOTE: host lacks AVX512F or AVX512VL; unavailable native cases skipped, engine checked against Rust oracle"
+        );
     }
     let mut ran_engine = 0usize;
     let mut ran_native = 0usize;
@@ -536,15 +553,14 @@ fn evex128_256_packed_single_differential() -> Result<(), BoxError> {
         let insn_asm = instruction(&case);
         let code = assemble_one(&dir, &case.name, &insn_asm).ok_or_else(|| format!("as failed for `{insn_asm}`"))?;
         let engine = engine_run(&code, &seeds).map_err(|e| format!("case `{}`: {e}", case.name))?;
-        let vl = if case.ymm { 8 } else { 4 };
-        let expected = oracle(case.op, vl, case.mask, case.zeroing, &seeds);
+        let expected = oracle(case.op, case.vl_lanes, case.mask, case.zeroing, &seeds);
         assert_eq!(
             engine, expected,
             "engine mismatch vs oracle in `{}` ({insn_asm})",
             case.name
         );
         ran_engine += 1;
-        if native_ok {
+        if if case.vl_lanes == 16 { native_zmm } else { native_vl } {
             let source = native_source(&insn_asm, &seeds, case.mask);
             let native = native_run(&dir, &format!("{}_bin", case.name), &source)?;
             assert_eq!(
@@ -571,5 +587,37 @@ fn evex_broadcast_forms_stay_unmapped() -> Result<(), BoxError> {
     // vaddps {1to8}(%rax), %ymm1, %ymm0{%k0} — 62 f1 74 38 58 00
     let decoded = decoder.decode(CODE_BASE, &[0x62, 0xf1, 0x74, 0x38, 0x58, 0x00])?;
     assert_eq!(map_form(&decoded), None, "{{1to8}} broadcast must stay unmapped");
+    Ok(())
+}
+
+/// The staged ZMM providers can be selected for register operands and k0
+/// memory. Runtime mapping still rejects k1-k7 memory until symbolic-mask
+/// fault suppression is supported end to end.
+#[test]
+fn evex512_masked_memory_stays_unmapped() -> Result<(), BoxError> {
+    let decoder = XedDecoder::new();
+    for opcode in [0x58, 0x5c, 0x59, 0x5e] {
+        for mask in 1..=7 {
+            let code = [
+                0x62,
+                0xf1,
+                0x74,
+                0x48 | mask,
+                opcode,
+                0x04,
+                0x25,
+                0x40,
+                0x00,
+                0x50,
+                0x00,
+            ];
+            let decoded = decoder.decode(CODE_BASE, &code)?;
+            assert_eq!(
+                map_form(&decoded),
+                None,
+                "opcode {opcode:#x} k{mask} memory must stay unmapped"
+            );
+        }
+    }
     Ok(())
 }

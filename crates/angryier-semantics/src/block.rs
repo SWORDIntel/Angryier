@@ -13,6 +13,7 @@ pub enum SemanticValueDefinition {
     Constant(Vec<u8>),
     ReadRegister(RegisterId),
     ReadOperand(u8),
+    ReadPredicatedOperand { operand_index: u8, mask: ValueId },
     Operation { op: SemanticOp, inputs: Vec<ValueId> },
 }
 
@@ -157,6 +158,30 @@ impl SemanticBuilder for SemanticBlockBuilder {
 
     fn read_operand(&mut self, operand_index: u8, ty: SemanticType) -> Result<ValueId, SemanticError> {
         self.push_value(ty, SemanticValueDefinition::ReadOperand(operand_index))
+    }
+
+    fn read_predicated_operand(
+        &mut self,
+        operand_index: u8,
+        mask: ValueId,
+        ty: SemanticType,
+    ) -> Result<ValueId, SemanticError> {
+        let SemanticType::Vector { lanes, lane } = ty else {
+            return Err(SemanticError::InvalidSemanticDefinition);
+        };
+        let Some(lane_bits @ (32 | 64)) = scalar_bits(lane) else {
+            return Err(SemanticError::InvalidSemanticDefinition);
+        };
+        let mask_ty = self.values.get(mask as usize).map(|value| value.ty);
+        if !matches!(u32::from(lanes) * lane_bits as u32, 128 | 256 | 512)
+            || !matches!(mask_ty, Some(SemanticType::Scalar(crate::ScalarType::BitVec(64))))
+        {
+            return Err(SemanticError::InvalidSemanticDefinition);
+        }
+        self.push_value(
+            ty,
+            SemanticValueDefinition::ReadPredicatedOperand { operand_index, mask },
+        )
     }
 
     fn emit(&mut self, op: SemanticOp, ty: SemanticType, inputs: &[ValueId]) -> Result<ValueId, SemanticError> {
@@ -360,6 +385,11 @@ fn encode_block(
             SemanticValueDefinition::ReadOperand(index) => {
                 out.byte(2);
                 out.byte(*index);
+            }
+            SemanticValueDefinition::ReadPredicatedOperand { operand_index, mask } => {
+                out.byte(4);
+                out.byte(*operand_index);
+                out.u32(*mask);
             }
             SemanticValueDefinition::Operation { op, inputs } => {
                 out.byte(3);

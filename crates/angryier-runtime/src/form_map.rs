@@ -202,6 +202,21 @@ fn evex_memory_is_unmasked(decoded: &DecodedInstruction) -> bool {
     })
 }
 
+/// An explicit k1..k7 mask on an EVEX memory operand requires lane-level
+/// fault suppression. Current corpus providers load the whole operand before
+/// applying the mask, so mapping such a decode would invent a memory fault.
+fn evex_masked_memory_requires_fault_suppression(decoded: &DecodedInstruction) -> bool {
+    if decoded.modifiers.encoding != angryier_arch_intel64::encoding_class::EVEX {
+        return false;
+    }
+    // The decoder distinguishes an EVEX predicate from an ordinary k-register
+    // data operand. Do not assume the predicate's position in the operand list.
+    decoded.modifiers.predicate.is_some()
+        && decoded.operands.iter().any(|operand| {
+            operand.visibility != OperandVisibility::Suppressed && matches!(operand.kind, OperandKind::Memory(_))
+        })
+}
+
 /// Maps a decoded instruction to an engine-owned semantic form id.
 ///
 /// Returns `None` when the instruction class or operand shape has no exact
@@ -424,6 +439,9 @@ fn map_evex_integer_bitwise(decoded: &DecodedInstruction, shapes: &[Shape]) -> O
 }
 
 pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
+    if evex_masked_memory_requires_fault_suppression(decoded) {
+        return None;
+    }
     // Implicit operands join the shape (accumulator of `cmp eax, imm`), but a
     // suppressed operand never does. The implicit `CL` of variable-count
     // shifts is detected separately by `has_cl`, so it is excluded here.
@@ -4420,6 +4438,56 @@ mod tests {
             mapped(&[0x62, 0xF1, 0xF5, 0x48, 0x54, 0xC2])?,
             Some(forms::VANDPD_ZMM_ZMM_ZMM)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn masked_evex_memory_is_not_mapped_without_fault_suppression() -> Result<(), Box<dyn std::error::Error>> {
+        // EVEX.512 vaddps zmm0{k1}, zmm1, [rax]. Loading the full memory
+        // vector before applying k1 would fault on masked-off inaccessible lanes.
+        for bytes in [
+            [0x62, 0xF1, 0x74, 0x49, 0x58, 0x00], // vaddps k1
+            [0x62, 0xF1, 0x74, 0x4F, 0x58, 0x00], // vaddps k7
+            [0x62, 0xF1, 0xF5, 0x49, 0x58, 0x00], // vaddpd k1
+            [0x62, 0xF1, 0x74, 0x49, 0x57, 0x00], // vxorps k1
+        ] {
+            assert_eq!(mapped(&bytes)?, None, "masked EVEX memory must remain unmapped");
+        }
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x74, 0x48, 0x58, 0x00])?,
+            Some(forms::VADDPS_ZMM_ZMM_MEM)
+        );
+        // Register source does not need lane-granular memory fault suppression.
+        assert_eq!(
+            mapped(&[0x62, 0xF1, 0x74, 0x49, 0x58, 0xC2])?,
+            Some(forms::VADDPS_ZMM_ZMM_ZMM)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn masked_evex_memory_reaches_runtime_as_unmapped_not_eager_load() -> Result<(), Box<dyn std::error::Error>> {
+        use angryier_arch::Decoder;
+
+        let translator = crate::XedFormTranslator::new(XedDecoder::new());
+        let decoded = translator.decode(0x401000, &[0x62, 0xF1, 0x74, 0x49, 0x58, 0x00])?;
+        assert_eq!(decoded.form_id, UNMAPPED_FORM_ID);
+        Ok(())
+    }
+
+    #[test]
+    fn evex_memory_guard_uses_predicate_metadata_not_operand_position() -> Result<(), Box<dyn std::error::Error>> {
+        let decoder = XedDecoder::new();
+        let mut decoded = decoder.decode(0x401000, &[0x62, 0xF1, 0x74, 0x49, 0x58, 0x00])?;
+        assert!(decoded.modifiers.predicate.is_some());
+        assert!(evex_masked_memory_requires_fault_suppression(&decoded));
+
+        decoded.operands.swap(1, 2);
+        assert!(evex_masked_memory_requires_fault_suppression(&decoded));
+
+        // A k-register present as data is not enough to imply predication.
+        decoded.modifiers.predicate = None;
+        assert!(!evex_masked_memory_requires_fault_suppression(&decoded));
         Ok(())
     }
 

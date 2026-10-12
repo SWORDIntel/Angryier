@@ -192,6 +192,17 @@ pub enum IrOp {
         address: IrValueId,
         ty: IrType,
     },
+    /// Lane-fault-suppressing load. Mask bit 0 selects the lowest lane;
+    /// higher bits beyond the vector lane count are ignored. Inactive lanes
+    /// produce zero bytes. Packed-single EVEX.128/.256 providers can now
+    /// emit it, but runtime form mapping still excludes masked memory. Concrete
+    /// execution reads only active lanes. Symbolic/concolic evaluation does
+    /// likewise for a provably constant mask; symbolic masks are rejected.
+    PredicatedVectorLoad {
+        address: IrValueId,
+        mask: IrValueId,
+        ty: IrType,
+    },
     Store {
         address: IrValueId,
         value: IrValueId,
