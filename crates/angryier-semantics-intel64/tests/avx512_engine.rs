@@ -6,11 +6,12 @@ mod avx512;
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 use angryier_arch_xed_ffi::XedDecoder;
 use angryier_execution::{ConcreteInterpreter, ExecutionEngine, ExecutionMode, ExecutionOutcome};
-use angryier_ir::BasicSemanticLowerer;
+use angryier_ir::{BasicSemanticLowerer, IrOp, IrType};
 use angryier_memory::{ByteValue, LayeredMemory, MemoryRegion, PersistentMemory};
 use angryier_semantics::{
     BlockValidityKey, DecodedInstructionView, FeatureId, FloatingPointPolicy, FormId, OperandDescriptor,
-    SemanticBlockBuilder, SemanticContext, SemanticProvider, TileRepresentation, VectorRepresentation,
+    SemanticBlockBuilder, SemanticContext, SemanticProvider, SemanticValueDefinition, TileRepresentation,
+    VectorRepresentation,
 };
 use angryier_semantics_intel64::forms;
 use angryier_state::{
@@ -228,6 +229,68 @@ fn run_engine(case: EngineCase<'_>) -> Result<ExecutionState<PersistentRegisters
         k3: case.k3,
         mem_data: case.mem_data,
     })
+}
+
+#[test]
+fn masked_evex_packed_single_memory_emits_only_predicated_loads() -> Result<(), BoxError> {
+    let decoder = XedDecoder::new();
+    for (code, provider, width) in [
+        (
+            [0x62, 0xF1, 0x74, 0x09, 0x58, 0x00],
+            &avx512::VaddpsEvexXmmXmmMem128 as &dyn SemanticProvider,
+            128,
+        ),
+        (
+            [0x62, 0xF1, 0x74, 0x29, 0x58, 0x00],
+            &avx512::VaddpsEvexYmmYmmMem as &dyn SemanticProvider,
+            256,
+        ),
+    ] {
+        let decoded = decoder.decode(CODE_BASE, &code)?;
+        let mut builder = SemanticBlockBuilder::new(SEMANTIC_VERSION);
+        provider
+            .emit(&context(), &decoded, &mut builder)
+            .map_err(|error| format!("emit: {error:?}"))?;
+        assert_eq!(
+            builder
+                .values()
+                .iter()
+                .filter(|value| matches!(value.definition, SemanticValueDefinition::ReadPredicatedOperand { .. }))
+                .count(),
+            1,
+        );
+        let sealed = builder
+            .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+            .map_err(|error| format!("seal: {error:?}"))?;
+        let key = BlockValidityKey {
+            image: ImageId(1),
+            block: BlockId(1),
+            address: CODE_BASE,
+            semantic_version: SEMANTIC_VERSION,
+            target_profile: TARGET_PROFILE,
+            code_versions: vec![],
+        };
+        let ir = BasicSemanticLowerer.lower_with_decode(&sealed, &key, &decoded)?;
+        assert!(ir.instructions.iter().any(|instruction| matches!(instruction.op,
+            IrOp::PredicatedVectorLoad { ty: IrType::Vector { width_bits, lane_bits: 32 }, .. } if width_bits == width)));
+        assert!(
+            !ir.instructions
+                .iter()
+                .any(|instruction| matches!(instruction.op, IrOp::Load { .. }))
+        );
+    }
+    let unmasked = decoder.decode(CODE_BASE, &[0x62, 0xF1, 0x74, 0x08, 0x58, 0x00])?;
+    let mut builder = SemanticBlockBuilder::new(SEMANTIC_VERSION);
+    avx512::VaddpsEvexXmmXmmMem128
+        .emit(&context(), &unmasked, &mut builder)
+        .map_err(|error| format!("emit: {error:?}"))?;
+    assert!(
+        builder
+            .values()
+            .iter()
+            .all(|value| !matches!(value.definition, SemanticValueDefinition::ReadPredicatedOperand { .. }))
+    );
+    Ok(())
 }
 
 fn read_zmm_bytes(
