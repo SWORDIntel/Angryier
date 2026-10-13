@@ -762,6 +762,14 @@ impl ExprArena for ShardedExprArena {
                             self.hits.fetch_add(1, Ordering::Relaxed);
                             return Ok(node.operands[0]);
                         }
+                    } else if node.operands[0] == node.operands[1] {
+                        match node.op {
+                            ExprOp::And | ExprOp::Or => {
+                                self.hits.fetch_add(1, Ordering::Relaxed);
+                                return Ok(node.operands[0]);
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
