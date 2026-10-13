@@ -68,6 +68,7 @@ dependencies = [
 name = "angryier-cli"
 version = "1.0.0"
 dependencies = [
+ "angryier",
  "angryier-models",
  "angryier-runtime",
  "angryier-types",

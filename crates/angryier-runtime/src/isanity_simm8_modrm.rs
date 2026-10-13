@@ -85,7 +85,10 @@ pub fn resolve_decoded(
         return Recognition::WrongEncoding;
     }
     let modrm = bytes[modrm_index];
-    if modrm >> 6 == 3 || ((modrm >> 3) & 7) != form.iform_reg_extension() {
+    let Some(reg_ext) = form.iform_reg_extension() else {
+        return Recognition::WrongEncoding;
+    };
+    if modrm >> 6 == 3 || ((modrm >> 3) & 7) != reg_ext {
         return Recognition::WrongEncoding;
     }
 
@@ -118,11 +121,10 @@ pub fn resolve_decoded(
 }
 
 impl Simm8ModrmForm {
-    fn iform_reg_extension(&self) -> u8 {
+    fn iform_reg_extension(&self) -> Option<u8> {
         SIMM8_MODRM_EXTENSION_BY_ID
             .iter()
             .find_map(|(canonical_id, extension)| (*canonical_id == self.canonical_id).then_some(*extension))
-            .expect("generated identity must have a ModRM extension")
     }
 }
 

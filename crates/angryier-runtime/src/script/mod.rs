@@ -621,6 +621,113 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
     }
 
+    if let Ok(tbl) = opts.get::<Table>("stubs") {
+        for pair in tbl.pairs::<Value, Value>() {
+            let (k, v) = pair?;
+            let (addr, ret_val) = if let Some(addr) = utils::parse_lua_u64(&k) {
+                let ret = match v {
+                    Value::Table(entry) => entry
+                        .get::<Value>("ret")
+                        .or_else(|_| entry.get::<Value>("value"))
+                        .ok()
+                        .and_then(|v| utils::parse_lua_u64(&v))
+                        .unwrap_or(0),
+                    _ => utils::parse_lua_u64(&v).unwrap_or(0),
+                };
+                (addr, ret)
+            } else if let Value::Table(entry) = v {
+                let a = entry
+                    .get::<Value>("addr")
+                    .ok()
+                    .and_then(|v| utils::parse_lua_u64(&v));
+                let r = entry
+                    .get::<Value>("ret")
+                    .or_else(|_| entry.get::<Value>("value"))
+                    .ok()
+                    .and_then(|v| utils::parse_lua_u64(&v))
+                    .unwrap_or(0);
+                if let Some(addr) = a {
+                    (addr, r)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
+            session.states[0].process.stub_function(addr, ret_val);
+        }
+    }
+    if let Ok(tbl) = opts.get::<Table>("redirects") {
+        for pair in tbl.pairs::<Value, Value>() {
+            let (k, v) = pair?;
+            let (from_pc, to_pc) = if let Some(from) = utils::parse_lua_u64(&k) {
+                let to = match v {
+                    Value::Table(entry) => entry
+                        .get::<Value>("to")
+                        .or_else(|_| entry.get::<Value>("target"))
+                        .ok()
+                        .and_then(|v| utils::parse_lua_u64(&v)),
+                    _ => utils::parse_lua_u64(&v),
+                };
+                if let Some(target) = to {
+                    (from, target)
+                } else {
+                    continue;
+                }
+            } else if let Value::Table(entry) = v {
+                let from = entry
+                    .get::<Value>("from")
+                    .or_else(|_| entry.get::<Value>("addr"))
+                    .ok()
+                    .and_then(|v| utils::parse_lua_u64(&v));
+                let to = entry
+                    .get::<Value>("to")
+                    .or_else(|_| entry.get::<Value>("target"))
+                    .ok()
+                    .and_then(|v| utils::parse_lua_u64(&v));
+                if let (Some(f), Some(t)) = (from, to) {
+                    (f, t)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
+            session.states[0].process.redirect_control_flow(from_pc, to_pc);
+        }
+    }
+    if let Ok(tbl) = opts.get::<Table>("patches") {
+        for pair in tbl.pairs::<Value, Value>() {
+            let (k, v) = pair?;
+            let (addr, data) = if let Some(addr) = utils::parse_lua_u64(&k) {
+                (addr, v)
+            } else if let Value::Table(entry) = &v {
+                let a = entry
+                    .get::<Value>("addr")
+                    .ok()
+                    .and_then(|v| utils::parse_lua_u64(&v));
+                let val = entry
+                    .get::<Value>("bytes")
+                    .or_else(|_| entry.get::<Value>("data"))
+                    .ok();
+                if let (Some(addr), Some(val)) = (a, val) {
+                    (addr, val)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
+            let raw = utils::parse_patch_bytes(data)?;
+            session.states[0]
+                .process
+                .patch_bytes(addr, &raw)
+                .map_err(|e| mlua::Error::external(format!("patch_bytes: {e:?}")))?;
+            session.states[0].memory =
+                angryier_execution::SymbolicSessionMemory::new(session.states[0].process.state.memory.clone());
+        }
+    }
+
     let find: Vec<u64> = opts
         .get::<Table>("find")
         .map(|t| t.sequence_values::<u64>().flatten().collect())

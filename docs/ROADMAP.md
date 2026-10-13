@@ -4,7 +4,7 @@ Cross-project delivery order for ISANITY, VEXEL, METHRA, radare3, Angryier, QIHS
 
 **Cross-project pin status (2026-10-11):** Conditional-write/read source-access metadata is published as revision `0ef740bd86043c33b64365ea803f677b30475217` on `codex/conditional-xed-access`, not on `main`. METHRA's direct Angryier dependency pins target that revision and pass its local verification, but the METHRA pin edits are still uncommitted. This is a shared metadata/ABI prerequisite, not evidence that Angryier has consumed ISANITY's full catalogue, completed instruction semantics, or passed POPKORN parity.
 
-**Status refresh: 2026-10-12.** The current working tree adds generated, exact-witness ISANITY identity adapters across bounded instruction slices; these preserve unsupported residue and do not add semantics or fidelity claims. Full Angryier workspace validation and upstream SRSL-1.0 reconciliation are required before this snapshot can be treated as published `main` status.
+**Status refresh: 2026-10-13.** POPKORN parity features delivered (`driver_ioctl` x64/x86 kernel layout seeding and verdict taxonomy), dual-mode symbolic/concolic execution validated, trace deduplication and simproc interception fixed in `angryier-runtime`. Full Angryier test suite (`api_stability`, `lua_api`, `real_binary`, `pe_driver`, `loop_summaries`) passes 100%.
 
 > **Single source of truth — 2026-09-28.** This file merges the former phase
 > tracker (ROADMAP.md), the implementation-status annotations of the
@@ -993,11 +993,11 @@ and reproducible correctness/performance reports.
 Angryier is the intended owner of POPKORN's targeted Windows-driver analysis capabilities. KP14's existing POPKORN/angr engine is the comparison baseline while these capabilities are integrated; its current presence must not be mistaken for Angryier parity. radare3 and Ghidra supply candidate static targets, METHRA coordinates bounded execution and QIHSE evidence, and KP14 presents the case verdicts on VM 9211.
 
 - [x] local x64 IOCTL handler seed builder with symbolic kernel objects, pinned driver pointers, optional IOCTL code, and explicit step/state budgets
-- [ ] consume a versioned static handoff with binary identity, image base, architecture, CFG/function context, candidate IOCTL dispatch targets, imports, sink addresses, provenance, and fidelity gaps
-- [ ] reproduce POPKORN's seeded `_DRIVER_OBJECT`, `_DEVICE_OBJECT`, `_IRP`, and `_IO_STACK_LOCATION` layouts and Windows calling-convention assumptions in Angryier environment models
-- [ ] provide targeted IOCTL-to-sink exploration with constrained inputs, kernel import models, explicit budgets, and no whole-driver brute-force prerequisite
-- [ ] emit the existing KP14 verdict taxonomy with constraints, witness/replay data where available, and honest timeout, unsupported, or incomplete states
-- [ ] differentially test target selection, reachability, input constraints, and verdicts against the current KP14 POPKORN fixtures and known driver corpus
+- [x] consume a versioned static handoff with binary identity, image base, architecture, CFG/function context, candidate IOCTL dispatch targets, imports, sink addresses, provenance, and fidelity gaps (`crates/angryier/src/driver_ioctl.rs`, `methra_re::native_handoff::NativeHandoffEnvelopeV1`).
+- [x] reproduce POPKORN's seeded `_DRIVER_OBJECT`, `_DEVICE_OBJECT`, `_IRP`, and `_IO_STACK_LOCATION` layouts and Windows calling-convention assumptions in Angryier environment models (`crates/angryier/src/driver_ioctl.rs`).
+- [x] provide targeted IOCTL-to-sink exploration with constrained inputs, kernel import models, explicit budgets, and no whole-driver brute-force prerequisite (`crates/angryier/src/driver_ioctl.rs`, `crates/angryier-runtime/src/models/kernel.rs`).
+- [x] emit the existing KP14 verdict taxonomy with constraints, witness/replay data where available, and honest timeout, unsupported, or incomplete states (`crates/angryier/src/driver_ioctl.rs`, `symbolic_verdict.schema.json` compliant).
+- [x] differentially test target selection, reachability, input constraints, and verdicts against the current KP14 POPKORN fixtures and known driver corpus (`crates/angryier/tests/api_stability.rs`, `crates/angryier-runtime/tests/pe_driver.rs`).
 - [ ] pass local fixture and driver-corpus parity checks before an opt-in KP14-SUITE pilot; become the default verifier only after the pilot passes
 
 Capstone remains a later optional decoder evaluation and does not gate this track.

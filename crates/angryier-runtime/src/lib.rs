@@ -24,6 +24,7 @@ use angryier_execution::{
     ConcolicEvaluator, ConcolicImage, ConcolicSource, ConcreteInterpreter, ExecutionEngine, ExecutionMode,
     ExecutionOutcome, PathConstraint, SymbolBinding, SymbolicArena, SymbolicBranch, SymbolicEvaluator,
 };
+pub use angryier_execution::SymbolicSessionMemory;
 use angryier_expr::{ExprNode, ExprOp, ExprSort};
 use angryier_ir::{BasicSemanticLowerer, IrBlock, IrInstruction, IrOp};
 use angryier_loader::{Elf64Loader, ImageLoader, LoadedImage, Symbol};
@@ -249,9 +250,15 @@ pub enum RuntimeError {
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Loader(e) => write!(f, "loader error: {e:?}"),
+            Self::Loader(e) => write!(f, "loader error: {e}"),
             Self::Decode(e) => write!(f, "decode error: {e}"),
-            Self::UnsupportedForm(form) => write!(f, "no semantic provider for form {form:#x}"),
+            Self::UnsupportedForm(form) => {
+                if *form == 0 {
+                    write!(f, "no semantic provider for form 0x0 (instruction unmapped in Angryier semantics corpus)")
+                } else {
+                    write!(f, "no semantic provider for form {form:#x} ({form})")
+                }
+            }
             Self::Semantic(e) => write!(f, "semantic error: {e}"),
             Self::Lowering(e) => write!(f, "lowering error: {e}"),
             Self::Execution(e) => write!(f, "execution error: {e}"),
@@ -388,6 +395,9 @@ pub struct Process {
     /// before the name-keyed `simproc_hooks` in `step_with`, with
     /// call-correct return semantics (RIP = `[RSP]`; RSP += 8).
     pub simproc_instances: BTreeMap<Address, Arc<dyn SimProcedure>>,
+    /// Control-flow redirects: if execution reaches `from_pc`, execution is
+    /// diverted directly to `to_pc` instead of executing instructions at `from_pc`.
+    pub redirects: BTreeMap<Address, Address>,
     /// Windows kernel pool model state when attached
     /// ([`Runtime::attach_kernel_pool_model`]); the dispatch loop records
     /// modeled alloc/free events (pointer + caller) into it.
@@ -471,6 +481,39 @@ impl Process {
             .ok_or_else(|| RuntimeError::SimProcedure(format!("unknown PE import: {dll}!{export_name}")))?;
         self.simproc_instances
             .insert(address, Arc::new(KernelReturnStub { value }));
+        Ok(())
+    }
+
+    /// Stubs a function at `address` to immediately return `return_value` in RAX
+    /// and pop the call return address from RSP.
+    pub fn stub_function(&mut self, address: Address, return_value: u64) {
+        self.simproc_instances.insert(
+            address,
+            Arc::new(KernelReturnStub { value: return_value }),
+        );
+        self.step_cache.remove(&address);
+        self.block_cache.remove(&address);
+    }
+
+    /// Redirects control flow from `from_pc` to `to_pc`.
+    pub fn redirect_control_flow(&mut self, from_pc: Address, to_pc: Address) {
+        self.redirects.insert(from_pc, to_pc);
+    }
+
+    /// Overwrites concrete memory at `address` with `bytes` and invalidates any
+    /// overlapping cached decoded instruction blocks.
+    pub fn patch_bytes(&mut self, address: Address, bytes: &[u8]) -> Result<(), RuntimeError> {
+        self.state.memory = self
+            .state
+            .memory
+            .load_concrete(address, bytes)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        let end = address.saturating_add(bytes.len() as u64);
+        self.step_cache.retain(|&k, v| {
+            let block_end = k.saturating_add(v.length as u64);
+            block_end <= address || k >= end
+        });
+        self.block_cache.retain(|&k, _| k < address || k >= end);
         Ok(())
     }
 
@@ -1473,6 +1516,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_hooks: BTreeMap::new(),
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
+            redirects: BTreeMap::new(),
             kernel_pool: None,
             pci_config_address: 0,
             symbols: Vec::new(),
@@ -1634,6 +1678,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_hooks: BTreeMap::new(),
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
+            redirects: BTreeMap::new(),
             kernel_pool: None,
             pci_config_address: 0,
             symbols: image.symbols.clone(),
@@ -2252,6 +2297,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_hooks: BTreeMap::new(),
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
+            redirects: BTreeMap::new(),
             kernel_pool: None,
             pci_config_address: 0,
             symbols: image.symbols,
@@ -2301,6 +2347,19 @@ impl<D: Decoder> Runtime<D> {
         // attempted/executed PC before any early environment-model dispatch.
         // This includes syscalls, CPUID, SimProcedures and terminating blocks.
         process.record_trace_pc(pc);
+
+        // Control-flow redirects: divert execution to target PC before SimProcedure
+        // or instruction decode.
+        if let Some(&target) = process.redirects.get(&pc) {
+            process.write_pc(target)?;
+            process.step_count = process.step_count.saturating_add(1);
+            return Ok(StepOutcome::Stepped {
+                pc,
+                next_pc: target,
+                length: 0,
+                form_id: 0,
+            });
+        }
 
         // Instance SimProcedure hooks (call-target stubs) take priority over
         // the name-keyed hooks.
@@ -2657,6 +2716,12 @@ impl<D: Decoder> Runtime<D> {
         // every block in the trace and keep the last conditional branch: that
         // is the branch that determined the current path.
         for address in &process.trace {
+            if process.simproc_hooks.contains_key(address)
+                || process.simproc_instances.contains_key(address)
+                || process.redirects.contains_key(address)
+            {
+                continue;
+            }
             let block = process
                 .block_cache
                 .get(address)
@@ -4936,6 +5001,7 @@ mod tests {
             simproc_hooks: BTreeMap::new(),
             pe_import_stubs: BTreeMap::new(),
             simproc_instances: BTreeMap::new(),
+            redirects: BTreeMap::new(),
             kernel_pool: None,
             pci_config_address: 0,
             symbols: Vec::new(),
@@ -5302,6 +5368,77 @@ mod tests {
         assert_eq!(process.step_count, 2);
         assert!(!process.terminated);
 
+        Ok(())
+    }
+
+    #[test]
+    fn stub_function_pops_return_address_and_sets_rax() -> Result<(), RuntimeError> {
+        let decoder = SyntheticDecoder::new();
+        let runtime = Runtime::new(decoder, SemanticVersion(1), TargetProfileId(1));
+        let mut process = minimal_process()?;
+
+        let region = angryier_memory::MemoryRegion {
+            object: angryier_types::ObjectId(1),
+            base: 0x1000,
+            size: 0x10000,
+            readable: true,
+            writable: true,
+            executable: true,
+        };
+        process.state.memory = process.state.memory.with_region(region).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+
+        let rsp = 0x8000u64;
+        let return_address = 0x1040u64;
+        process.write_register(register_id::GPR_BASE + 4, rsp)?; // RSP
+        process.state.memory = process.state.memory.write(rsp, &[ByteValue::Concrete(0x40), ByteValue::Concrete(0x10), ByteValue::Concrete(0), ByteValue::Concrete(0), ByteValue::Concrete(0), ByteValue::Concrete(0), ByteValue::Concrete(0), ByteValue::Concrete(0)]).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+
+        let stub_addr = 0x2000u64;
+        process.write_pc(stub_addr)?;
+        process.stub_function(stub_addr, 0x1337);
+
+        let outcome = runtime.step(&mut process)?;
+        assert!(matches!(outcome, StepOutcome::SimProcedure { address, ref name } if address == stub_addr && name == "kernel_stub_return"));
+        assert_eq!(process.pc()?, return_address);
+        assert_eq!(process.read_register(register_id::GPR_BASE + 4)?, rsp + 8);
+        assert_eq!(process.read_register(register_id::GPR_BASE)?, 0x1337); // RAX
+        Ok(())
+    }
+
+    #[test]
+    fn redirect_control_flow_diverts_pc() -> Result<(), RuntimeError> {
+        let decoder = SyntheticDecoder::new();
+        let runtime = Runtime::new(decoder, SemanticVersion(1), TargetProfileId(1));
+        let mut process = minimal_process()?;
+
+        let from_pc = 0x1000u64;
+        let to_pc = 0x2050u64;
+        process.write_pc(from_pc)?;
+        process.redirect_control_flow(from_pc, to_pc);
+
+        let outcome = runtime.step(&mut process)?;
+        assert!(matches!(outcome, StepOutcome::Stepped { pc, next_pc, .. } if pc == from_pc && next_pc == to_pc));
+        assert_eq!(process.pc()?, to_pc);
+        assert_eq!(process.step_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn patch_bytes_updates_memory_and_invalidates_cache() -> Result<(), RuntimeError> {
+        let mut process = minimal_process()?;
+        let region = angryier_memory::MemoryRegion {
+            object: angryier_types::ObjectId(1),
+            base: 0x1000,
+            size: 0x1000,
+            readable: true,
+            writable: true,
+            executable: true,
+        };
+        process.state.memory = process.state.memory.with_region(region).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+
+        process.patch_bytes(0x1000, &[0x90, 0xeb, 0x05])?;
+        let mut buf = [ByteValue::Concrete(0); 3];
+        process.state.memory.read_into(0x1000, &mut buf).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        assert_eq!(buf, [ByteValue::Concrete(0x90), ByteValue::Concrete(0xeb), ByteValue::Concrete(0x05)]);
         Ok(())
     }
 }
@@ -6691,14 +6828,19 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         }
         let state = &mut self.states[index];
 
-        // SimProcedure hooks dispatch like they do in concrete mode —
-        // BOTH the name-keyed hooks and the instance map (bound by
-        // attach_kernel_pool_model / hook_export_return). Without the
-        // instance check the symbolic stepper decoded the import stub's
-        // bare `ret` and kernel models never fired.
-        if state.process.simproc_hooks.contains_key(&pc) || state.process.simproc_instances.contains_key(&pc) {
+        // SimProcedure hooks and control-flow redirects dispatch like they do in concrete mode —
+        // BOTH the name-keyed hooks, instance map, and control-flow redirects.
+        if state.process.simproc_hooks.contains_key(&pc)
+            || state.process.simproc_instances.contains_key(&pc)
+            || state.process.redirects.contains_key(&pc)
+        {
             let state = &mut self.states[index];
-            let outcome = if let Some(model) = state.process.simproc_instances.get(&pc).cloned() {
+            // Pop the PC recorded at the start of step_state_inner so that runtime.step
+            // / dispatch_simproc_instance does not record the same PC twice.
+            state.process.trace.pop();
+            let outcome = if state.process.redirects.contains_key(&pc) {
+                self.runtime.step(&mut state.process)?
+            } else if let Some(model) = state.process.simproc_instances.get(&pc).cloned() {
                 self.runtime.dispatch_simproc_instance(&mut state.process, pc, &model)?
             } else {
                 self.runtime.step(&mut state.process)?
@@ -6923,6 +7065,9 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     return Ok(SymbolicStepOutcome::Stepped { next_pc });
                 }
             }
+            // Pop the PC recorded at the start of step_state_inner so that runtime.step
+            // does not record the same PC twice.
+            state.process.trace.pop();
             let outcome = self.runtime.step(&mut state.process)?;
             if decoded.form_id == SYSCALL_FORM_ID {
                 // Linux x86-64 syscalls return through RAX. The concrete

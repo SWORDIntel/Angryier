@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use angryier_runtime::Runtime;
+use angryier_runtime::{Runtime, RuntimeError};
 use angryier_types::{SemanticVersion, TargetProfileId};
 
 /// The x87 fixture template. `{iters}` FADD iterations accumulate
@@ -227,10 +227,9 @@ fn unmapped_x87_forms_fail_explicitly() -> Result<(), Box<dyn std::error::Error>
             .run(&mut process, 8)
             .err()
             .ok_or("expected an unsupported-form error")?;
-        let message = error.to_string();
         assert!(
-            message.contains("UnsupportedForm(0)"),
-            "unmapped x87 must report form id 0, got: {message}"
+            matches!(error, RuntimeError::UnsupportedForm(0)),
+            "unmapped x87 must report form id 0, got: {error:?}"
         );
     }
     Ok(())

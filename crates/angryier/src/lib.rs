@@ -153,15 +153,89 @@ pub struct RunReport {
     pub peak_states: u64,
     /// Dead/terminated states accumulated.
     pub dead_states: u64,
+    /// The wall-clock deadline elapsed before the step budget ran out.
+    pub timed_out: bool,
     /// PCs of states that reached a `find` address.
     pub found_pcs: Vec<u64>,
     /// Per-found-state input models: symbol index → bytes (only when
     /// `RunOptions::solve` is set).
     pub inputs: Vec<Vec<Vec<u8>>>,
+    /// Whether attacker inputs were evaluated as unconstrained (multiple satisfying assignments).
+    pub unconstrained_inputs: bool,
     /// Description of the most recent step error, if any.
     pub last_error: Option<String>,
     /// Kernel pool evidence (driver-mode PE loads only).
     pub kernel: KernelReport,
+}
+
+impl fmt::Display for RunReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Angryier Symbolic Run Report:")?;
+        writeln!(f, "  Steps consumed      : {}", self.steps)?;
+        writeln!(f, "  Forks produced      : {}", self.forks)?;
+        writeln!(f, "  States merged       : {}", self.merges)?;
+        writeln!(f, "  Terminated states   : {}", self.terminated)?;
+        writeln!(f, "  Failed states       : {}", self.failed)?;
+        writeln!(f, "  Pruned states (cap) : {}", self.pruned_states)?;
+        writeln!(f, "  Live states         : {}", self.live_states)?;
+        writeln!(f, "  Peak live states    : {}", self.peak_states)?;
+        writeln!(f, "  Dead states total   : {}", self.dead_states)?;
+        writeln!(
+            f,
+            "  Timed out           : {}",
+            if self.timed_out {
+                "yes (wall-clock deadline)"
+            } else {
+                "no"
+            }
+        )?;
+        if self.found_pcs.is_empty() {
+            writeln!(f, "  Found target PCs    : none")?;
+        } else {
+            let pcs: Vec<String> = self.found_pcs.iter().map(|pc| format!("{pc:#x}")).collect();
+            writeln!(f, "  Found target PCs    : {} ({})", self.found_pcs.len(), pcs.join(", "))?;
+        }
+        if !self.inputs.is_empty() {
+            writeln!(f, "  Solved input models : {}", self.inputs.len())?;
+            for (idx, model) in self.inputs.iter().enumerate() {
+                let byte_counts: Vec<String> = model
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| format!("sym{i}: {}B", b.len()))
+                    .collect();
+                writeln!(f, "    model #{idx} : {}", byte_counts.join(", "))?;
+            }
+        }
+        writeln!(
+            f,
+            "  Unconstrained inputs: {}",
+            if self.unconstrained_inputs {
+                "yes (multiple solutions)"
+            } else {
+                "no"
+            }
+        )?;
+        if self.kernel.allocs > 0
+            || self.kernel.frees > 0
+            || !self.kernel.double_frees.is_empty()
+            || !self.kernel.uaf_writes.is_empty()
+        {
+            writeln!(f, "  Kernel pool allocs  : {}", self.kernel.allocs)?;
+            writeln!(f, "  Kernel pool frees   : {}", self.kernel.frees)?;
+            writeln!(f, "  Double-free events  : {}", self.kernel.double_frees.len())?;
+            for (i, df) in self.kernel.double_frees.iter().enumerate() {
+                writeln!(f, "    double-free #{i} : ptr={:#x}, caller={:#x}", df.pointer, df.caller)?;
+            }
+            writeln!(f, "  UAF write witnesses : {}", self.kernel.uaf_writes.len())?;
+            for (i, uaf) in self.kernel.uaf_writes.iter().enumerate() {
+                writeln!(f, "    uaf-write #{i}   : ptr={:#x}, caller={:#x}", uaf.pointer, uaf.caller)?;
+            }
+        }
+        if let Some(ref err) = self.last_error {
+            writeln!(f, "  Last error          : {err}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Stable core options for one-shot runs. The Lua/CLI surfaces expose additional search-policy controls without changing this 1.0 struct layout.
@@ -204,6 +278,12 @@ pub struct RunOptions {
     /// Map the low 64 KiB as zeroed RAM (under-constrained memory
     /// relaxation; never changes executable mappings).
     pub zero_low_pages: bool,
+    /// Function stubs: `(address, return_value)`. Automatically pops RSP and returns RAX.
+    pub stubs: Vec<(u64, u64)>,
+    /// Control-flow redirects: `(from_pc, to_pc)`. Diverts execution without executing from_pc.
+    pub redirects: Vec<(u64, u64)>,
+    /// Byte patches: `(address, bytes)`. Overwrites concrete memory and clears instruction cache.
+    pub patches: Vec<(u64, Vec<u8>)>,
 }
 
 impl Default for RunOptions {
@@ -224,6 +304,9 @@ impl Default for RunOptions {
             files: Vec::new(),
             contents: Vec::new(),
             zero_low_pages: false,
+            stubs: Vec::new(),
+            redirects: Vec::new(),
+            patches: Vec::new(),
         }
     }
 }
@@ -390,9 +473,11 @@ impl Engine {
             live_states: report.live_states,
             peak_states: report.peak_states,
             dead_states: report.dead_states,
+            timed_out: report.timed_out,
             last_error: report.last_error.clone(),
             found_pcs: Vec::new(),
             inputs: Vec::new(),
+            unconstrained_inputs: false,
             kernel: KernelReport::default(),
         };
         out.found_pcs = report.found.iter().map(|s| s.process.pc().unwrap_or(0)).collect();
@@ -517,6 +602,34 @@ impl Session {
         result.map_err(|e| ApiError::Run(format!("mark_symbolic: {e:?}")))
     }
 
+    /// Stubs a function at `address` to immediately return `return_value` in RAX
+    /// and pop the call return address from RSP across all active states.
+    pub fn stub_function(&mut self, address: u64, return_value: u64) {
+        for state in &mut self.states {
+            state.process.stub_function(address, return_value);
+        }
+    }
+
+    /// Redirects control flow from `from_pc` to `to_pc` across all active states.
+    pub fn redirect_control_flow(&mut self, from_pc: u64, to_pc: u64) {
+        for state in &mut self.states {
+            state.process.redirect_control_flow(from_pc, to_pc);
+        }
+    }
+
+    /// Patches memory bytes at `address` and invalidates cached instruction blocks
+    /// across all active states.
+    pub fn patch_bytes(&mut self, address: u64, bytes: &[u8]) -> Result<(), ApiError> {
+        for state in &mut self.states {
+            state
+                .process
+                .patch_bytes(address, bytes)
+                .map_err(|e| ApiError::Run(format!("patch_bytes: {e:?}")))?;
+            state.memory = angryier_runtime::SymbolicSessionMemory::new(state.process.state.memory.clone());
+        }
+        Ok(())
+    }
+
     /// Runs the session to `options.steps` (or termination) and returns a
     /// report; the handle keeps the final states for inspection.
     pub fn run(&mut self, options: &RunOptions) -> Result<RunReport, ApiError> {
@@ -562,9 +675,11 @@ impl Session {
             live_states: report.live_states,
             peak_states: report.peak_states,
             dead_states: report.dead_states,
+            timed_out: report.timed_out,
             last_error: report.last_error.clone(),
             found_pcs: report.found.iter().map(|s| s.process.pc().unwrap_or(0)).collect(),
             inputs: Vec::new(),
+            unconstrained_inputs: false,
             kernel: KernelReport::default(),
         };
         if options.solve
@@ -696,5 +811,78 @@ fn apply_inputs(
     for (name, data) in &options.contents {
         session.states[0].process.files.insert(name.clone(), data.clone());
     }
+    for (addr, ret_val) in &options.stubs {
+        session.states[0].process.stub_function(*addr, *ret_val);
+    }
+    for (from_pc, to_pc) in &options.redirects {
+        session.states[0].process.redirect_control_flow(*from_pc, *to_pc);
+    }
+    for (addr, bytes) in &options.patches {
+        session.states[0]
+            .process
+            .patch_bytes(*addr, bytes)
+            .map_err(|e| ApiError::Run(format!("patch_bytes: {e:?}")))?;
+        session.states[0].memory =
+            angryier_runtime::SymbolicSessionMemory::new(session.states[0].process.state.memory.clone());
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_report_display_is_informative() {
+        let report = RunReport {
+            steps: 512,
+            forks: 4,
+            merges: 2,
+            terminated: 3,
+            failed: 1,
+            pruned_states: 0,
+            live_states: 2,
+            peak_states: 6,
+            dead_states: 4,
+            timed_out: false,
+            found_pcs: vec![0x140002000, 0x140002010],
+            inputs: vec![vec![vec![0x41, 0x42, 0x43, 0x00]]],
+            unconstrained_inputs: false,
+            last_error: Some("test error annotation".to_string()),
+            kernel: KernelReport {
+                allocs: 5,
+                frees: 3,
+                double_frees: vec![angryier_models::PoolEvent {
+                    pointer: 0xffff_8000_1000,
+                    caller: 0x140001050,
+                }],
+                uaf_writes: Vec::new(),
+            },
+        };
+
+        let s = format!("{report}");
+        assert!(s.contains("Angryier Symbolic Run Report:"));
+        assert!(s.contains("Steps consumed      : 512"));
+        assert!(s.contains("Forks produced      : 4"));
+        assert!(s.contains("0x140002000"));
+        assert!(s.contains("0x140002010"));
+        assert!(s.contains("sym0: 4B"));
+        assert!(s.contains("Kernel pool allocs  : 5"));
+        assert!(s.contains("Double-free events  : 1"));
+        assert!(s.contains("0xffff80001000"));
+        assert!(s.contains("test error annotation"));
+    }
+
+    #[test]
+    fn run_options_defaults_and_fields() {
+        let opts = RunOptions {
+            stubs: vec![(0x401000, 42)],
+            redirects: vec![(0x401050, 0x401080)],
+            patches: vec![(0x401020, vec![0x90, 0x90])],
+            ..RunOptions::default()
+        };
+        assert_eq!(opts.stubs, vec![(0x401000, 42)]);
+        assert_eq!(opts.redirects, vec![(0x401050, 0x401080)]);
+        assert_eq!(opts.patches, vec![(0x401020, vec![0x90, 0x90])]);
+    }
 }

@@ -44,9 +44,8 @@ fn fixture_path(name: &str) -> PathBuf {
 
 /// Optional driver corpus fixture resolver (skipped when absent).
 fn harness_fixture(name: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let path = PathBuf::from(home)
-        .join("Documents/byovd-harness/ghidra_pipeline/fixtures/bin")
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../byovd-harness/ghidra_pipeline/fixtures/bin")
         .join(name);
     path.is_file().then_some(path)
 }
@@ -152,6 +151,9 @@ fn test_run_options_construction_and_defaults() {
         files: vec!["/dev/urandom".to_string()],
         contents: vec![("test.txt".to_string(), vec![0x41, 0x42])],
         zero_low_pages: true,
+        stubs: vec![(0x401050, 0)],
+        redirects: vec![(0x401060, 0x401070)],
+        patches: vec![(0x401080, vec![0x90, 0x90])],
     };
 
     assert_eq!(custom.steps, 50);

@@ -1,6 +1,6 @@
 //! Binary utilities, register name mappings, and disassembler for the Lua scripting API.
 
-use mlua::{Lua, LuaString, Table};
+use mlua::{Lua, LuaString, Table, Value};
 
 /// Maps a register name (case-insensitive) to its architectural register ID.
 pub fn reg_by_name(name: &str) -> Option<u32> {
@@ -198,4 +198,108 @@ pub fn register_utils(lua: &Lua, lib: &Table) -> mlua::Result<()> {
     )?;
 
     Ok(())
+}
+
+/// Parses a Lua value (hex string, raw byte string, or sequence table of integers)
+/// into a `Vec<u8>`.
+pub fn parse_patch_bytes(data: Value) -> Result<Vec<u8>, mlua::Error> {
+    match data {
+        Value::String(s) => {
+            let s_bytes = s.as_bytes();
+            if let Ok(text) = std::str::from_utf8(&s_bytes) {
+                let trimmed = text.trim();
+                let clean = trimmed
+                    .strip_prefix("0x")
+                    .or_else(|| trimmed.strip_prefix("0X"))
+                    .unwrap_or(trimmed)
+                    .replace([' ', '\t'], "");
+                if !clean.is_empty()
+                    && clean.len() % 2 == 0
+                    && clean.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    let mut bytes = Vec::with_capacity(clean.len() / 2);
+                    for chunk in clean.as_bytes().chunks(2) {
+                        if let Ok(s) = std::str::from_utf8(chunk)
+                            && let Ok(b) = u8::from_str_radix(s, 16)
+                        {
+                            bytes.push(b);
+                        } else {
+                            bytes.clear();
+                            break;
+                        }
+                    }
+                    if bytes.len() == clean.len() / 2 {
+                        return Ok(bytes);
+                    }
+                }
+            }
+            Ok(s_bytes.to_vec())
+        }
+        Value::Table(t) => {
+            let mut vec = Vec::new();
+            for b in t.sequence_values::<u8>() {
+                vec.push(b?);
+            }
+            Ok(vec)
+        }
+        _ => Err(mlua::Error::external(
+            "patch: data must be a hex string, byte string, or table of bytes",
+        )),
+    }
+}
+
+/// Robustly parses a Lua value representing a 64-bit unsigned integer or address.
+/// Accepts:
+/// - `Value::Integer(i)`: signed 64-bit integer, cast to `u64` preserving bit pattern.
+/// - `Value::Number(f)`: finite positive floating-point number, converted to `u64`.
+/// - `Value::String(s)`: hex string (with or without `0x`/`0X` prefix) or decimal string.
+pub fn parse_lua_u64(val: &Value) -> Option<u64> {
+    match val {
+        Value::Integer(i) => Some(*i as u64),
+        Value::Number(f) if f.is_finite() && *f >= 0.0 && *f <= (u64::MAX as f64) => {
+            Some(*f as u64)
+        }
+        Value::String(s) => {
+            let s_bytes = s.as_bytes();
+            let text = std::str::from_utf8(&s_bytes).ok()?.trim();
+            let clean = text.replace(['_', ' '], "");
+            if let Some(hex) = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else if clean.chars().all(|c| c.is_ascii_digit()) {
+                clean.parse::<u64>().ok()
+            } else {
+                u64::from_str_radix(&clean, 16).ok()
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_lua_u64() {
+        let lua = Lua::new();
+        let val_int = Value::Integer(0x401000);
+        assert_eq!(parse_lua_u64(&val_int), Some(0x401000));
+
+        let val_neg = Value::Integer(-1);
+        assert_eq!(parse_lua_u64(&val_neg), Some(u64::MAX));
+
+        let val_float = Value::Number(4096.0);
+        assert_eq!(parse_lua_u64(&val_float), Some(4096));
+
+        let val_hex_str = Value::String(lua.create_string("0x401000").unwrap());
+        assert_eq!(parse_lua_u64(&val_hex_str), Some(0x401000));
+
+        let val_dec_str = Value::String(lua.create_string("12345").unwrap());
+        assert_eq!(parse_lua_u64(&val_dec_str), Some(12345));
+
+        let val_raw_hex = Value::String(lua.create_string("deadbeef").unwrap());
+        assert_eq!(parse_lua_u64(&val_raw_hex), Some(0xdeadbeef));
+
+        assert_eq!(parse_lua_u64(&Value::Nil), None);
+    }
 }

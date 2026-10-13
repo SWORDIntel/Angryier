@@ -10,6 +10,7 @@ name = "angryier"
 path = "src/main.rs"
 
 [dependencies]
+angryier = { path = "../angryier", optional = true }
 angryier-runtime = { path = "../angryier-runtime", optional = true }
 angryier-models = { path = "../angryier-models", optional = true }
 angryier-types = { path = "../angryier-types", optional = true }
@@ -22,7 +23,7 @@ mlua = { version = "0.12", features = ["lua54", "vendored"], optional = true }
 # and the system libz3 via `angryier-runtime/script` -> `z3`; build the
 # minimal rustc-only CLI with `cargo build -p angryier-cli --no-default-features`.
 default = ["run"]
-run = ["dep:angryier-runtime", "dep:angryier-models", "dep:angryier-types", "dep:mlua", "angryier-runtime/xed", "angryier-runtime/script"]
+run = ["dep:angryier", "dep:angryier-runtime", "dep:angryier-models", "dep:angryier-types", "dep:mlua", "angryier-runtime/xed", "angryier-runtime/script"]
 
 [lints]
 workspace = true

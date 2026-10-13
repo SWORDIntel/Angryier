@@ -403,12 +403,28 @@ mod run_cmd {
         /// PE driver mode: load via `load_pe_driver`, attach kernel models,
         /// execute DriverEntry, and report pool/kernel events.
         pub driver: bool,
+        /// Function stubs: (address, return_value)
+        pub stubs: Vec<(u64, u64)>,
+        /// Control-flow redirects: (from_pc, to_pc)
+        pub redirects: Vec<(u64, u64)>,
+        /// Memory/instruction byte patches: (address, bytes)
+        pub patches: Vec<(u64, Vec<u8>)>,
+        /// Ingest static handoff JSON file (produced by METHRA or test fixtures).
+        pub handoff: Option<String>,
+        /// Target ID filter when using --handoff (e.g. `TGT-VBOXUSBMON-001`).
+        pub handoff_target: Option<String>,
+        /// Emit machine-readable line-delimited JSON verdicts conforming to `symbolic_verdict.schema.json`.
+        pub json: bool,
+        /// Kernel layout architecture ("x64", "x86").
+        pub arch: Option<String>,
     }
 
     pub fn usage() -> String {
-        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver]\n\
+        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver] [--stub ADDR=VAL] [--redirect FROM=TO] [--patch ADDR=HEX] [--handoff PATH] [--handoff-target ID] [--json] [--arch ARCH]\n\
          note: --reg is repeatable; VALUE accepts decimal or 0x-prefixed hexadecimal\n\
          note: --find/--avoid ADDR are repeatable hexadecimal addresses, 0x prefix optional\n\
+         note: --stub/--redirect/--patch are repeatable for function stubbing, execution diversion, and live memory patching\n\
+         note: --handoff consumes METHRA static handoffs (symbolic_targets.schema.json) for targeted IOCTL exploration\n\
          note: --fork enables fork-aggressive symbolic exploration; --dfs prioritizes the newest/deepest state\n\
          note: --driver loads PE32+ drivers with kernel models and reports pool events"
             .to_string()
@@ -449,6 +465,52 @@ mod run_cmd {
         Ok((name.to_string(), value))
     }
 
+    fn parse_stub(raw: &str) -> Result<(u64, u64), String> {
+        let (addr_str, val_str) = raw
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --stub value '{raw}' (expected ADDR=VAL, e.g. 0x401000=0)"))?;
+        let addr = parse_u64_value(addr_str)
+            .ok_or_else(|| format!("invalid --stub address '{addr_str}' (expected decimal or 0x-prefixed hex)"))?;
+        let val = parse_u64_value(val_str)
+            .ok_or_else(|| format!("invalid --stub return value '{val_str}' (expected decimal or 0x-prefixed hex)"))?;
+        Ok((addr, val))
+    }
+
+    fn parse_redirect(raw: &str) -> Result<(u64, u64), String> {
+        let (from_str, to_str) = raw
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --redirect value '{raw}' (expected FROM=TO, e.g. 0x401050=0x401080)"))?;
+        let from = parse_u64_value(from_str)
+            .ok_or_else(|| format!("invalid --redirect source address '{from_str}' (expected decimal or 0x-prefixed hex)"))?;
+        let to = parse_u64_value(to_str)
+            .ok_or_else(|| format!("invalid --redirect target address '{to_str}' (expected decimal or 0x-prefixed hex)"))?;
+        Ok((from, to))
+    }
+
+    fn parse_patch(raw: &str) -> Result<(u64, Vec<u8>), String> {
+        let (addr_str, bytes_str) = raw
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --patch value '{raw}' (expected ADDR=HEX, e.g. 0x401000=9090)"))?;
+        let addr = parse_u64_value(addr_str)
+            .ok_or_else(|| format!("invalid --patch address '{addr_str}' (expected decimal or 0x-prefixed hex)"))?;
+        let clean = bytes_str
+            .trim()
+            .strip_prefix("0x")
+            .or_else(|| bytes_str.trim().strip_prefix("0X"))
+            .unwrap_or(bytes_str.trim())
+            .replace([' ', '\t'], "");
+        if clean.is_empty() || clean.len() % 2 != 0 || !clean.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!("invalid --patch hex bytes '{bytes_str}' (expected even number of hex characters)"));
+        }
+        let mut bytes = Vec::with_capacity(clean.len() / 2);
+        for chunk in clean.as_bytes().chunks(2) {
+            let s = std::str::from_utf8(chunk).map_err(|e| format!("{e}"))?;
+            let b = u8::from_str_radix(s, 16).map_err(|e| format!("{e}"))?;
+            bytes.push(b);
+        }
+        Ok((addr, bytes))
+    }
+
     pub fn parse(args: &[String]) -> Result<RunConfig, String> {
         let mut path = None;
         let mut script = None;
@@ -456,6 +518,9 @@ mod run_cmd {
         let mut regs = Vec::new();
         let mut find = Vec::new();
         let mut avoid = Vec::new();
+        let mut stubs = Vec::new();
+        let mut redirects = Vec::new();
+        let mut patches = Vec::new();
         let mut argv = None;
         let mut steps: Option<u64> = None;
         let mut states: Option<usize> = None;
@@ -466,6 +531,10 @@ mod run_cmd {
         let mut dfs = false;
         let mut dynamic = false;
         let mut driver = false;
+        let mut handoff = None;
+        let mut handoff_target = None;
+        let mut json = false;
+        let mut arch = None;
         let mut i = 0;
         while i < args.len() {
             let arg = args[i].as_str();
@@ -609,6 +678,38 @@ mod run_cmd {
                     return Err("duplicate --driver flag (may only be given once)".to_string());
                 }
                 driver = true;
+            } else if arg == "--stub" {
+                let raw = value(args, &mut i, arg)?;
+                let stub = parse_stub(raw)?;
+                stubs.push(stub);
+            } else if arg == "--redirect" {
+                let raw = value(args, &mut i, arg)?;
+                let redirect = parse_redirect(raw)?;
+                redirects.push(redirect);
+            } else if arg == "--patch" {
+                let raw = value(args, &mut i, arg)?;
+                let patch = parse_patch(raw)?;
+                patches.push(patch);
+            } else if arg == "--handoff" {
+                let raw = value(args, &mut i, arg)?;
+                if handoff.replace(raw.to_string()).is_some() {
+                    return Err(format!("duplicate --handoff value '{raw}' (flag may only be given once)"));
+                }
+            } else if arg == "--handoff-target" {
+                let raw = value(args, &mut i, arg)?;
+                if handoff_target.replace(raw.to_string()).is_some() {
+                    return Err(format!("duplicate --handoff-target value '{raw}' (flag may only be given once)"));
+                }
+            } else if arg == "--json" {
+                if json {
+                    return Err("duplicate --json flag (may only be given once)".to_string());
+                }
+                json = true;
+            } else if arg == "--arch" {
+                let raw = value(args, &mut i, arg)?;
+                if arch.replace(raw.to_string()).is_some() {
+                    return Err(format!("duplicate --arch value '{raw}' (flag may only be given once)"));
+                }
             } else if !arg.starts_with('-') {
                 if path.replace(arg.to_string()).is_some() {
                     return Err(format!(
@@ -640,6 +741,13 @@ mod run_cmd {
             dfs,
             dynamic,
             driver,
+            stubs,
+            redirects,
+            patches,
+            handoff,
+            handoff_target,
+            json,
+            arch,
         })
     }
 
@@ -654,12 +762,19 @@ mod run_cmd {
             Some(script) => format!("custom Lua script ({script})"),
             None => "generated Lua driver".to_string(),
         };
-        let mode = if config.driver {
+        let mode = if config.handoff.is_some() {
+            "METHRA static-handoff driver verification (POPKORN targeted IOCTL exploration)"
+        } else if config.driver {
             "PE32+ kernel-driver execution (direct Rust runtime + kernel models)"
         } else if config.dynamic {
             "symbolic/concolic execution with dynamic-linking environment model"
         } else {
             "symbolic/concolic execution with static image entry"
+        };
+        let handoff_desc = match (&config.handoff, &config.handoff_target) {
+            (Some(path), Some(tgt)) => format!("{path} (target {tgt})"),
+            (Some(path), None) => format!("{path} (all targets)"),
+            (None, _) => "none".to_string(),
         };
         let symbolic = if config.symbolic.is_empty() {
             "none".to_string()
@@ -700,10 +815,42 @@ mod run_cmd {
             .argv
             .map(|bytes| format!("{bytes} symbolic byte(s) in argv[0]"))
             .unwrap_or_else(|| "disabled".to_string());
-        let note = if config.driver {
-            "\n  note           : --driver bypasses Lua; --reg and --steps apply directly, while symbolic search flags (--symbolic/--find/--avoid/--argv/--states/--timeout/--branch-timeout-ms/--solve/--fork/--dfs/--dynamic) are not applied"
+        let stubs_desc = if config.stubs.is_empty() {
+            "none".to_string()
+        } else {
+            config
+                .stubs
+                .iter()
+                .map(|(addr, ret)| format!("{addr:#x}->ret {ret:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let redirects_desc = if config.redirects.is_empty() {
+            "none".to_string()
+        } else {
+            config
+                .redirects
+                .iter()
+                .map(|(from, to)| format!("{from:#x}->{to:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let patches_desc = if config.patches.is_empty() {
+            "none".to_string()
+        } else {
+            config
+                .patches
+                .iter()
+                .map(|(addr, bytes)| format!("{addr:#x} ({}B)", bytes.len()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let note = if config.handoff.is_some() {
+            "\n  note           : --handoff enables METHRA targeted IOCTL verification; targets, RVAs, and candidate IOCTL codes are driven by the static handoff specification"
+        } else if config.driver {
+            "\n  note           : --driver bypasses Lua; --reg, --stub, --redirect, --patch, and --steps apply directly, while symbolic search flags (--symbolic/--find/--avoid/--argv/--states/--timeout/--branch-timeout-ms/--solve/--fork/--dfs/--dynamic) are not applied"
         } else if config.script.is_some() {
-            "\n  note           : a custom Lua script owns execution; parsed symbolic/reg/find/avoid/argv/budget/search flags are not injected automatically"
+            "\n  note           : a custom Lua script owns execution; parsed symbolic/reg/find/avoid/argv/stub/redirect/patch/budget/search flags are not injected automatically"
         } else {
             ""
         };
@@ -713,6 +860,7 @@ mod run_cmd {
              \x20 target         : {}\n\
              \x20 frontend       : {}\n\
              \x20 mode           : {}\n\
+             \x20 static handoff : {}\n\
              \x20 step budget    : {}\n\
              \x20 state budget   : {}\n\
              \x20 wall timeout   : {} s\n\
@@ -724,10 +872,14 @@ mod run_cmd {
              \x20 concrete regs  : {}\n\
              \x20 find targets   : {}\n\
              \x20 avoid targets  : {}\n\
-             \x20 symbolic argv  : {}{}",
+             \x20 symbolic argv  : {}\n\
+             \x20 function stubs : {}\n\
+             \x20 redirects      : {}\n\
+             \x20 memory patches : {}{}",
             config.path,
             frontend,
             mode,
+            handoff_desc,
             config.steps,
             config.states,
             config.timeout_secs,
@@ -748,6 +900,9 @@ mod run_cmd {
             find,
             avoid,
             argv,
+            stubs_desc,
+            redirects_desc,
+            patches_desc,
             note
         )
     }
@@ -808,6 +963,42 @@ mod run_cmd {
                 .join(", ");
             format!("regs = {{ {entries} }},")
         };
+        let stubs_opt = if config.stubs.is_empty() {
+            String::new()
+        } else {
+            let entries = config
+                .stubs
+                .iter()
+                .map(|(addr, ret)| format!("[{addr}] = {ret}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("stubs = {{ {entries} }},")
+        };
+        let redirects_opt = if config.redirects.is_empty() {
+            String::new()
+        } else {
+            let entries = config
+                .redirects
+                .iter()
+                .map(|(from, to)| format!("[{from}] = {to}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("redirects = {{ {entries} }},")
+        };
+        let patches_opt = if config.patches.is_empty() {
+            String::new()
+        } else {
+            let entries = config
+                .patches
+                .iter()
+                .map(|(addr, bytes)| {
+                    let hex = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                    format!("[{addr}] = \"{hex}\"")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("patches = {{ {entries} }},")
+        };
         let argv_opt = config.argv.map(|n| format!("argv = {n},")).unwrap_or_default();
         let dyn_opt = if config.dynamic { "dynamic = true," } else { "" };
         let solve_opt = if config.solve { "solve = true," } else { "" };
@@ -815,7 +1006,7 @@ mod run_cmd {
         let dfs_opt = if config.dfs { "search = \"dfs\"," } else { "" };
         let escaped_path = config.path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
-            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, {regs_opt} find = {{ {find_table} }}, avoid = {{ {avoid_table} }}, {argv_opt} {dyn_opt} {solve_opt} {fork_opt} {dfs_opt} steps = {steps}, states = {states}, timeout_secs = {timeout_secs}, branch_analysis = true, branch_timeout_ms = {branch_timeout_ms} }})
+            r#"local r = angry.run("{path}", {{ symbolic = {{ {sym_table} }}, {regs_opt} {stubs_opt} {redirects_opt} {patches_opt} find = {{ {find_table} }}, avoid = {{ {avoid_table} }}, {argv_opt} {dyn_opt} {solve_opt} {fork_opt} {dfs_opt} steps = {steps}, states = {states}, timeout_secs = {timeout_secs}, branch_analysis = true, branch_timeout_ms = {branch_timeout_ms} }})
 
 local function yn(v)
     if v then return "yes" end
@@ -1416,6 +1607,11 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
     pub fn execute(config: &RunConfig) -> i32 {
         println!("{}", run_plan_output(config));
 
+        // Static handoff mode: direct Rust execution driven by METHRA static targets.
+        if let Some(handoff_path) = &config.handoff {
+            return execute_handoff_mode(config, handoff_path);
+        }
+
         // Driver mode: direct Rust execution with kernel models, no Lua.
         if config.driver {
             return execute_driver_mode(config);
@@ -1471,6 +1667,158 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 1
             }
         }
+    }
+
+    /// Static handoff mode: load driver binary, ingest METHRA static targets
+    /// from JSON, synthesize layout-aware driver states, and emit canonical
+    /// verdicts matching `symbolic_verdict.schema.json`.
+    fn execute_handoff_mode(config: &RunConfig, handoff_path: &str) -> i32 {
+        use angryier::driver_ioctl::{KernelLayout, StaticHandoff, StaticHandoffTarget};
+        use angryier::{Engine, RunReport};
+
+        println!("[angryier][handoff] reading static handoff from: {handoff_path}");
+        let handoff_json = match std::fs::read_to_string(handoff_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[angryier][handoff][error] cannot read handoff file '{handoff_path}': {e}");
+                return 1;
+            }
+        };
+
+        let handoff = match StaticHandoff::from_json(&handoff_json) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[angryier][handoff][error] invalid static handoff JSON: {e}");
+                return 1;
+            }
+        };
+
+        let arch_str = config.arch.as_deref().unwrap_or(&handoff.arch);
+        let layout = match KernelLayout::for_arch(arch_str) {
+            Some(l) => l,
+            None => {
+                eprintln!("[angryier][handoff][error] unsupported architecture '{arch_str}'");
+                return 1;
+            }
+        };
+
+        println!(
+            "[angryier][handoff] METHRA static handoff loaded: {} target(s), arch={}, image_base={:#x}",
+            handoff.targets.len(),
+            handoff.arch,
+            handoff.image_base
+        );
+        if let Some(producer) = &handoff.producer {
+            println!("  producer       : {producer}");
+        }
+        if let Some(name) = &handoff.binary_name {
+            println!("  binary name    : {name}");
+        }
+        println!("  binary sha256  : {}", handoff.binary_sha256);
+
+        let targets: Vec<&StaticHandoffTarget> = if let Some(target_id) = &config.handoff_target {
+            let matched: Vec<_> = handoff
+                .targets
+                .iter()
+                .filter(|t| &t.target_id == target_id)
+                .collect();
+            if matched.is_empty() {
+                eprintln!("[angryier][handoff][error] target '{target_id}' not found in handoff");
+                return 1;
+            }
+            matched
+        } else {
+            handoff.targets.iter().collect()
+        };
+
+        println!("[angryier][init] initializing Angryier engine for targeted exploration");
+        let engine = match Engine::new() {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[angryier][init][error] failed to initialize engine: {e}");
+                return 1;
+            }
+        };
+
+        println!("[angryier][load] loading target binary: {}", config.path);
+        let image = match engine.load(&config.path) {
+            Ok(img) => img,
+            Err(e) => {
+                eprintln!("[angryier][load][error] failed to load binary '{}': {e}", config.path);
+                return 1;
+            }
+        };
+
+        let mut total_verdicts = 0;
+        let mut feasible_count = 0;
+
+        for target in targets {
+            println!(
+                "[angryier][target] ID={} | sink={} | handler_rva={:#x} | sink_rva={:#x}",
+                target.target_id, target.sink_name, target.handler_rva, target.sink_rva
+            );
+
+            let driver_targets = target.to_driver_targets(handoff.image_base);
+            for driver_target in driver_targets {
+                let start = std::time::Instant::now();
+                let mut options = match driver_target.run_options_with_layout(
+                    layout,
+                    config.steps,
+                    config.states,
+                ) {
+                    Ok(opts) => opts,
+                    Err(e) => {
+                        eprintln!("[angryier][target][error] failed to construct run options: {e}");
+                        continue;
+                    }
+                };
+
+                // Propagate CLI stubs, redirects, and patches if any
+                options.stubs.extend(config.stubs.iter().cloned());
+                options.redirects.extend(config.redirects.iter().cloned());
+                options.patches.extend(config.patches.iter().cloned());
+
+                let report = match engine.run(&image, &options) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[angryier][exec][error] exploration error: {e}");
+                        RunReport {
+                            last_error: Some(format!("{e}")),
+                            ..RunReport::default()
+                        }
+                    }
+                };
+
+                let elapsed_secs = start.elapsed().as_secs_f64();
+                let verdict = driver_target.classify_run_with_metadata(
+                    &report,
+                    elapsed_secs,
+                    Some(&target.target_id),
+                    Some(&target.sink_name),
+                    Some(&handoff.binary_sha256),
+                );
+
+                total_verdicts += 1;
+                if verdict.verdict == angryier::driver_ioctl::DriverVerdict::PathFeasibleUnchecked
+                    || verdict.verdict == angryier::driver_ioctl::DriverVerdict::PathFeasibleConstrained
+                {
+                    feasible_count += 1;
+                }
+
+                if config.json {
+                    println!("{}", verdict.to_json());
+                } else {
+                    println!("{verdict}");
+                    println!("[angryier][verdict][json] {}", verdict.to_json());
+                }
+            }
+        }
+
+        println!(
+            "[angryier][summary] verification complete: {} verdict(s) emitted, {} feasible path(s)",
+            total_verdicts, feasible_count
+        );
+        0
     }
 
     /// PE driver mode: load, attach kernel models, execute DriverEntry,
@@ -1535,6 +1883,42 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                     return 1;
                 }
                 println!("  {name:<4} = {value:#018x}");
+            }
+        }
+
+        if !config.stubs.is_empty() {
+            println!(
+                "[angryier][stub] applying {} function stub(s)",
+                config.stubs.len()
+            );
+            for (address, ret_val) in &config.stubs {
+                process.stub_function(*address, *ret_val);
+                println!("  {address:#x} -> ret {ret_val:#x}");
+            }
+        }
+
+        if !config.redirects.is_empty() {
+            println!(
+                "[angryier][redirect] applying {} control-flow redirect(s)",
+                config.redirects.len()
+            );
+            for (from_pc, to_pc) in &config.redirects {
+                process.redirect_control_flow(*from_pc, *to_pc);
+                println!("  {from_pc:#x} -> {to_pc:#x}");
+            }
+        }
+
+        if !config.patches.is_empty() {
+            println!(
+                "[angryier][patch] applying {} memory/code patch(es)",
+                config.patches.len()
+            );
+            for (address, bytes) in &config.patches {
+                if let Err(error) = process.patch_bytes(*address, bytes) {
+                    eprintln!("[angryier][patch][error] failed to patch {address:#x}: {error}");
+                    return 1;
+                }
+                println!("  {address:#x} -> {} byte(s)", bytes.len());
             }
         }
 
@@ -1684,6 +2068,13 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 dfs: false,
                 dynamic,
                 driver: false,
+                stubs: Vec::new(),
+                redirects: Vec::new(),
+                patches: Vec::new(),
+                handoff: None,
+                handoff_target: None,
+                json: false,
+                arch: None,
             }
         }
 
@@ -1693,6 +2084,34 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 parse(&args(&["./bin"])),
                 Ok(config("./bin", None, &[], &[], None, 256, false))
             );
+        }
+
+        #[test]
+        fn parses_handoff_flags() {
+            let res = parse(&args(&[
+                "./driver.sys",
+                "--handoff",
+                "targets.json",
+                "--handoff-target",
+                "TGT-VBOXUSBMON-001",
+                "--json",
+                "--arch",
+                "x64",
+            ]))
+            .expect("valid handoff parse");
+            assert_eq!(res.path, "./driver.sys");
+            assert_eq!(res.handoff.as_deref(), Some("targets.json"));
+            assert_eq!(res.handoff_target.as_deref(), Some("TGT-VBOXUSBMON-001"));
+            assert!(res.json);
+            assert_eq!(res.arch.as_deref(), Some("x64"));
+        }
+
+        #[test]
+        fn rejects_duplicate_handoff_flags() {
+            assert!(parse(&args(&["./driver.sys", "--handoff", "t1.json", "--handoff", "t2.json"])).is_err());
+            assert!(parse(&args(&["./driver.sys", "--handoff-target", "T1", "--handoff-target", "T2"])).is_err());
+            assert!(parse(&args(&["./driver.sys", "--json", "--json"])).is_err());
+            assert!(parse(&args(&["./driver.sys", "--arch", "x64", "--arch", "x86"])).is_err());
         }
 
         #[test]
@@ -1992,6 +2411,50 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 parse(&args(&["./bin", "--find", "0x40102a", "--find", "40102a"])),
                 Ok(config("./bin", None, &[], &[0x40102a, 0x40102a], None, 256, false))
             );
+        }
+
+        #[test]
+        fn parses_stubs_redirects_and_patches() {
+            let parsed = parse(&args(&[
+                "./bin",
+                "--stub",
+                "0x401000=1",
+                "--redirect",
+                "0x401050=0x401080",
+                "--patch",
+                "0x401020=9090eb05",
+            ]))
+            .expect("parse should succeed");
+            assert_eq!(parsed.stubs, vec![(0x401000, 1)]);
+            assert_eq!(parsed.redirects, vec![(0x401050, 0x401080)]);
+            assert_eq!(parsed.patches, vec![(0x401020, vec![0x90, 0x90, 0xeb, 0x05])]);
+        }
+
+        #[test]
+        fn default_driver_threads_stubs_redirects_patches_into_lua() {
+            let mut cfg = config("./bin", None, &[], &[], None, 256, false);
+            cfg.stubs = vec![(0x401000, 0)];
+            cfg.redirects = vec![(0x401050, 0x401080)];
+            cfg.patches = vec![(0x401020, vec![0x90, 0x90])];
+            let lua = default_driver_lua(&cfg);
+            assert!(lua.contains("stubs = { [4198400] = 0 },"));
+            assert!(lua.contains("redirects = { [4198480] = 4198528 },"));
+            assert!(lua.contains("patches = { [4198432] = \"9090\" },"));
+        }
+
+        #[test]
+        fn invalid_stub_is_descriptive() {
+            assert!(parse(&args(&["./bin", "--stub", "invalid"])).is_err());
+        }
+
+        #[test]
+        fn invalid_redirect_is_descriptive() {
+            assert!(parse(&args(&["./bin", "--redirect", "invalid"])).is_err());
+        }
+
+        #[test]
+        fn invalid_patch_is_descriptive() {
+            assert!(parse(&args(&["./bin", "--patch", "0x1000=xyz"])).is_err());
         }
 
         #[test]

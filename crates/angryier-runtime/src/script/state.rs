@@ -200,6 +200,36 @@ impl LuaState {
         Ok(())
     }
 
+    pub fn stub_function(&self, addr: u64, return_value: u64) -> Result<(), mlua::Error> {
+        let mut inner = this_inner_mut(&self.inner);
+        let idx = Self::active_index(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
+        inner.session.states[idx].process.stub_function(addr, return_value);
+        Ok(())
+    }
+
+    pub fn redirect_control_flow(&self, from_pc: u64, to_pc: u64) -> Result<(), mlua::Error> {
+        let mut inner = this_inner_mut(&self.inner);
+        let idx = Self::active_index(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
+        inner.session.states[idx].process.redirect_control_flow(from_pc, to_pc);
+        Ok(())
+    }
+
+    pub fn patch_bytes_slice(&self, addr: u64, raw: &[u8]) -> Result<(), mlua::Error> {
+        let mut inner = this_inner_mut(&self.inner);
+        let idx = Self::active_index(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
+        let state = &mut inner.session.states[idx];
+
+        state
+            .process
+            .patch_bytes(addr, raw)
+            .map_err(|e| mlua::Error::external(format!("patch_bytes: {e:?}")))?;
+        state.memory = angryier_execution::SymbolicSessionMemory::new(state.process.state.memory.clone());
+        Ok(())
+    }
+
     pub fn poke(&self, addr: u64, val: u64) -> Result<(), mlua::Error> {
         self.write_bytes_slice(addr, &val.to_le_bytes())
     }
@@ -411,6 +441,32 @@ impl UserData for LuaState {
 
         // st:poke(addr, val)
         methods.add_method("poke", |_, this, (addr, val): (u64, u64)| this.poke(addr, val));
+
+        // st:stub(addr, ret_val) / st:stub_function(addr, ret_val)
+        methods.add_method("stub", |_, this, (addr, ret_val): (u64, u64)| {
+            this.stub_function(addr, ret_val)
+        });
+        methods.add_method("stub_function", |_, this, (addr, ret_val): (u64, u64)| {
+            this.stub_function(addr, ret_val)
+        });
+
+        // st:redirect(from_pc, to_pc) / st:redirect_control_flow(from_pc, to_pc)
+        methods.add_method("redirect", |_, this, (from_pc, to_pc): (u64, u64)| {
+            this.redirect_control_flow(from_pc, to_pc)
+        });
+        methods.add_method("redirect_control_flow", |_, this, (from_pc, to_pc): (u64, u64)| {
+            this.redirect_control_flow(from_pc, to_pc)
+        });
+
+        // st:patch(addr, data) / st:patch_bytes(addr, data)
+        methods.add_method("patch", |_, this, (addr, data): (u64, Value)| {
+            let raw = super::utils::parse_patch_bytes(data)?;
+            this.patch_bytes_slice(addr, &raw)
+        });
+        methods.add_method("patch_bytes", |_, this, (addr, data): (u64, Value)| {
+            let raw = super::utils::parse_patch_bytes(data)?;
+            this.patch_bytes_slice(addr, &raw)
+        });
 
         // st:symbolic(name, [width])
         methods.add_method("symbolic", |_, this, (name, width): (String, Option<i64>)| {

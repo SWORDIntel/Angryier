@@ -198,10 +198,11 @@ fn unmapped_instructions_fail_explicitly() -> Result<(), Box<dyn std::error::Err
         .step(&mut process)
         .err()
         .ok_or("expected an unsupported-form error")?;
-    let message = error.to_string();
+    let debug_msg = format!("{error:?}");
+    let display_msg = error.to_string();
     assert!(
-        message.contains("UnsupportedForm(0)"),
-        "unmapped instructions must report form id 0, got: {message}"
+        debug_msg.contains("UnsupportedForm(0)") || display_msg.contains("form 0x0"),
+        "unmapped instructions must report form id 0, got debug={debug_msg}, display={display_msg}"
     );
     Ok(())
 }

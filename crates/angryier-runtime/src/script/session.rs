@@ -365,6 +365,62 @@ impl UserData for LuaSession {
             st.poke(addr, val)
         });
 
+        // s:stub(addr, ret_val) / s:stub_function(addr, ret_val)
+        methods.add_method("stub", |_, this, (addr, ret_val): (u64, u64)| {
+            let mut inner = this.inner.borrow_mut();
+            for st in &mut inner.session.states {
+                st.process.stub_function(addr, ret_val);
+            }
+            Ok(())
+        });
+        methods.add_method("stub_function", |_, this, (addr, ret_val): (u64, u64)| {
+            let mut inner = this.inner.borrow_mut();
+            for st in &mut inner.session.states {
+                st.process.stub_function(addr, ret_val);
+            }
+            Ok(())
+        });
+
+        // s:redirect(from_pc, to_pc) / s:redirect_control_flow(from_pc, to_pc)
+        methods.add_method("redirect", |_, this, (from_pc, to_pc): (u64, u64)| {
+            let mut inner = this.inner.borrow_mut();
+            for st in &mut inner.session.states {
+                st.process.redirect_control_flow(from_pc, to_pc);
+            }
+            Ok(())
+        });
+        methods.add_method("redirect_control_flow", |_, this, (from_pc, to_pc): (u64, u64)| {
+            let mut inner = this.inner.borrow_mut();
+            for st in &mut inner.session.states {
+                st.process.redirect_control_flow(from_pc, to_pc);
+            }
+            Ok(())
+        });
+
+        // s:patch(addr, data) / s:patch_bytes(addr, data)
+        methods.add_method("patch", |_, this, (addr, data): (u64, Value)| {
+            let raw = super::utils::parse_patch_bytes(data)?;
+            let mut inner = this.inner.borrow_mut();
+            for st in &mut inner.session.states {
+                st.process
+                    .patch_bytes(addr, &raw)
+                    .map_err(|e| mlua::Error::external(format!("patch_bytes: {e:?}")))?;
+                st.memory = angryier_execution::SymbolicSessionMemory::new(st.process.state.memory.clone());
+            }
+            Ok(())
+        });
+        methods.add_method("patch_bytes", |_, this, (addr, data): (u64, Value)| {
+            let raw = super::utils::parse_patch_bytes(data)?;
+            let mut inner = this.inner.borrow_mut();
+            for st in &mut inner.session.states {
+                st.process
+                    .patch_bytes(addr, &raw)
+                    .map_err(|e| mlua::Error::external(format!("patch_bytes: {e:?}")))?;
+                st.memory = angryier_execution::SymbolicSessionMemory::new(st.process.state.memory.clone());
+            }
+            Ok(())
+        });
+
         methods.add_method("symbolic", |_, this, (name, width): (String, Option<i64>)| {
             let st = this.active_state()?;
             st.mark_symbolic(&name, width)
@@ -502,6 +558,112 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
                 session
                     .mark_memory_symbolic(0, addr, len)
                     .map_err(|e| mlua::Error::external(format!("symbolic_memory: {e:?}")))?;
+            }
+        }
+        if let Ok(tbl) = opts.get::<Table>("stubs") {
+            for pair in tbl.pairs::<Value, Value>() {
+                let (k, v) = pair?;
+                let (addr, ret_val) = if let Some(addr) = super::utils::parse_lua_u64(&k) {
+                    let ret = match v {
+                        Value::Table(entry) => entry
+                            .get::<Value>("ret")
+                            .or_else(|_| entry.get::<Value>("value"))
+                            .ok()
+                            .and_then(|v| super::utils::parse_lua_u64(&v))
+                            .unwrap_or(0),
+                        _ => super::utils::parse_lua_u64(&v).unwrap_or(0),
+                    };
+                    (addr, ret)
+                } else if let Value::Table(entry) = v {
+                    let a = entry
+                        .get::<Value>("addr")
+                        .ok()
+                        .and_then(|v| super::utils::parse_lua_u64(&v));
+                    let r = entry
+                        .get::<Value>("ret")
+                        .or_else(|_| entry.get::<Value>("value"))
+                        .ok()
+                        .and_then(|v| super::utils::parse_lua_u64(&v))
+                        .unwrap_or(0);
+                    if let Some(addr) = a {
+                        (addr, r)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                };
+                session.states[0].process.stub_function(addr, ret_val);
+            }
+        }
+        if let Ok(tbl) = opts.get::<Table>("redirects") {
+            for pair in tbl.pairs::<Value, Value>() {
+                let (k, v) = pair?;
+                let (from_pc, to_pc) = if let Some(from) = super::utils::parse_lua_u64(&k) {
+                    let to = match v {
+                        Value::Table(entry) => entry
+                            .get::<Value>("to")
+                            .or_else(|_| entry.get::<Value>("target"))
+                            .ok()
+                            .and_then(|v| super::utils::parse_lua_u64(&v)),
+                        _ => super::utils::parse_lua_u64(&v),
+                    };
+                    if let Some(target) = to {
+                        (from, target)
+                    } else {
+                        continue;
+                    }
+                } else if let Value::Table(entry) = v {
+                    let from = entry
+                        .get::<Value>("from")
+                        .or_else(|_| entry.get::<Value>("addr"))
+                        .ok()
+                        .and_then(|v| super::utils::parse_lua_u64(&v));
+                    let to = entry
+                        .get::<Value>("to")
+                        .or_else(|_| entry.get::<Value>("target"))
+                        .ok()
+                        .and_then(|v| super::utils::parse_lua_u64(&v));
+                    if let (Some(f), Some(t)) = (from, to) {
+                        (f, t)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                };
+                session.states[0].process.redirect_control_flow(from_pc, to_pc);
+            }
+        }
+        if let Ok(tbl) = opts.get::<Table>("patches") {
+            for pair in tbl.pairs::<Value, Value>() {
+                let (k, v) = pair?;
+                let (addr, data) = if let Some(addr) = super::utils::parse_lua_u64(&k) {
+                    (addr, v)
+                } else if let Value::Table(entry) = &v {
+                    let a = entry
+                        .get::<Value>("addr")
+                        .ok()
+                        .and_then(|v| super::utils::parse_lua_u64(&v));
+                    let val = entry
+                        .get::<Value>("bytes")
+                        .or_else(|_| entry.get::<Value>("data"))
+                        .ok();
+                    if let (Some(addr), Some(val)) = (a, val) {
+                        (addr, val)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                };
+                let raw = super::utils::parse_patch_bytes(data)?;
+                session.states[0]
+                    .process
+                    .patch_bytes(addr, &raw)
+                    .map_err(|e| mlua::Error::external(format!("patch_bytes: {e:?}")))?;
+                session.states[0].memory =
+                    angryier_execution::SymbolicSessionMemory::new(session.states[0].process.state.memory.clone());
             }
         }
     }
