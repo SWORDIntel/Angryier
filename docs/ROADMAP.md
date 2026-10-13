@@ -998,7 +998,7 @@ Angryier is the intended owner of POPKORN's targeted Windows-driver analysis cap
 - [x] provide targeted IOCTL-to-sink exploration with constrained inputs, kernel import models, explicit budgets, and no whole-driver brute-force prerequisite (`crates/angryier/src/driver_ioctl.rs`, `crates/angryier-runtime/src/models/kernel.rs`).
 - [x] emit the existing KP14 verdict taxonomy with constraints, witness/replay data where available, and honest timeout, unsupported, or incomplete states (`crates/angryier/src/driver_ioctl.rs`, `symbolic_verdict.schema.json` compliant).
 - [x] differentially test target selection, reachability, input constraints, and verdicts against the current KP14 POPKORN fixtures and known driver corpus (`crates/angryier/tests/api_stability.rs`, `crates/angryier-runtime/tests/pe_driver.rs`).
-- [ ] pass local fixture and driver-corpus parity checks before an opt-in KP14-SUITE pilot; become the default verifier only after the pilot passes
+- [x] pass local fixture and driver-corpus parity checks before an opt-in KP14-SUITE pilot; become the default verifier only after the pilot passes (`crates/angryier/tests/driver_corpus_parity_test.rs`, `crates/angryier/tests/hybrid_fuzz_concolic_loop.rs`).
 
 Capstone remains a later optional decoder evaluation and does not gate this track.
 
