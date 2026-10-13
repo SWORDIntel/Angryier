@@ -440,15 +440,15 @@ where
                 for (slot, byte) in buffer.iter_mut().zip(bytes.iter().copied()) {
                     *slot = ByteValue::Concrete(byte);
                 }
-                state.memory = state
+                state
                     .memory
-                    .write(address, &buffer[..bytes.len()])
+                    .write_in_place(address, &buffer[..bytes.len()])
                     .map_err(ConcreteExecutionError::Memory)?;
             } else {
                 let buffer: Vec<ByteValue> = bytes.iter().copied().map(ByteValue::Concrete).collect();
-                state.memory = state
+                state
                     .memory
-                    .write(address, &buffer)
+                    .write_in_place(address, &buffer)
                     .map_err(ConcreteExecutionError::Memory)?;
             }
             None

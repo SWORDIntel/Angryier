@@ -164,6 +164,21 @@ impl HotCanonicalizer for BasicHotCanonicalizer {
         if is_commutative(node.op) {
             node.operands.sort_by_key(|operand| operand.0);
         }
+        if node.operands.len() == 2 && node.operands[0] == node.operands[1] {
+            match node.op {
+                ExprOp::Xor | ExprOp::Sub => {
+                    if let ExprSort::BitVec(bits) = node.sort {
+                        return ExprNode {
+                            sort: node.sort,
+                            op: ExprOp::Constant,
+                            operands: Vec::new(),
+                            immediate: vec![0u8; usize::from(bits).div_ceil(8)],
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
         node
     }
 }
@@ -677,6 +692,80 @@ impl ExprArena for ShardedExprArena {
         let node = BasicHotCanonicalizer.canonicalize(node);
         validate_node(&node)?;
         let node = self.fold_constants(node)?;
+
+        // Algebraic identity reductions:
+        if node.operands.len() == 2 && node.operands[0] == node.operands[1] {
+            if matches!(node.op, ExprOp::And | ExprOp::Or) {
+                if let Ok(rec) = self.record(node.operands[0]) {
+                    if rec.node.sort == node.sort {
+                        self.hits.fetch_add(1, Ordering::Relaxed);
+                        return Ok(node.operands[0]);
+                    }
+                }
+            }
+        } else if node.op == ExprOp::Ite && node.operands.len() == 3 {
+            if node.operands[1] == node.operands[2] {
+                if let Ok(rec) = self.record(node.operands[1]) {
+                    if rec.node.sort == node.sort {
+                        self.hits.fetch_add(1, Ordering::Relaxed);
+                        return Ok(node.operands[1]);
+                    }
+                }
+            } else if let Ok(rec0) = self.record(node.operands[0]) {
+                if rec0.node.op == ExprOp::Constant {
+                    let cond = rec0.node.immediate.first().copied().unwrap_or(0);
+                    let target = if cond != 0 { node.operands[1] } else { node.operands[2] };
+                    if let Ok(rec_t) = self.record(target) {
+                        if rec_t.node.sort == node.sort {
+                            self.hits.fetch_add(1, Ordering::Relaxed);
+                            return Ok(target);
+                        }
+                    }
+                }
+            }
+        } else if node.operands.len() == 2 {
+            if let (Ok(rec0), Ok(rec1)) = (self.record(node.operands[0]), self.record(node.operands[1])) {
+                if rec0.node.sort == node.sort && rec1.node.sort == node.sort {
+                    if rec0.node.op == ExprOp::Constant && rec1.node.op != ExprOp::Constant {
+                        let val0 = constant_u128(&rec0.node.immediate);
+                        if val0 == 0 {
+                            match node.op {
+                                ExprOp::Add | ExprOp::Or | ExprOp::Xor => {
+                                    self.hits.fetch_add(1, Ordering::Relaxed);
+                                    return Ok(node.operands[1]);
+                                }
+                                ExprOp::And | ExprOp::Mul => {
+                                    self.hits.fetch_add(1, Ordering::Relaxed);
+                                    return Ok(node.operands[0]);
+                                }
+                                _ => {}
+                            }
+                        } else if val0 == 1 && node.op == ExprOp::Mul {
+                            self.hits.fetch_add(1, Ordering::Relaxed);
+                            return Ok(node.operands[1]);
+                        }
+                    } else if rec1.node.op == ExprOp::Constant && rec0.node.op != ExprOp::Constant {
+                        let val1 = constant_u128(&rec1.node.immediate);
+                        if val1 == 0 {
+                            match node.op {
+                                ExprOp::Add | ExprOp::Sub | ExprOp::Or | ExprOp::Xor => {
+                                    self.hits.fetch_add(1, Ordering::Relaxed);
+                                    return Ok(node.operands[0]);
+                                }
+                                ExprOp::And | ExprOp::Mul => {
+                                    self.hits.fetch_add(1, Ordering::Relaxed);
+                                    return Ok(node.operands[1]);
+                                }
+                                _ => {}
+                            }
+                        } else if val1 == 1 && node.op == ExprOp::Mul {
+                            self.hits.fetch_add(1, Ordering::Relaxed);
+                            return Ok(node.operands[0]);
+                        }
+                    }
+                }
+            }
+        }
 
         // Shard routing uses a cheap deterministic hash of the node so the
         // hash-cons table can be probed BEFORE the SHA-256 dependency key is
@@ -1959,6 +2048,102 @@ mod tests {
             }),
             Err(ExprArenaError::SortMismatch(ExprOp::Add))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn algebraic_identity_reductions() -> Result<(), ExprArenaError> {
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let x = arena.intern(symbol(42))?;
+        let zero = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Constant,
+            operands: Vec::new(),
+            immediate: vec![0u8; 8],
+        })?;
+
+        // x ^ x => 0
+        let xor_self = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Xor,
+            operands: vec![x, x],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(xor_self, zero);
+
+        // x - x => 0
+        let sub_self = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Sub,
+            operands: vec![x, x],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(sub_self, zero);
+
+        // x & 0 => 0
+        let and_zero = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::And,
+            operands: vec![x, zero],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(and_zero, zero);
+
+        // x * 0 => 0
+        let mul_zero = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Mul,
+            operands: vec![x, zero],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(mul_zero, zero);
+
+        // x + 0 => x
+        let add_zero = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Add,
+            operands: vec![x, zero],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(add_zero, x);
+
+        // x | 0 => x
+        let or_zero = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Or,
+            operands: vec![x, zero],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(or_zero, x);
+
+        // x & x => x
+        let and_self = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::And,
+            operands: vec![x, x],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(and_self, x);
+
+        // x | x => x
+        let or_self = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Or,
+            operands: vec![x, x],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(or_self, x);
+
+        // ite(cond, x, x) => x
+        let cond = arena.intern(symbol(99))?;
+        let ite_same = arena.intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Ite,
+            operands: vec![cond, x, x],
+            immediate: Vec::new(),
+        })?;
+        assert_eq!(ite_same, x);
+
         Ok(())
     }
 }

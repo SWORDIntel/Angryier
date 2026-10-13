@@ -481,6 +481,10 @@ impl<R: RegisterState, M: LayeredMemory> ExecutionState<R, M> {
         Ok(next)
     }
 
+    pub fn write_memory_mut(&mut self, address: Address, bytes: &[ByteValue]) -> Result<(), M::Error> {
+        self.memory.write_in_place(address, bytes)
+    }
+
     pub fn with_fidelity_debt(&self, kind: AnalysisDebtKind, source: u64) -> Self {
         let mut next = self.clone();
         next.fidelity = self.fidelity.record(kind, source);

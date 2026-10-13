@@ -102,6 +102,12 @@ pub trait LayeredMemory: Clone + Send + Sync {
         Ok(())
     }
     fn write(&self, address: Address, bytes: &[ByteValue]) -> Result<Self, Self::Error>;
+    /// Allocation-free in-place write: mutates `self` when singly-referenced,
+    /// avoiding deep clones of page tables and state forks.
+    fn write_in_place(&mut self, address: Address, bytes: &[ByteValue]) -> Result<(), Self::Error> {
+        *self = self.write(address, bytes)?;
+        Ok(())
+    }
     fn fork(&self) -> Self;
     fn page_version(&self, page: CodePageId) -> Option<CodePageVersion>;
     fn regions(&self) -> &[MemoryRegion];
@@ -427,6 +433,31 @@ impl MemoryPage {
             .retain(|cell_offset, _| *cell_offset < offset || *cell_offset >= end);
     }
 
+    /// Fast path for bulk concrete byte writes (e.g. loader and concrete buffers):
+    /// avoids per-byte enum matching and copies contiguous slices into the 64-byte lines.
+    fn write_concrete(&mut self, offset: usize, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut cursor = 0usize;
+        while cursor < bytes.len() {
+            let page_offset = offset + cursor;
+            let line_index = page_offset / PAGE_LINE_BYTES;
+            let in_line = page_offset % PAGE_LINE_BYTES;
+            let chunk = (bytes.len() - cursor).min(PAGE_LINE_BYTES - in_line);
+            if line_index >= self.lines.len() {
+                self.lines.resize(line_index + 1, None);
+            }
+            let line = self.lines[line_index].get_or_insert_with(|| Arc::new([0u8; PAGE_LINE_BYTES]));
+            let line = Arc::make_mut(line);
+            line[in_line..in_line + chunk].copy_from_slice(&bytes[cursor..cursor + chunk]);
+            cursor += chunk;
+        }
+        let end = offset + bytes.len();
+        self.symbolic
+            .retain(|cell_offset, _| *cell_offset < offset || *cell_offset >= end);
+    }
+
     /// Zeroes the concrete byte at `offset` so a symbolic cell is not
     /// shadowed by stale concrete data.
     fn clear_line_bytes(&mut self, offset: usize) {
@@ -675,8 +706,16 @@ impl PersistentMemory {
     /// advancing executable-page versions. This is for loader construction only.
     pub fn load_concrete(&self, address: Address, bytes: &[u8]) -> Result<Self, MemoryError> {
         self.check_mapped_range(address, bytes.len())?;
-        let values: Vec<_> = bytes.iter().copied().map(ByteValue::Concrete).collect();
-        self.write_materialized(address, &values, false)
+        let mut next = self.clone();
+        next.write_concrete_in_place(address, bytes, false)?;
+        Ok(next)
+    }
+
+    /// In-place variant of `load_concrete`: directly writes image bytes into `self`
+    /// without cloning the page table or allocating intermediate `ByteValue` vectors.
+    pub fn load_concrete_in_place(&mut self, address: Address, bytes: &[u8]) -> Result<(), MemoryError> {
+        self.check_mapped_range(address, bytes.len())?;
+        self.write_concrete_in_place(address, bytes, false)
     }
 
     pub fn page_id_for_address(address: Address) -> CodePageId {
@@ -826,18 +865,18 @@ impl PersistentMemory {
         }
     }
 
-    fn write_materialized(
-        &self,
+    fn write_materialized_in_place(
+        &mut self,
         address: Address,
         bytes: &[ByteValue],
         bump_executable_versions: bool,
-    ) -> Result<Self, MemoryError> {
+    ) -> Result<(), MemoryError> {
         if bytes.is_empty() {
-            return Ok(self.clone());
+            return Ok(());
         }
 
         let end = Self::inclusive_end(address, bytes.len())?;
-        let mut pages = (*self.pages).clone();
+        let pages = Arc::make_mut(&mut self.pages);
 
         // Walk the store one page window at a time: the page being written
         // copies its line table (untouched lines stay shared through their
@@ -853,16 +892,12 @@ impl PersistentMemory {
             let page_span = (DEFAULT_PAGE_SIZE - page_start_offset).min(bytes.len() - cursor);
             let window = &bytes[cursor..cursor + page_span];
 
-            let mut materialized = pages
-                .get(&page_number)
-                .map(|existing| (**existing).clone())
-                .unwrap_or_default();
+            let page_entry = pages.entry(page_number).or_default();
+            let materialized = Arc::make_mut(page_entry);
             let mut window_index = 0usize;
             while window_index < window.len() {
                 match window[window_index] {
                     ByteValue::Concrete(_) => {
-                        // Extend over the contiguous concrete run and apply
-                        // it directly from the caller's slice.
                         let run_start = window_index;
                         while window_index < window.len() && matches!(window[window_index], ByteValue::Concrete(_)) {
                             window_index += 1;
@@ -875,42 +910,86 @@ impl PersistentMemory {
                     }
                 }
             }
-            pages.insert(page_number, Arc::new(materialized));
             cursor += page_span;
         }
 
-        // Version guards only diverge when an executable page is actually
-        // bumped: data/stack stores share the previous code-version table
-        // instead of cloning it.
-        let code_versions = if bump_executable_versions {
+        // Version guards only diverge when an executable page is actually bumped.
+        if bump_executable_versions {
             let to_bump: Vec<CodePageId> = (Self::page_number(address)..=Self::page_number(end))
                 .map(CodePageId)
                 .filter(|page| self.code_versions.contains_key(page))
                 .collect();
-            if to_bump.is_empty() {
-                Arc::clone(&self.code_versions)
-            } else {
-                let mut versions = (*self.code_versions).clone();
+            if !to_bump.is_empty() {
+                let versions = Arc::make_mut(&mut self.code_versions);
                 for page in to_bump {
                     let Some(version) = versions.get_mut(&page) else {
                         continue;
                     };
                     version.0 = version.0.checked_add(1).ok_or(MemoryError::VersionOverflow(page))?;
                 }
-                Arc::new(versions)
             }
-        } else {
-            Arc::clone(&self.code_versions)
-        };
+        }
 
-        Ok(Self {
-            regions: Arc::clone(&self.regions),
-            region_index: Arc::clone(&self.region_index),
-            pages: Arc::new(pages),
-            code_versions,
-            uc: self.uc.clone(),
-            uc_write_ro: self.uc_write_ro,
-        })
+        Ok(())
+    }
+
+    fn write_concrete_in_place(
+        &mut self,
+        address: Address,
+        bytes: &[u8],
+        bump_executable_versions: bool,
+    ) -> Result<(), MemoryError> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        let end = Self::inclusive_end(address, bytes.len())?;
+        let pages = Arc::make_mut(&mut self.pages);
+
+        let mut cursor = 0usize;
+        while cursor < bytes.len() {
+            let current = address
+                .checked_add(u64::try_from(cursor).map_err(|_| MemoryError::AddressOverflow)?)
+                .ok_or(MemoryError::AddressOverflow)?;
+            let page_number = Self::page_number(current);
+            let page_start_offset = Self::page_offset(current);
+            let page_span = (DEFAULT_PAGE_SIZE - page_start_offset).min(bytes.len() - cursor);
+            let window = &bytes[cursor..cursor + page_span];
+
+            let page_entry = pages.entry(page_number).or_default();
+            let materialized = Arc::make_mut(page_entry);
+            materialized.write_concrete(page_start_offset, window);
+            cursor += page_span;
+        }
+
+        if bump_executable_versions {
+            let to_bump: Vec<CodePageId> = (Self::page_number(address)..=Self::page_number(end))
+                .map(CodePageId)
+                .filter(|page| self.code_versions.contains_key(page))
+                .collect();
+            if !to_bump.is_empty() {
+                let versions = Arc::make_mut(&mut self.code_versions);
+                for page in to_bump {
+                    let Some(version) = versions.get_mut(&page) else {
+                        continue;
+                    };
+                    version.0 = version.0.checked_add(1).ok_or(MemoryError::VersionOverflow(page))?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn write_materialized(
+        &self,
+        address: Address,
+        bytes: &[ByteValue],
+        bump_executable_versions: bool,
+    ) -> Result<Self, MemoryError> {
+        let mut next = self.clone();
+        next.write_materialized_in_place(address, bytes, bump_executable_versions)?;
+        Ok(next)
     }
 
     /// Under-constrained policy resolution of an access whose span touched
@@ -1182,27 +1261,28 @@ impl LayeredMemory for PersistentMemory {
         Ok(())
     }
 
-    fn write(&self, address: Address, bytes: &[ByteValue]) -> Result<Self, Self::Error> {
-        // Dispatch on the exact strict check instead of `check_access` so the
-        // read-only-write relaxation can interpose on permission denials
-        // without touching the read path. Flag-off behavior is byte-identical:
-        // the unmapped arm re-issues exactly what `check_access` did, and the
-        // permission arm only exists under `uc_memory` + `uc_write_ro`.
+    fn write_in_place(&mut self, address: Address, bytes: &[ByteValue]) -> Result<(), Self::Error> {
         match self.check_access_strict(address, bytes.len(), MemoryAccessKind::Write) {
-            Ok(()) => self.write_materialized(address, bytes, true),
+            Ok(()) => self.write_materialized_in_place(address, bytes, true),
             Err(MemoryError::Unmapped(first)) if self.uc_memory_armed() => {
                 self.uc_resolve_unmapped(address, bytes.len(), MemoryAccessKind::Write, first)?;
-                self.write_materialized(address, bytes, true)
+                self.write_materialized_in_place(address, bytes, true)
             }
             Err(MemoryError::PermissionDenied {
                 address: denied,
                 access: MemoryAccessKind::Write,
             }) if self.uc_memory_armed() && self.uc_write_ro => {
                 self.uc_resolve_ro_write(address, bytes, denied)?;
-                self.write_materialized(address, bytes, true)
+                self.write_materialized_in_place(address, bytes, true)
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn write(&self, address: Address, bytes: &[ByteValue]) -> Result<Self, Self::Error> {
+        let mut next = self.clone();
+        next.write_in_place(address, bytes)?;
+        Ok(next)
     }
 
     fn fork(&self) -> Self {
