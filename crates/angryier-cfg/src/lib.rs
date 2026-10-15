@@ -867,7 +867,7 @@ fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
                         Some(angryier_arch::MemoryBase::InstructionPointer { .. }) => {
                             insn.address
                                 .checked_add(u64::from(insn.length))
-                                .and_then(|end| end.checked_add(mem.displacement as u64))
+                                .and_then(|end| end.checked_add_signed(mem.displacement))
                                 .map(AbstractVal::Const)
                         }
                         Some(angryier_arch::MemoryBase::Register(b)) => {
@@ -876,7 +876,7 @@ fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
                             // &table[idx] — an address, not a target: Unknown.
                             match (facts.values.get(&b.parent).copied(), mem.index) {
                                 (Some(AbstractVal::Const(c)), None) => {
-                                    c.checked_add(mem.displacement as u64).map(AbstractVal::Const)
+                                    c.checked_add_signed(mem.displacement).map(AbstractVal::Const)
                                 }
                                 _ => None,
                             }
@@ -900,7 +900,7 @@ fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
                                 Some(angryier_arch::MemoryIndex::Register(idx)) => {
                                     insn.address
                                         .checked_add(u64::from(insn.length))
-                                        .and_then(|end| end.checked_add(mem.displacement as u64))
+                                        .and_then(|end| end.checked_add_signed(mem.displacement))
                                         .map(|table| AbstractVal::TableEntry {
                                             base: table,
                                             index: idx.parent,
@@ -914,7 +914,7 @@ fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
                         Some(angryier_arch::MemoryBase::Register(b)) => {
                             match (facts.values.get(&b.parent).copied(), mem.index) {
                                 (Some(AbstractVal::Const(c)), Some(angryier_arch::MemoryIndex::Register(idx))) => {
-                                    c.checked_add(mem.displacement as u64).map(|table| AbstractVal::TableEntry {
+                                    c.checked_add_signed(mem.displacement).map(|table| AbstractVal::TableEntry {
                                         base: table,
                                         index: idx.parent,
                                         scale: mem.scale,
@@ -1058,11 +1058,11 @@ fn resolve_indirect_jump(
                 };
                 let table = match mem.base {
                     Some(angryier_arch::MemoryBase::InstructionPointer { .. }) => {
-                        insn_end.checked_add(mem.displacement as u64)?
+                        insn_end.checked_add_signed(mem.displacement)?
                     }
                     Some(angryier_arch::MemoryBase::Register(b)) => {
                         match facts.values.get(&b.parent) {
-                            Some(AbstractVal::Const(c)) => c.checked_add(mem.displacement as u64)?,
+                            Some(AbstractVal::Const(c)) => c.checked_add_signed(mem.displacement)?,
                             _ => return None,
                         }
                     }
