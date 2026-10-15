@@ -78,3 +78,40 @@
 ## Minimal cross-device recovery command
 
 In another ChatGPT session: **“Read the current `SWORDIntel/Angryier` feature branch and `docs/ACTIVE_ENGINE_HANDOFF.md` using GitHub, then continue PR #1 from its current HEAD. Do not assume any unsynced local checkout changes are on GitHub.”**
+
+
+## 2026-10-15 — Native handler materialization milestone (PC continuation)
+
+**Last verified code revision:** `ffe97dbb64dc3d3343c9271cb17ad34fb3fb9938`  
+**Focused CI:** https://github.com/SWORDIntel/Angryier/actions/runs/38780871150 — **success**.  
+This documentation update advances branch HEAD beyond that tested revision; always fetch the latest branch tip.
+
+### Added and verified
+
+- `angryier-ir::vm_trace::collect_observed_vm_trace`: multi-block, observed VM traces with **step-scoped SSA IDs**, ordered memory and register effects, explicit VPC/context boundaries, code-epoch guards, budget and branch-destination checks, and uncertainty caveats. Does not infer a VPC automatically.
+- `angryier-runtime::vm_observe::Runtime::observe_vm_handler`: opt-in native execution capture which records the AngryIR actually executed, pre/post observations, original COW entry state, final state and verified footprint. Unrecorded hooks and incomplete windows are errors.
+- `angryier-execution::SymbolicEvaluator::eval_block_with_memory_values`: opt-in producer-expression readout and **per-register-write post-state expressions**, without creating a second evaluator. Normal `eval_block_with_memory` has ordered-write logging disabled to protect its hot path.
+- `angryier-runtime::vm_materialize::materialize_vm_handler`: revalidates the observed capture and maps local SSA values into the existing expression DAG. It preserves successive full-width and partial-parent writes, memory-write order, potentially faulting reads, and observed branch predicates. It feeds output-rooted reduction and refuses unsupported semantics.
+- `angryier-runtime::vm_replay::check_vm_concrete_replay`: independently compares scalar effects, native final registers and touched stores for the exact observed input. The report explicitly retains `observed_input_only=true` and unresolved read/fault obligations. **This is not universal semantic equivalence or a PROVE-grade replacement certificate.**
+
+### Correctness defects discovered by the stronger regressions
+
+1. **Concat operand mismatch:** AngryIR `IrPrimitive::Concat` is `(low, high)`; `ExprOp::Concat` uses `(high, low)`. Corrected the conversion in the shared symbolic/concolic expression path and the partial-register merge order.
+2. **Repeated writes lost:** Using an end-of-block register value for earlier writes was incorrect. The evaluator now records the expression *at each actual write point*.
+3. **First zero-extended GPR write mis-width:** `mov eax, imm32` could create a 32-bit symbolic RAX binding if no prior symbolic register binding existed. Corrected the architectural parent-width zero extension.
+
+The focused suite now includes an independent native x86 two-instruction execution/replay test (`mov eax,7; add eax,2`) and repeated register writes with an upper-bit-preserving low-byte modification. An additional native test starts with nonzero upper RAX bits and confirms the 32-bit write clears them.
+
+### Next engineering gates
+
+1. **Input-independent handler relations:** explicitly symbolic VM-context/GPR seeds and precise path guards; no assumption that one captured input generalizes to all inputs.
+2. **Validation:** differential re-execution across independent inputs plus SMT equivalence for supported bitvector/memory fragments, with explicit fault and alias obligations. No summary substitution before the relevant equivalence gate.
+3. **Complete memory/exception coverage:** the existing replay checker compares candidate-touched stores, not every conceivable write or exception; add bounded observed-write coverage and fail closed on gaps.
+4. **Controlled VPC discovery:** bind dispatch-site candidates to measured native state and capture provenance; reject guessed handler boundaries.
+5. **Versioned METHRA handoff:** only verified semantics and explicit unresolved edges, without a new decompiler inside Angryier.
+6. **Separate Windows thread scheduler/OS fidelity work**, needed for accurate asynchronous initialization but not a prerequisite for the synthetic VM-handler milestones.
+7. **Repository-wide formatting/CI backlog** remains distinct from focused VM CI. Do not label the full suite green until the root workflow passes.
+
+### Operational continuity
+
+Work from current branch `feat/themida-vm-structural-20261015`, draft PR #1. The history includes `main` commit `b3df3e5` through a prior merge; preserve it. Treat notes as historical and verify current branch HEAD and CI before coding. Keep private analyst dump/host details out of GitHub.
