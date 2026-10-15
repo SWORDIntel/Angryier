@@ -241,20 +241,21 @@ mod tests {
     }
 
     #[test]
-    fn extracts_exact_captured_singleton_bytes() {
+    fn extracts_exact_captured_singleton_bytes() -> Result<(), MiniDumpError> {
         let bytes = memory_list_fixture();
-        let dump = MiniDumpMemory::parse(&bytes).expect("minidump");
+        let dump = MiniDumpMemory::parse(&bytes)?;
         assert_eq!(dump.regions().len(), 1);
-        let read = dump.read(0x094464c0, 0x40).expect("captured object");
+        let read = dump.read(0x094464c0, 0x40)?;
         assert_eq!(read.len(), 64);
         assert_eq!(read[0], 0);
         assert_eq!(read[63], 63);
+        Ok(())
     }
 
     #[test]
-    fn missing_page_is_not_zero_filled() {
+    fn missing_page_is_not_zero_filled() -> Result<(), MiniDumpError> {
         let bytes = memory_list_fixture();
-        let dump = MiniDumpMemory::parse(&bytes).expect("minidump");
+        let dump = MiniDumpMemory::parse(&bytes)?;
         assert_eq!(
             dump.read(0x094464fc, 16),
             Err(MiniDumpError::MissingCapture { address: 0x09446500 })
@@ -263,10 +264,11 @@ mod tests {
             dump.read(0x094464c0, MAX_READ + 1),
             Err(MiniDumpError::ReadLimitExceeded)
         );
+        Ok(())
     }
 
     #[test]
-    fn memory64_stream_uses_cumulative_file_offsets() {
+    fn memory64_stream_uses_cumulative_file_offsets() -> Result<(), MiniDumpError> {
         let mut bytes = vec![0u8; 0x200];
         bytes[0..4].copy_from_slice(b"MDMP");
         bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
@@ -281,8 +283,9 @@ mod tests {
         bytes[0x80..0x88].copy_from_slice(&0x1002u64.to_le_bytes());
         bytes[0x88..0x90].copy_from_slice(&3u64.to_le_bytes());
         bytes[0x100..0x105].copy_from_slice(&[1, 2, 3, 4, 5]);
-        let dump = MiniDumpMemory::parse(&bytes).expect("minidump64");
+        let dump = MiniDumpMemory::parse(&bytes)?;
         assert_eq!(dump.read(0x1000, 5), Ok(vec![1, 2, 3, 4, 5]));
+        Ok(())
     }
 
     #[test]
