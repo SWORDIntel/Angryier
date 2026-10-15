@@ -5,6 +5,9 @@
 //! This binary reports workspace/crate status. It parses arguments manually
 //! from `std::env::args()` and uses no external dependencies.
 
+#[cfg(feature = "inspect")]
+mod inspection;
+
 /// Single version source: the workspace package version inherited via
 /// `version.workspace = true` in Cargo.toml. `angry.version()` (the runtime
 /// crate) derives from the same source, so the two cannot drift.
@@ -309,6 +312,11 @@ fn help_output() -> String {
            run        {run_desc}\n  \
            help       Print this help message"
     )
+    + if cfg!(feature = "inspect") {
+        "\n  pe-address <PE> <VA> [length]   Strict VA/RVA/file-offset lookup\n  dump-read <DMP> <VA> <length>   Read captured minidump bytes"
+    } else {
+        ""
+    }
 }
 
 /// Dispatch a parsed argument list to the appropriate subcommand.
@@ -347,6 +355,31 @@ fn run(args: &[String]) -> i32 {
                      Or run directly: cargo run -p angryier-cli --features run -- run <binary>\n\
                      Hint: use 'angryier help' after rebuilding to inspect supported run flags."
                 );
+                1
+            }
+        }
+        Some("pe-address") | Some("dump-read") => {
+            #[cfg(feature = "inspect")]
+            {
+                let outcome = if args.get(1).map(String::as_str) == Some("pe-address") {
+                    inspection::pe_address(&args[2..])
+                } else {
+                    inspection::minidump_read(&args[2..])
+                };
+                match outcome {
+                    Ok(result) => {
+                        println!("{result}");
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        1
+                    }
+                }
+            }
+            #[cfg(not(feature = "inspect"))]
+            {
+                eprintln!("error: forensic inspection requires --features inspect");
                 1
             }
         }
