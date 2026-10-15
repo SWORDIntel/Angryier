@@ -336,6 +336,10 @@ fn native_xed_two_instruction_execution_replays_materialized_effects()
         pe: None,
     };
     let mut process = runtime.load_image(image).map_err(|error| error.to_string())?;
+    // A MOV EAX must clear the upper half of RAX, even if the original
+    // captured RAX had nonzero upper bits.
+    process.write_register(0, 0xFFFF_FFFF_0000_0000)
+        .map_err(|error| error.to_string())?;
     let location = |native_pc: u64| {
         let offset = native_pc.saturating_sub(0x1000);
         VmObservedLocation {
