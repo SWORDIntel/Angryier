@@ -22,13 +22,13 @@ impl SimProcedure for DeviceIoControlProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let h_device = state.get_arg(0);
-        let _ioctl_code = state.get_arg(1) as u32;
-        let _in_buf = state.get_arg(2);
-        let in_size = state.get_arg(3) as usize;
-        let out_buf = state.get_arg(4);
-        let out_size = (state.get_arg(5) as usize).min(65536);
-        let ret_bytes_ptr = state.get_arg(6);
+        let h_device = state.get_win64_arg(0);
+        let _ioctl_code = state.get_win64_arg(1) as u32;
+        let _in_buf = state.get_win64_arg(2);
+        let in_size = state.get_win64_arg(3) as usize;
+        let out_buf = state.get_win64_arg(4);
+        let out_size = (state.get_win64_arg(5) as usize).min(65536);
+        let ret_bytes_ptr = state.get_win64_arg(6);
 
         if !self.handles.is_valid(h_device) {
             return SimResult::Return(0); // FALSE
@@ -63,7 +63,7 @@ impl SimProcedure for GetOverlappedResultProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let transferred_ptr = state.get_arg(2);
+        let transferred_ptr = state.get_win64_arg(2);
         if transferred_ptr != 0 {
             let mut next = state.clone();
             next.write_memory(transferred_ptr, 1024u32.to_le_bytes().to_vec());
