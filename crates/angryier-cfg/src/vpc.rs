@@ -51,10 +51,9 @@
 //!    `r1` then `r2`). Register rotation is also something ordinary
 //!    register allocation produces, so this is the weakest signal.
 //!
-//! This module is intentionally NOT wired into the crate module tree yet
-//! (`lib.rs` is owned elsewhere): it is self-contained and drop-in. The
-//! tests below activate once the module is declared; until then cargo does
-//! not compile this file at all.
+//! This module is compiled and exposed by `angryier-cfg`. Its candidates
+//! are consumed by the opt-in `vm::inspect_native_cfg` report; they are not
+//! automatically promoted to confirmed virtual-PC identities.
 
 use std::collections::BTreeMap;
 
