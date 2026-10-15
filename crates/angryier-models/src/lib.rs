@@ -439,6 +439,7 @@ impl SimState {
                 next.exited = true;
                 next
             }
+            SimResult::Blocked { .. } | SimResult::Unsupported(_) => self.clone(),
         }
     }
 
@@ -448,6 +449,7 @@ impl SimState {
             SimResult::Continue(s) => *self = s.clone(),
             SimResult::Return(val) => self.return_value = Some(*val),
             SimResult::Exit => self.exited = true,
+            SimResult::Blocked { .. } | SimResult::Unsupported(_) => {},
         }
     }
 }
@@ -461,6 +463,10 @@ pub enum SimResult {
     Return(u64),
     /// Target program execution exited.
     Exit,
+    /// A real wait would block; no synthetic timeout or signal is invented.
+    Blocked { handle: u64, timeout_ms: u32 },
+    /// Exact API semantics are unavailable; callers must fail closed.
+    Unsupported(&'static str),
 }
 
 impl core::fmt::Display for SimResult {
@@ -469,6 +475,10 @@ impl core::fmt::Display for SimResult {
             Self::Continue(_) => f.write_str("Continue"),
             Self::Return(val) => write!(f, "Return({val:#x})"),
             Self::Exit => f.write_str("Exit"),
+            Self::Blocked { handle, timeout_ms } => {
+                write!(f, "Blocked(handle={handle:#x}, timeout_ms={timeout_ms})")
+            }
+            Self::Unsupported(reason) => write!(f, "Unsupported({reason})"),
         }
     }
 }
