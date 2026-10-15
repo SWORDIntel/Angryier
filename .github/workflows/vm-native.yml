@@ -40,6 +40,8 @@ jobs:
         run: cargo test -p angryier-loader
       - name: Win32 API and synchronization tests
         run: cargo test -p angryier-models
+      - name: Native runtime unit and fidelity tests
+        run: cargo test -p angryier-runtime --features "xed script" --lib
       - name: VM runtime integration tests
         run: cargo test -p angryier-runtime --features "xed script" --test lua_api
       - name: Windows PE call-return fidelity regressions
