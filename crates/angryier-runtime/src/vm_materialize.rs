@@ -176,12 +176,6 @@ pub fn materialize_vm_handler(
         {
             return Err(VmMaterializationError::InvalidCapture("footprint/recorded-step identity mismatch"));
         }
-        let evaluation = evaluator.eval_block_with_memory_values(&recorded.block, &mut memory)
-            .map_err(|error| VmMaterializationError::SymbolicEvaluation {
-                step: step_index,
-                reason: error.to_string(),
-            })?;
-
         let writes: Vec<(u32, RegisterWriteKind)> = capture.footprint.effects.iter()
             .filter(|e| e.step == step_index)
             .filter_map(|e| match e.effect {
@@ -198,6 +192,12 @@ pub fn materialize_vm_handler(
                 return Err(VmMaterializationError::UnsupportedPartialRegister { step: step_index, register: *register });
             }
         }
+        let evaluation = evaluator.eval_block_with_memory_values(&recorded.block, &mut memory)
+            .map_err(|error| VmMaterializationError::SymbolicEvaluation {
+                step: step_index,
+                reason: error.to_string(),
+            })?;
+
         let after_registers = evaluator.snapshot().registers;
         for scoped in capture.footprint.effects.iter().filter(|e| e.step == step_index) {
             match scoped.effect {
