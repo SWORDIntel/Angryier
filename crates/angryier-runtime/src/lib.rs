@@ -635,6 +635,27 @@ impl Process {
             )))
     }
 
+    /// Mark an explicitly approximate PE API return in the state fidelity
+    /// ledger. This is de-duplicated per PC to avoid unbounded ledger growth
+    /// on a tight loop through the same simulated import.
+    fn record_approximate_import(&mut self, pc: Address) {
+        if self.simproc_instances.contains_key(&pc) || self.redirects.contains_key(&pc) {
+            return;
+        }
+        let Some((dll, export)) = self.pe_import_stubs.get(&pc) else {
+            return;
+        };
+        if import_audit::classify(dll, export, false)
+            != import_audit::ImportBehavior::ApproximateScalar
+            || self.state.fidelity.entries.iter().any(|entry| {
+                entry.kind == AnalysisDebtKind::Concretized && entry.source == pc
+            })
+        {
+            return;
+        }
+        self.state.fidelity = self.state.fidelity.record(AnalysisDebtKind::Concretized, pc);
+    }
+
     /// Whether the target is executable in the current mapped address
     /// space, or has an explicit SimProcedure/exit hook. No per-application
     /// address constants: mappings and hook registrations are authoritative.
@@ -2499,6 +2520,7 @@ impl<D: Decoder> Runtime<D> {
         if let Some(error) = process.unmodeled_import_error(pc) {
             return Err(error);
         }
+        process.record_approximate_import(pc);
 
         // Control-flow redirects: divert execution to target PC before SimProcedure
         // or instruction decode.
@@ -5654,6 +5676,27 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_success_stub_records_bounded_approximation_debt() -> Result<(), RuntimeError> {
+        let mut process = minimal_process()?;
+        let stub = 0x7000_0000_4140;
+        process.pe_import_stubs.insert(
+            stub,
+            ("kernel32.dll".into(), "IsProcessorFeaturePresent".into()),
+        );
+        assert!(process.state.fidelity.is_exact());
+        process.record_approximate_import(stub);
+        assert!(!process.state.fidelity.is_exact());
+        assert_eq!(process.state.fidelity.entries.len(), 1);
+        assert_eq!(process.state.fidelity.entries[0].source, stub);
+        process.record_approximate_import(stub);
+        assert_eq!(process.state.fidelity.entries.len(), 1);
+        process.stub_function(stub, 0);
+        process.record_approximate_import(stub);
+        assert_eq!(process.state.fidelity.entries.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn imported_userland_api_guard_applies_to_symbolic_and_concrete_modes() -> Result<(), RuntimeError> {
         let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
         let mut process = minimal_process()?;
@@ -7157,6 +7200,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         if let Some(error) = self.states[index].process.unmodeled_import_error(pc) {
             return Err(error);
         }
+        self.states[index].process.record_approximate_import(pc);
 
         // Loop summarization: a summarized header with concrete inputs
         // collapses its remaining iterations into one step.
