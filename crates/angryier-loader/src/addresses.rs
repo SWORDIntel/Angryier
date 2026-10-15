@@ -271,9 +271,9 @@ mod tests {
     }
 
     #[test]
-    fn pe_va_rva_and_disk_bytes_remain_distinct() {
+    fn pe_va_rva_and_disk_bytes_remain_distinct() -> Result<(), PeAddressError> {
         let bytes = fixture();
-        let map = PeAddressMap::parse(&bytes).expect("map");
+        let map = PeAddressMap::parse(&bytes)?;
         let va = 0x140001010;
         assert_eq!(map.va_to_rva(va), Ok(0x1010));
         assert_eq!(map.file_offset(va, 5), Ok(0x210));
@@ -283,6 +283,7 @@ mod tests {
         assert_eq!(map.file_offset(0x140001400, 1), Err(PeAddressError::NotFileBacked { rva: 0x1400 }));
         assert_eq!(map.file_offset(0x1400011ff, 2), Err(PeAddressError::CrossesBoundary));
         assert_eq!(map.locate_rva(0x3000), Err(PeAddressError::Unmapped { rva: 0x3000 }));
+        Ok(())
     }
 
     #[test]
