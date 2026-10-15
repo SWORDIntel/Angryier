@@ -11,6 +11,96 @@ use angryier_types::ObjectId;
 
 use crate::{Process, RuntimeError};
 
+/// Exact memory input boundary shared by valid MINIDUMP_MEMORY64 streams
+/// and independently verified, pre-extracted heap slices. The trait cannot
+/// return invented zero-filled gaps or partial reads.
+pub trait CapturedMemoryReader {
+    fn read_captured(&mut self, address: u64, length: usize) -> Result<Vec<u8>, String>;
+}
+
+impl CapturedMemoryReader for MiniDumpFile {
+    fn read_captured(&mut self, address: u64, length: usize) -> Result<Vec<u8>, String> {
+        self.read(address, length).map_err(|e| format!("{e:?}"))
+    }
+}
+
+/// One capture region independently associated with a guest virtual address.
+/// No ownership of bytes is taken; the caller must retain each source file.
+#[derive(Clone, Copy, Debug)]
+pub struct CapturedSlice<'a> {
+    pub base: u64,
+    pub bytes: &'a [u8],
+}
+
+/// Read-only collection of verified VA-backed slices. Use when the OS dump's
+/// stream directory is missing/corrupted but an independent extraction step
+/// has established exact byte-to-VA mappings. The declared source identity
+/// is provided by the caller, not authenticated or inferred here.
+pub struct SliceCapture<'a> {
+    source_identity: [u8; 32],
+    regions: Vec<CapturedSlice<'a>>,
+}
+
+impl<'a> SliceCapture<'a> {
+    pub fn new(
+        source_identity: [u8; 32],
+        mut regions: Vec<CapturedSlice<'a>>,
+    ) -> Result<Self, RuntimeError> {
+        if source_identity == [0; 32] {
+            return Err(capture_error("capture identity must not be all zeros"));
+        }
+        if regions.is_empty() || regions.len() > MAX_SELECTIONS {
+            return Err(capture_error("no capture regions or excessive region count"));
+        }
+        regions.sort_by_key(|r| r.base);
+        let mut previous_end: Option<u64> = None;
+        for region in &regions {
+            if region.bytes.is_empty() {
+                return Err(capture_error("empty captured slice"));
+            }
+            let len = u64::try_from(region.bytes.len())
+                .map_err(|_| capture_error("slice length overflow"))?;
+            let end = region.base.checked_add(len)
+                .ok_or_else(|| capture_error("slice VA overflow"))?;
+            if previous_end.is_some_and(|p| region.base < p) {
+                return Err(capture_error("overlapping captured slices"));
+            }
+            previous_end = Some(end);
+        }
+        Ok(Self { source_identity, regions })
+    }
+
+    pub fn source_identity(&self) -> [u8; 32] {
+        self.source_identity
+    }
+}
+
+impl CapturedMemoryReader for SliceCapture<'_> {
+    fn read_captured(&mut self, address: u64, length: usize) -> Result<Vec<u8>, String> {
+        if length > MAX_SINGLE_READ as usize {
+            return Err("requested capture read exceeds 1 MiB".into());
+        }
+        let end = address.checked_add(length as u64)
+            .ok_or_else(|| "requested capture address overflow".to_string())?;
+        let mut cursor = address;
+        let mut out = Vec::with_capacity(length);
+        while cursor < end {
+            let region = self.regions.iter().find(|r| {
+                cursor >= r.base && cursor - r.base < r.bytes.len() as u64
+            }).ok_or_else(|| format!("no captured bytes at VA {cursor:#x}"))?;
+            let index = usize::try_from(cursor - region.base)
+                .map_err(|_| "slice index overflow".to_string())?;
+            let remaining = (end - cursor).min((region.bytes.len() - index) as u64);
+            let count = usize::try_from(remaining)
+                .map_err(|_| "slice read size overflow".to_string())?;
+            out.extend_from_slice(&region.bytes[index..index + count]);
+            cursor = cursor.checked_add(remaining)
+                .ok_or_else(|| "capture cursor overflow".to_string())?;
+        }
+        Ok(out)
+    }
+}
+
 const MAX_CAPTURED_TOTAL: u64 = 64 * 1024 * 1024;
 const MAX_SINGLE_READ: u64 = 1024 * 1024;
 const MAX_SELECTIONS: usize = 256;
@@ -75,7 +165,7 @@ fn region_placement(
 /// came from the same process or moment.
 pub fn import_captured_memory(
     process: &mut Process,
-    dump: &mut MiniDumpFile,
+    dump: &mut impl CapturedMemoryReader,
     selections: &[CaptureRange],
     baseline: CaptureBaseline,
 ) -> Result<CaptureImportReport, RuntimeError> {
@@ -123,8 +213,8 @@ pub fn import_captured_memory(
             let count = (range.length - offset).min(MAX_SINGLE_READ);
             let location = range.address.checked_add(offset)
                 .ok_or_else(|| capture_error("VA overflow"))?;
-            let bytes = dump.read(location, count as usize)
-                .map_err(|e| capture_error(format!("{e:?}")))?;
+            let bytes = dump.read_captured(location, count as usize)
+                .map_err(capture_error)?;
             // No fabricated bytes; the source reader requires a complete
             // captured range and reports the first missing byte.
             staged = staged.load_concrete(location, &bytes)
@@ -241,6 +331,59 @@ mod tests {
             snapshot,
         );
         std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn independently_mapped_heap_slices_share_the_atomic_import_pipeline() -> Result<(), String> {
+        let left = [0xaau8; 16];
+        let right = [0xbbu8; 16];
+        let regions = vec![
+            CapturedSlice { base: 0x60000010, bytes: &right },
+            CapturedSlice { base: 0x60000000, bytes: &left },
+        ];
+        let mut capture = SliceCapture::new([0x42; 32], regions)
+            .map_err(|e| e.to_string())?;
+        assert_eq!(capture.source_identity(), [0x42; 32]);
+        assert_eq!(
+            capture.read_captured(0x60000008, 16).map_err(|e| e.to_string())?,
+            [&left[8..], &right[..8]].concat(),
+        );
+        let mut process = make_process()?;
+        let report = import_captured_memory(
+            &mut process, &mut capture, &[range(32)], CaptureBaseline::ReplayMemory
+        ).map_err(|e| e.to_string())?;
+        assert_eq!(report.mapped_new_ranges, 1);
+        assert_eq!(report.bytes, 32);
+        let memory = process.state.memory.read(0x60000000, 32)
+            .map_err(|e| format!("{e:?}"))?;
+        assert!(memory[..16].iter().all(|b| *b == ByteValue::Concrete(0xaa)));
+        assert!(memory[16..].iter().all(|b| *b == ByteValue::Concrete(0xbb)));
+        Ok(())
+    }
+
+    #[test]
+    fn mapped_slices_reject_overlaps_and_uncaptured_gaps() -> Result<(), String> {
+        let first = [0x11u8; 8];
+        let second = [0x22u8; 8];
+        assert!(SliceCapture::new(
+            [1; 32],
+            vec![
+                CapturedSlice { base: 0x2000, bytes: &first },
+                CapturedSlice { base: 0x2004, bytes: &second },
+            ]
+        ).is_err());
+        let mut valid = SliceCapture::new(
+            [1; 32],
+            vec![
+                CapturedSlice { base: 0x2000, bytes: &first },
+                CapturedSlice { base: 0x2010, bytes: &second },
+            ],
+        ).map_err(|e| e.to_string())?;
+        assert!(valid.read_captured(0x2004, 16).is_err());
+        assert!(SliceCapture::new(
+            [0; 32], vec![CapturedSlice { base: 0x2000, bytes: &first }]
+        ).is_err());
         Ok(())
     }
 
