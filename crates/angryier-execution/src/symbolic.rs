@@ -579,10 +579,21 @@ impl<'a> SymbolicEvaluator<'a> {
                     let (expression, ty) = match kind {
                         RegisterWriteKind::ReplaceParent => (expression, ty),
                         RegisterWriteKind::ZeroExtendParent => {
-                            // Zero-fill to the register's current symbolic width.
-                            let target_ty = self.registers.get(register).map(|(_, ty)| *ty).unwrap_or(ty);
-                            let target_width = bit_width(target_ty)?;
+                            // A 32-bit x86 write targets its 64-bit parent,
+                            // even when this is the FIRST access to EAX.
+                            // Previously an unseen register defaulted to the
+                            // source's 32-bit type, creating a 32-bit "RAX"
+                            // binding and breaking native replay fidelity.
                             let source_width = bit_width(ty)?;
+                            let known = self.registers.get(register).map(|(_, prior_ty)| *prior_ty);
+                            let known_width = known.and_then(|prior_ty| bit_width(prior_ty).ok()).unwrap_or(0);
+                            let target_width = arch_parent_bits(*register)
+                                .max(source_width)
+                                .max(known_width);
+                            let target_ty = match known {
+                                Some(prior_ty) if known_width == target_width => prior_ty,
+                                _ => IrType::Bits(target_width),
+                            };
                             if source_width >= target_width {
                                 (expression, target_ty)
                             } else {
