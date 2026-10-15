@@ -155,3 +155,18 @@ fn fabricated_native_step_outcome_fails_closed() -> Result<(), String> {
     assert!(materialize_vm_handler(&capture, &arena, 1024).is_err());
     Ok(())
 }
+
+#[test]
+fn candidate_replay_is_only_a_captured_input_check() -> Result<(), String> {
+    let captured = fixture()?;
+    let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+    let candidate = materialize_vm_handler(&captured, &arena, 1024)
+        .map_err(|error| format!("{error:?}"))?;
+    let report = angryier_runtime::vm_replay::check_vm_concrete_replay(
+        &captured, &candidate, &arena
+    ).map_err(|error| format!("{error:?}"))?;
+    assert!(report.checked_registers > 0);
+    assert_eq!(report.unresolved_fault_obligations, 1);
+    assert!(report.observed_input_only);
+    Ok(())
+}
