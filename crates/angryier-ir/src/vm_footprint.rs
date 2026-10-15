@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_unused_faulting_load_and_ordered_aliasing_writes() {
+    fn preserves_unused_faulting_load_and_ordered_aliasing_writes() -> Result<(), String> {
         let b = block(vec![
             value(0, IrOp::ReadRegister { register: 14, ty: IrType::Bits(64) }),
             value(1, IrOp::Load { address: IrValueId(0), ty: IrType::Bits(64) }),
@@ -271,7 +271,7 @@ mod tests {
             effect(IrOp::Store { address: IrValueId(0), value: IrValueId(2) }),
             effect(IrOp::Return),
         ]);
-        let p = collect_vm_ir_effects(&b, limits()).unwrap();
+        let p = collect_vm_ir_effects(&b, limits()).map_err(|error| format!("{error:?}"))?;
         assert_eq!(p.effects.len(), 4);
         assert!(matches!(p.effects[0], VmIrEffect::MemoryRead { result: IrValueId(1), .. }));
         assert_eq!(p.effects[1], p.effects[2]);
@@ -280,10 +280,11 @@ mod tests {
             VmIrSource::MemoryRead(IrValueId(1)),
         ]);
         assert_eq!(p.dependencies, vec![IrValueId(0), IrValueId(1), IrValueId(2)]);
+        Ok(())
     }
 
     #[test]
-    fn retains_mask_and_indirect_dispatch_dependencies() {
+    fn retains_mask_and_indirect_dispatch_dependencies() -> Result<(), String> {
         let b = block(vec![
             value(0, IrOp::ReadRegister { register: 10, ty: IrType::Bits(64) }),
             value(1, IrOp::ReadRegister { register: 11, ty: IrType::Bits(8) }),
@@ -295,7 +296,7 @@ mod tests {
             value(3, IrOp::ExprRef { expression: ExprId(55), ty: IrType::Bits(64) }),
             effect(IrOp::JumpIndirect { target: IrValueId(3) }),
         ]);
-        let p = collect_vm_ir_effects(&b, limits()).unwrap();
+        let p = collect_vm_ir_effects(&b, limits()).map_err(|error| format!("{error:?}"))?;
         assert_eq!(p.sources, vec![
             VmIrSource::Register(10),
             VmIrSource::Register(11),
@@ -304,10 +305,11 @@ mod tests {
         ]);
         assert!(p.dependencies.contains(&IrValueId(1)));
         assert!(p.effects.iter().any(|effect| matches!(effect, VmIrEffect::IndirectJump { target: IrValueId(3) })));
+        Ok(())
     }
 
     #[test]
-    fn partial_register_update_keeps_implicit_parent_and_path_condition() {
+    fn partial_register_update_keeps_implicit_parent_and_path_condition() -> Result<(), String> {
         let b = block(vec![
             value(0, IrOp::Constant { ty: IrType::Bits(8), bytes_le: vec![1] }),
             effect(IrOp::WriteRegister {
@@ -317,13 +319,14 @@ mod tests {
             }),
             effect(IrOp::Branch { condition: IrValueId(0), taken: 0x10, not_taken: 0x20 }),
         ]);
-        let p = collect_vm_ir_effects(&b, limits()).unwrap();
+        let p = collect_vm_ir_effects(&b, limits()).map_err(|error| format!("{error:?}"))?;
         assert_eq!(p.sources, vec![VmIrSource::Register(4)]);
         assert!(matches!(p.effects[1], VmIrEffect::Branch { condition: IrValueId(0), .. }));
+        Ok(())
     }
 
     #[test]
-    fn refuses_unverified_ir_and_budgets_without_partial_results() {
+    fn refuses_unverified_ir_and_budgets_without_partial_results() -> Result<(), String> {
         let bad = block(vec![effect(IrOp::Store {
             address: IrValueId(44), value: IrValueId(45),
         })]);
@@ -340,5 +343,6 @@ mod tests {
         assert!(matches!(collect_vm_ir_effects(&b, VmIrLimits { max_instructions: 2, max_dependency_values: 8 }), Err(VmIrError::InstructionBudgetExceeded { .. })));
         assert!(matches!(collect_vm_ir_effects(&b, VmIrLimits { max_instructions: 8, max_dependency_values: 2 }), Err(VmIrError::DependencyBudgetExceeded { .. })));
         assert!(matches!(collect_vm_ir_effects(&b, limits()), Ok(VmIrFootprint { caveats, .. }) if caveats.iter().any(|c| matches!(c, VmIrCaveat::PrimitiveRequiresSemanticReview { .. }))));
+        Ok(())
     }
 }
