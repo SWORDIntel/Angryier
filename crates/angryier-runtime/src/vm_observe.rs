@@ -89,6 +89,15 @@ impl<D: Decoder> Runtime<D> {
                 "VM handler capture image/profile identity mismatch".into(),
             ));
         }
+        if [
+            window.identity.executable_digest,
+            window.identity.capture_digest,
+            window.identity.initial_state_digest,
+        ].iter().any(|digest| *digest == [0; 32]) {
+            return Err(RuntimeError::Environment(
+                "VM handler observation lacks executable/capture/initial-state identity".into(),
+            ));
+        }
         if window.limits.max_steps == 0 {
             return Err(RuntimeError::Environment(
                 "VM handler capture requires a nonzero step budget".into(),
