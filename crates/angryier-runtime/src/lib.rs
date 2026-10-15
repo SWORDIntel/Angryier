@@ -3593,25 +3593,38 @@ impl<D: Decoder> Runtime<D> {
                 sim_state.set_reg(u64::from(index), u64::from_le_bytes(buf));
             }
         }
-        // Stack-argument shadowing: mirror [rsp .. rsp+0x40) (return
-        // address + 7 stack-argument slots) into the SimState shadow so
-        // stack-passed OUT/IN parameters (5th argument and beyond, e.g.
-        // IoCreateDevice's pptrDeviceObject at [rsp+0x38]) are readable
-        // through SimState::read_bytes. 5th arg = [rsp+0x08] ... 11th =
-        // [rsp+0x38]; slot 0 is the return address, also useful.
+        // Stack-argument shadowing: read Windows x64 shadow space at
+        // [rsp+0x08..0x27], followed by the fifth argument at [rsp+0x28].
+        // Retain only observed concrete runs: a symbolic argument must not
+        // be silently transformed into an apparently known zero. The caller
+        // can then use try_win64_arg to fail closed on partial evidence.
         {
             let rsp = sim_state.get_reg(4);
             if rsp != 0
-                && let Ok(bytes) = process.state.memory.read(rsp, 0x40)
+                && let Ok(bytes) = process.state.memory.read(rsp, 0x60)
             {
-                let concrete: Vec<u8> = bytes
-                    .iter()
-                    .map(|b| match b {
-                        ByteValue::Concrete(v) => *v,
-                        ByteValue::Symbolic(_) => 0,
-                    })
-                    .collect();
-                sim_state.write_memory(rsp, concrete);
+                let mut segment_start: Option<u64> = None;
+                let mut segment = Vec::new();
+                for (offset, byte) in bytes.iter().enumerate() {
+                    match byte {
+                        ByteValue::Concrete(value) => {
+                            if segment_start.is_none() {
+                                segment_start = rsp.checked_add(offset as u64);
+                            }
+                            if segment_start.is_some() {
+                                segment.push(*value);
+                            }
+                        }
+                        ByteValue::Symbolic(_) => {
+                            if let Some(base) = segment_start.take() {
+                                sim_state.shadow_memory(base, std::mem::take(&mut segment));
+                            }
+                        }
+                    }
+                }
+                if let Some(base) = segment_start {
+                    sim_state.shadow_memory(base, segment);
+                }
             }
         }
 
