@@ -157,7 +157,7 @@ pub fn check_vm_concrete_replay(
     }
 
     let mut checked_registers = 0usize;
-    for (&register, _) in &Intel64RegisterFile::canonical().architectural_registers {
+    for (register, _) in &Intel64RegisterFile::canonical().architectural_registers {
         if register.0 == register_id::RIP.0 {
             continue;
         }
