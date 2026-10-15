@@ -170,3 +170,29 @@ fn candidate_replay_is_only_a_captured_input_check() -> Result<(), String> {
     assert!(report.observed_input_only);
     Ok(())
 }
+
+#[test]
+fn captured_replay_detects_changed_register_and_rejects_debt() -> Result<(), String> {
+    use angryier_state::RegisterState;
+    use angryier_runtime::vm_replay::{check_vm_concrete_replay, VmReplayError};
+    let mut capture = fixture()?;
+    let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+    let candidate = materialize_vm_handler(&capture, &arena, 1024)
+        .map_err(|error| format!("{error:?}"))?;
+    capture.final_state.registers = capture.final_state.registers
+        .write(1, &8u64.to_le_bytes()).map_err(|error| format!("{error:?}"))?;
+    assert_eq!(
+        check_vm_concrete_replay(&capture, &candidate, &arena),
+        Err(VmReplayError::RegisterMismatch { register: 1 })
+    );
+    let mut capture = fixture()?;
+    capture.initial_state.fidelity = capture.initial_state.fidelity
+        .record(angryier_types::AnalysisDebtKind::Concretized, 0x1000);
+    let candidate = materialize_vm_handler(&capture, &arena, 1024)
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(
+        check_vm_concrete_replay(&capture, &candidate, &arena),
+        Err(VmReplayError::ExistingFidelityDebt)
+    );
+    Ok(())
+}
