@@ -68,8 +68,7 @@ impl PeAddressMap {
         if bytes.get(..2) != Some(b"MZ") || bytes.len() < 0x40 {
             return Err(PeAddressError::InvalidImage);
         }
-        let pe_offset = usize::try_from(checked_u32(bytes, 0x3c)?)
-            .map_err(|_| PeAddressError::Overflow)?;
+        let pe_offset = usize::try_from(checked_u32(bytes, 0x3c)?).map_err(|_| PeAddressError::Overflow)?;
         let coff = pe_offset.checked_add(4).ok_or(PeAddressError::Overflow)?;
         if bytes.get(pe_offset..coff) != Some(b"PE\0\0") {
             return Err(PeAddressError::InvalidImage);
@@ -86,14 +85,13 @@ impl PeAddressMap {
         let optional_size = usize::from(checked_u16(bytes, coff + 16)?);
         let optional = coff.checked_add(20).ok_or(PeAddressError::Overflow)?;
         let optional_end = optional.checked_add(optional_size).ok_or(PeAddressError::Overflow)?;
-        if optional_size < 64 || optional_end > bytes.len()
-            || checked_u16(bytes, optional)? != 0x20b
-        {
+        if optional_size < 64 || optional_end > bytes.len() || checked_u16(bytes, optional)? != 0x20b {
             return Err(PeAddressError::InvalidImage);
         }
         let image_base = checked_u64(bytes, optional + 24)?;
         let header_len = checked_u32(bytes, optional + 60)?;
-        if header_len == 0 || u64::from(header_len) > bytes.len() as u64
+        if header_len == 0
+            || u64::from(header_len) > bytes.len() as u64
             || optional_end > usize::try_from(header_len).unwrap_or(0)
         {
             return Err(PeAddressError::InvalidImage);
@@ -117,7 +115,8 @@ impl PeAddressMap {
             let virtual_span = virtual_size.max(raw_size);
             let virtual_end = rva.checked_add(virtual_span).ok_or(PeAddressError::Overflow)?;
             let raw_end = u64::from(raw_offset)
-                .checked_add(u64::from(raw_size)).ok_or(PeAddressError::Overflow)?;
+                .checked_add(u64::from(raw_size))
+                .ok_or(PeAddressError::Overflow)?;
             if raw_end > bytes.len() as u64 {
                 return Err(PeAddressError::OutOfBounds);
             }
@@ -168,7 +167,9 @@ impl PeAddressMap {
     }
 
     pub fn rva_to_va(&self, rva: u32) -> Result<u64, PeAddressError> {
-        self.image_base.checked_add(u64::from(rva)).ok_or(PeAddressError::Overflow)
+        self.image_base
+            .checked_add(u64::from(rva))
+            .ok_or(PeAddressError::Overflow)
     }
 
     pub fn locate_rva(&self, rva: u32) -> Result<PeLocation, PeAddressError> {
@@ -177,9 +178,10 @@ impl PeAddressMap {
                 file_offset: u64::from(rva),
             });
         }
-        let section = self.sections.iter().enumerate().find(|(_, section)| {
-            rva >= section.rva && u64::from(rva - section.rva) < u64::from(section.virtual_span)
-        });
+        let section =
+            self.sections.iter().enumerate().find(|(_, section)| {
+                rva >= section.rva && u64::from(rva - section.rva) < u64::from(section.virtual_span)
+            });
         let (index, section) = section.ok_or(PeAddressError::Unmapped { rva })?;
         let offset = rva - section.rva;
         if offset < section.raw_size {
@@ -221,17 +223,11 @@ impl PeAddressMap {
         }
     }
 
-    pub fn bytes_at_va<'a>(
-        &self,
-        bytes: &'a [u8],
-        va: u64,
-        length: usize,
-    ) -> Result<&'a [u8], PeAddressError> {
+    pub fn bytes_at_va<'a>(&self, bytes: &'a [u8], va: u64, length: usize) -> Result<&'a [u8], PeAddressError> {
         if bytes.len() as u64 != self.file_size {
             return Err(PeAddressError::InvalidImage);
         }
-        let offset = usize::try_from(self.file_offset(va, length)?)
-            .map_err(|_| PeAddressError::Overflow)?;
+        let offset = usize::try_from(self.file_offset(va, length)?).map_err(|_| PeAddressError::Overflow)?;
         let end = offset.checked_add(length).ok_or(PeAddressError::Overflow)?;
         bytes.get(offset..end).ok_or(PeAddressError::OutOfBounds)
     }
@@ -280,7 +276,10 @@ mod tests {
         assert_eq!(map.bytes_at_va(&bytes, va, 5), Ok(&bytes[0x210..0x215]));
         assert_eq!(map.rva_to_va(0x1010), Ok(va));
         assert_eq!(map.locate_rva(0x1400), Ok(PeLocation::ZeroFill { index: 0 }));
-        assert_eq!(map.file_offset(0x140001400, 1), Err(PeAddressError::NotFileBacked { rva: 0x1400 }));
+        assert_eq!(
+            map.file_offset(0x140001400, 1),
+            Err(PeAddressError::NotFileBacked { rva: 0x1400 })
+        );
         assert_eq!(map.file_offset(0x1400011ff, 2), Err(PeAddressError::CrossesBoundary));
         assert_eq!(map.locate_rva(0x3000), Err(PeAddressError::Unmapped { rva: 0x3000 }));
         Ok(())
@@ -290,10 +289,16 @@ mod tests {
     fn rejects_ambiguous_and_out_of_range_sections() {
         let mut bytes = fixture();
         bytes[0x188 + 12..0x188 + 16].copy_from_slice(&0x100u32.to_le_bytes());
-        assert!(matches!(PeAddressMap::parse(&bytes), Err(PeAddressError::AmbiguousMapping)));
+        assert!(matches!(
+            PeAddressMap::parse(&bytes),
+            Err(PeAddressError::AmbiguousMapping)
+        ));
         let mut bytes = fixture();
         bytes[0x188 + 20..0x188 + 24].copy_from_slice(&0x700u32.to_le_bytes());
         assert!(matches!(PeAddressMap::parse(&bytes), Err(PeAddressError::OutOfBounds)));
-        assert!(matches!(PeAddressMap::parse(&bytes[..0x90]), Err(PeAddressError::InvalidImage)));
+        assert!(matches!(
+            PeAddressMap::parse(&bytes[..0x90]),
+            Err(PeAddressError::InvalidImage)
+        ));
     }
 }

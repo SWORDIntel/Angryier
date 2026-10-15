@@ -19,18 +19,13 @@ use angryier_execution::{SymbolBinding, SymbolicArena};
 use angryier_expr::{ExprArena, ExprArenaError, ExprNode, ExprOp, ExprSort, ShardedExprArena};
 use angryier_ir::IrType;
 use angryier_memory::LayeredMemory;
-use angryier_replay::{
-    capsule_domain_id, ExpectedCheckpoints, RecordedInputs, ReplayCapsule,
-    REPLAY_SCHEMA_V2,
-};
-use angryier_solver::{
-    CanonicalConstraint, SolverBackend, SolverOutcomeKind, SolverQuery,
-};
+use angryier_replay::{ExpectedCheckpoints, REPLAY_SCHEMA_V2, RecordedInputs, ReplayCapsule, capsule_domain_id};
+use angryier_solver::{CanonicalConstraint, SolverBackend, SolverOutcomeKind, SolverQuery};
 use angryier_taint::TaintLabel;
 use angryier_types::{
-    Address, AnalysisContext, ConstraintCanonicalizationVersion, ConstraintId, ContentId,
-    DependencyKey, ExpressionNormalizationVersion, FidelityProfile, ReplayCapsuleId,
-    RetentionProfile, RunId, SecurityContext, SolverQueryId, TaintId,
+    Address, AnalysisContext, ConstraintCanonicalizationVersion, ConstraintId, ContentId, DependencyKey,
+    ExpressionNormalizationVersion, FidelityProfile, ReplayCapsuleId, RetentionProfile, RunId, SecurityContext,
+    SolverQueryId, TaintId,
 };
 
 use crate::jni::JniEnvironment;
@@ -199,9 +194,7 @@ pub enum JniPathStatus {
     Unsat,
     /// Exploration did not reach the sink within bounds (step budget, timeout, state pruning,
     /// or depth limit exceeded) — Honoring Honest Incompleteness.
-    BoundedUnknown {
-        reason: String,
-    },
+    BoundedUnknown { reason: String },
 }
 
 /// Metadata describing a deterministic replay capsule for verified reachability.
@@ -351,7 +344,9 @@ impl<'a, D: Decoder> JniSinkReachabilityAnalyzer<'a, D> {
         ];
 
         // Ensure stack has a valid return PC for call returns.
-        let rsp = process.read_register(register_id::GPR_BASE + 4).unwrap_or(0x7fff_0000_0000);
+        let rsp = process
+            .read_register(register_id::GPR_BASE + 4)
+            .unwrap_or(0x7fff_0000_0000);
         let stack_top = if rsp >= 0x7fff_0000_0000 { rsp - 8 } else { rsp };
         process.write_register(register_id::GPR_BASE + 4, stack_top)?;
         let exit_ret_pc = 0x7fff_ffff_1000u64;
@@ -561,9 +556,7 @@ impl<'a, D: Decoder> JniSinkReachabilityAnalyzer<'a, D> {
         // Bind initial symbolic registers into session state 0.
         if !session.states.is_empty() {
             for (reg_id, sym_id) in initial_symbolic_regs {
-                session.states[0]
-                    .registers
-                    .insert(reg_id, (sym_id, IrType::Bits(64)));
+                session.states[0].registers.insert(reg_id, (sym_id, IrType::Bits(64)));
                 session.states[0].symbols.push(SymbolBinding {
                     register: reg_id,
                     expression: sym_id,
@@ -634,10 +627,7 @@ impl<'a, D: Decoder> JniSinkReachabilityAnalyzer<'a, D> {
                 ));
                 return Ok(JniReachabilityResult {
                     status: JniPathStatus::BoundedUnknown {
-                        reason: format!(
-                            "Exceeded maximum step budget of {} steps",
-                            self.config.max_steps
-                        ),
+                        reason: format!("Exceeded maximum step budget of {} steps", self.config.max_steps),
                     },
                     trace: Vec::new(),
                     model_values: Vec::new(),
@@ -727,9 +717,7 @@ impl<'a, D: Decoder> JniSinkReachabilityAnalyzer<'a, D> {
                         semantic_version: self.runtime.semantic_version,
                         semantic_content: ContentId::default(),
                         code_versions: Vec::new(),
-                        environment_key: DependencyKey(
-                            capsule_domain_id(b"angryier:environment:jni-native:1").0,
-                        ),
+                        environment_key: DependencyKey(capsule_domain_id(b"angryier:environment:jni-native:1").0),
                         scheduler_seed,
                         image_hash,
                         inputs,
@@ -932,12 +920,8 @@ fn check_state_feasibility(
             .copied()
             .or_else(|| state.process.read_register(reg_id).ok());
         if let Some(addr) = concrete_val {
-            let guard = env
-                .read()
-                .map_err(|e| RuntimeError::Environment(format!("{e:?}")))?;
-            if guard.taint_tracker.is_memory_tainted(addr)
-                || guard.taint_tracker.get_buffer(addr).is_some()
-            {
+            let guard = env.read().map_err(|e| RuntimeError::Environment(format!("{e:?}")))?;
+            if guard.taint_tracker.is_memory_tainted(addr) || guard.taint_tracker.get_buffer(addr).is_some() {
                 is_controlled = true;
             }
         }
@@ -1130,11 +1114,7 @@ fn check_state_feasibility(
 }
 
 /// Derives a deterministic replay capsule ID from image hash, inputs, and seed.
-pub fn derive_capsule_id(
-    image: ContentId,
-    inputs: &RecordedInputs,
-    scheduler_seed: u64,
-) -> ReplayCapsuleId {
+pub fn derive_capsule_id(image: ContentId, inputs: &RecordedInputs, scheduler_seed: u64) -> ReplayCapsuleId {
     let mut canonical = Vec::new();
     canonical.extend_from_slice(&image.0);
     canonical.extend_from_slice(&(inputs.registers.len() as u64).to_le_bytes());
@@ -1145,10 +1125,6 @@ pub fn derive_capsule_id(
     canonical.extend_from_slice(&(inputs.stdin.len() as u64).to_le_bytes());
     canonical.extend_from_slice(&inputs.stdin);
     canonical.extend_from_slice(&scheduler_seed.to_le_bytes());
-    let derived = u64::from_le_bytes(
-        capsule_domain_id(&canonical).0[..8]
-            .try_into()
-            .unwrap_or([0; 8]),
-    );
+    let derived = u64::from_le_bytes(capsule_domain_id(&canonical).0[..8].try_into().unwrap_or([0; 8]));
     ReplayCapsuleId(if derived == 0 { 1 } else { derived })
 }

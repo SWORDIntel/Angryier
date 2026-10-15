@@ -52,12 +52,7 @@ fn as_u64(bytes: &[u8], offset: usize) -> Result<u64, MiniDumpFileError> {
     Ok(u64::from_le_bytes(value))
 }
 
-fn read_at(
-    file: &mut File,
-    file_size: u64,
-    offset: u64,
-    size: usize,
-) -> Result<Vec<u8>, MiniDumpFileError> {
+fn read_at(file: &mut File, file_size: u64, offset: u64, size: usize) -> Result<Vec<u8>, MiniDumpFileError> {
     let end = offset
         .checked_add(u64::try_from(size).map_err(|_| MiniDumpError::Overflow)?)
         .ok_or(MiniDumpError::Overflow)?;
@@ -102,8 +97,7 @@ impl MiniDumpFile {
                 continue;
             }
             found = true;
-            let stream_len = usize::try_from(as_u32(&directory, off + 4)?)
-                .map_err(|_| MiniDumpError::Overflow)?;
+            let stream_len = usize::try_from(as_u32(&directory, off + 4)?).map_err(|_| MiniDumpError::Overflow)?;
             let stream_rva = u64::from(as_u32(&directory, off + 8)?);
             // Stream data is a list of descriptors, not the memory bytes.
             // Refuse maliciously large table allocations before reading.
@@ -121,7 +115,9 @@ impl MiniDumpFile {
                 usize::try_from(as_u64(&stream, 0)?).map_err(|_| MiniDumpError::Overflow)?
             };
             if ranges > MAX_RANGES.saturating_sub(regions.len())
-                || ranges.checked_mul(16).and_then(|v| v.checked_add(header_size))
+                || ranges
+                    .checked_mul(16)
+                    .and_then(|v| v.checked_add(header_size))
                     .is_none_or(|needed| needed > stream.len())
             {
                 return Err(MiniDumpError::TooManyRanges.into());
@@ -161,7 +157,10 @@ impl MiniDumpFile {
         let mut end = None::<u64>;
         for (index, region) in regions.iter().enumerate() {
             let region_end = region.base.checked_add(region.len).ok_or(MiniDumpError::Overflow)?;
-            let file_end = region.file_offset.checked_add(region.len).ok_or(MiniDumpError::Overflow)?;
+            let file_end = region
+                .file_offset
+                .checked_add(region.len)
+                .ok_or(MiniDumpError::Overflow)?;
             if region.len == 0 || file_end > file_size {
                 return Err(MiniDumpError::InvalidRange.into());
             }
@@ -171,7 +170,12 @@ impl MiniDumpFile {
             end = Some(region_end);
             starts.insert(region.base, index);
         }
-        Ok(Self { file, file_size, regions, starts })
+        Ok(Self {
+            file,
+            file_size,
+            regions,
+            starts,
+        })
     }
 
     pub fn regions(&self) -> &[MiniDumpRegion] {
@@ -192,14 +196,19 @@ impl MiniDumpFile {
         let mut cursor = address;
         let mut out = Vec::with_capacity(length);
         while cursor < end {
-            let (_, &index) = self.starts.range(..=cursor).next_back()
+            let (_, &index) = self
+                .starts
+                .range(..=cursor)
+                .next_back()
                 .ok_or(MiniDumpError::MissingCapture { address: cursor })?;
             let region = self.regions[index];
             if cursor - region.base >= region.len {
                 return Err(MiniDumpError::MissingCapture { address: cursor }.into());
             }
             let take = (region.len - (cursor - region.base)).min(end - cursor);
-            let raw_start = region.file_offset.checked_add(cursor - region.base)
+            let raw_start = region
+                .file_offset
+                .checked_add(cursor - region.base)
                 .ok_or(MiniDumpError::Overflow)?;
             let data = read_at(
                 &mut self.file,
@@ -247,7 +256,9 @@ mod tests {
         assert_eq!(reader.read(0x094464c0, 4)?, vec![0x41; 4]);
         assert!(matches!(
             reader.read(0x09446500, 1),
-            Err(MiniDumpFileError::Format(MiniDumpError::MissingCapture { address: 0x09446500 }))
+            Err(MiniDumpFileError::Format(MiniDumpError::MissingCapture {
+                address: 0x09446500
+            }))
         ));
         std::fs::remove_file(&dir)?;
         Ok(())

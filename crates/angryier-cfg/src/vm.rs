@@ -208,9 +208,7 @@ impl VmAnalysisSession {
         }
 
         let new_nodes = usize::from(!self.nodes.contains(&transition.from))
-            + usize::from(
-                transition.to != transition.from && !self.nodes.contains(&transition.to),
-            );
+            + usize::from(transition.to != transition.from && !self.nodes.contains(&transition.to));
         let required_nodes = self.nodes.len().saturating_add(new_nodes);
         if required_nodes > self.limits.max_nodes {
             self.rejected = self.rejected.saturating_add(1);
@@ -259,25 +257,15 @@ impl VmAnalysisSession {
     /// Context-collapsed view for a downstream decompiler. This is a union of
     /// observed possibilities, not a complete CFG or an equivalence proof.
     pub fn projected_edges(&self) -> Vec<VmProjectedEdge> {
-        let mut edges: BTreeMap<
-            ((Address, Address), (Address, Address)),
-            u64,
-        > = BTreeMap::new();
+        let mut edges: BTreeMap<((Address, Address), (Address, Address)), u64> = BTreeMap::new();
         for ((from, to), evidence) in &self.edges {
-            let location = (
-                (from.native_pc, from.virtual_pc),
-                (to.native_pc, to.virtual_pc),
-            );
+            let location = ((from.native_pc, from.virtual_pc), (to.native_pc, to.virtual_pc));
             let count = edges.entry(location).or_default();
             *count = count.saturating_add(evidence.observations);
         }
         edges
             .into_iter()
-            .map(|((from, to), observations)| VmProjectedEdge {
-                from,
-                to,
-                observations,
-            })
+            .map(|((from, to), observations)| VmProjectedEdge { from, to, observations })
             .collect()
     }
 }
@@ -285,12 +273,12 @@ impl VmAnalysisSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BasicBlock, CfgEdge};
     use angryier_arch::{
-        AccessKind, DecodedInstruction, InstructionModifiers, MemoryBase, MemoryOperand,
-        Operand, OperandKind, OperandVisibility, RegisterView,
+        AccessKind, DecodedInstruction, InstructionModifiers, MemoryBase, MemoryOperand, Operand, OperandKind,
+        OperandVisibility, RegisterView,
     };
     use angryier_semantics_intel64::forms;
-    use crate::{BasicBlock, CfgEdge};
 
     fn node(native_pc: u64, virtual_pc: u64, state: u8) -> VmNodeKey {
         VmNodeKey {
@@ -308,11 +296,14 @@ mod tests {
         let y = node(0x1000, 0x2001, 1);
         let z = node(0x1000, 0x2000, 2);
         for (from, to) in [(x, y), (y, z), (z, x)] {
-            assert_eq!(session.observe(VmTransition {
-                from,
-                to,
-                source: VmTransitionSource::ObservedTrace,
-            }), Ok(()));
+            assert_eq!(
+                session.observe(VmTransition {
+                    from,
+                    to,
+                    source: VmTransitionSource::ObservedTrace,
+                }),
+                Ok(())
+            );
         }
         assert_eq!(session.nodes().len(), 3);
         assert_eq!(session.edges().len(), 3);
@@ -347,11 +338,14 @@ mod tests {
         let x = node(0x1000, 0x2000, 1);
         let y = node(0x1100, 0x2001, 1);
         let z = node(0x1200, 0x2002, 1);
-        assert_eq!(session.observe(VmTransition {
-            from: x,
-            to: y,
-            source: VmTransitionSource::ObservedTrace,
-        }), Ok(()));
+        assert_eq!(
+            session.observe(VmTransition {
+                from: x,
+                to: y,
+                source: VmTransitionSource::ObservedTrace,
+            }),
+            Ok(())
+        );
         assert_eq!(
             session.observe(VmTransition {
                 from: y,

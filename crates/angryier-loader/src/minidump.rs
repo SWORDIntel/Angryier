@@ -46,15 +46,21 @@ pub struct MiniDumpRegion {
 
 fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, MiniDumpError> {
     let end = offset.checked_add(4).ok_or(MiniDumpError::Overflow)?;
-    let data: [u8; 4] = bytes.get(offset..end).ok_or(MiniDumpError::Truncated)?
-        .try_into().map_err(|_| MiniDumpError::Truncated)?;
+    let data: [u8; 4] = bytes
+        .get(offset..end)
+        .ok_or(MiniDumpError::Truncated)?
+        .try_into()
+        .map_err(|_| MiniDumpError::Truncated)?;
     Ok(u32::from_le_bytes(data))
 }
 
 fn u64_at(bytes: &[u8], offset: usize) -> Result<u64, MiniDumpError> {
     let end = offset.checked_add(8).ok_or(MiniDumpError::Overflow)?;
-    let data: [u8; 8] = bytes.get(offset..end).ok_or(MiniDumpError::Truncated)?
-        .try_into().map_err(|_| MiniDumpError::Truncated)?;
+    let data: [u8; 8] = bytes
+        .get(offset..end)
+        .ok_or(MiniDumpError::Truncated)?
+        .try_into()
+        .map_err(|_| MiniDumpError::Truncated)?;
     Ok(u64::from_le_bytes(data))
 }
 
@@ -84,7 +90,9 @@ impl<'a> MiniDumpMemory<'a> {
         }
         let directory_offset = usize_checked(u64::from(u32_at(bytes, 12)?))?;
         let directory_len = count.checked_mul(DIRECTORY_SIZE).ok_or(MiniDumpError::Overflow)?;
-        let directory_end = directory_offset.checked_add(directory_len).ok_or(MiniDumpError::Overflow)?;
+        let directory_end = directory_offset
+            .checked_add(directory_len)
+            .ok_or(MiniDumpError::Overflow)?;
         if directory_end > bytes.len() {
             return Err(MiniDumpError::Truncated);
         }
@@ -112,7 +120,9 @@ impl<'a> MiniDumpMemory<'a> {
                 if n > MAX_RANGES || n > MAX_RANGES.saturating_sub(regions.len()) {
                     return Err(MiniDumpError::TooManyRanges);
                 }
-                let needed = n.checked_mul(16).and_then(|len| len.checked_add(4))
+                let needed = n
+                    .checked_mul(16)
+                    .and_then(|len| len.checked_add(4))
                     .ok_or(MiniDumpError::Overflow)?;
                 if needed > size {
                     return Err(MiniDumpError::Truncated);
@@ -137,7 +147,9 @@ impl<'a> MiniDumpMemory<'a> {
                 if n > MAX_RANGES || n > MAX_RANGES.saturating_sub(regions.len()) {
                     return Err(MiniDumpError::TooManyRanges);
                 }
-                let needed = n.checked_mul(16).and_then(|len| len.checked_add(16))
+                let needed = n
+                    .checked_mul(16)
+                    .and_then(|len| len.checked_add(16))
                     .ok_or(MiniDumpError::Overflow)?;
                 if needed > size {
                     return Err(MiniDumpError::Truncated);
@@ -165,7 +177,10 @@ impl<'a> MiniDumpMemory<'a> {
         let mut previous_end: Option<u64> = None;
         for (index, region) in regions.iter().enumerate() {
             let end = region.base.checked_add(region.len).ok_or(MiniDumpError::Overflow)?;
-            let last_file_byte = region.file_offset.checked_add(region.len).ok_or(MiniDumpError::Overflow)?;
+            let last_file_byte = region
+                .file_offset
+                .checked_add(region.len)
+                .ok_or(MiniDumpError::Overflow)?;
             if region.len == 0 || last_file_byte > bytes.len() as u64 {
                 return Err(MiniDumpError::InvalidRange);
             }
@@ -199,19 +214,20 @@ impl<'a> MiniDumpMemory<'a> {
         let mut out = Vec::with_capacity(length);
         let mut current = address;
         while current < end {
-            let region = self.region_at(current)
+            let region = self
+                .region_at(current)
                 .ok_or(MiniDumpError::MissingCapture { address: current })?;
             let offset_in_region = current - region.base;
             let remaining_region = region.len - offset_in_region;
             let available = (end - current).min(remaining_region);
-            let file_offset = region.file_offset.checked_add(offset_in_region)
+            let file_offset = region
+                .file_offset
+                .checked_add(offset_in_region)
                 .ok_or(MiniDumpError::Overflow)?;
             let start = usize_checked(file_offset)?;
             let chunk_len = usize_checked(available)?;
             let file_end = start.checked_add(chunk_len).ok_or(MiniDumpError::Overflow)?;
-            out.extend_from_slice(
-                self.bytes.get(start..file_end).ok_or(MiniDumpError::InvalidRange)?
-            );
+            out.extend_from_slice(self.bytes.get(start..file_end).ok_or(MiniDumpError::InvalidRange)?);
             current = current.checked_add(available).ok_or(MiniDumpError::Overflow)?;
         }
         Ok(out)
@@ -290,9 +306,15 @@ mod tests {
 
     #[test]
     fn malformed_and_overlap_fail_closed() {
-        assert!(matches!(MiniDumpMemory::parse(b"bad"), Err(MiniDumpError::InvalidSignature)));
+        assert!(matches!(
+            MiniDumpMemory::parse(b"bad"),
+            Err(MiniDumpError::InvalidSignature)
+        ));
         let mut bytes = memory_list_fixture();
         bytes[0x70..0x74].copy_from_slice(&0x1f0u32.to_le_bytes());
-        assert!(matches!(MiniDumpMemory::parse(&bytes), Err(MiniDumpError::InvalidRange)));
+        assert!(matches!(
+            MiniDumpMemory::parse(&bytes),
+            Err(MiniDumpError::InvalidRange)
+        ));
     }
 }

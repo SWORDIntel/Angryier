@@ -2,8 +2,8 @@
 
 //! Win32 registry subsystem simulation models.
 
-use crate::{SimProcedure, SimResult, SimState};
 use super::file::{Win32HandleKind, Win32HandleTable};
+use crate::{SimProcedure, SimResult, SimState};
 
 /// `LSTATUS RegOpenKeyExA(HKEY hKey, LPCSTR lpSubKey, DWORD ulOptions, REGSAM samDesired, PHKEY phkResult)`
 pub struct RegOpenKeyExAProcedure {

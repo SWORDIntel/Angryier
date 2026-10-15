@@ -594,9 +594,7 @@ impl<'a> SymbolicEvaluator<'a> {
                             let source_width = bit_width(ty)?;
                             let known = self.registers.get(register).map(|(_, prior_ty)| *prior_ty);
                             let known_width = known.and_then(|prior_ty| bit_width(prior_ty).ok()).unwrap_or(0);
-                            let target_width = arch_parent_bits(*register)
-                                .max(source_width)
-                                .max(known_width);
+                            let target_width = arch_parent_bits(*register).max(source_width).max(known_width);
                             let target_ty = match known {
                                 Some(prior_ty) if known_width == target_width => prior_ty,
                                 _ => IrType::Bits(target_width),
@@ -1865,7 +1863,9 @@ fn primitive_expr(
                 )));
             }
             if operands.len() != 2 {
-                return Err(SymbolicEvalError::UnsupportedOperation("concat requires two inputs".into()));
+                return Err(SymbolicEvalError::UnsupportedOperation(
+                    "concat requires two inputs".into(),
+                ));
             }
             // AngryIR's concrete interpreter defines Concat(low, high).
             // The expression DAG/SMT convention is Concat(high, low);
@@ -3748,9 +3748,7 @@ mod tests {
     }
 
     #[test]
-    fn ir_concat_low_high_matches_concrete_and_symbolic_expression_order()
-        -> Result<(), SymbolicEvalError>
-    {
+    fn ir_concat_low_high_matches_concrete_and_symbolic_expression_order() -> Result<(), SymbolicEvalError> {
         let arena = arena();
         let candidate = block(vec![
             IrInstruction {
@@ -3788,23 +3786,19 @@ mod tests {
         evaluator.eval_block(&candidate)?;
         let resulting = evaluator
             .register_value(1)
-            .ok_or(SymbolicEvalError::UnsupportedOperation("concat produced no register value".into()))?;
+            .ok_or(SymbolicEvalError::UnsupportedOperation(
+                "concat produced no register value".into(),
+            ))?;
         assert_eq!(constant_value(&arena, resulting)?, 0x1234);
         assert_eq!(
-            eval_primitive_concrete(
-                IrPrimitive::Concat,
-                16,
-                &[(0x34u128, 8u16), (0x12u128, 8u16)],
-            ),
+            eval_primitive_concrete(IrPrimitive::Concat, 16, &[(0x34u128, 8u16), (0x12u128, 8u16)],),
             Some(0x1234),
         );
         Ok(())
     }
 
     #[test]
-    fn producer_expressions_are_exposed_without_reimplementing_evaluation()
-        -> Result<(), SymbolicEvalError>
-    {
+    fn producer_expressions_are_exposed_without_reimplementing_evaluation() -> Result<(), SymbolicEvalError> {
         let arena = arena();
         let block = compare_block(0, 42);
         let mut evaluator = SymbolicEvaluator::new(&arena);

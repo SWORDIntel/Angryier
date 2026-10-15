@@ -193,7 +193,12 @@ impl fmt::Display for RunReport {
             writeln!(f, "  Found target PCs    : none")?;
         } else {
             let pcs: Vec<String> = self.found_pcs.iter().map(|pc| format!("{pc:#x}")).collect();
-            writeln!(f, "  Found target PCs    : {} ({})", self.found_pcs.len(), pcs.join(", "))?;
+            writeln!(
+                f,
+                "  Found target PCs    : {} ({})",
+                self.found_pcs.len(),
+                pcs.join(", ")
+            )?;
         }
         if !self.inputs.is_empty() {
             writeln!(f, "  Solved input models : {}", self.inputs.len())?;
@@ -224,11 +229,19 @@ impl fmt::Display for RunReport {
             writeln!(f, "  Kernel pool frees   : {}", self.kernel.frees)?;
             writeln!(f, "  Double-free events  : {}", self.kernel.double_frees.len())?;
             for (i, df) in self.kernel.double_frees.iter().enumerate() {
-                writeln!(f, "    double-free #{i} : ptr={:#x}, caller={:#x}", df.pointer, df.caller)?;
+                writeln!(
+                    f,
+                    "    double-free #{i} : ptr={:#x}, caller={:#x}",
+                    df.pointer, df.caller
+                )?;
             }
             writeln!(f, "  UAF write witnesses : {}", self.kernel.uaf_writes.len())?;
             for (i, uaf) in self.kernel.uaf_writes.iter().enumerate() {
-                writeln!(f, "    uaf-write #{i}   : ptr={:#x}, caller={:#x}", uaf.pointer, uaf.caller)?;
+                writeln!(
+                    f,
+                    "    uaf-write #{i}   : ptr={:#x}, caller={:#x}",
+                    uaf.pointer, uaf.caller
+                )?;
             }
         }
         if let Some(ref err) = self.last_error {

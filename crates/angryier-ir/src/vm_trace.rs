@@ -21,9 +21,7 @@ use angryier_types::{Address, CodePageId, CodePageVersion, ImageId, TargetProfil
 
 use crate::{
     IrBlock, IrOp, IrPrimitive, IrValueId,
-    vm_footprint::{
-        collect_vm_ir_effects, VmIrCaveat, VmIrEffect, VmIrError, VmIrLimits, VmIrSource,
-    },
+    vm_footprint::{VmIrCaveat, VmIrEffect, VmIrError, VmIrLimits, VmIrSource, collect_vm_ir_effects},
 };
 
 /// Exact observed machine location. Context digests bind all relevant VM
@@ -175,8 +173,13 @@ pub fn collect_observed_vm_trace(
     if steps.is_empty() {
         return Err(VmTraceError::EmptyTrace);
     }
-    if [identity.executable_digest, identity.capture_digest, identity.initial_state_digest]
-        .iter().any(|digest| *digest == [0; 32])
+    if [
+        identity.executable_digest,
+        identity.capture_digest,
+        identity.initial_state_digest,
+    ]
+    .iter()
+    .any(|digest| *digest == [0; 32])
     {
         return Err(VmTraceError::MissingCaptureIdentity);
     }
@@ -285,7 +288,11 @@ pub fn collect_observed_vm_trace(
         }
 
         match step.block.instructions.last().map(|instruction| &instruction.op) {
-            Some(IrOp::Branch { condition, taken, not_taken }) => {
+            Some(IrOp::Branch {
+                condition,
+                taken,
+                not_taken,
+            }) => {
                 let is_taken = if step.after.native_pc == *taken {
                     true
                 } else if step.after.native_pc == *not_taken {
@@ -297,13 +304,14 @@ pub fn collect_observed_vm_trace(
                     });
                 };
                 chosen_branches.push((
-                    VmScopedValue { step: index, value: *condition },
+                    VmScopedValue {
+                        step: index,
+                        value: *condition,
+                    },
                     is_taken,
                 ));
             }
-            Some(IrOp::Jump { target } | IrOp::Call { target })
-                if *target != step.after.native_pc =>
-            {
+            Some(IrOp::Jump { target } | IrOp::Call { target }) if *target != step.after.native_pc => {
                 return Err(VmTraceError::DirectControlMismatch {
                     step: index,
                     observed: step.after.native_pc,
@@ -389,10 +397,28 @@ mod tests {
         IrBlock {
             key: key(1, 0x1000, version),
             instructions: vec![
-                value(0, IrOp::ReadRegister { register: 14, ty: IrType::Bits(64) }),
-                value(1, IrOp::Load { address: IrValueId(0), ty: IrType::Bits(64) }),
-                effect(IrOp::Store { address: IrValueId(0), value: IrValueId(1) }),
-                effect(IrOp::Store { address: IrValueId(0), value: IrValueId(1) }),
+                value(
+                    0,
+                    IrOp::ReadRegister {
+                        register: 14,
+                        ty: IrType::Bits(64),
+                    },
+                ),
+                value(
+                    1,
+                    IrOp::Load {
+                        address: IrValueId(0),
+                        ty: IrType::Bits(64),
+                    },
+                ),
+                effect(IrOp::Store {
+                    address: IrValueId(0),
+                    value: IrValueId(1),
+                }),
+                effect(IrOp::Store {
+                    address: IrValueId(0),
+                    value: IrValueId(1),
+                }),
                 effect(IrOp::Jump { target: 0x2000 }),
             ],
         }
@@ -402,20 +428,37 @@ mod tests {
         IrBlock {
             key: key(2, 0x2000, version),
             instructions: vec![
-                value(0, IrOp::ReadRegister { register: 1, ty: IrType::Bits(64) }),
-                value(1, IrOp::ReadRegister { register: 2, ty: IrType::Bits(64) }),
-                value(2, IrOp::Primitive {
-                    op: IrPrimitive::Eq,
-                    ty: IrType::Bits(1),
-                    inputs: vec![IrValueId(0), IrValueId(1)],
-                }),
+                value(
+                    0,
+                    IrOp::ReadRegister {
+                        register: 1,
+                        ty: IrType::Bits(64),
+                    },
+                ),
+                value(
+                    1,
+                    IrOp::ReadRegister {
+                        register: 2,
+                        ty: IrType::Bits(64),
+                    },
+                ),
+                value(
+                    2,
+                    IrOp::Primitive {
+                        op: IrPrimitive::Eq,
+                        ty: IrType::Bits(1),
+                        inputs: vec![IrValueId(0), IrValueId(1)],
+                    },
+                ),
                 effect(IrOp::WriteRegister {
                     register: 9,
                     value: IrValueId(0),
                     kind: RegisterWriteKind::ReplaceParent,
                 }),
                 effect(IrOp::Branch {
-                    condition: IrValueId(2), taken: 0x3000, not_taken: 0x4000,
+                    condition: IrValueId(2),
+                    taken: 0x3000,
+                    not_taken: 0x4000,
                 }),
             ],
         }
@@ -426,8 +469,18 @@ mod tests {
         let next = location(0x2000, 0x51, 12);
         let end = location(0x3000, 0x53, 14);
         vec![
-            VmObservedBlock { block: a, before: first, after: next, code_epoch: 0 },
-            VmObservedBlock { block: b, before: next, after: end, code_epoch: second_epoch },
+            VmObservedBlock {
+                block: a,
+                before: first,
+                after: next,
+                code_epoch: 0,
+            },
+            VmObservedBlock {
+                block: b,
+                before: next,
+                after: end,
+                code_epoch: second_epoch,
+            },
         ]
     }
 
@@ -437,17 +490,41 @@ mod tests {
         let b = block_b(1);
         let steps = observed(&a, &b, 0);
         let result = collect_observed_vm_trace(
-            identity(), steps[0].before, steps[1].after, &steps, VmTraceLimits::default(),
-        ).map_err(|error| format!("{error:?}"))?;
+            identity(),
+            steps[0].before,
+            steps[1].after,
+            &steps,
+            VmTraceLimits::default(),
+        )
+        .map_err(|error| format!("{error:?}"))?;
         assert_eq!(result.edges.len(), 2);
         assert_eq!(result.total_instructions, 10);
-        assert!(matches!(result.effects[1], VmScopedEffect { step: 0, effect: VmIrEffect::MemoryWrite { .. } }));
+        assert!(matches!(
+            result.effects[1],
+            VmScopedEffect {
+                step: 0,
+                effect: VmIrEffect::MemoryWrite { .. }
+            }
+        ));
         assert_eq!(result.effects[1], result.effects[2]); // repeated store stays ordered
-        assert!(result.dependencies.contains(&VmScopedValue { step: 0, value: IrValueId(0) }));
-        assert!(result.dependencies.contains(&VmScopedValue { step: 1, value: IrValueId(0) }));
-        assert_eq!(result.chosen_branches, vec![
-            (VmScopedValue { step: 1, value: IrValueId(2) }, true),
-        ]);
+        assert!(result.dependencies.contains(&VmScopedValue {
+            step: 0,
+            value: IrValueId(0)
+        }));
+        assert!(result.dependencies.contains(&VmScopedValue {
+            step: 1,
+            value: IrValueId(0)
+        }));
+        assert_eq!(
+            result.chosen_branches,
+            vec![(
+                VmScopedValue {
+                    step: 1,
+                    value: IrValueId(2)
+                },
+                true
+            ),]
+        );
         assert!(result.caveats.contains(&VmTraceCaveat::HandlerBoundaryObserverSupplied));
         Ok(())
     }
@@ -459,13 +536,25 @@ mod tests {
         let mut steps = observed(&a, &b, 0);
         steps[1].before.virtual_pc = 0xdead;
         assert_eq!(
-            collect_observed_vm_trace(identity(), steps[0].before, steps[1].after, &steps, VmTraceLimits::default()),
+            collect_observed_vm_trace(
+                identity(),
+                steps[0].before,
+                steps[1].after,
+                &steps,
+                VmTraceLimits::default()
+            ),
             Err(VmTraceError::DisconnectedTransition { step: 1 }),
         );
         let mut steps = observed(&a, &b, 0);
         steps[0].after.native_pc = 0xdead;
         assert!(matches!(
-            collect_observed_vm_trace(identity(), steps[0].before, steps[1].after, &steps, VmTraceLimits::default()),
+            collect_observed_vm_trace(
+                identity(),
+                steps[0].before,
+                steps[1].after,
+                &steps,
+                VmTraceLimits::default()
+            ),
             Err(VmTraceError::DisconnectedTransition { .. } | VmTraceError::DirectControlMismatch { .. })
         ));
         let mut bad = block_b(1);
@@ -484,13 +573,27 @@ mod tests {
         let b = block_b(2);
         let trace = observed(&a, &b, 0);
         assert_eq!(
-            collect_observed_vm_trace(identity(), trace[0].before, trace[1].after, &trace, VmTraceLimits::default()),
-            Err(VmTraceError::CodeVersionConflict { step: 1, page: CodePageId(1) }),
+            collect_observed_vm_trace(
+                identity(),
+                trace[0].before,
+                trace[1].after,
+                &trace,
+                VmTraceLimits::default()
+            ),
+            Err(VmTraceError::CodeVersionConflict {
+                step: 1,
+                page: CodePageId(1)
+            }),
         );
         let trace = observed(&a, &b, 1);
         let ok = collect_observed_vm_trace(
-            identity(), trace[0].before, trace[1].after, &trace, VmTraceLimits::default(),
-        ).map_err(|error| format!("{error:?}"));
+            identity(),
+            trace[0].before,
+            trace[1].after,
+            &trace,
+            VmTraceLimits::default(),
+        )
+        .map_err(|error| format!("{error:?}"));
         assert!(matches!(ok, Ok(ref p) if p.caveats.contains(&VmTraceCaveat::ExecutableCodeEpochChanged { step: 1 })));
     }
 
@@ -530,7 +633,13 @@ mod tests {
         let b = IrBlock {
             key: key(1, 0x1000, 1),
             instructions: vec![
-                value(0, IrOp::ReadRegister { register: 1, ty: IrType::Bits(64) }),
+                value(
+                    0,
+                    IrOp::ReadRegister {
+                        register: 1,
+                        ty: IrType::Bits(64),
+                    },
+                ),
                 effect(IrOp::Jump { target: 0x1000 }),
             ],
         };
@@ -538,12 +647,21 @@ mod tests {
         let s2 = location(0x1000, 0x41, 5);
         let s3 = location(0x1000, 0x42, 6);
         let steps = [
-            VmObservedBlock { block: &b, before: s1, after: s2, code_epoch: 0 },
-            VmObservedBlock { block: &b, before: s2, after: s3, code_epoch: 0 },
+            VmObservedBlock {
+                block: &b,
+                before: s1,
+                after: s2,
+                code_epoch: 0,
+            },
+            VmObservedBlock {
+                block: &b,
+                before: s2,
+                after: s3,
+                code_epoch: 0,
+            },
         ];
-        let footprint = collect_observed_vm_trace(
-            identity(), s1, s3, &steps, VmTraceLimits::default()
-        ).map_err(|e| format!("{e:?}"))?;
+        let footprint = collect_observed_vm_trace(identity(), s1, s3, &steps, VmTraceLimits::default())
+            .map_err(|e| format!("{e:?}"))?;
         assert_eq!(footprint.edges.len(), 2);
         assert_eq!(footprint.total_instructions, 4);
         Ok(())

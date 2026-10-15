@@ -542,8 +542,7 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
                 let (_, entry) = pair?;
                 let addr = entry.get::<i64>("addr")? as u64;
                 let path: String = entry.get("path")?;
-                let bytes = std::fs::read(&path)
-                    .map_err(|e| mlua::Error::external(format!("load_mem {path}: {e}")))?;
+                let bytes = std::fs::read(&path).map_err(|e| mlua::Error::external(format!("load_mem {path}: {e}")))?;
                 let mem = &session.states[0].process.state.memory;
                 session.states[0].process.state.memory = match mem.load_concrete(addr, &bytes) {
                     Ok(m) => m,
@@ -690,10 +689,7 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
                         .get::<Value>("addr")
                         .ok()
                         .and_then(|v| super::utils::parse_lua_u64(&v));
-                    let val = entry
-                        .get::<Value>("bytes")
-                        .or_else(|_| entry.get::<Value>("data"))
-                        .ok();
+                    let val = entry.get::<Value>("bytes").or_else(|_| entry.get::<Value>("data")).ok();
                     if let (Some(addr), Some(val)) = (a, val) {
                         (addr, val)
                     } else {

@@ -1,17 +1,15 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use angryier::driver_ioctl::StaticHandoff;
 use angryier::Engine;
+use angryier::driver_ioctl::StaticHandoff;
 
 fn find_radare3_binary() -> Option<PathBuf> {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../radare3/target/debug/radare3");
+    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../radare3/target/debug/radare3");
     if candidate.is_file() {
         return Some(candidate);
     }
-    let release_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../radare3/target/release/radare3");
+    let release_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../radare3/target/release/radare3");
     if release_candidate.is_file() {
         return Some(release_candidate);
     }

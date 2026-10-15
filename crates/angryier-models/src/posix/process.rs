@@ -2,8 +2,8 @@
 
 //! Comprehensive POSIX process, signal, time, memory-mapping, and environment procedures.
 
-use crate::{SimProcedure, SimResult, SimState};
 use super::heap::TrackedHeap;
+use crate::{SimProcedure, SimResult, SimState};
 
 // ---------------------------------------------------------------------------
 // Process & User IDs

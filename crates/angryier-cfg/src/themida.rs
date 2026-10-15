@@ -29,9 +29,7 @@
 //!
 //! Wiring (integrator): add `pub mod themida;` to `angryier-cfg/src/lib.rs`.
 
-use angryier_arch::{
-    AccessKind, DecodedInstruction, MemoryBase, MemoryIndex, OperandKind, RegisterId,
-};
+use angryier_arch::{AccessKind, DecodedInstruction, MemoryBase, MemoryIndex, OperandKind, RegisterId};
 
 /// Dispatch shape of one indirect control-transfer site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,9 +124,7 @@ impl DispatchWindow<'_> {
                 });
             }
             let (base_reg, prov) = match mem.base {
-                Some(MemoryBase::Register(view)) => {
-                    (view.parent, self.provenance(view.parent))
-                }
+                Some(MemoryBase::Register(view)) => (view.parent, self.provenance(view.parent)),
                 _ => return None,
             };
             let kind = match mem.index {
@@ -223,17 +219,14 @@ impl DispatchWindow<'_> {
                     _ => None,
                 });
                 match mem.map(|m| (m.base, m.index)) {
-                    Some((Some(MemoryBase::InstructionPointer { .. }), None))
-                    | Some((None, None)) => Def::Constant,
+                    Some((Some(MemoryBase::InstructionPointer { .. }), None)) | Some((None, None)) => Def::Constant,
                     Some((Some(MemoryBase::Register(base)), None)) => Def::Derived(base.parent),
-                    Some((None, Some(MemoryIndex::Register(index)))) => {
-                        Def::Derived(index.parent)
-                    }
+                    Some((None, Some(MemoryIndex::Register(index)))) => Def::Derived(index.parent),
                     // Two register inputs cannot be represented by the single-
                     // source provenance relation. Retain uncertainty.
                     _ => Def::ClobberedByUnmodeled,
                 }
-            },
+            }
             forms::MOV_R64_R64 | forms::MOV_R32_R32 | forms::MOVZX_R64_R32 | forms::MOVSX_R64_R32 => {
                 match register_source(insn) {
                     Some(src) => Def::From(src),
@@ -269,11 +262,7 @@ enum Def {
 
 fn register_source(insn: &DecodedInstruction) -> Option<RegisterId> {
     insn.operands.iter().find_map(|op| match op.kind {
-        OperandKind::Register(view)
-            if matches!(op.access, AccessKind::Read) =>
-        {
-            Some(view.parent)
-        }
+        OperandKind::Register(view) if matches!(op.access, AccessKind::Read) => Some(view.parent),
         _ => None,
     })
 }
@@ -282,8 +271,7 @@ fn register_source(insn: &DecodedInstruction) -> Option<RegisterId> {
 mod tests {
     use super::*;
     use angryier_arch::{
-        AccessKind, ImmediateOperand, InstructionModifiers, MemoryOperand, Operand,
-        OperandVisibility, RegisterView,
+        AccessKind, ImmediateOperand, InstructionModifiers, MemoryOperand, Operand, OperandVisibility, RegisterView,
     };
     use angryier_semantics_intel64::forms;
 
@@ -358,7 +346,10 @@ mod tests {
             width_bits: 64,
             access: AccessKind::Read,
             visibility: OperandVisibility::Explicit,
-            kind: OperandKind::Immediate(ImmediateOperand { value: v, signed: false }),
+            kind: OperandKind::Immediate(ImmediateOperand {
+                value: v,
+                signed: false,
+            }),
         }
     }
 
@@ -366,7 +357,11 @@ mod tests {
     fn context_table_dominant_shape() {
         // mov rbx, r14 (context ptr, no local def) ; jmp [rbx+0x38]
         let block = [
-            insn(0x10, forms::MOV_R64_R64, vec![reg_op(0, 2, AccessKind::Write), reg_op(1, 0xE, AccessKind::Read)]),
+            insn(
+                0x10,
+                forms::MOV_R64_R64,
+                vec![reg_op(0, 2, AccessKind::Write), reg_op(1, 0xE, AccessKind::Read)],
+            ),
             insn(0x13, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
         ];
         let w = DispatchWindow { instructions: &block };
@@ -395,14 +390,14 @@ mod tests {
         let site = DispatchWindow { instructions: &block }.classify().expect("site");
         assert_eq!(
             site.kind,
-            DispatchKind::Indexed { scale: 8, has_disp: true }
+            DispatchKind::Indexed {
+                scale: 8,
+                has_disp: true
+            }
         );
         assert_eq!(site.index_register, Some(RegisterId(0)));
         // Base with no local def: context candidate too (weaker).
-        assert!(matches!(
-            site.base.expect("base").1,
-            BaseProvenance::NoLocalDef
-        ));
+        assert!(matches!(site.base.expect("base").1, BaseProvenance::NoLocalDef));
     }
 
     #[test]
@@ -419,7 +414,11 @@ mod tests {
         // classified as ContextTable shape but Constant provenance, so the
         // VM passes skip it and the static resolver owns it.
         let block = [
-            insn(0x40, forms::MOV_R64_IMM64, vec![reg_op(0, 2, AccessKind::Write), imm(0x1_4500_0000)]),
+            insn(
+                0x40,
+                forms::MOV_R64_IMM64,
+                vec![reg_op(0, 2, AccessKind::Write), imm(0x1_4500_0000)],
+            ),
             insn(0x43, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
         ];
         let site = DispatchWindow { instructions: &block }.classify().expect("site");
@@ -441,7 +440,11 @@ mod tests {
     fn raw_register_transfer_reports_chain() {
         // mov rax, rbx ; jmp rax  (handler tail-jump)
         let block = [
-            insn(0x60, forms::MOV_R64_R64, vec![reg_op(0, 0, AccessKind::Write), reg_op(1, 3, AccessKind::Read)]),
+            insn(
+                0x60,
+                forms::MOV_R64_R64,
+                vec![reg_op(0, 0, AccessKind::Write), reg_op(1, 3, AccessKind::Read)],
+            ),
             insn(0x63, forms::JMP_INDIRECT_R64, vec![reg_op(0, 0, AccessKind::Read)]),
         ];
         let site = DispatchWindow { instructions: &block }.classify().expect("site");
@@ -456,14 +459,13 @@ mod tests {
             insn(
                 0x80,
                 forms::LEA_R64_MEM,
-                vec![
-                    reg_op(0, 2, AccessKind::Write),
-                    mem_op(1, Some(0xe), None, 1, 0x28),
-                ],
+                vec![reg_op(0, 2, AccessKind::Write), mem_op(1, Some(0xe), None, 1, 0x28)],
             ),
             insn(0x83, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
         ];
-        let site = (DispatchWindow { instructions: &block }).classify().ok_or("site unavailable")?;
+        let site = (DispatchWindow { instructions: &block })
+            .classify()
+            .ok_or("site unavailable")?;
         let (_, provenance) = site.base.ok_or("base unavailable")?;
         assert!(matches!(
             provenance,
@@ -482,8 +484,13 @@ mod tests {
             ),
             insn(0x93, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
         ];
-        let site = (DispatchWindow { instructions: &rip }).classify().ok_or("RIP site unavailable")?;
-        assert!(matches!(site.base.ok_or("RIP base unavailable")?.1, BaseProvenance::Constant));
+        let site = (DispatchWindow { instructions: &rip })
+            .classify()
+            .ok_or("RIP site unavailable")?;
+        assert!(matches!(
+            site.base.ok_or("RIP base unavailable")?.1,
+            BaseProvenance::Constant
+        ));
 
         let ambiguous = [
             insn(
@@ -496,8 +503,15 @@ mod tests {
             ),
             insn(0xa3, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
         ];
-        let site = (DispatchWindow { instructions: &ambiguous }).classify().ok_or("ambiguous site unavailable")?;
-        assert!(matches!(site.base.ok_or("ambiguous base unavailable")?.1, BaseProvenance::Clobbered));
+        let site = (DispatchWindow {
+            instructions: &ambiguous,
+        })
+        .classify()
+        .ok_or("ambiguous site unavailable")?;
+        assert!(matches!(
+            site.base.ok_or("ambiguous base unavailable")?.1,
+            BaseProvenance::Clobbered
+        ));
         Ok(())
     }
 

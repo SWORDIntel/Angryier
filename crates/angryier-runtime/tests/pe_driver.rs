@@ -655,8 +655,7 @@ fn direct_call_fixture() -> Vec<u8> {
 }
 
 #[test]
-fn concrete_and_symbolic_direct_indirect_calls_share_stack_and_return_targets()
-    -> Result<(), Box<dyn std::error::Error>>
+fn concrete_and_symbolic_direct_indirect_calls_share_stack_and_return_targets() -> Result<(), Box<dyn std::error::Error>>
 {
     use angryier_expr::ShardedExprArena;
     use angryier_runtime::{SymbolicSession, SymbolicStepOutcome};
@@ -679,10 +678,7 @@ fn concrete_and_symbolic_direct_indirect_calls_share_stack_and_return_targets()
             if concrete.terminated {
                 break;
             }
-            expected.push((
-                concrete.pc()?,
-                concrete.read_register(register_id::GPR_BASE + 4)?,
-            ));
+            expected.push((concrete.pc()?, concrete.read_register(register_id::GPR_BASE + 4)?));
             runtime.step(&mut concrete)?;
         }
         assert!(concrete.terminated, "{kind}: concrete run did not return");
@@ -695,13 +691,14 @@ fn concrete_and_symbolic_direct_indirect_calls_share_stack_and_return_targets()
         // symbolic step, while concrete execution still enters the callee.
         // Exercise each architectural call/return boundary instead.
         symbolic.set_function_summary_cost_model(std::sync::Arc::new(
-            angryier_runtime::function_summaries::DepthWidthCostModel {
-                max_summary_cost: 0,
-            },
+            angryier_runtime::function_summaries::DepthWidthCostModel { max_summary_cost: 0 },
         ));
         for (step, (pc, rsp)) in expected.iter().enumerate() {
-            assert_eq!(symbolic.states[0].process.pc()?, *pc,
-                "{kind}: symbolic PC diverged before step {step}");
+            assert_eq!(
+                symbolic.states[0].process.pc()?,
+                *pc,
+                "{kind}: symbolic PC diverged before step {step}"
+            );
             assert_eq!(
                 symbolic.states[0].process.read_register(register_id::GPR_BASE + 4)?,
                 *rsp,
@@ -725,9 +722,7 @@ fn concrete_and_symbolic_direct_indirect_calls_share_stack_and_return_targets()
 }
 
 #[test]
-fn symbolic_indirect_import_cannot_summarize_create_thread_stub()
-    -> Result<(), Box<dyn std::error::Error>>
-{
+fn symbolic_indirect_import_cannot_summarize_create_thread_stub() -> Result<(), Box<dyn std::error::Error>> {
     use angryier_expr::ShardedExprArena;
     use angryier_runtime::SymbolicSession;
     use angryier_types::ExpressionNormalizationVersion;
@@ -737,10 +732,9 @@ fn symbolic_indirect_import_cannot_summarize_create_thread_stub()
     // write to an import stub. The stub remains RET-only; no worker exists.
     let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
     let mut process = runtime.load_pe_driver(&driver_image())?;
-    process.pe_import_stubs.insert(
-        PE_DRIVER_STUB_BASE,
-        ("kernel32.dll".into(), "CreateThread".into()),
-    );
+    process
+        .pe_import_stubs
+        .insert(PE_DRIVER_STUB_BASE, ("kernel32.dll".into(), "CreateThread".into()));
     let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
     let mut symbolic = SymbolicSession::new(&runtime, &arena, process);
 
@@ -752,13 +746,18 @@ fn symbolic_indirect_import_cannot_summarize_create_thread_stub()
         if pc == PE_DRIVER_STUB_BASE {
             reached_import = true;
             let outcome = symbolic.step_state(0);
-            assert!(matches!(outcome, Err(angryier_runtime::RuntimeError::Environment(ref message))
-                if message.contains("CreateThread") && message.contains("worker scheduling")));
+            assert!(
+                matches!(outcome, Err(angryier_runtime::RuntimeError::Environment(ref message))
+                if message.contains("CreateThread") && message.contains("worker scheduling"))
+            );
             break;
         }
         let result = symbolic.step_state(0)?;
         assert!(matches!(result, angryier_runtime::SymbolicStepOutcome::Stepped { .. }));
     }
-    assert!(reached_import, "symbolic engine did not reach IAT stub; verify call summarizer");
+    assert!(
+        reached_import,
+        "symbolic engine did not reach IAT stub; verify call summarizer"
+    );
     Ok(())
 }

@@ -50,7 +50,12 @@ pub enum ReturnValidation {
     NotReturn,
     Verified,
     MissingStackEvidence,
-    WrongReturn { target: Address, actual: Address, expected_rsp: u64, actual_rsp: Option<u64> },
+    WrongReturn {
+        target: Address,
+        actual: Address,
+        expected_rsp: u64,
+        actual_rsp: Option<u64>,
+    },
 }
 
 #[derive(Debug)]
@@ -127,11 +132,21 @@ pub struct TraceIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TraceDifference {
     IdentityMismatch,
-    StepCount { expected: usize, actual: usize },
+    StepCount {
+        expected: usize,
+        actual: usize,
+    },
     /// One trace had valid evidence for a field while the other did not.
     /// Missing evidence is NOT equivalent to equality.
-    EvidenceGap { index: usize, field: &'static str },
-    Control { index: usize, native: ControlSnapshot, emulated: ControlSnapshot },
+    EvidenceGap {
+        index: usize,
+        field: &'static str,
+    },
+    Control {
+        index: usize,
+        native: ControlSnapshot,
+        emulated: ControlSnapshot,
+    },
 }
 
 /// Compare snapshots at the same step boundary. The caller must supply
@@ -151,13 +166,20 @@ pub fn first_divergence(
             || (a.rsp.is_some() && b.rsp.is_some() && a.rsp != b.rsp)
             || (a.stack_top.is_some() && b.stack_top.is_some() && a.stack_top != b.stack_top)
         {
-            return Some(TraceDifference::Control { index, native: *a, emulated: *b });
+            return Some(TraceDifference::Control {
+                index,
+                native: *a,
+                emulated: *b,
+            });
         }
         if a.rsp.is_some() != b.rsp.is_some() {
             return Some(TraceDifference::EvidenceGap { index, field: "rsp" });
         }
         if a.stack_top.is_some() != b.stack_top.is_some() {
-            return Some(TraceDifference::EvidenceGap { index, field: "stack_top" });
+            return Some(TraceDifference::EvidenceGap {
+                index,
+                field: "stack_top",
+            });
         }
     }
     (native.len() != emulated.len()).then_some(TraceDifference::StepCount {
@@ -171,7 +193,12 @@ mod tests {
     use super::*;
 
     fn state(pc: u64, rsp: Option<u64>, top: Option<u64>) -> ControlSnapshot {
-        ControlSnapshot { pc, rsp, stack_top: top, rax: None }
+        ControlSnapshot {
+            pc,
+            rsp,
+            stack_top: top,
+            rax: None,
+        }
     }
 
     #[test]
@@ -186,8 +213,14 @@ mod tests {
             form_id: angryier_semantics_intel64::forms::RET,
         });
         assert_eq!(verify_return(before, good, &result, false), ReturnValidation::Verified);
-        assert!(matches!(verify_return(before, bad, &result, false), ReturnValidation::WrongReturn { .. }));
-        assert_eq!(verify_return(state(0x1000, None, None), good, &result, false), ReturnValidation::MissingStackEvidence);
+        assert!(matches!(
+            verify_return(before, bad, &result, false),
+            ReturnValidation::WrongReturn { .. }
+        ));
+        assert_eq!(
+            verify_return(state(0x1000, None, None), good, &result, false),
+            ReturnValidation::MissingStackEvidence
+        );
     }
 
     #[test]
@@ -197,8 +230,10 @@ mod tests {
             initial_state_digest: [2; 32],
             arch_id: 1,
         };
-        let native = [state(0x1000, Some(0x8000), Some(0x1100)),
-                      state(0x1100, Some(0x8008), None)];
+        let native = [
+            state(0x1000, Some(0x8000), Some(0x1100)),
+            state(0x1100, Some(0x8008), None),
+        ];
         let emulated = [native[0], state(0x0f1e, Some(0x8008), None)];
         assert_eq!(first_divergence(id, &native, id, &native), None);
         assert!(matches!(

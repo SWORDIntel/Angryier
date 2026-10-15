@@ -16,8 +16,8 @@ use std::collections::BTreeSet;
 
 use angryier_types::ExprId;
 
-use crate::deobf::deobfuscate;
 use crate::ExprArena;
+use crate::deobf::deobfuscate;
 
 /// A VM state update the caller has established as observable. An ordered
 /// list of writes must not be deduplicated: aliasing memory stores may matter.
@@ -118,16 +118,9 @@ pub fn reduce_vm_effects<A: ExprArena + ?Sized>(
             value: deobfuscate(arena, effect.value),
         })
         .collect();
-    let reduced_guards: Vec<ExprId> = guards
-        .iter()
-        .map(|&root| deobfuscate(arena, root))
-        .collect();
+    let reduced_guards: Vec<ExprId> = guards.iter().map(|&root| deobfuscate(arena, root)).collect();
 
-    let after = slice_roots(
-        arena,
-        effect_roots(&reduced_effects, &reduced_guards),
-        max_nodes,
-    )?;
+    let after = slice_roots(arena, effect_roots(&reduced_effects, &reduced_guards), max_nodes)?;
     let mut sources = BTreeSet::new();
     for root in effect_roots(&reduced_effects, &reduced_guards) {
         // All roots were already checked by slice_roots. Missing dependency
@@ -150,29 +143,33 @@ pub fn reduce_vm_effects<A: ExprArena + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use angryier_types::ExpressionNormalizationVersion;
     use crate::{ExprNode, ExprOp, ExprSort, ShardedExprArena};
+    use angryier_types::ExpressionNormalizationVersion;
 
     fn arena() -> ShardedExprArena {
         ShardedExprArena::new(ExpressionNormalizationVersion(1))
     }
 
     fn symbol(arena: &ShardedExprArena, source: u64) -> Result<ExprId, String> {
-        arena.intern(ExprNode {
-            sort: ExprSort::BitVec(32),
-            op: ExprOp::Symbol,
-            operands: Vec::new(),
-            immediate: source.to_le_bytes().to_vec(),
-        }).map_err(|error| format!("{error:?}"))
+        arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(32),
+                op: ExprOp::Symbol,
+                operands: Vec::new(),
+                immediate: source.to_le_bytes().to_vec(),
+            })
+            .map_err(|error| format!("{error:?}"))
     }
 
     fn binary(arena: &ShardedExprArena, op: ExprOp, x: ExprId, y: ExprId) -> Result<ExprId, String> {
-        arena.intern(ExprNode {
-            sort: ExprSort::BitVec(32),
-            op,
-            operands: vec![x, y],
-            immediate: Vec::new(),
-        }).map_err(|error| format!("{error:?}"))
+        arena
+            .intern(ExprNode {
+                sort: ExprSort::BitVec(32),
+                op,
+                operands: vec![x, y],
+                immediate: Vec::new(),
+            })
+            .map_err(|error| format!("{error:?}"))
     }
 
     #[test]
@@ -191,7 +188,8 @@ mod tests {
             }],
             &[],
             64,
-        ).map_err(|error| format!("{error:?}"))?;
+        )
+        .map_err(|error| format!("{error:?}"))?;
         assert_eq!(result.effects[0].value, binary(&arena, ExprOp::Add, x, y)?);
         assert!(result.reduced_nodes < result.original_nodes);
         assert_eq!(result.symbolic_sources, vec![1, 2]);
@@ -205,16 +203,21 @@ mod tests {
         let value = symbol(&arena, 4)?;
         let effects = [
             VmEffect {
-                kind: VmEffectKind::Memory { address: addr, bytes: 4 },
+                kind: VmEffectKind::Memory {
+                    address: addr,
+                    bytes: 4,
+                },
                 value,
             },
             VmEffect {
-                kind: VmEffectKind::Memory { address: addr, bytes: 4 },
+                kind: VmEffectKind::Memory {
+                    address: addr,
+                    bytes: 4,
+                },
                 value: addr,
             },
         ];
-        let result = reduce_vm_effects(&arena, &effects, &[addr], 16)
-            .map_err(|error| format!("{error:?}"))?;
+        let result = reduce_vm_effects(&arena, &effects, &[addr], 16).map_err(|error| format!("{error:?}"))?;
         assert_eq!(result.effects, effects);
         assert_eq!(result.guards, vec![addr]);
         assert_eq!(result.symbolic_sources, vec![3, 4]);
@@ -250,10 +253,14 @@ mod tests {
         let _noise = binary(&arena, ExprOp::Add, y, y)?;
         let result = reduce_vm_effects(
             &arena,
-            &[VmEffect { kind: VmEffectKind::VirtualPc, value: x }],
+            &[VmEffect {
+                kind: VmEffectKind::VirtualPc,
+                value: x,
+            }],
             &[],
             3,
-        ).map_err(|error| format!("{error:?}"))?;
+        )
+        .map_err(|error| format!("{error:?}"))?;
         assert_eq!(result.original_nodes, 1);
         assert_eq!(result.reduced_nodes, 1);
         assert_eq!(result.symbolic_sources, vec![1]);

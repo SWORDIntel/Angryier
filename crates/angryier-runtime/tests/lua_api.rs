@@ -1286,4 +1286,3 @@ fn test_lua_scripts_syntax() {
         }
     }
 }
-

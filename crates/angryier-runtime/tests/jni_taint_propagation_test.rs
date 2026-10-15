@@ -17,16 +17,13 @@ use angryier_arch_intel64::register_id;
 use angryier_expr::{ExprArena, ExprNode, ExprOp, ExprSort, ShardedExprArena};
 use angryier_memory::{ByteValue, LayeredMemory};
 use angryier_models::{SimProcedure, SimProcedureRegistry, SimResult, SimState};
-use angryier_runtime::jni::{
-    self, JniEnvironment, JNI_COMMIT, JNI_ENV_PTR_ADDR, JNI_HEAP_BASE, JNI_TRUE,
-    JNI_VERSION_1_6, JNI_VTABLE_ADDR, JNI_STUB_BASE, JNI_STUB_STRIDE, jboolean, jbyte, jclass,
-    jdouble, jfloat, jint, jlong, jsize, jstring, vtable_idx,
-};
 use angryier_runtime::Runtime;
-use angryier_taint::TaintLabel;
-use angryier_types::{
-    Address, ExprId, ExpressionNormalizationVersion, SemanticVersion, TaintId, TargetProfileId,
+use angryier_runtime::jni::{
+    self, JNI_COMMIT, JNI_ENV_PTR_ADDR, JNI_HEAP_BASE, JNI_STUB_BASE, JNI_STUB_STRIDE, JNI_TRUE, JNI_VERSION_1_6,
+    JNI_VTABLE_ADDR, JniEnvironment, jboolean, jbyte, jclass, jdouble, jfloat, jint, jlong, jsize, jstring, vtable_idx,
 };
+use angryier_taint::TaintLabel;
+use angryier_types::{Address, ExprId, ExpressionNormalizationVersion, SemanticVersion, TaintId, TargetProfileId};
 
 /// Dummy decoder for SimProcedure-only stepping.
 #[derive(Clone, Copy, Debug, Default)]
@@ -212,10 +209,13 @@ fn test_get_array_length_and_new_string_utf() {
     state.set_arg(1, arr_handle);
     let len_proc = jni::GetArrayLengthProcedure::new(env_arc.clone());
     let res = len_proc.apply(&state);
-    assert_eq!(match res {
-        SimResult::Continue(s) => s.return_value,
-        _ => None,
-    }, Some(128));
+    assert_eq!(
+        match res {
+            SimResult::Continue(s) => s.return_value,
+            _ => None,
+        },
+        Some(128)
+    );
 
     // NewStringUTF
     let mut new_str_state = SimState::new();
@@ -263,12 +263,7 @@ fn test_symbolic_taint_propagation_string() {
     // Mark Android Java parameter as tainted!
     {
         let mut env = env_arc.write().unwrap();
-        env.mark_string_symbolic(
-            str_handle,
-            TaintId(0xCAFE),
-            TaintLabel::UserInput,
-            sym_exprs.clone(),
-        );
+        env.mark_string_symbolic(str_handle, TaintId(0xCAFE), TaintLabel::UserInput, sym_exprs.clone());
         assert!(env.is_handle_tainted(str_handle));
     }
 
@@ -293,7 +288,9 @@ fn test_symbolic_taint_propagation_string() {
 
     for (i, &sym_id) in sym_exprs.iter().enumerate() {
         let byte_addr = buf_addr + i as u64;
-        let taint_record = env.taint_tracker.get_byte_taint(byte_addr)
+        let taint_record = env
+            .taint_tracker
+            .get_byte_taint(byte_addr)
             .expect("byte must be marked tainted");
         assert_eq!(taint_record.taint_id, TaintId(0xCAFE));
         assert_eq!(taint_record.label, TaintLabel::UserInput);
@@ -364,7 +361,9 @@ fn test_symbolic_taint_propagation_byte_array() {
 
     for (i, &sym_id) in sym_exprs.iter().enumerate() {
         let byte_addr = buf_addr + i as u64;
-        let taint_record = env.taint_tracker.get_byte_taint(byte_addr)
+        let taint_record = env
+            .taint_tracker
+            .get_byte_taint(byte_addr)
             .expect("byte must be marked tainted");
         assert_eq!(taint_record.taint_id, TaintId(0xBEEF));
         assert_eq!(taint_record.label, TaintLabel::NetworkInput);
@@ -489,10 +488,13 @@ fn test_simprocedure_registry_registration() {
 
     let state = SimState::new();
     let version_res = registry.apply_by_name("GetVersion", &state);
-    assert_eq!(match version_res {
-        Some(SimResult::Continue(s)) => s.return_value,
-        _ => None,
-    }, Some(JNI_VERSION_1_6 as u64));
+    assert_eq!(
+        match version_res {
+            Some(SimResult::Continue(s)) => s.return_value,
+            _ => None,
+        },
+        Some(JNI_VERSION_1_6 as u64)
+    );
 }
 
 #[test]
@@ -526,12 +528,7 @@ fn test_jnienv_vtable_and_process_wiring() -> Result<(), angryier_runtime::Runti
 
     {
         let mut env = env_arc.write().unwrap();
-        env.mark_string_symbolic(
-            str_handle,
-            TaintId(0x7777),
-            TaintLabel::UserInput,
-            sym_exprs.clone(),
-        );
+        env.mark_string_symbolic(str_handle, TaintId(0x7777), TaintLabel::UserInput, sym_exprs.clone());
     }
 
     // Attach JNI environment to process
@@ -539,7 +536,10 @@ fn test_jnienv_vtable_and_process_wiring() -> Result<(), angryier_runtime::Runti
     assert_eq!(env_ptr, JNI_ENV_PTR_ADDR);
 
     // Verify JNIEnv* struct layout: [JNI_ENV_PTR_ADDR] contains pointer to vtable
-    let vtable_ptr_bytes = process.state.memory.read(JNI_ENV_PTR_ADDR, 8)
+    let vtable_ptr_bytes = process
+        .state
+        .memory
+        .read(JNI_ENV_PTR_ADDR, 8)
         .map_err(|e| angryier_runtime::RuntimeError::Memory(format!("{e:?}")))?;
     let mut raw_vtable = [0u8; 8];
     for (i, b) in vtable_ptr_bytes.iter().enumerate() {
@@ -552,7 +552,10 @@ fn test_jnienv_vtable_and_process_wiring() -> Result<(), angryier_runtime::Runti
 
     // Verify vtable at GetStringUTFChars slot (index 169) points to stub address
     let stub_slot_addr = JNI_VTABLE_ADDR + (vtable_idx::GET_STRING_UTF_CHARS as u64 * 8);
-    let stub_bytes = process.state.memory.read(stub_slot_addr, 8)
+    let stub_bytes = process
+        .state
+        .memory
+        .read(stub_slot_addr, 8)
         .map_err(|e| angryier_runtime::RuntimeError::Memory(format!("{e:?}")))?;
     let mut raw_stub = [0u8; 8];
     for (i, b) in stub_bytes.iter().enumerate() {
@@ -597,15 +600,24 @@ fn test_jnienv_vtable_and_process_wiring() -> Result<(), angryier_runtime::Runti
     assert_eq!(process.read_register(register_id::GPR_BASE + 4)?, stack_pointer + 8);
 
     // Verify symbolic taint was written to process.state.memory!
-    let mem_bytes = process.state.memory.read(rax, raw_secret.len())
+    let mem_bytes = process
+        .state
+        .memory
+        .read(rax, raw_secret.len())
         .map_err(|e| angryier_runtime::RuntimeError::Memory(format!("{e:?}")))?;
     for (i, b) in mem_bytes.iter().enumerate() {
         match b {
             ByteValue::Symbolic(sym_id) => {
-                assert_eq!(*sym_id, sym_exprs[i], "byte {i} must carry exact symbolic taint expression");
+                assert_eq!(
+                    *sym_id, sym_exprs[i],
+                    "byte {i} must carry exact symbolic taint expression"
+                );
             }
             ByteValue::Concrete(_) => {
-                panic!("byte {i} at {:#x} should be symbolic due to taint propagation", rax + i as u64);
+                panic!(
+                    "byte {i} at {:#x} should be symbolic due to taint propagation",
+                    rax + i as u64
+                );
             }
         }
     }

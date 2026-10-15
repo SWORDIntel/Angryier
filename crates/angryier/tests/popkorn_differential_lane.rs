@@ -5,18 +5,15 @@ use angryier::driver_ioctl::{DriverVerdict, StaticHandoff};
 use angryier::{Engine, RunReport};
 
 fn workspace_fixtures_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../KP14/src/kp14/ghidra_pipeline/fixtures")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../KP14/src/kp14/ghidra_pipeline/fixtures")
 }
 
 fn find_radare3_binary() -> Option<PathBuf> {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../radare3/target/debug/radare3");
+    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../radare3/target/debug/radare3");
     if candidate.is_file() {
         return Some(candidate);
     }
-    let release_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../radare3/target/release/radare3");
+    let release_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../radare3/target/release/radare3");
     if release_candidate.is_file() {
         return Some(release_candidate);
     }
@@ -65,8 +62,7 @@ fn popkorn_differential_oracle_lane_on_fixtures() {
         assert!(r3_out.status.success(), "radare3 export-handoff failed on {file_name}");
 
         let r3_stdout = String::from_utf8(r3_out.stdout).expect("valid utf8");
-        let handoff = StaticHandoff::from_json(&r3_stdout)
-            .expect("StaticHandoff ingestion failed");
+        let handoff = StaticHandoff::from_json(&r3_stdout).expect("StaticHandoff ingestion failed");
 
         assert_eq!(handoff.arch, "x64");
         assert!(!handoff.targets.is_empty(), "targets found for {file_name}");

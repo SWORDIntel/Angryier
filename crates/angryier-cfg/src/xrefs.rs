@@ -82,7 +82,8 @@ impl XrefIndex {
                                 let kind = match operand.access {
                                     AccessKind::Read | AccessKind::ConditionalRead => XrefKind::Read,
                                     AccessKind::Write | AccessKind::ConditionalWrite => XrefKind::Write,
-                                    AccessKind::ReadWrite | AccessKind::ReadConditionalWrite
+                                    AccessKind::ReadWrite
+                                    | AccessKind::ReadConditionalWrite
                                     | AccessKind::ConditionalReadWrite => XrefKind::ReadWrite,
                                 };
                                 (mem, kind)
@@ -90,9 +91,7 @@ impl XrefIndex {
                         }
                         _ => continue,
                     };
-                    if !matches!(memory.base, Some(MemoryBase::InstructionPointer { .. }))
-                        || memory.index.is_some()
-                    {
+                    if !matches!(memory.base, Some(MemoryBase::InstructionPointer { .. })) || memory.index.is_some() {
                         continue;
                     }
                     let Some(target) = insn
@@ -152,11 +151,10 @@ impl XrefIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use angryier_arch::{
-        DecodedInstruction, InstructionModifiers, MemoryOperand, Operand,
-        OperandVisibility, RelativeBranchOperand,
-    };
     use crate::{BasicBlock, CfgEdge};
+    use angryier_arch::{
+        DecodedInstruction, InstructionModifiers, MemoryOperand, Operand, OperandVisibility, RelativeBranchOperand,
+    };
 
     fn rip_reference(addr: u64, disp: i64, form: u32, access: AccessKind) -> DecodedInstruction {
         DecodedInstruction {
@@ -188,7 +186,12 @@ mod tests {
     #[test]
     fn exact_direct_caller_and_rip_iat_slot_are_distinct() {
         let instructions = vec![
-            rip_reference(0x1000, -0x10, angryier_semantics_intel64::forms::CALL_INDIRECT_MEM64, AccessKind::Read),
+            rip_reference(
+                0x1000,
+                -0x10,
+                angryier_semantics_intel64::forms::CALL_INDIRECT_MEM64,
+                AccessKind::Read,
+            ),
             DecodedInstruction {
                 address: 0x1006,
                 length: 5,
@@ -219,9 +222,21 @@ mod tests {
                 },
             )]),
             edges: vec![
-                CfgEdge { from: 0x1006, to: Some(0x1020), kind: EdgeKind::Call },
-                CfgEdge { from: 0x1006, to: Some(0x100b), kind: EdgeKind::FallThrough },
-                CfgEdge { from: 0x1006, to: Some(0x1020), kind: EdgeKind::Call }, // dedup
+                CfgEdge {
+                    from: 0x1006,
+                    to: Some(0x1020),
+                    kind: EdgeKind::Call,
+                },
+                CfgEdge {
+                    from: 0x1006,
+                    to: Some(0x100b),
+                    kind: EdgeKind::FallThrough,
+                },
+                CfgEdge {
+                    from: 0x1006,
+                    to: Some(0x1020),
+                    kind: EdgeKind::Call,
+                }, // dedup
             ],
         };
         let idx = XrefIndex::from_cfg(&cfg);

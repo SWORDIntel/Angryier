@@ -371,12 +371,8 @@ impl JniEnvironment {
 
     pub fn create_class(&mut self, name: &str) -> jclass {
         let handle = self.allocate_handle();
-        self.objects.insert(
-            handle,
-            JavaObject::Class {
-                name: name.to_string(),
-            },
-        );
+        self.objects
+            .insert(handle, JavaObject::Class { name: name.to_string() });
         handle
     }
 
@@ -481,12 +477,7 @@ impl JniEnvironment {
 
     // ── Native Heap Allocation ──────────────────────────────────────────────
 
-    pub fn allocate_native_buffer(
-        &mut self,
-        size: usize,
-        source_object: jobject,
-        is_string: bool,
-    ) -> Address {
+    pub fn allocate_native_buffer(&mut self, size: usize, source_object: jobject, is_string: bool) -> Address {
         let addr = self.heap_cursor;
         // Align to 16 bytes.
         let aligned_size = (size + 15) & !15;
@@ -540,7 +531,6 @@ pub fn get_jni_arg(state: &SimState, index: usize) -> u64 {
 }
 
 impl JniEnvironment {
-
     /// `GetStringUTFChars(JNIEnv *env, jstring str, jboolean *isCopy)`
     /// Arg 0: env, Arg 1: str, Arg 2: isCopy
     pub fn get_string_utf_chars(&mut self, state: &SimState) -> SimResult {
@@ -580,13 +570,8 @@ impl JniEnvironment {
             let tid = taint_id.unwrap_or(TaintId(1));
             let lbl = label.unwrap_or(TaintLabel::UserInput);
             self.taint_tracker.record_buffer(
-                buf_addr,
-                str_len, // mark the string characters tainted
-                tid,
-                lbl,
-                str_handle,
-                "jstring",
-                sym_bytes,
+                buf_addr, str_len, // mark the string characters tainted
+                tid, lbl, str_handle, "jstring", sym_bytes,
             );
         }
 
@@ -630,13 +615,7 @@ impl JniEnvironment {
                 label,
                 symbolic_bytes,
                 ..
-            }) => (
-                data.clone(),
-                *tainted,
-                *taint_id,
-                *label,
-                symbolic_bytes.clone(),
-            ),
+            }) => (data.clone(), *tainted, *taint_id, *label, symbolic_bytes.clone()),
             _ => {
                 let mut next = state.clone();
                 next.set_reg(0, 0);
@@ -652,15 +631,8 @@ impl JniEnvironment {
         if tainted {
             let tid = taint_id.unwrap_or(TaintId(1));
             let lbl = label.unwrap_or(TaintLabel::UserInput);
-            self.taint_tracker.record_buffer(
-                buf_addr,
-                len,
-                tid,
-                lbl,
-                array_handle,
-                "jbyteArray",
-                sym_bytes,
-            );
+            self.taint_tracker
+                .record_buffer(buf_addr, len, tid, lbl, array_handle, "jbyteArray", sym_bytes);
         }
 
         let mut next = state.clone();
@@ -684,20 +656,13 @@ impl JniEnvironment {
         let elems_ptr = get_jni_arg(state, 2);
         let mode = get_jni_arg(state, 3) as jint;
 
-        let buf_size = self
-            .native_buffers
-            .get(&elems_ptr)
-            .map(|b| b.size)
-            .unwrap_or(0);
+        let buf_size = self.native_buffers.get(&elems_ptr).map(|b| b.size).unwrap_or(0);
 
         // Mode 0 (commit and free) or Mode 1 (commit, no free): copy back to Java array
         if (mode == 0 || mode == JNI_COMMIT) && buf_size > 0 {
             let updated_bytes = state.read_bytes(elems_ptr, buf_size);
             let is_tainted = self.taint_tracker.is_range_tainted(elems_ptr, buf_size);
-            let taint_id = self
-                .taint_tracker
-                .get_buffer(elems_ptr)
-                .map(|b| b.taint_id);
+            let taint_id = self.taint_tracker.get_buffer(elems_ptr).map(|b| b.taint_id);
 
             if let Some(JavaObject::ByteArray {
                 data,
@@ -845,15 +810,8 @@ impl JniEnvironment {
                         None
                     }
                 });
-                self.taint_tracker.record_buffer(
-                    buf_ptr,
-                    len,
-                    tid,
-                    lbl,
-                    array_handle,
-                    "jbyteArray",
-                    sub_syms,
-                );
+                self.taint_tracker
+                    .record_buffer(buf_ptr, len, tid, lbl, array_handle, "jbyteArray", sub_syms);
             }
         }
 
@@ -903,14 +861,9 @@ impl JniEnvironment {
 
     /// Wires the JNI interface, vtable, and stub regions into `process`, registering
     /// all JNI SimProcedures at their canonical offsets. Returns the `JNIEnv*` pointer.
-    pub fn setup_in_process(
-        this: Arc<RwLock<Self>>,
-        process: &mut Process,
-    ) -> Result<Address, RuntimeError> {
+    pub fn setup_in_process(this: Arc<RwLock<Self>>, process: &mut Process) -> Result<Address, RuntimeError> {
         let (env_ptr, vtable_ptr, stubs_base) = {
-            let guard = this
-                .read()
-                .map_err(|e| RuntimeError::Environment(format!("{e:?}")))?;
+            let guard = this.read().map_err(|e| RuntimeError::Environment(format!("{e:?}")))?;
             (guard.env_ptr, guard.vtable_ptr, guard.stubs_base)
         };
 
@@ -981,7 +934,9 @@ impl JniEnvironment {
                 vtable_idx::GET_ARRAY_LENGTH => Arc::new(GetArrayLengthProcedure::new(this.clone())),
                 vtable_idx::NEW_BYTE_ARRAY => Arc::new(NewByteArrayProcedure::new(this.clone())),
                 vtable_idx::GET_BYTE_ARRAY_ELEMENTS => Arc::new(GetByteArrayElementsProcedure::new(this.clone())),
-                vtable_idx::RELEASE_BYTE_ARRAY_ELEMENTS => Arc::new(ReleaseByteArrayElementsProcedure::new(this.clone())),
+                vtable_idx::RELEASE_BYTE_ARRAY_ELEMENTS => {
+                    Arc::new(ReleaseByteArrayElementsProcedure::new(this.clone()))
+                }
                 vtable_idx::GET_BYTE_ARRAY_REGION => Arc::new(GetByteArrayRegionProcedure::new(this.clone())),
                 vtable_idx::SET_BYTE_ARRAY_REGION => Arc::new(SetByteArrayRegionProcedure::new(this.clone())),
                 _ => default_stub.clone(),
@@ -1337,10 +1292,7 @@ impl SimProcedure for GetStaticMethodIDProcedure {
 }
 
 /// Registers all standard JNI procedures into a `SimProcedureRegistry`.
-pub fn register_jni_procedures(
-    registry: &mut SimProcedureRegistry,
-    env: Arc<RwLock<JniEnvironment>>,
-) {
+pub fn register_jni_procedures(registry: &mut SimProcedureRegistry, env: Arc<RwLock<JniEnvironment>>) {
     registry.register(Box::new(GetStringUTFCharsProcedure::new(env.clone())));
     registry.register(Box::new(ReleaseStringUTFCharsProcedure::new(env.clone())));
     registry.register(Box::new(GetByteArrayElementsProcedure::new(env.clone())));

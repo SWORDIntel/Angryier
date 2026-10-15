@@ -213,10 +213,7 @@ pub fn parse_patch_bytes(data: Value) -> Result<Vec<u8>, mlua::Error> {
                     .or_else(|| trimmed.strip_prefix("0X"))
                     .unwrap_or(trimmed)
                     .replace([' ', '\t'], "");
-                if !clean.is_empty()
-                    && clean.len() % 2 == 0
-                    && clean.chars().all(|c| c.is_ascii_hexdigit())
-                {
+                if !clean.is_empty() && clean.len() % 2 == 0 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
                     let mut bytes = Vec::with_capacity(clean.len() / 2);
                     for chunk in clean.as_bytes().chunks(2) {
                         if let Ok(s) = std::str::from_utf8(chunk)
@@ -256,9 +253,7 @@ pub fn parse_patch_bytes(data: Value) -> Result<Vec<u8>, mlua::Error> {
 pub fn parse_lua_u64(val: &Value) -> Option<u64> {
     match val {
         Value::Integer(i) => Some(*i as u64),
-        Value::Number(f) if f.is_finite() && *f >= 0.0 && *f <= (u64::MAX as f64) => {
-            Some(*f as u64)
-        }
+        Value::Number(f) if f.is_finite() && *f >= 0.0 && *f <= (u64::MAX as f64) => Some(*f as u64),
         Value::String(s) => {
             let s_bytes = s.as_bytes();
             let text = std::str::from_utf8(&s_bytes).ok()?.trim();

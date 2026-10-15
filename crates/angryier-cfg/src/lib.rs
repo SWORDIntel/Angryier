@@ -17,8 +17,8 @@ use angryier_semantics_intel64::forms;
 use angryier_types::Address;
 
 pub mod themida;
-pub mod vpc;
 pub mod vm;
+pub mod vpc;
 pub mod xrefs;
 
 /// How control leaves a basic block.
@@ -394,11 +394,7 @@ impl Cfg {
                     continue;
                 }
                 for edge in self.edges.iter().filter(|e| {
-                    e.from == last_pc
-                        && !matches!(
-                            e.kind,
-                            EdgeKind::Call | EdgeKind::IndirectCall | EdgeKind::Return
-                        )
+                    e.from == last_pc && !matches!(e.kind, EdgeKind::Call | EdgeKind::IndirectCall | EdgeKind::Return)
                 }) {
                     if let Some(to) = edge.to
                         && !entries.contains(&to)
@@ -772,7 +768,6 @@ fn static_target(insn: &DecodedInstruction) -> Option<Address> {
     })
 }
 
-
 /// Abstract per-register value while interpreting one basic block, used to
 /// resolve indirect-jump terminators to jump-table entries.
 #[derive(Clone, Copy, Debug)]
@@ -781,9 +776,20 @@ enum AbstractVal {
     Const(u64),
     /// Value loaded from `table_base + idx*scale + disp` — a table entry;
     /// `idx` stays symbolic (the switch variable).
-    TableEntry { base: u64, index: angryier_arch::RegisterId, scale: u8, disp: i64 },
+    TableEntry {
+        base: u64,
+        index: angryier_arch::RegisterId,
+        scale: u8,
+        disp: i64,
+    },
     /// TableEntry plus a constant — PIE-style `add entry, base`.
-    EntryPlusConst { base: u64, index: angryier_arch::RegisterId, scale: u8, disp: i64, add: u64 },
+    EntryPlusConst {
+        base: u64,
+        index: angryier_arch::RegisterId,
+        scale: u8,
+        disp: i64,
+        add: u64,
+    },
 }
 
 /// Block-local facts: per-register abstract values plus the latest
@@ -866,12 +872,11 @@ fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
             forms::LEA_R64_MEM => {
                 if let (Some(dst), Some(mem)) = (reg_operand(insn, 0), addr_or_mem_operand(insn)) {
                     let resolved = match mem.base {
-                        Some(angryier_arch::MemoryBase::InstructionPointer { .. }) => {
-                            insn.address
-                                .checked_add(u64::from(insn.length))
-                                .and_then(|end| end.checked_add_signed(mem.displacement))
-                                .map(AbstractVal::Const)
-                        }
+                        Some(angryier_arch::MemoryBase::InstructionPointer { .. }) => insn
+                            .address
+                            .checked_add(u64::from(insn.length))
+                            .and_then(|end| end.checked_add_signed(mem.displacement))
+                            .map(AbstractVal::Const),
                         Some(angryier_arch::MemoryBase::Register(b)) => {
                             // Constant base (+ constant index*scale+disp) is
                             // a plain address; a symbolic index makes this
@@ -899,30 +904,29 @@ fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
                             // RIP-based indexed load: table at a constant
                             // address even without a base register.
                             match mem.index {
-                                Some(angryier_arch::MemoryIndex::Register(idx)) => {
-                                    insn.address
-                                        .checked_add(u64::from(insn.length))
-                                        .and_then(|end| end.checked_add_signed(mem.displacement))
-                                        .map(|table| AbstractVal::TableEntry {
-                                            base: table,
-                                            index: idx.parent,
-                                            scale: mem.scale,
-                                            disp: 0,
-                                        })
-                                }
+                                Some(angryier_arch::MemoryIndex::Register(idx)) => insn
+                                    .address
+                                    .checked_add(u64::from(insn.length))
+                                    .and_then(|end| end.checked_add_signed(mem.displacement))
+                                    .map(|table| AbstractVal::TableEntry {
+                                        base: table,
+                                        index: idx.parent,
+                                        scale: mem.scale,
+                                        disp: 0,
+                                    }),
                                 _ => None,
                             }
                         }
                         Some(angryier_arch::MemoryBase::Register(b)) => {
                             match (facts.values.get(&b.parent).copied(), mem.index) {
-                                (Some(AbstractVal::Const(c)), Some(angryier_arch::MemoryIndex::Register(idx))) => {
-                                    c.checked_add_signed(mem.displacement).map(|table| AbstractVal::TableEntry {
+                                (Some(AbstractVal::Const(c)), Some(angryier_arch::MemoryIndex::Register(idx))) => c
+                                    .checked_add_signed(mem.displacement)
+                                    .map(|table| AbstractVal::TableEntry {
                                         base: table,
                                         index: idx.parent,
                                         scale: mem.scale,
                                         disp: 0,
-                                    })
-                                }
+                                    }),
                                 _ => None,
                             }
                         }
@@ -944,21 +948,55 @@ fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
                             Some(AbstractVal::Const(x.wrapping_add(y)))
                         }
                         (
-                            Some(AbstractVal::TableEntry { base, index, scale, disp }),
+                            Some(AbstractVal::TableEntry {
+                                base,
+                                index,
+                                scale,
+                                disp,
+                            }),
                             Some(AbstractVal::Const(c)),
                         )
                         | (
                             Some(AbstractVal::Const(c)),
-                            Some(AbstractVal::TableEntry { base, index, scale, disp }),
-                        ) => Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add: c }),
+                            Some(AbstractVal::TableEntry {
+                                base,
+                                index,
+                                scale,
+                                disp,
+                            }),
+                        ) => Some(AbstractVal::EntryPlusConst {
+                            base,
+                            index,
+                            scale,
+                            disp,
+                            add: c,
+                        }),
                         (
-                            Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add }),
+                            Some(AbstractVal::EntryPlusConst {
+                                base,
+                                index,
+                                scale,
+                                disp,
+                                add,
+                            }),
                             Some(AbstractVal::Const(c)),
                         )
                         | (
                             Some(AbstractVal::Const(c)),
-                            Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add }),
-                        ) => Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add: add.wrapping_add(c) }),
+                            Some(AbstractVal::EntryPlusConst {
+                                base,
+                                index,
+                                scale,
+                                disp,
+                                add,
+                            }),
+                        ) => Some(AbstractVal::EntryPlusConst {
+                            base,
+                            index,
+                            scale,
+                            disp,
+                            add: add.wrapping_add(c),
+                        }),
                         _ => None,
                     };
                     kill(&mut facts, dst.parent);
@@ -973,9 +1011,19 @@ fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
                     let a = facts.values.get(&dst.parent).copied();
                     let sum = match a {
                         Some(AbstractVal::Const(x)) => Some(AbstractVal::Const(x.wrapping_add(imm))),
-                        Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add }) => {
-                            Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add: add.wrapping_add(imm) })
-                        }
+                        Some(AbstractVal::EntryPlusConst {
+                            base,
+                            index,
+                            scale,
+                            disp,
+                            add,
+                        }) => Some(AbstractVal::EntryPlusConst {
+                            base,
+                            index,
+                            scale,
+                            disp,
+                            add: add.wrapping_add(imm),
+                        }),
                         _ => None,
                     };
                     kill(&mut facts, dst.parent);
@@ -985,7 +1033,11 @@ fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
                     continue;
                 }
             }
-            forms::CMP_R64_IMM32 | forms::CMP_R32_IMM8 | forms::CMP_R8_IMM8 | forms::CMP_R16_IMM8 | forms::CMP_R16_IMM16 => {
+            forms::CMP_R64_IMM32
+            | forms::CMP_R32_IMM8
+            | forms::CMP_R8_IMM8
+            | forms::CMP_R16_IMM8
+            | forms::CMP_R16_IMM16 => {
                 if let (Some(dst), Some(imm)) = (reg_operand(insn, 0), imm_operand(insn, 1)) {
                     facts.cmp_imm.insert(dst.parent, imm);
                     continue;
@@ -1062,12 +1114,10 @@ fn resolve_indirect_jump(
                     Some(angryier_arch::MemoryBase::InstructionPointer { .. }) => {
                         insn_end.checked_add_signed(mem.displacement)?
                     }
-                    Some(angryier_arch::MemoryBase::Register(b)) => {
-                        match facts.values.get(&b.parent) {
-                            Some(AbstractVal::Const(c)) => c.checked_add_signed(mem.displacement)?,
-                            _ => return None,
-                        }
-                    }
+                    Some(angryier_arch::MemoryBase::Register(b)) => match facts.values.get(&b.parent) {
+                        Some(AbstractVal::Const(c)) => c.checked_add_signed(mem.displacement)?,
+                        _ => return None,
+                    },
                     _ => return None,
                 };
                 (table, u64::from(mem.scale), idx, 0)
@@ -1076,12 +1126,16 @@ fn resolve_indirect_jump(
             None => {
                 let reg = reg_operand(terminator, 0)?;
                 match facts.values.get(&reg.parent)? {
-                    AbstractVal::TableEntry { base: b, index, scale, .. } => {
-                        (*b, u64::from(*scale), *index, 0)
-                    }
-                    AbstractVal::EntryPlusConst { base: b, index, scale, add, .. } => {
-                        (*b, u64::from(*scale), *index, *add)
-                    }
+                    AbstractVal::TableEntry {
+                        base: b, index, scale, ..
+                    } => (*b, u64::from(*scale), *index, 0),
+                    AbstractVal::EntryPlusConst {
+                        base: b,
+                        index,
+                        scale,
+                        add,
+                        ..
+                    } => (*b, u64::from(*scale), *index, *add),
                     AbstractVal::Const(_) => return None,
                 }
             }
@@ -1146,7 +1200,10 @@ fn resolve_indirect_jump(
             if !verifies(target) {
                 return None;
             }
-            out.push(TableTarget { index: u16::try_from(i).ok()?, target });
+            out.push(TableTarget {
+                index: u16::try_from(i).ok()?,
+                target,
+            });
         }
         Some(out)
     };
@@ -1259,257 +1316,249 @@ pub fn recover_multi<D: Decoder>(
     let mut visited = BTreeSet::new();
 
     'discovery: loop {
-    while let Some(head) = worklist.pop() {
-        if !visited.insert(head) {
-            continue;
-        }
-        let mut cursor = head;
-        let mut instructions = Vec::new();
-        let terminator;
-
-        loop {
-            // A jump target or existing block start inside the block splits
-            // it — fall through to that boundary so blocks never overlap.
-            if cursor != head && (blocks.contains_key(&cursor) || worklist.contains(&cursor)) {
-                edges.push(CfgEdge {
-                    from: instructions
-                        .last()
-                        .map(|i: &DecodedInstruction| i.address)
-                        .unwrap_or(head),
-                    to: Some(cursor),
-                    kind: EdgeKind::FallThrough,
-                });
-                worklist.push(cursor);
-                terminator = EdgeKind::FallThrough;
-                break;
+        while let Some(head) = worklist.pop() {
+            if !visited.insert(head) {
+                continue;
             }
-            let offset = match cursor.checked_sub(base) {
-                Some(offset) => usize::try_from(offset).ok(),
-                None => None,
-            };
-            let Some(offset) = offset else {
-                terminator = EdgeKind::IndirectJump;
-                break;
-            };
-            let Some(bytes) = region.get(offset..) else {
-                terminator = EdgeKind::IndirectJump;
-                break;
-            };
-            // Undecodable bytes (padding, embedded data, ISA gaps) end the
-            // block rather than the recovery — real binaries interleave
-            // non-code inside executable regions.
-            let mut decoded = match decoder.decode(cursor, bytes) {
-                Ok(decoded) => decoded,
-                Err(_) => {
+            let mut cursor = head;
+            let mut instructions = Vec::new();
+            let terminator;
+
+            loop {
+                // A jump target or existing block start inside the block splits
+                // it — fall through to that boundary so blocks never overlap.
+                if cursor != head && (blocks.contains_key(&cursor) || worklist.contains(&cursor)) {
+                    edges.push(CfgEdge {
+                        from: instructions
+                            .last()
+                            .map(|i: &DecodedInstruction| i.address)
+                            .unwrap_or(head),
+                        to: Some(cursor),
+                        kind: EdgeKind::FallThrough,
+                    });
+                    worklist.push(cursor);
+                    terminator = EdgeKind::FallThrough;
+                    break;
+                }
+                let offset = match cursor.checked_sub(base) {
+                    Some(offset) => usize::try_from(offset).ok(),
+                    None => None,
+                };
+                let Some(offset) = offset else {
                     terminator = EdgeKind::IndirectJump;
                     break;
-                }
-            };
-            decoded.form_id = map_form(&decoded);
-            let next = cursor.wrapping_add(u64::from(decoded.length));
-            instructions.push(decoded.clone());
-            cursor = next;
+                };
+                let Some(bytes) = region.get(offset..) else {
+                    terminator = EdgeKind::IndirectJump;
+                    break;
+                };
+                // Undecodable bytes (padding, embedded data, ISA gaps) end the
+                // block rather than the recovery — real binaries interleave
+                // non-code inside executable regions.
+                let mut decoded = match decoder.decode(cursor, bytes) {
+                    Ok(decoded) => decoded,
+                    Err(_) => {
+                        terminator = EdgeKind::IndirectJump;
+                        break;
+                    }
+                };
+                decoded.form_id = map_form(&decoded);
+                let next = cursor.wrapping_add(u64::from(decoded.length));
+                instructions.push(decoded.clone());
+                cursor = next;
 
-            match terminator_kind(decoded.form_id) {
-                Some(EdgeKind::ConditionalTaken) => {
-                    let target = static_target(&decoded);
-                    edges.push(CfgEdge {
-                        from: decoded.address,
-                        to: target,
-                        kind: EdgeKind::ConditionalTaken,
-                    });
-                    edges.push(CfgEdge {
-                        from: decoded.address,
-                        to: Some(next),
-                        kind: EdgeKind::FallThrough,
-                    });
-                    if let Some(target) = target {
-                        worklist.push(target);
+                match terminator_kind(decoded.form_id) {
+                    Some(EdgeKind::ConditionalTaken) => {
+                        let target = static_target(&decoded);
+                        edges.push(CfgEdge {
+                            from: decoded.address,
+                            to: target,
+                            kind: EdgeKind::ConditionalTaken,
+                        });
+                        edges.push(CfgEdge {
+                            from: decoded.address,
+                            to: Some(next),
+                            kind: EdgeKind::FallThrough,
+                        });
+                        if let Some(target) = target {
+                            worklist.push(target);
+                        }
+                        worklist.push(next);
+                        terminator = EdgeKind::ConditionalTaken;
+                        break;
                     }
-                    worklist.push(next);
-                    terminator = EdgeKind::ConditionalTaken;
-                    break;
-                }
-                Some(EdgeKind::Unconditional) => {
-                    let target = static_target(&decoded);
-                    edges.push(CfgEdge {
-                        from: decoded.address,
-                        to: target,
-                        kind: EdgeKind::Unconditional,
-                    });
-                    if let Some(target) = target {
-                        worklist.push(target);
+                    Some(EdgeKind::Unconditional) => {
+                        let target = static_target(&decoded);
+                        edges.push(CfgEdge {
+                            from: decoded.address,
+                            to: target,
+                            kind: EdgeKind::Unconditional,
+                        });
+                        if let Some(target) = target {
+                            worklist.push(target);
+                        }
+                        terminator = EdgeKind::Unconditional;
+                        break;
                     }
-                    terminator = EdgeKind::Unconditional;
-                    break;
-                }
-                Some(EdgeKind::Call) => {
-                    let target = static_target(&decoded);
-                    edges.push(CfgEdge {
-                        from: decoded.address,
-                        to: target,
-                        kind: EdgeKind::Call,
-                    });
-                    edges.push(CfgEdge {
-                        from: decoded.address,
-                        to: Some(next),
-                        kind: EdgeKind::FallThrough,
-                    });
-                    if let Some(target) = target {
-                        worklist.push(target);
+                    Some(EdgeKind::Call) => {
+                        let target = static_target(&decoded);
+                        edges.push(CfgEdge {
+                            from: decoded.address,
+                            to: target,
+                            kind: EdgeKind::Call,
+                        });
+                        edges.push(CfgEdge {
+                            from: decoded.address,
+                            to: Some(next),
+                            kind: EdgeKind::FallThrough,
+                        });
+                        if let Some(target) = target {
+                            worklist.push(target);
+                        }
+                        worklist.push(next);
+                        terminator = EdgeKind::Call;
+                        break;
                     }
-                    worklist.push(next);
-                    terminator = EdgeKind::Call;
-                    break;
-                }
-                Some(EdgeKind::IndirectCall) => {
-                    edges.push(CfgEdge {
-                        from: decoded.address,
-                        to: None,
-                        kind: EdgeKind::IndirectCall,
-                    });
-                    edges.push(CfgEdge {
-                        from: decoded.address,
-                        to: Some(next),
-                        kind: EdgeKind::FallThrough,
-                    });
-                    worklist.push(next);
-                    terminator = EdgeKind::IndirectCall;
-                    break;
-                }
-                Some(EdgeKind::IndirectJump) => {
-                    // Statically resolvable jump tables (compiler switch
-                    // tables, VM dispatch) become per-entry TableDispatch
-                    // edges; anything else stays an unresolved graph exit
-                    // and gets a second chance in the predecessor-bound
-                    // post-pass below (MSVC puts `cmp idx,N; ja` in the
-                    // block BEFORE the table walk).
-                    let resolved =
-                        resolve_indirect_jump(decoder, &instructions, &decoded, base, region, None);
-                    if let Some(targets) = resolved {
-                        for entry in &targets {
+                    Some(EdgeKind::IndirectCall) => {
+                        edges.push(CfgEdge {
+                            from: decoded.address,
+                            to: None,
+                            kind: EdgeKind::IndirectCall,
+                        });
+                        edges.push(CfgEdge {
+                            from: decoded.address,
+                            to: Some(next),
+                            kind: EdgeKind::FallThrough,
+                        });
+                        worklist.push(next);
+                        terminator = EdgeKind::IndirectCall;
+                        break;
+                    }
+                    Some(EdgeKind::IndirectJump) => {
+                        // Statically resolvable jump tables (compiler switch
+                        // tables, VM dispatch) become per-entry TableDispatch
+                        // edges; anything else stays an unresolved graph exit
+                        // and gets a second chance in the predecessor-bound
+                        // post-pass below (MSVC puts `cmp idx,N; ja` in the
+                        // block BEFORE the table walk).
+                        let resolved = resolve_indirect_jump(decoder, &instructions, &decoded, base, region, None);
+                        if let Some(targets) = resolved {
+                            for entry in &targets {
+                                edges.push(CfgEdge {
+                                    from: decoded.address,
+                                    to: Some(entry.target),
+                                    kind: EdgeKind::TableDispatch { index: entry.index },
+                                });
+                                worklist.push(entry.target);
+                            }
+                            terminator = EdgeKind::TableDispatch { index: 0 };
+                        } else {
                             edges.push(CfgEdge {
                                 from: decoded.address,
+                                to: None,
+                                kind: EdgeKind::IndirectJump,
+                            });
+                            terminator = EdgeKind::IndirectJump;
+                        }
+                        break;
+                    }
+                    Some(kind) => {
+                        edges.push(CfgEdge {
+                            from: decoded.address,
+                            to: None,
+                            kind,
+                        });
+                        terminator = kind;
+                        break;
+                    }
+                    None => {}
+                }
+            }
+
+            if !instructions.is_empty() {
+                blocks.insert(
+                    head,
+                    BasicBlock {
+                        start: head,
+                        end: cursor,
+                        instructions,
+                        terminator,
+                    },
+                );
+            }
+        }
+
+        // Predecessor-bound post-pass: for every still-unresolved indirect
+        // jump, look for `cmp idx, imm` bounds in the CFG predecessor blocks
+        // (the canonical MSVC layout: the bound check's `ja` splits the block,
+        // so the cmp never shares a block with the table walk). The jmp block
+        // is re-interpreted with each predecessor bound; the same fail-closed
+        // verification applies.
+        let unresolved: Vec<Address> = blocks
+            .iter()
+            .filter(|(_, b)| b.terminator == EdgeKind::IndirectJump)
+            .map(|(&head, _)| head)
+            .collect();
+        for head in unresolved {
+            let Some(terminator_pc) = blocks.get(&head).and_then(|b| b.instructions.last()).map(|i| i.address) else {
+                continue;
+            };
+            let mut new_edges = Vec::new();
+            for pred in blocks.values() {
+                let is_pred = edges.iter().any(|e| {
+                    e.to == Some(head)
+                        && e.from == pred.instructions.last().map(|i| i.address).unwrap_or(pred.start)
+                        && !matches!(e.kind, EdgeKind::Call | EdgeKind::IndirectCall)
+                });
+                if !is_pred {
+                    continue;
+                }
+                let pred_facts = interpret_block(&pred.instructions);
+                for (rid, bound) in pred_facts.cmp_imm {
+                    let Some(block) = blocks.get(&head) else { continue };
+                    let Some(term) = block.instructions.last() else {
+                        continue;
+                    };
+                    let term = DecodedInstruction {
+                        address: term.address,
+                        length: term.length,
+                        form_id: term.form_id,
+                        features: Vec::new(),
+                        operands: term.operands.clone(),
+                        modifiers: angryier_arch::InstructionModifiers::default(),
+                    };
+                    if let Some(targets) =
+                        resolve_indirect_jump(decoder, &block.instructions, &term, base, region, Some((rid, bound)))
+                    {
+                        for entry in &targets {
+                            new_edges.push(CfgEdge {
+                                from: terminator_pc,
                                 to: Some(entry.target),
                                 kind: EdgeKind::TableDispatch { index: entry.index },
                             });
                             worklist.push(entry.target);
                         }
-                        terminator = EdgeKind::TableDispatch { index: 0 };
-                    } else {
-                        edges.push(CfgEdge {
-                            from: decoded.address,
-                            to: None,
-                            kind: EdgeKind::IndirectJump,
-                        });
-                        terminator = EdgeKind::IndirectJump;
+                        break;
                     }
-                    break;
                 }
-                Some(kind) => {
-                    edges.push(CfgEdge {
-                        from: decoded.address,
-                        to: None,
-                        kind,
-                    });
-                    terminator = kind;
-                    break;
-                }
-                None => {}
-            }
-        }
-
-        if !instructions.is_empty() {
-            blocks.insert(
-                head,
-                BasicBlock {
-                    start: head,
-                    end: cursor,
-                    instructions,
-                    terminator,
-                },
-            );
-        }
-    }
-
-    // Predecessor-bound post-pass: for every still-unresolved indirect
-    // jump, look for `cmp idx, imm` bounds in the CFG predecessor blocks
-    // (the canonical MSVC layout: the bound check's `ja` splits the block,
-    // so the cmp never shares a block with the table walk). The jmp block
-    // is re-interpreted with each predecessor bound; the same fail-closed
-    // verification applies.
-    let unresolved: Vec<Address> = blocks
-        .iter()
-        .filter(|(_, b)| b.terminator == EdgeKind::IndirectJump)
-        .map(|(&head, _)| head)
-        .collect();
-    for head in unresolved {
-        let Some(terminator_pc) = blocks
-            .get(&head)
-            .and_then(|b| b.instructions.last())
-            .map(|i| i.address)
-        else {
-            continue;
-        };
-        let mut new_edges = Vec::new();
-        for pred in blocks.values() {
-            let is_pred = edges.iter().any(|e| {
-                e.to == Some(head)
-                    && e.from
-                        == pred
-                            .instructions
-                            .last()
-                            .map(|i| i.address)
-                            .unwrap_or(pred.start)
-                    && !matches!(e.kind, EdgeKind::Call | EdgeKind::IndirectCall)
-            });
-            if !is_pred {
-                continue;
-            }
-            let pred_facts = interpret_block(&pred.instructions);
-            for (rid, bound) in pred_facts.cmp_imm {
-                let Some(block) = blocks.get(&head) else { continue };
-                let Some(term) = block.instructions.last() else { continue };
-                let term = DecodedInstruction {
-                    address: term.address,
-                    length: term.length,
-                    form_id: term.form_id,
-                    features: Vec::new(),
-                    operands: term.operands.clone(),
-                    modifiers: angryier_arch::InstructionModifiers::default(),
-                };
-                if let Some(targets) =
-                    resolve_indirect_jump(decoder, &block.instructions, &term, base, region, Some((rid, bound)))
-                {
-                    for entry in &targets {
-                        new_edges.push(CfgEdge {
-                            from: terminator_pc,
-                            to: Some(entry.target),
-                            kind: EdgeKind::TableDispatch { index: entry.index },
-                        });
-                        worklist.push(entry.target);
-                    }
+                if !new_edges.is_empty() {
                     break;
                 }
             }
             if !new_edges.is_empty() {
-                break;
+                edges.retain(|e| !(e.from == terminator_pc && e.kind == EdgeKind::IndirectJump));
+                edges.extend(new_edges);
+                if let Some(block) = blocks.get_mut(&head) {
+                    block.terminator = EdgeKind::TableDispatch { index: 0 };
+                }
             }
         }
-        if !new_edges.is_empty() {
-            edges.retain(|e| !(e.from == terminator_pc && e.kind == EdgeKind::IndirectJump));
-            edges.extend(new_edges);
-            if let Some(block) = blocks.get_mut(&head) {
-                block.terminator = EdgeKind::TableDispatch { index: 0 };
-            }
-        }
-    }
 
-    // Post-pass discoveries re-enter the main discovery loop.
-    if !worklist.is_empty() {
-        continue 'discovery;
-    }
-    break 'discovery;
+        // Post-pass discoveries re-enter the main discovery loop.
+        if !worklist.is_empty() {
+            continue 'discovery;
+        }
+        break 'discovery;
     }
 
     Ok(Cfg { entry, blocks, edges })
@@ -1597,11 +1646,7 @@ mod tests {
                 // F3 rb: jmp reg
                 [0xf3, rb, ..] => (2, forms::JMP_INDIRECT_R64, vec![r64_read(*rb, 0)]),
                 // F4 dst src: mov reg, reg
-                [0xf4, dst, src, ..] => (
-                    3,
-                    forms::MOV_R64_R64,
-                    vec![r64(*dst, 0), r64_read(*src, 1)],
-                ),
+                [0xf4, dst, src, ..] => (3, forms::MOV_R64_R64, vec![r64(*dst, 0), r64_read(*src, 1)]),
                 // F5 rb d0 d1 d2 d3: lea rb, [rip+disp32] (AddressGeneration!)
                 [0xf5, rb, d0, d1, d2, d3, ..] => (
                     7,
@@ -1618,9 +1663,7 @@ mod tests {
                                 address_width_bits: 64,
                                 segment: None,
                                 segment_base: None,
-                                base: Some(angryier_arch::MemoryBase::InstructionPointer {
-                                    width_bits: 64,
-                                }),
+                                base: Some(angryier_arch::MemoryBase::InstructionPointer { width_bits: 64 }),
                                 index: None,
                                 scale: 1,
                                 displacement: i64::from(i32::from_le_bytes([*d0, *d1, *d2, *d3])),
@@ -1645,18 +1688,14 @@ mod tests {
                                 address_width_bits: 64,
                                 segment: None,
                                 segment_base: None,
-                                base: Some(angryier_arch::MemoryBase::Register(
-                                    angryier_arch::RegisterView::full(
-                                        angryier_arch::RegisterId(0x100 + u32::from(*bse)),
-                                        64,
-                                    ),
-                                )),
-                                index: Some(angryier_arch::MemoryIndex::Register(
-                                    angryier_arch::RegisterView::full(
-                                        angryier_arch::RegisterId(0x100 + u32::from(*idx)),
-                                        64,
-                                    ),
-                                )),
+                                base: Some(angryier_arch::MemoryBase::Register(angryier_arch::RegisterView::full(
+                                    angryier_arch::RegisterId(0x100 + u32::from(*bse)),
+                                    64,
+                                ))),
+                                index: Some(angryier_arch::MemoryIndex::Register(angryier_arch::RegisterView::full(
+                                    angryier_arch::RegisterId(0x100 + u32::from(*idx)),
+                                    64,
+                                ))),
                                 scale: *scale,
                                 displacement: i64::from(i32::from_le_bytes([*d0, *d1, *d2, *d3])),
                                 displacement_width_bits: 32,
@@ -1698,15 +1737,11 @@ mod tests {
                             address_width_bits: 64,
                             segment: None,
                             segment_base: None,
-                            base: Some(angryier_arch::MemoryBase::InstructionPointer {
-                                width_bits: 64,
-                            }),
-                            index: Some(angryier_arch::MemoryIndex::Register(
-                                angryier_arch::RegisterView::full(
-                                    angryier_arch::RegisterId(0x100 + u32::from(*rb)),
-                                    64,
-                                ),
-                            )),
+                            base: Some(angryier_arch::MemoryBase::InstructionPointer { width_bits: 64 }),
+                            index: Some(angryier_arch::MemoryIndex::Register(angryier_arch::RegisterView::full(
+                                angryier_arch::RegisterId(0x100 + u32::from(*rb)),
+                                64,
+                            ))),
                             scale: *scale,
                             displacement: i64::from(i32::from_le_bytes([*d0, *d1, *d2, *d3])),
                             displacement_width_bits: 32,
@@ -1727,18 +1762,14 @@ mod tests {
                             address_width_bits: 64,
                             segment: None,
                             segment_base: None,
-                            base: Some(angryier_arch::MemoryBase::Register(
-                                angryier_arch::RegisterView::full(
-                                    angryier_arch::RegisterId(0x100 + u32::from(*bse)),
-                                    64,
-                                ),
-                            )),
-                            index: Some(angryier_arch::MemoryIndex::Register(
-                                angryier_arch::RegisterView::full(
-                                    angryier_arch::RegisterId(0x100 + u32::from(*idx)),
-                                    64,
-                                ),
-                            )),
+                            base: Some(angryier_arch::MemoryBase::Register(angryier_arch::RegisterView::full(
+                                angryier_arch::RegisterId(0x100 + u32::from(*bse)),
+                                64,
+                            ))),
+                            index: Some(angryier_arch::MemoryIndex::Register(angryier_arch::RegisterView::full(
+                                angryier_arch::RegisterId(0x100 + u32::from(*idx)),
+                                64,
+                            ))),
                             scale: *scale,
                             displacement: 0,
                             displacement_width_bits: 0,
@@ -1797,9 +1828,7 @@ mod tests {
                             address_width_bits: 64,
                             segment: None,
                             segment_base: None,
-                            base: Some(angryier_arch::MemoryBase::InstructionPointer {
-                                width_bits: 64,
-                            }),
+                            base: Some(angryier_arch::MemoryBase::InstructionPointer { width_bits: 64 }),
                             index: Some(angryier_arch::MemoryIndex::Register(reg_view(
                                 angryier_arch::RegisterId(0x100),
                                 32,
@@ -1859,10 +1888,7 @@ mod tests {
             width_bits,
             access: angryier_arch::AccessKind::ReadWrite,
             visibility: angryier_arch::OperandVisibility::Explicit,
-            kind: OperandKind::Register(reg_view(
-                angryier_arch::RegisterId(0x100),
-                width_bits,
-            )),
+            kind: OperandKind::Register(reg_view(angryier_arch::RegisterId(0x100), width_bits)),
         }
     }
 
@@ -2393,19 +2419,22 @@ mod tests {
         let code = [
             0x18, 0x10, 0, 0, 0, 0, 0, 0, // 0x1000 -> 0x1018
             0x1a, 0x10, 0, 0, 0, 0, 0, 0, // 0x1008 -> 0x101a
-            0xf0, 0x02,                 // cmp eax,2  @ 0x1010
+            0xf0, 0x02, // cmp eax,2  @ 0x1010
             0xf1, 0x08, 0xe8, 0xff, 0xff, 0xff, // jmp [rip+eax*8-24], end=0x1018
-            0x90, 0xc3,                 // nop; ret @ 0x1018
-            0x90, 0xc3,                 // nop; ret @ 0x101a
+            0x90, 0xc3, // nop; ret @ 0x1018
+            0x90, 0xc3, // nop; ret @ 0x101a
         ];
-        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1010, identity_form)
-            .map_err(|error| format!("{error:?}"))?;
-        assert!(cfg.edges.iter().any(|edge| {
-            matches!(edge.kind, EdgeKind::TableDispatch { .. }) && edge.to == Some(0x1018)
-        }));
-        assert!(cfg.edges.iter().any(|edge| {
-            matches!(edge.kind, EdgeKind::TableDispatch { .. }) && edge.to == Some(0x101a)
-        }));
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1010, identity_form).map_err(|error| format!("{error:?}"))?;
+        assert!(
+            cfg.edges
+                .iter()
+                .any(|edge| { matches!(edge.kind, EdgeKind::TableDispatch { .. }) && edge.to == Some(0x1018) })
+        );
+        assert!(
+            cfg.edges
+                .iter()
+                .any(|edge| { matches!(edge.kind, EdgeKind::TableDispatch { .. }) && edge.to == Some(0x101a) })
+        );
         Ok(())
     }
 
@@ -2420,8 +2449,7 @@ mod tests {
             0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1008..0x1010
             0x90, 0x90, // 0x1010..0x1012
             // entries: 0x1022, 0x1026 (region ends 0x102A — both inside)
-            0x22, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x26, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x22, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x26, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             // target code (0x1022 and 0x1026): nop; ret
             0x90, 0xc3, 0x90, 0xc3, 0x90, 0xc3, 0x90, 0xc3,
         ];
@@ -2441,15 +2469,16 @@ mod tests {
     fn jump_without_bound_stays_unresolved() -> Result<(), String> {
         // jmp [rip+eax*8] with NO cmp bound in-block: fail closed.
         let code = [
-            0xf1, 0x08, 0x0a, 0x00, 0x00, 0x00,
-            0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-            0x90, 0x90,
-            0x22, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x30, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xf1, 0x08, 0x0a, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x22, 0x10,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
         let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
         assert!(cfg.edges.iter().any(|e| e.kind == EdgeKind::IndirectJump));
-        assert!(!cfg.edges.iter().any(|e| matches!(e.kind, EdgeKind::TableDispatch { .. })));
+        assert!(
+            !cfg.edges
+                .iter()
+                .any(|e| matches!(e.kind, EdgeKind::TableDispatch { .. }))
+        );
         Ok(())
     }
 

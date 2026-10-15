@@ -103,11 +103,7 @@ pub fn deobfuscate<A: ExprArena + ?Sized>(arena: &A, root: ExprId) -> ExprId {
 /// One bottom-up pass. `memo` caches original-id -> simplified-id across the
 /// whole `deobfuscate` call, which both dedups shared DAG subtrees and makes
 /// follow-up passes nearly free.
-fn run_pass<A: ExprArena + ?Sized>(
-    arena: &A,
-    root: ExprId,
-    memo: &mut FxHashMap<ExprId, ExprId>,
-) -> ExprId {
+fn run_pass<A: ExprArena + ?Sized>(arena: &A, root: ExprId, memo: &mut FxHashMap<ExprId, ExprId>) -> ExprId {
     // Iterative post-order walk: expressions decoded from mutated code can
     // be far deeper than the default stack, so recursion is not an option.
     // `expanded` distinguishes "children pending" from "children finished".
@@ -221,11 +217,7 @@ fn widen(bytes: &[u8]) -> u128 {
 }
 
 fn bit_mask(bits: u16) -> u128 {
-    if bits >= 128 {
-        u128::MAX
-    } else {
-        (1_u128 << bits) - 1
-    }
+    if bits >= 128 { u128::MAX } else { (1_u128 << bits) - 1 }
 }
 
 /// Canonical little-endian constant bytes for `value` at `bits`.
@@ -328,35 +320,22 @@ fn not_operand<A: ExprArena + ?Sized>(arena: &A, id: ExprId) -> Option<ExprId> {
             let left = node.operands.first().copied()?;
             let right = node.operands.get(1).copied()?;
             let left_node = arena.get(left)?;
-            if is_all_ones(&left_node) {
-                Some(right)
-            } else {
-                None
-            }
+            if is_all_ones(&left_node) { Some(right) } else { None }
         }
         _ => None,
     }
 }
 
 /// Fetches the two operand nodes of a validated binary node.
-fn binary_children<A: ExprArena + ?Sized>(
-    arena: &A,
-    node: &ExprNode,
-) -> Option<(ExprNode, ExprNode)> {
-    Some((
-        arena.get(*node.operands.first()?)?,
-        arena.get(*node.operands.get(1)?)?,
-    ))
+fn binary_children<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode) -> Option<(ExprNode, ExprNode)> {
+    Some((arena.get(*node.operands.first()?)?, arena.get(*node.operands.get(1)?)?))
 }
 
 /// Matches `or_node = (x|y)` against `and_node = (x&y)` over the same
 /// operand pair. Commutative operands are canonically sorted at intern time,
 /// so equal pairs compare equal as plain id lists.
 fn or_and_pair(or_node: &ExprNode, and_node: &ExprNode) -> Option<Vec<ExprId>> {
-    if or_node.op == ExprOp::Or
-        && and_node.op == ExprOp::And
-        && or_node.operands == and_node.operands
-    {
+    if or_node.op == ExprOp::Or && and_node.op == ExprOp::And && or_node.operands == and_node.operands {
         Some(or_node.operands.clone())
     } else {
         None
@@ -381,10 +360,7 @@ fn rewrite_not<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> 
 
 fn rewrite_add<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> Option<ExprNode> {
     let (a, b) = binary_children(arena, node)?;
-    let (x, y) = (
-        node.operands.first().copied()?,
-        node.operands.get(1).copied()?,
-    );
+    let (x, y) = (node.operands.first().copied()?, node.operands.get(1).copied()?);
     if is_zero_const(&b) {
         return Some(a);
     }
@@ -409,10 +385,7 @@ fn rewrite_add<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> 
 
 fn rewrite_sub<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> Option<ExprNode> {
     let (a, b) = binary_children(arena, node)?;
-    let (x, y) = (
-        node.operands.first().copied()?,
-        node.operands.get(1).copied()?,
-    );
+    let (x, y) = (node.operands.first().copied()?, node.operands.get(1).copied()?);
     if x == y {
         return Some(zero_node(bits));
     }
@@ -434,10 +407,7 @@ fn rewrite_sub<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> 
 
 fn rewrite_xor<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> Option<ExprNode> {
     let (a, b) = binary_children(arena, node)?;
-    let (x, y) = (
-        node.operands.first().copied()?,
-        node.operands.get(1).copied()?,
-    );
+    let (x, y) = (node.operands.first().copied()?, node.operands.get(1).copied()?);
     if x == y {
         return Some(zero_node(bits));
     }
@@ -477,16 +447,8 @@ fn rewrite_xor<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> 
 
 /// Folds `(x ^ c) ^ k` into `x ^ (c ^ k)`; the arena folds the re-interned
 /// constants, and a cancelling pair (`c == k`) yields plain `x`.
-fn xor_chain<A: ExprArena + ?Sized>(
-    arena: &A,
-    bits: u16,
-    xor_node: &ExprNode,
-    k: u128,
-) -> Option<ExprNode> {
-    let (l, r) = (
-        xor_node.operands.first().copied()?,
-        xor_node.operands.get(1).copied()?,
-    );
+fn xor_chain<A: ExprArena + ?Sized>(arena: &A, bits: u16, xor_node: &ExprNode, k: u128) -> Option<ExprNode> {
+    let (l, r) = (xor_node.operands.first().copied()?, xor_node.operands.get(1).copied()?);
     let l_node = arena.get(l)?;
     let r_node = arena.get(r)?;
     let (x, c) = if let Some(c) = constant_value(&l_node) {
@@ -509,10 +471,7 @@ fn xor_chain<A: ExprArena + ?Sized>(
 
 fn rewrite_and<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> Option<ExprNode> {
     let (a, b) = binary_children(arena, node)?;
-    let (x, y) = (
-        node.operands.first().copied()?,
-        node.operands.get(1).copied()?,
-    );
+    let (x, y) = (node.operands.first().copied()?, node.operands.get(1).copied()?);
     if x == y {
         return Some(a);
     }
@@ -530,10 +489,7 @@ fn rewrite_and<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> 
 
 fn rewrite_or<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16) -> Option<ExprNode> {
     let (a, b) = binary_children(arena, node)?;
-    let (x, y) = (
-        node.operands.first().copied()?,
-        node.operands.get(1).copied()?,
-    );
+    let (x, y) = (node.operands.first().copied()?, node.operands.get(1).copied()?);
     if x == y {
         return Some(a);
     }
@@ -622,12 +578,7 @@ fn rewrite_extend<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode) -> Option<E
 
 /// Tries the constant-chain fold for both operand alignments of the outer
 /// node: `(p ± c) OP k` with `k` the constant operand.
-fn chain_through<A: ExprArena + ?Sized>(
-    arena: &A,
-    node: &ExprNode,
-    bits: u16,
-    outer: ExprOp,
-) -> Option<ExprNode> {
+fn chain_through<A: ExprArena + ?Sized>(arena: &A, node: &ExprNode, bits: u16, outer: ExprOp) -> Option<ExprNode> {
     let first = *node.operands.first()?;
     let second = *node.operands.get(1)?;
     // `k_on_right` records whether the constant `k` is the outer node's
@@ -639,9 +590,7 @@ fn chain_through<A: ExprArena + ?Sized>(
         let Some(k_value) = constant_value(&k_node) else {
             continue;
         };
-        if let Some(rewritten) =
-            fold_constant_chain(arena, node.sort, bits, outer, k_on_right, &p_node, k_value)
-        {
+        if let Some(rewritten) = fold_constant_chain(arena, node.sort, bits, outer, k_on_right, &p_node, k_value) {
             return Some(rewritten);
         }
     }
@@ -693,11 +642,7 @@ fn fold_constant_chain<A: ExprArena + ?Sized>(
     };
     let value = |id: ExprId| -> Option<u128> { arena.get(id).and_then(|n| constant_value(&n)) };
 
-    let (p_op, p_left, p_right) = (
-        p.op,
-        p.operands.first().copied()?,
-        p.operands.get(1).copied()?,
-    );
+    let (p_op, p_left, p_right) = (p.op, p.operands.first().copied()?, p.operands.get(1).copied()?);
     let left_is_const = arena.op_of(p_left) == Some(ExprOp::Constant);
     let right_is_const = arena.op_of(p_right) == Some(ExprOp::Constant);
 
@@ -709,40 +654,24 @@ fn fold_constant_chain<A: ExprArena + ?Sized>(
                 // (x + c) OP k, constant on either side of p.
                 (ExprOp::Add, false, true) => {
                     let c = value(p_right)?;
-                    let folded = if add_k {
-                        c.wrapping_add(k)
-                    } else {
-                        c.wrapping_sub(k)
-                    };
+                    let folded = if add_k { c.wrapping_add(k) } else { c.wrapping_sub(k) };
                     Some(make(ExprOp::Add, p_left, new_const(folded)?))
                 }
                 (ExprOp::Add, true, false) => {
                     let c = value(p_left)?;
-                    let folded = if add_k {
-                        c.wrapping_add(k)
-                    } else {
-                        c.wrapping_sub(k)
-                    };
+                    let folded = if add_k { c.wrapping_add(k) } else { c.wrapping_sub(k) };
                     Some(make(ExprOp::Add, p_right, new_const(folded)?))
                 }
                 // (x - c) OP k
                 (ExprOp::Sub, false, true) => {
                     let c = value(p_right)?;
-                    let folded = if add_k {
-                        c.wrapping_sub(k)
-                    } else {
-                        c.wrapping_add(k)
-                    };
+                    let folded = if add_k { c.wrapping_sub(k) } else { c.wrapping_add(k) };
                     Some(make(ExprOp::Sub, p_left, new_const(folded)?))
                 }
                 // (c - x) OP k
                 (ExprOp::Sub, true, false) => {
                     let c = value(p_left)?;
-                    let folded = if add_k {
-                        c.wrapping_add(k)
-                    } else {
-                        c.wrapping_sub(k)
-                    };
+                    let folded = if add_k { c.wrapping_add(k) } else { c.wrapping_sub(k) };
                     Some(make(ExprOp::Sub, new_const(folded)?, p_right))
                 }
                 _ => None,
@@ -753,37 +682,21 @@ fn fold_constant_chain<A: ExprArena + ?Sized>(
             // k - (x + c) = (k - c) - x
             (ExprOp::Add, false, true) => {
                 let c = value(p_right)?;
-                Some(make(
-                    ExprOp::Sub,
-                    new_const(k.wrapping_sub(c))?,
-                    p_left,
-                ))
+                Some(make(ExprOp::Sub, new_const(k.wrapping_sub(c))?, p_left))
             }
             (ExprOp::Add, true, false) => {
                 let c = value(p_left)?;
-                Some(make(
-                    ExprOp::Sub,
-                    new_const(k.wrapping_sub(c))?,
-                    p_right,
-                ))
+                Some(make(ExprOp::Sub, new_const(k.wrapping_sub(c))?, p_right))
             }
             // k - (x - c) = (k + c) - x
             (ExprOp::Sub, false, true) => {
                 let c = value(p_right)?;
-                Some(make(
-                    ExprOp::Sub,
-                    new_const(k.wrapping_add(c))?,
-                    p_left,
-                ))
+                Some(make(ExprOp::Sub, new_const(k.wrapping_add(c))?, p_left))
             }
             // k - (c - x) = (k - c) + x
             (ExprOp::Sub, true, false) => {
                 let c = value(p_left)?;
-                Some(make(
-                    ExprOp::Add,
-                    p_right,
-                    new_const(k.wrapping_sub(c))?,
-                ))
+                Some(make(ExprOp::Add, p_right, new_const(k.wrapping_sub(c))?))
             }
             _ => None,
         },
@@ -829,12 +742,7 @@ mod tests {
         })
     }
 
-    fn unary(
-        arena: &ShardedExprArena,
-        op: ExprOp,
-        operand: ExprId,
-        bits: u16,
-    ) -> Result<ExprId, ExprArenaError> {
+    fn unary(arena: &ShardedExprArena, op: ExprOp, operand: ExprId, bits: u16) -> Result<ExprId, ExprArenaError> {
         arena.intern(ExprNode {
             sort: ExprSort::BitVec(bits),
             op,
@@ -860,7 +768,10 @@ mod tests {
     /// Reads a simplified node back as a bitvector constant value, so tests
     /// can assert exact folded results with plain `assert_eq!`.
     fn const_value_of(arena: &ShardedExprArena, id: ExprId) -> Option<u128> {
-        arena.get(id).filter(|n| n.op == ExprOp::Constant).map(|n| widen(&n.immediate))
+        arena
+            .get(id)
+            .filter(|n| n.op == ExprOp::Constant)
+            .map(|n| widen(&n.immediate))
     }
 
     #[test]
@@ -869,10 +780,7 @@ mod tests {
         let x = symbol(&arena, 1, 32)?;
         let not_x = unary(&arena, ExprOp::Not, x, 32)?;
         let root = binary(&arena, ExprOp::Add, x, not_x, 32)?;
-        assert_eq!(
-            const_value_of(&arena, deobfuscate(&arena, root)),
-            Some(bit_mask(32))
-        );
+        assert_eq!(const_value_of(&arena, deobfuscate(&arena, root)), Some(bit_mask(32)));
 
         // Operand order must not matter.
         let commuted = binary(&arena, ExprOp::Add, not_x, x, 32)?;
@@ -891,10 +799,7 @@ mod tests {
         let ones = konst(&arena, bit_mask(16), 16)?;
         let neg = binary(&arena, ExprOp::Sub, ones, x, 16)?;
         let root = binary(&arena, ExprOp::Add, neg, x, 16)?;
-        assert_eq!(
-            const_value_of(&arena, deobfuscate(&arena, root)),
-            Some(bit_mask(16))
-        );
+        assert_eq!(const_value_of(&arena, deobfuscate(&arena, root)), Some(bit_mask(16)));
         Ok(())
     }
 
@@ -999,10 +904,7 @@ mod tests {
         // x ^ -1 becomes the strength-reduced negation.
         let ones = konst(&arena, bit_mask(8), 8)?;
         let expected = binary(&arena, ExprOp::Sub, ones, x, 8)?;
-        assert_eq!(
-            deobfuscate(&arena, binary(&arena, ExprOp::Xor, x, ones, 8)?),
-            expected
-        );
+        assert_eq!(deobfuscate(&arena, binary(&arena, ExprOp::Xor, x, ones, 8)?), expected);
         Ok(())
     }
 
@@ -1013,13 +915,7 @@ mod tests {
         let (c1, c2) = (1000_u128, 37_u128);
         let inner = binary(&arena, ExprOp::Sub, konst(&arena, c2, 32)?, x, 32)?;
         let root = binary(&arena, ExprOp::Sub, konst(&arena, c1, 32)?, inner, 32)?;
-        let expected = binary(
-            &arena,
-            ExprOp::Add,
-            x,
-            konst(&arena, c1.wrapping_sub(c2), 32)?,
-            32,
-        )?;
+        let expected = binary(&arena, ExprOp::Add, x, konst(&arena, c1.wrapping_sub(c2), 32)?, 32)?;
         assert_eq!(deobfuscate(&arena, root), expected);
         Ok(())
     }
@@ -1126,10 +1022,7 @@ mod tests {
             Some(0)
         );
         assert_eq!(
-            const_value_of(
-                &arena,
-                deobfuscate(&arena, binary(&arena, ExprOp::LShr, x, big, 8)?)
-            ),
+            const_value_of(&arena, deobfuscate(&arena, binary(&arena, ExprOp::LShr, x, big, 8)?)),
             Some(0)
         );
         // Arithmetic shifts past the width depend on the sign bit and must
@@ -1147,31 +1040,13 @@ mod tests {
         let ones = konst(&arena, bit_mask(16), 16)?;
         let one = konst(&arena, 1, 16)?;
 
-        assert_eq!(
-            deobfuscate(&arena, binary(&arena, ExprOp::And, x, x, 16)?),
-            x
-        );
+        assert_eq!(deobfuscate(&arena, binary(&arena, ExprOp::And, x, x, 16)?), x);
         assert_eq!(deobfuscate(&arena, binary(&arena, ExprOp::Or, x, x, 16)?), x);
-        assert_eq!(
-            deobfuscate(&arena, binary(&arena, ExprOp::And, x, ones, 16)?),
-            x
-        );
-        assert_eq!(
-            deobfuscate(&arena, binary(&arena, ExprOp::Or, x, zero, 16)?),
-            x
-        );
-        assert_eq!(
-            deobfuscate(&arena, binary(&arena, ExprOp::Add, x, zero, 16)?),
-            x
-        );
-        assert_eq!(
-            deobfuscate(&arena, binary(&arena, ExprOp::Sub, x, zero, 16)?),
-            x
-        );
-        assert_eq!(
-            deobfuscate(&arena, binary(&arena, ExprOp::Mul, x, one, 16)?),
-            x
-        );
+        assert_eq!(deobfuscate(&arena, binary(&arena, ExprOp::And, x, ones, 16)?), x);
+        assert_eq!(deobfuscate(&arena, binary(&arena, ExprOp::Or, x, zero, 16)?), x);
+        assert_eq!(deobfuscate(&arena, binary(&arena, ExprOp::Add, x, zero, 16)?), x);
+        assert_eq!(deobfuscate(&arena, binary(&arena, ExprOp::Sub, x, zero, 16)?), x);
+        assert_eq!(deobfuscate(&arena, binary(&arena, ExprOp::Mul, x, one, 16)?), x);
         assert_eq!(
             const_value_of(&arena, deobfuscate(&arena, binary(&arena, ExprOp::And, x, zero, 16)?)),
             Some(0)
@@ -1197,8 +1072,7 @@ mod tests {
             operands: vec![x, y],
             immediate: Vec::new(),
         })?;
-        let x_plus_not_x =
-            binary(&arena, ExprOp::Add, x, unary(&arena, ExprOp::Not, x, 32)?, 32)?;
+        let x_plus_not_x = binary(&arena, ExprOp::Add, x, unary(&arena, ExprOp::Not, x, 32)?, 32)?;
         let root = arena.intern(ExprNode {
             sort: ExprSort::BitVec(32),
             op: ExprOp::Ite,
@@ -1312,11 +1186,7 @@ mod tests {
     /// evaluates to 0; that convention is only ever compared against itself
     /// because rewrites never change an operand's *value*, so relative
     /// equality still pins semantics.
-    fn evaluate(
-        arena: &ShardedExprArena,
-        id: ExprId,
-        env: &FxHashMap<u64, u128>,
-    ) -> Option<u128> {
+    fn evaluate(arena: &ShardedExprArena, id: ExprId, env: &FxHashMap<u64, u128>) -> Option<u128> {
         let node = arena.get(id)?;
         let signed = |value: u128, bits: u16| -> i128 {
             if bits > 0 && bits < 128 && value & (1_u128 << (bits - 1)) != 0 {
@@ -1436,11 +1306,7 @@ mod tests {
                 };
                 let hi = evaluate(arena, node.operands[0], env)?;
                 let lo = evaluate(arena, node.operands[1], env)?;
-                let value = if right_bits >= 128 {
-                    lo
-                } else {
-                    (hi << right_bits) | lo
-                };
+                let value = if right_bits >= 128 { lo } else { (hi << right_bits) | lo };
                 Some(value & bit_mask(out_bits))
             }
             ExprOp::Extract => {
@@ -1469,10 +1335,7 @@ mod tests {
                 let value = evaluate(arena, node.operands[0], env)?;
                 let extended = if node.op == ExprOp::ZExt {
                     value & bit_mask(out_bits)
-                } else if in_bits > 0
-                    && in_bits < 128
-                    && value & (1_u128 << (in_bits - 1)) != 0
-                {
+                } else if in_bits > 0 && in_bits < 128 && value & (1_u128 << (in_bits - 1)) != 0 {
                     (value | !bit_mask(in_bits)) & bit_mask(out_bits)
                 } else {
                     value & bit_mask(out_bits)
@@ -1491,8 +1354,7 @@ mod tests {
                 let value = if node.op == ExprOp::UDiv {
                     left / right
                 } else {
-                    (signed(left, bits).checked_div(signed(right, bits)).unwrap_or(0) as u128)
-                        & bit_mask(bits)
+                    (signed(left, bits).checked_div(signed(right, bits)).unwrap_or(0) as u128) & bit_mask(bits)
                 };
                 Some(value & bit_mask(bits))
             }
@@ -1520,9 +1382,7 @@ mod tests {
                      rng: &mut Rng,
                      at: u16,
                      next_symbol: &mut u64|
-         -> Result<ExprId, ExprArenaError> {
-            gen_bv(arena, rng, depth - 1, at, next_symbol)
-        };
+         -> Result<ExprId, ExprArenaError> { gen_bv(arena, rng, depth - 1, at, next_symbol) };
         match rng.below(100) {
             0..=14 => {
                 let op = [
@@ -1553,13 +1413,7 @@ mod tests {
                 let x = child(arena, rng, bits, next_symbol)?;
                 let count_bits = if rng.below(2) == 0 { 8 } else { bits };
                 let count = konst(arena, u128::from(rng.below(u64::from(bits) + 3)), count_bits)?;
-                let op = [
-                    ExprOp::Shl,
-                    ExprOp::LShr,
-                    ExprOp::AShr,
-                    ExprOp::RotL,
-                    ExprOp::RotR,
-                ][rng.below(5) as usize];
+                let op = [ExprOp::Shl, ExprOp::LShr, ExprOp::AShr, ExprOp::RotL, ExprOp::RotR][rng.below(5) as usize];
                 binary(arena, op, x, count, bits)
             }
             25..=29 => {
@@ -1599,28 +1453,10 @@ mod tests {
                     konst(arena, u128::from(rng.next_u64()), bits)?,
                 );
                 match rng.below(4) {
-                    0 => binary(
-                        arena,
-                        ExprOp::Add,
-                        binary(arena, ExprOp::Add, x, c1, bits)?,
-                        c2,
-                        bits,
-                    ),
-                    1 => binary(
-                        arena,
-                        ExprOp::Sub,
-                        binary(arena, ExprOp::Add, x, c1, bits)?,
-                        c2,
-                        bits,
-                    ),
+                    0 => binary(arena, ExprOp::Add, binary(arena, ExprOp::Add, x, c1, bits)?, c2, bits),
+                    1 => binary(arena, ExprOp::Sub, binary(arena, ExprOp::Add, x, c1, bits)?, c2, bits),
                     2 => binary(arena, ExprOp::Sub, c1, binary(arena, ExprOp::Sub, c2, x, bits)?, bits),
-                    _ => binary(
-                        arena,
-                        ExprOp::Add,
-                        binary(arena, ExprOp::Sub, c1, x, bits)?,
-                        c2,
-                        bits,
-                    ),
+                    _ => binary(arena, ExprOp::Add, binary(arena, ExprOp::Sub, c1, x, bits)?, c2, bits),
                 }
             }
             40..=44 => {
@@ -1629,23 +1465,10 @@ mod tests {
                     let a = 1 + rng.below(u64::from(bits) - 3) as u16;
                     let b = a + 1 + rng.below(u64::from(bits) - u64::from(a) - 2) as u16;
                     let x = child(arena, rng, a, next_symbol)?;
-                    let mid = extension(
-                        arena,
-                        if rng.below(2) == 0 {
-                            ExprOp::ZExt
-                        } else {
-                            ExprOp::SExt
-                        },
-                        x,
-                        b,
-                    )?;
+                    let mid = extension(arena, if rng.below(2) == 0 { ExprOp::ZExt } else { ExprOp::SExt }, x, b)?;
                     extension(
                         arena,
-                        if rng.below(2) == 0 {
-                            ExprOp::ZExt
-                        } else {
-                            ExprOp::SExt
-                        },
+                        if rng.below(2) == 0 { ExprOp::ZExt } else { ExprOp::SExt },
                         mid,
                         bits,
                     )
@@ -1654,11 +1477,7 @@ mod tests {
                     let x = child(arena, rng, narrow, next_symbol)?;
                     let wide = extension(
                         arena,
-                        if rng.below(2) == 0 {
-                            ExprOp::ZExt
-                        } else {
-                            ExprOp::SExt
-                        },
+                        if rng.below(2) == 0 { ExprOp::ZExt } else { ExprOp::SExt },
                         x,
                         bits,
                     )?;
@@ -1688,11 +1507,7 @@ mod tests {
                 );
                 let condition = arena.intern(ExprNode {
                     sort: ExprSort::Bool,
-                    op: if rng.below(2) == 0 {
-                        ExprOp::Eq
-                    } else {
-                        ExprOp::Ult
-                    },
+                    op: if rng.below(2) == 0 { ExprOp::Eq } else { ExprOp::Ult },
                     operands: vec![
                         child(arena, rng, bits, next_symbol)?,
                         child(arena, rng, bits, next_symbol)?,
@@ -1743,13 +1558,7 @@ mod tests {
                     let not_x = unary(arena, ExprOp::Not, x, bits)?;
                     binary(arena, ExprOp::Add, x, not_x, bits)
                 } else {
-                    let neg = binary(
-                        arena,
-                        ExprOp::Sub,
-                        konst(arena, bit_mask(bits), bits)?,
-                        x,
-                        bits,
-                    )?;
+                    let neg = binary(arena, ExprOp::Sub, konst(arena, bit_mask(bits), bits)?, x, bits)?;
                     binary(arena, ExprOp::Add, neg, x, bits)
                 }
             }
@@ -1803,10 +1612,7 @@ mod tests {
                 let before = evaluate(&arena, root, &env);
                 let after = evaluate(&arena, simplified, &env);
                 assert!(before.is_some(), "evaluator gap on tree {tree}");
-                assert_eq!(
-                    before, after,
-                    "value changed after simplification on tree {tree}"
-                );
+                assert_eq!(before, after, "value changed after simplification on tree {tree}");
             }
 
             // The fixpoint must be stable: simplifying again is a no-op.

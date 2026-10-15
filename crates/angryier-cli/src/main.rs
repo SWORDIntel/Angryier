@@ -313,8 +313,7 @@ fn help_output() -> String {
            crates     List all crates with implementation status\n  \
            run        {run_desc}\n  \
            help       Print this help message"
-    )
-    + if cfg!(feature = "inspect") {
+    ) + if cfg!(feature = "inspect") {
         "\n  doctor [--show-paths]         Report executable hash/build source identity\n  pe-address <PE> <VA> [length]   Strict VA/RVA/file-offset lookup\n  pe-imports <PE> [substring]   List exact IAT slot addresses and import names\n  dump-read <DMP> <VA> <length>   Read captured minidump bytes"
     } else {
         ""
@@ -364,8 +363,14 @@ fn run(args: &[String]) -> i32 {
             #[cfg(feature = "inspect")]
             {
                 match provenance::doctor(&args[2..]) {
-                    Ok(report) => { println!("{report}"); 0 }
-                    Err(error) => { eprintln!("error: {error}"); 1 }
+                    Ok(report) => {
+                        println!("{report}");
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        1
+                    }
                 }
             }
             #[cfg(not(feature = "inspect"))]
@@ -529,10 +534,12 @@ mod run_cmd {
         let (from_str, to_str) = raw
             .split_once('=')
             .ok_or_else(|| format!("invalid --redirect value '{raw}' (expected FROM=TO, e.g. 0x401050=0x401080)"))?;
-        let from = parse_u64_value(from_str)
-            .ok_or_else(|| format!("invalid --redirect source address '{from_str}' (expected decimal or 0x-prefixed hex)"))?;
-        let to = parse_u64_value(to_str)
-            .ok_or_else(|| format!("invalid --redirect target address '{to_str}' (expected decimal or 0x-prefixed hex)"))?;
+        let from = parse_u64_value(from_str).ok_or_else(|| {
+            format!("invalid --redirect source address '{from_str}' (expected decimal or 0x-prefixed hex)")
+        })?;
+        let to = parse_u64_value(to_str).ok_or_else(|| {
+            format!("invalid --redirect target address '{to_str}' (expected decimal or 0x-prefixed hex)")
+        })?;
         Ok((from, to))
     }
 
@@ -549,7 +556,9 @@ mod run_cmd {
             .unwrap_or(bytes_str.trim())
             .replace([' ', '\t'], "");
         if clean.is_empty() || clean.len() % 2 != 0 || !clean.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(format!("invalid --patch hex bytes '{bytes_str}' (expected even number of hex characters)"));
+            return Err(format!(
+                "invalid --patch hex bytes '{bytes_str}' (expected even number of hex characters)"
+            ));
         }
         let mut bytes = Vec::with_capacity(clean.len() / 2);
         for chunk in clean.as_bytes().chunks(2) {
@@ -742,12 +751,16 @@ mod run_cmd {
             } else if arg == "--handoff" {
                 let raw = value(args, &mut i, arg)?;
                 if handoff.replace(raw.to_string()).is_some() {
-                    return Err(format!("duplicate --handoff value '{raw}' (flag may only be given once)"));
+                    return Err(format!(
+                        "duplicate --handoff value '{raw}' (flag may only be given once)"
+                    ));
                 }
             } else if arg == "--handoff-target" {
                 let raw = value(args, &mut i, arg)?;
                 if handoff_target.replace(raw.to_string()).is_some() {
-                    return Err(format!("duplicate --handoff-target value '{raw}' (flag may only be given once)"));
+                    return Err(format!(
+                        "duplicate --handoff-target value '{raw}' (flag may only be given once)"
+                    ));
                 }
             } else if arg == "--json" {
                 if json {
@@ -1766,11 +1779,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
         println!("  binary sha256  : {}", handoff.binary_sha256);
 
         let targets: Vec<&StaticHandoffTarget> = if let Some(target_id) = &config.handoff_target {
-            let matched: Vec<_> = handoff
-                .targets
-                .iter()
-                .filter(|t| &t.target_id == target_id)
-                .collect();
+            let matched: Vec<_> = handoff.targets.iter().filter(|t| &t.target_id == target_id).collect();
             if matched.is_empty() {
                 eprintln!("[angryier][handoff][error] target '{target_id}' not found in handoff");
                 return 1;
@@ -1810,11 +1819,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
             let driver_targets = target.to_driver_targets(handoff.image_base);
             for driver_target in driver_targets {
                 let start = std::time::Instant::now();
-                let mut options = match driver_target.run_options_with_layout(
-                    layout,
-                    config.steps,
-                    config.states,
-                ) {
+                let mut options = match driver_target.run_options_with_layout(layout, config.steps, config.states) {
                     Ok(opts) => opts,
                     Err(e) => {
                         eprintln!("[angryier][target][error] failed to construct run options: {e}");
@@ -1936,10 +1941,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
         }
 
         if !config.stubs.is_empty() {
-            println!(
-                "[angryier][stub] applying {} function stub(s)",
-                config.stubs.len()
-            );
+            println!("[angryier][stub] applying {} function stub(s)", config.stubs.len());
             for (address, ret_val) in &config.stubs {
                 process.stub_function(*address, *ret_val);
                 println!("  {address:#x} -> ret {ret_val:#x}");
@@ -2158,7 +2160,16 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
         #[test]
         fn rejects_duplicate_handoff_flags() {
             assert!(parse(&args(&["./driver.sys", "--handoff", "t1.json", "--handoff", "t2.json"])).is_err());
-            assert!(parse(&args(&["./driver.sys", "--handoff-target", "T1", "--handoff-target", "T2"])).is_err());
+            assert!(
+                parse(&args(&[
+                    "./driver.sys",
+                    "--handoff-target",
+                    "T1",
+                    "--handoff-target",
+                    "T2"
+                ]))
+                .is_err()
+            );
             assert!(parse(&args(&["./driver.sys", "--json", "--json"])).is_err());
             assert!(parse(&args(&["./driver.sys", "--arch", "x64", "--arch", "x86"])).is_err());
         }

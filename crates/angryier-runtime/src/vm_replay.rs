@@ -10,8 +10,8 @@
 //! Potentially faulting loads remain replay obligations even on success.
 
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
-use angryier_execution::{constant_value, SymbolicArena};
-use angryier_expr::{ExprArena, ExprSort, vm_effects::VmEffectKind};
+use angryier_execution::{SymbolicArena, constant_value};
+use angryier_expr::{ExprSort, vm_effects::VmEffectKind};
 use angryier_ir::vm_trace::VmTraceCaveat;
 use angryier_memory::{ByteValue, LayeredMemory};
 use angryier_state::RegisterState;
@@ -50,11 +50,8 @@ pub struct VmConcreteReplayReport {
     pub observed_input_only: bool,
 }
 
-fn constant(arena: &SymbolicArena, expr: angryier_types::ExprId, index: usize)
-    -> Result<u64, VmReplayError>
-{
-    constant_value(arena, expr)
-        .map_err(|_| VmReplayError::UnresolvedSymbolicValue { effect: index })
+fn constant(arena: &SymbolicArena, expr: angryier_types::ExprId, index: usize) -> Result<u64, VmReplayError> {
+    constant_value(arena, expr).map_err(|_| VmReplayError::UnresolvedSymbolicValue { effect: index })
 }
 
 /// Test the candidate's concrete effects against a separate native-execution
@@ -82,7 +79,11 @@ pub fn check_vm_concrete_replay(
     {
         return Err(VmReplayError::ExistingFidelityDebt);
     }
-    if candidate.caveats.iter().any(|c| matches!(c, VmTraceCaveat::ExecutableCodeEpochChanged { .. })) {
+    if candidate
+        .caveats
+        .iter()
+        .any(|c| matches!(c, VmTraceCaveat::ExecutableCodeEpochChanged { .. }))
+    {
         return Err(VmReplayError::ExecutableChanged);
     }
 
@@ -95,20 +96,21 @@ pub fn check_vm_concrete_replay(
         let step = candidate.effect_steps[index];
         match effect.kind {
             VmEffectKind::Register { register } => {
-                let raw = registers.read(register)
+                let raw = registers
+                    .read(register)
                     .map_err(|_| VmReplayError::RegisterWriteFailed { register })?;
-                let expr = arena.get(effect.value)
+                let expr = arena
+                    .get(effect.value)
                     .ok_or(VmReplayError::UnresolvedSymbolicValue { effect: index })?;
                 let ExprSort::BitVec(width) = expr.sort else {
                     return Err(VmReplayError::RegisterTypeMismatch { register });
                 };
-                if raw.is_empty() || raw.len() > 8
-                    || usize::from(width).div_ceil(8) != raw.len()
-                {
+                if raw.is_empty() || raw.len() > 8 || usize::from(width).div_ceil(8) != raw.len() {
                     return Err(VmReplayError::RegisterTypeMismatch { register });
                 }
                 let value = constant(arena, effect.value, index)?;
-                registers = registers.write(register, &value.to_le_bytes()[..raw.len()])
+                registers = registers
+                    .write(register, &value.to_le_bytes()[..raw.len()])
                     .map_err(|_| VmReplayError::RegisterWriteFailed { register })?;
             }
             VmEffectKind::Memory { address, bytes } => {
@@ -117,10 +119,15 @@ pub fn check_vm_concrete_replay(
                 }
                 let at = constant(arena, address, index)?;
                 let value = constant(arena, effect.value, index)?;
-                let concrete: Vec<ByteValue> = value.to_le_bytes()
-                    .iter().take(bytes as usize)
-                    .copied().map(ByteValue::Concrete).collect();
-                memory = memory.write(at, &concrete)
+                let concrete: Vec<ByteValue> = value
+                    .to_le_bytes()
+                    .iter()
+                    .take(bytes as usize)
+                    .copied()
+                    .map(ByteValue::Concrete)
+                    .collect();
+                memory = memory
+                    .write(at, &concrete)
                     .map_err(|_| VmReplayError::MemoryWriteFailed { address: at })?;
                 touched.push((at, bytes as usize));
             }
@@ -150,7 +157,10 @@ pub fn check_vm_concrete_replay(
 
     // Native RIP is a separate control-flow obligation: no register write
     // was fabricated merely to make the replayed register file agree.
-    let recorded_pc = capture.final_state.registers.read(register_id::RIP.0)
+    let recorded_pc = capture
+        .final_state
+        .registers
+        .read(register_id::RIP.0)
         .map_err(|_| VmReplayError::FinalPcMismatch)?;
     if recorded_pc.as_slice() != capture.window.exit.native_pc.to_le_bytes() {
         return Err(VmReplayError::FinalPcMismatch);
@@ -161,9 +171,13 @@ pub fn check_vm_concrete_replay(
         if register.0 == register_id::RIP.0 {
             continue;
         }
-        let got = registers.read(register.0)
+        let got = registers
+            .read(register.0)
             .map_err(|_| VmReplayError::RegisterMismatch { register: register.0 })?;
-        let actual = capture.final_state.registers.read(register.0)
+        let actual = capture
+            .final_state
+            .registers
+            .read(register.0)
             .map_err(|_| VmReplayError::RegisterMismatch { register: register.0 })?;
         if got != actual {
             return Err(VmReplayError::RegisterMismatch { register: register.0 });
@@ -172,9 +186,13 @@ pub fn check_vm_concrete_replay(
     }
 
     for &(at, bytes) in &touched {
-        let replay = memory.read(at, bytes)
+        let replay = memory
+            .read(at, bytes)
             .map_err(|_| VmReplayError::MissingMemoryEvidence { address: at })?;
-        let final_bytes = capture.final_state.memory.read(at, bytes)
+        let final_bytes = capture
+            .final_state
+            .memory
+            .read(at, bytes)
             .map_err(|_| VmReplayError::MissingMemoryEvidence { address: at })?;
         if replay != final_bytes {
             return Err(VmReplayError::MemoryMismatch { address: at });

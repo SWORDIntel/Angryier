@@ -71,10 +71,12 @@ name = "angryier-cli"
 version = "1.0.0"
 dependencies = [
  "angryier",
+ "angryier-loader",
  "angryier-models",
  "angryier-runtime",
  "angryier-types",
  "mlua",
+ "sha2",
 ]
 
 [[package]]

@@ -2,8 +2,8 @@
 
 //! Win32 DeviceIoControl and asynchronous I/O simulation models.
 
-use crate::{SimProcedure, SimResult, SimState};
 use super::file::Win32HandleTable;
+use crate::{SimProcedure, SimResult, SimState};
 
 /// `BOOL DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID lpInBuffer, DWORD nInBufferSize, LPVOID lpOutBuffer, DWORD nOutBufferSize, LPDWORD lpBytesReturned, LPOVERLAPPED lpOverlapped)`
 pub struct DeviceIoControlProcedure {

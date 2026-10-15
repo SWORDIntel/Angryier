@@ -10,7 +10,9 @@ fn number(text: &str) -> Result<u64, String> {
     if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
         u64::from_str_radix(hex, 16).map_err(|_| format!("invalid hexadecimal address: {text}"))
     } else {
-        value.parse::<u64>().map_err(|_| format!("invalid unsigned integer: {text}"))
+        value
+            .parse::<u64>()
+            .map_err(|_| format!("invalid unsigned integer: {text}"))
     }
 }
 
@@ -37,8 +39,12 @@ pub fn pe_address(args: &[String]) -> Result<String, String> {
     let mapping = PeAddressMap::parse(&file).map_err(|error| format!("invalid PE image: {error:?}"))?;
     let va = number(&args[1])?;
     let len = length(args.get(2), 0, 256)?;
-    let rva = mapping.va_to_rva(va).map_err(|error| format!("VA not in image: {error:?}"))?;
-    let location = mapping.locate_va(va).map_err(|error| format!("unmapped VA: {error:?}"))?;
+    let rva = mapping
+        .va_to_rva(va)
+        .map_err(|error| format!("VA not in image: {error:?}"))?;
+    let location = mapping
+        .locate_va(va)
+        .map_err(|error| format!("unmapped VA: {error:?}"))?;
     let description = match location {
         PeLocation::Header { file_offset } => format!("header file_offset=0x{file_offset:x}"),
         PeLocation::Section { index, file_offset } => {
@@ -46,7 +52,10 @@ pub fn pe_address(args: &[String]) -> Result<String, String> {
             format!("section={} file_offset=0x{file_offset:x}", section.name)
         }
         PeLocation::ZeroFill { index } => {
-            format!("section={} zero-fill (no original file bytes)", mapping.sections()[index].name)
+            format!(
+                "section={} zero-fill (no original file bytes)",
+                mapping.sections()[index].name
+            )
         }
     };
     let mut output = format!(
@@ -54,7 +63,8 @@ pub fn pe_address(args: &[String]) -> Result<String, String> {
         mapping.image_base()
     );
     if len != 0 {
-        let bytes = mapping.bytes_at_va(&file, va, len)
+        let bytes = mapping
+            .bytes_at_va(&file, va, len)
             .map_err(|error| format!("cannot read {len} bytes at VA: {error:?}"))?;
         output.push_str(&format!("\nbytes[{len}]={}", hex(bytes)));
     }
@@ -68,17 +78,14 @@ pub fn pe_imports(args: &[String]) -> Result<String, String> {
         return Err("usage: angryier pe-imports <image.exe> [substring]".to_string());
     }
     use angryier_loader::{ImageLoader, Pe32Loader, PeImportKind};
-    let bytes = std::fs::read(&args[0])
-        .map_err(|e| format!("cannot open PE: {e}"))?;
-    let map = PeAddressMap::parse(&bytes)
-        .map_err(|e| format!("PE address map: {e:?}"))?;
-    let image = Pe32Loader::new().load(&bytes)
+    let bytes = std::fs::read(&args[0]).map_err(|e| format!("cannot open PE: {e}"))?;
+    let map = PeAddressMap::parse(&bytes).map_err(|e| format!("PE address map: {e:?}"))?;
+    let image = Pe32Loader::new()
+        .load(&bytes)
         .map_err(|e| format!("PE import parse: {e}"))?;
     let imports = image.pe_imports().ok_or("not a PE image")?;
     let filter = args.get(1).map(|s| s.to_ascii_lowercase());
-    let mut out = format!(
-        "image_base=0x{:x} imports={}\n", map.image_base(), imports.len()
-    );
+    let mut out = format!("image_base=0x{:x} imports={}\n", map.image_base(), imports.len());
     let mut displayed = 0usize;
     for entry in imports {
         let symbol = match &entry.kind {
@@ -86,10 +93,14 @@ pub fn pe_imports(args: &[String]) -> Result<String, String> {
             PeImportKind::Ordinal(ordinal) => format!("#{ordinal}"),
         };
         let qualified = format!("{}!{}", entry.dll, symbol);
-        if filter.as_ref().is_some_and(|query| !qualified.to_ascii_lowercase().contains(query)) {
+        if filter
+            .as_ref()
+            .is_some_and(|query| !qualified.to_ascii_lowercase().contains(query))
+        {
             continue;
         }
-        let slot = map.rva_to_va(entry.iat_rva)
+        let slot = map
+            .rva_to_va(entry.iat_rva)
             .map_err(|e| format!("IAT RVA overflow: {e:?}"))?;
         let offset = match map.locate_rva(entry.iat_rva) {
             Ok(PeLocation::Header { file_offset } | PeLocation::Section { file_offset, .. }) => {
@@ -98,7 +109,10 @@ pub fn pe_imports(args: &[String]) -> Result<String, String> {
             Ok(PeLocation::ZeroFill { .. }) => "no-file-byte".to_string(),
             Err(_) => "unmapped".to_string(),
         };
-        out.push_str(&format!("slot=0x{slot:x} rva=0x{:x} file_offset={offset} import={qualified}\n", entry.iat_rva));
+        out.push_str(&format!(
+            "slot=0x{slot:x} rva=0x{:x} file_offset={offset} import={qualified}\n",
+            entry.iat_rva
+        ));
         displayed += 1;
         if displayed > 100_000 {
             return Err("too many imports to display safely".to_string());
@@ -114,9 +128,9 @@ pub fn minidump_read(args: &[String]) -> Result<String, String> {
     }
     let addr = number(&args[1])?;
     let len = length(args.get(2), 0, 4096)?;
-    let mut dump = MiniDumpFile::open(&args[0])
-        .map_err(|error| format!("cannot inspect dump: {error:?}"))?;
-    let bytes = dump.read(addr, len)
+    let mut dump = MiniDumpFile::open(&args[0]).map_err(|error| format!("cannot inspect dump: {error:?}"))?;
+    let bytes = dump
+        .read(addr, len)
         .map_err(|error| format!("requested memory is unavailable in dump: {error:?}"))?;
     Ok(format!(
         "captured va=0x{addr:x} length={} regions={} file_bytes={}\n{}",

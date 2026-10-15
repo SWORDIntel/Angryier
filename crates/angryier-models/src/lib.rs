@@ -449,7 +449,7 @@ impl SimState {
             SimResult::Continue(s) => *self = s.clone(),
             SimResult::Return(val) => self.return_value = Some(*val),
             SimResult::Exit => self.exited = true,
-            SimResult::Blocked { .. } | SimResult::Unsupported(_) => {},
+            SimResult::Blocked { .. } | SimResult::Unsupported(_) => {}
         }
     }
 }

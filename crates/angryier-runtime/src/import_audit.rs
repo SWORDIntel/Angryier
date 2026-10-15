@@ -36,10 +36,17 @@ pub struct ImportFinding {
 pub fn is_userland_dll(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "kernel32.dll" | "kernelbase.dll" | "ntdll.dll" |
-        "user32.dll" | "gdi32.dll" | "gdi32full.dll" |
-        "advapi32.dll" | "ole32.dll" | "combase.dll" |
-        "ws2_32.dll" | "ucrtbase.dll"
+        "kernel32.dll"
+            | "kernelbase.dll"
+            | "ntdll.dll"
+            | "user32.dll"
+            | "gdi32.dll"
+            | "gdi32full.dll"
+            | "advapi32.dll"
+            | "ole32.dll"
+            | "combase.dll"
+            | "ws2_32.dll"
+            | "ucrtbase.dll"
     )
 }
 
@@ -76,11 +83,26 @@ mod tests {
 
     #[test]
     fn stateful_api_imports_never_claim_stub_equivalence() {
-        assert_eq!(classify("KERNEL32.dll", "CreateThread", false), ImportBehavior::UnsupportedUserland);
-        assert_eq!(classify("kernelbase.dll", "WaitForSingleObject", false), ImportBehavior::UnsupportedUserland);
-        assert_eq!(classify("gdi32.dll", "GdiplusStartup", false), ImportBehavior::UnsupportedUserland);
-        assert_eq!(classify("KERNEL32.dll", "CreateThread", true), ImportBehavior::ExplicitHook);
-        assert_eq!(classify("ntoskrnl.exe", "DbgPrint", false), ImportBehavior::SyntheticReturn);
+        assert_eq!(
+            classify("KERNEL32.dll", "CreateThread", false),
+            ImportBehavior::UnsupportedUserland
+        );
+        assert_eq!(
+            classify("kernelbase.dll", "WaitForSingleObject", false),
+            ImportBehavior::UnsupportedUserland
+        );
+        assert_eq!(
+            classify("gdi32.dll", "GdiplusStartup", false),
+            ImportBehavior::UnsupportedUserland
+        );
+        assert_eq!(
+            classify("KERNEL32.dll", "CreateThread", true),
+            ImportBehavior::ExplicitHook
+        );
+        assert_eq!(
+            classify("ntoskrnl.exe", "DbgPrint", false),
+            ImportBehavior::SyntheticReturn
+        );
         assert_eq!(
             classify("kernel32.dll", "IsProcessorFeaturePresent", false),
             ImportBehavior::ApproximateScalar,

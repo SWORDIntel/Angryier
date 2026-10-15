@@ -521,8 +521,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             let (_, entry) = pair?;
             let addr = entry.get::<i64>("addr")? as u64;
             let path: String = entry.get("path")?;
-            let bytes = std::fs::read(&path)
-                .map_err(|e| mlua::Error::external(format!("load_mem {path}: {e}")))?;
+            let bytes = std::fs::read(&path).map_err(|e| mlua::Error::external(format!("load_mem {path}: {e}")))?;
             let mem = &process.state.memory;
             process.state.memory = match mem.load_concrete(addr, &bytes) {
                 Ok(m) => m,
@@ -685,10 +684,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                 };
                 (addr, ret)
             } else if let Value::Table(entry) = v {
-                let a = entry
-                    .get::<Value>("addr")
-                    .ok()
-                    .and_then(|v| utils::parse_lua_u64(&v));
+                let a = entry.get::<Value>("addr").ok().and_then(|v| utils::parse_lua_u64(&v));
                 let r = entry
                     .get::<Value>("ret")
                     .or_else(|_| entry.get::<Value>("value"))
@@ -751,14 +747,8 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             let (addr, data) = if let Some(addr) = utils::parse_lua_u64(&k) {
                 (addr, v)
             } else if let Value::Table(entry) = &v {
-                let a = entry
-                    .get::<Value>("addr")
-                    .ok()
-                    .and_then(|v| utils::parse_lua_u64(&v));
-                let val = entry
-                    .get::<Value>("bytes")
-                    .or_else(|_| entry.get::<Value>("data"))
-                    .ok();
+                let a = entry.get::<Value>("addr").ok().and_then(|v| utils::parse_lua_u64(&v));
+                let val = entry.get::<Value>("bytes").or_else(|_| entry.get::<Value>("data")).ok();
                 if let (Some(addr), Some(val)) = (a, val) {
                     (addr, val)
                 } else {
@@ -1754,18 +1744,14 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
                     .read(arena.as_ref(), dump_addr + off as u64, (n * 8) as u16)
                 {
                     if let Some(node) = arena.get(expr) {
-                        if node.op == angryier_expr::ExprOp::Constant
-                            && node.immediate.len() >= n
-                        {
-                            outbytes[off..off + n]
-                                .copy_from_slice(&node.immediate[..n]);
+                        if node.op == angryier_expr::ExprOp::Constant && node.immediate.len() >= n {
+                            outbytes[off..off + n].copy_from_slice(&node.immediate[..n]);
                         }
                     }
                 }
             }
-            std::fs::write(&dump_path, &outbytes).map_err(|e| {
-                mlua::Error::external(format!("memory_dump_out {dump_path}: {e}"))
-            })?;
+            std::fs::write(&dump_path, &outbytes)
+                .map_err(|e| mlua::Error::external(format!("memory_dump_out {dump_path}: {e}")))?;
             out.set("memory_dump", dump_path.as_str())?;
         }
     }

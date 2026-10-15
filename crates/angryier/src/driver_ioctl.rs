@@ -294,7 +294,9 @@ impl DriverIoctlVerdict {
                 }
                 json.push_str(&format!(
                     "{{\"offset\":{},\"size\":{},\"constraint\":\"{}\"}}",
-                    oc.offset, oc.size, escape_json(&oc.constraint)
+                    oc.offset,
+                    oc.size,
+                    escape_json(&oc.constraint)
                 ));
             }
             json.push_str("]},");
@@ -385,7 +387,10 @@ impl DriverIoctlTarget {
         }
 
         let mut poke = vec![
-            (DEVICE_OBJECT_ADDR + layout.device_object_device_extension, DEVICE_EXTENSION_ADDR),
+            (
+                DEVICE_OBJECT_ADDR + layout.device_object_device_extension,
+                DEVICE_EXTENSION_ADDR,
+            ),
             (IRP_ADDR + layout.irp_system_buffer, INPUT_BUFFER_ADDR),
             (IRP_ADDR + layout.irp_user_buffer, INPUT_BUFFER_ADDR),
             (IRP_ADDR + layout.irp_current_stack_location, IRP_STACK_ADDR),
@@ -514,7 +519,9 @@ impl DriverIoctlTarget {
                 .map(str::to_string)
                 .unwrap_or_else(|| "0000000000000000000000000000000000000000000000000000000000000000".to_string()),
             verdict,
-            sink_name: sink_name.map(str::to_string).unwrap_or_else(|| "unknown_sink".to_string()),
+            sink_name: sink_name
+                .map(str::to_string)
+                .unwrap_or_else(|| "unknown_sink".to_string()),
             execution_time_sec: if elapsed_secs >= 0.0 { elapsed_secs } else { 0.0 },
             ioctl_code: self.ioctl_code,
             handler_va: self.handler_va,
@@ -530,11 +537,7 @@ impl DriverIoctlTarget {
     ///
     /// If `candidate_ioctl_codes` is empty, emits a single target with symbolic IOCTL (`None`).
     /// Otherwise, emits one target per candidate code.
-    pub fn from_static_candidates(
-        handler_va: u64,
-        sink_va: u64,
-        candidate_ioctl_codes: &[u32],
-    ) -> Vec<Self> {
+    pub fn from_static_candidates(handler_va: u64, sink_va: u64, candidate_ioctl_codes: &[u32]) -> Vec<Self> {
         if candidate_ioctl_codes.is_empty() {
             vec![Self {
                 handler_va,
@@ -699,9 +702,12 @@ impl StaticHandoff {
                 handler_rva_str
                     .strip_prefix("0x")
                     .or_else(|| handler_rva_str.strip_prefix("0X"))
-                    .ok_or_else(|| ApiError::InvalidArgument(format!("targets[{idx}].handler_rva must be 0x-prefixed hex")))?
-                , 16
-            ).map_err(|e| ApiError::InvalidArgument(format!("targets[{idx}] invalid handler_rva: {e}")))?;
+                    .ok_or_else(|| {
+                        ApiError::InvalidArgument(format!("targets[{idx}].handler_rva must be 0x-prefixed hex"))
+                    })?,
+                16,
+            )
+            .map_err(|e| ApiError::InvalidArgument(format!("targets[{idx}] invalid handler_rva: {e}")))?;
 
             let sink_rva_str = item
                 .get("sink_rva")
@@ -711,9 +717,12 @@ impl StaticHandoff {
                 sink_rva_str
                     .strip_prefix("0x")
                     .or_else(|| sink_rva_str.strip_prefix("0X"))
-                    .ok_or_else(|| ApiError::InvalidArgument(format!("targets[{idx}].sink_rva must be 0x-prefixed hex")))?
-                , 16
-            ).map_err(|e| ApiError::InvalidArgument(format!("targets[{idx}] invalid sink_rva: {e}")))?;
+                    .ok_or_else(|| {
+                        ApiError::InvalidArgument(format!("targets[{idx}].sink_rva must be 0x-prefixed hex"))
+                    })?,
+                16,
+            )
+            .map_err(|e| ApiError::InvalidArgument(format!("targets[{idx}] invalid sink_rva: {e}")))?;
 
             let sink_name = item
                 .get("sink_name")
@@ -727,7 +736,10 @@ impl StaticHandoff {
                 .map(|arr| arr.iter().filter_map(|c| c.as_u32()).collect())
                 .unwrap_or_default();
 
-            let static_finding_rule = item.get("static_finding_rule").and_then(|v| v.as_str()).map(str::to_string);
+            let static_finding_rule = item
+                .get("static_finding_rule")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             let confidence = item.get("confidence").and_then(|v| v.as_str()).map(str::to_string);
             let interprocedural_depth = item.get("interprocedural_depth").and_then(|v| v.as_u32()).unwrap_or(0);
             let timeout_sec = item.get("timeout_sec").and_then(|v| v.as_u32()).unwrap_or(60);
@@ -851,26 +863,21 @@ impl StaticHandoff {
                 .map(|arr| arr.iter().filter_map(|c| c.as_u32()).collect())
                 .unwrap_or_default();
 
-            let static_finding_rule = hint
-                .get("static_rule")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let static_finding_rule = hint.get("static_rule").and_then(|v| v.as_str()).map(str::to_string);
 
-            let confidence = hint
-                .get("confidence")
-                .and_then(|v| match v {
-                    SimpleJson::Number(n) => {
-                        if *n >= 0.9 {
-                            Some("HIGH".to_string())
-                        } else if *n >= 0.5 {
-                            Some("MEDIUM".to_string())
-                        } else {
-                            Some("LOW".to_string())
-                        }
+            let confidence = hint.get("confidence").and_then(|v| match v {
+                SimpleJson::Number(n) => {
+                    if *n >= 0.9 {
+                        Some("HIGH".to_string())
+                    } else if *n >= 0.5 {
+                        Some("MEDIUM".to_string())
+                    } else {
+                        Some("LOW".to_string())
                     }
-                    SimpleJson::String(s) => Some(s.clone()),
-                    _ => None,
-                });
+                }
+                SimpleJson::String(s) => Some(s.clone()),
+                _ => None,
+            });
 
             let interprocedural_depth = if hint
                 .get("interprocedural_gap")
@@ -1075,8 +1082,7 @@ impl<'a> JsonParser<'a> {
                             let hex = std::str::from_utf8(&self.chars[self.pos..self.pos + 4])
                                 .map_err(|e| format!("utf8 error in \\u: {e}"))?;
                             self.pos += 4;
-                            let cp = u32::from_str_radix(hex, 16)
-                                .map_err(|e| format!("invalid hex in \\u: {e}"))?;
+                            let cp = u32::from_str_radix(hex, 16).map_err(|e| format!("invalid hex in \\u: {e}"))?;
                             let ch = char::from_u32(cp).ok_or_else(|| "invalid unicode codepoint".to_string())?;
                             s.push(ch);
                         }
@@ -1112,8 +1118,7 @@ impl<'a> JsonParser<'a> {
                 self.pos += 1;
             }
         }
-        let s = std::str::from_utf8(&self.chars[start..self.pos])
-            .map_err(|e| format!("invalid number: {e}"))?;
+        let s = std::str::from_utf8(&self.chars[start..self.pos]).map_err(|e| format!("invalid number: {e}"))?;
         let n = s.parse::<f64>().map_err(|e| format!("failed to parse float: {e}"))?;
         Ok(SimpleJson::Number(n))
     }
@@ -1374,12 +1379,7 @@ mod tests {
         let sink_rva = 0x2000;
 
         // Multiple candidates
-        let targets = DriverIoctlTarget::from_static_rva_candidates(
-            base,
-            handler_rva,
-            sink_rva,
-            &[0x220004, 0x220008],
-        );
+        let targets = DriverIoctlTarget::from_static_rva_candidates(base, handler_rva, sink_rva, &[0x220004, 0x220008]);
         assert_eq!(targets.len(), 2);
         assert_eq!(targets[0].handler_va, 0x140001000);
         assert_eq!(targets[0].sink_va, 0x140002000);
@@ -1387,11 +1387,7 @@ mod tests {
         assert_eq!(targets[1].ioctl_code, Some(0x220008));
 
         // Empty candidates -> single target with None
-        let targets_empty = DriverIoctlTarget::from_static_candidates(
-            0x140001000,
-            0x140002000,
-            &[],
-        );
+        let targets_empty = DriverIoctlTarget::from_static_candidates(0x140001000, 0x140002000, &[]);
         assert_eq!(targets_empty.len(), 1);
         assert_eq!(targets_empty[0].ioctl_code, None);
     }
@@ -1469,7 +1465,10 @@ mod tests {
         }"#;
 
         let handoff = StaticHandoff::from_json(json).expect("valid handoff JSON");
-        assert_eq!(handoff.binary_sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            handoff.binary_sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         assert_eq!(handoff.binary_name.as_deref(), Some("VBoxUSBMon.sys"));
         assert_eq!(handoff.arch, "x64");
         assert_eq!(handoff.image_base, 0x140000000);

@@ -118,7 +118,8 @@ impl TriageEngine {
             PrimitiveKind::UseAfterFree => (
                 format!("ptr 0x{ptr:x} dereference at 0x{caller:x}"),
                 "Read/write access to reclaimed pool memory".to_string(),
-                "Stale pointer retained after free was invoked; subsequent operation accessed invalid chunk.".to_string(),
+                "Stale pointer retained after free was invoked; subsequent operation accessed invalid chunk."
+                    .to_string(),
                 "Ensure references to object are invalidated or cleared before releasing backing storage.".to_string(),
             ),
             _ => (
@@ -152,7 +153,10 @@ impl TriageEngine {
         c.push_str(" * Synthesized by Angryier Triage Engine (Gate P15: KP15-152)\n");
         c.push_str(&format!(" * Target: {target_name}\n"));
         c.push_str(&format!(" * Vulnerability Class: {:?}\n", proof.kind));
-        c.push_str(&format!(" * Fault Instruction: 0x{:x} ({})\n", proof.fault_address, proof.instruction_mnemonic));
+        c.push_str(&format!(
+            " * Fault Instruction: 0x{:x} ({})\n",
+            proof.fault_address, proof.instruction_mnemonic
+        ));
         c.push_str(&format!(" * Root Cause: {}\n", proof.root_cause_explanation));
         c.push_str(&format!(" * Remediation: {}\n", proof.remediation_guidance));
         c.push_str(" *\n");
@@ -213,7 +217,9 @@ impl TriageEngine {
                 c.push_str("        volatile uint32_t canary = 0xCAFEBABE;\n");
                 c.push_str("        uint64_t target = (uint64_t)&canary;\n");
                 c.push_str("        if (target >= input_target_ptr) {\n");
-                c.push_str("            printf(\"[+] Boundary check held: target is outside unauthorized range.\\n\");\n");
+                c.push_str(
+                    "            printf(\"[+] Boundary check held: target is outside unauthorized range.\\n\");\n",
+                );
                 c.push_str("        }\n");
             }
             PrimitiveKind::DoubleFree => {

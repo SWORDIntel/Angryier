@@ -15,11 +15,11 @@
 //! The runtime is generic over the decoder backend so it works with both
 //! native XED (behind feature gates) and synthetic decoders for testing.
 
-pub mod import_audit;
-pub mod capture;
 pub mod call_audit;
-pub mod vm_observe;
+pub mod capture;
+pub mod import_audit;
 pub mod vm_materialize;
+pub mod vm_observe;
 pub mod vm_replay;
 
 use std::collections::BTreeMap;
@@ -27,11 +27,11 @@ use std::time::Duration;
 
 use angryier_arch::{AccessKind, DecodedInstruction, Decoder, MemoryBase, MemoryIndex, Operand, OperandKind};
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
+pub use angryier_execution::SymbolicSessionMemory;
 use angryier_execution::{
     ConcolicEvaluator, ConcolicImage, ConcolicSource, ConcreteInterpreter, ExecutionEngine, ExecutionMode,
     ExecutionOutcome, PathConstraint, SymbolBinding, SymbolicArena, SymbolicBranch, SymbolicEvaluator,
 };
-pub use angryier_execution::SymbolicSessionMemory;
 use angryier_expr::{ExprNode, ExprOp, ExprSort};
 use angryier_ir::{BasicSemanticLowerer, IrBlock, IrInstruction, IrOp};
 use angryier_loader::{Elf64Loader, ImageLoader, LoadedImage, Symbol};
@@ -88,18 +88,17 @@ pub mod isanity_uimm8_modrm;
 pub mod isanity_x87_memory;
 #[cfg(feature = "xed")]
 pub mod isanity_zero_operand;
-pub mod pipeline_speculation;
-pub mod speculative_concolic;
-pub mod triage;
-pub mod speculative_fork;
-pub mod speculative_summary;
 pub mod jni;
 pub mod jni_reachability;
+pub mod pipeline_speculation;
+pub mod speculative_concolic;
+pub mod speculative_fork;
+pub mod speculative_summary;
+pub mod triage;
 
 pub use jni_reachability::{
-    JniArgumentTaint, JniPathStatus, JniReachabilityConfig, JniReachabilityResult,
-    JniReplayCapsuleMetadata, JniSinkDescriptor, JniSinkKind, JniSinkReachabilityAnalyzer,
-    SinkConstraintPredicate, SinkControlledParam,
+    JniArgumentTaint, JniPathStatus, JniReachabilityConfig, JniReachabilityResult, JniReplayCapsuleMetadata,
+    JniSinkDescriptor, JniSinkKind, JniSinkReachabilityAnalyzer, SinkConstraintPredicate, SinkControlledParam,
 };
 
 /// Default stack size in bytes (64 KiB).
@@ -219,11 +218,7 @@ where
 /// stack, NOT a proof of the call/return relationship. An ambiguous window
 /// deliberately yields None instead of choosing an arbitrary nearest code
 /// pointer. The caller must record Concretized debt on any such recovery.
-fn select_bounded_stack_return<Read, Valid>(
-    rsp: Address,
-    mut read: Read,
-    valid: Valid,
-) -> Option<(Address, Address)>
+fn select_bounded_stack_return<Read, Valid>(rsp: Address, mut read: Read, valid: Valid) -> Option<(Address, Address)>
 where
     Read: FnMut(Address) -> Option<Address>,
     Valid: Fn(Address) -> bool,
@@ -232,8 +227,7 @@ where
         return Some((rsp, value));
     }
     const OFFSETS: [i64; 16] = [
-        -0x40, -0x38, -0x30, -0x28, -0x20, -0x18, -0x10, -0x08,
-        0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40,
+        -0x40, -0x38, -0x30, -0x28, -0x20, -0x18, -0x10, -0x08, 0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40,
     ];
     let mut unique: Option<(Address, Address)> = None;
     for delta in OFFSETS {
@@ -310,7 +304,10 @@ impl std::fmt::Display for RuntimeError {
             Self::Decode(e) => write!(f, "decode error: {e}"),
             Self::UnsupportedForm(form) => {
                 if *form == 0 {
-                    write!(f, "no semantic provider for form 0x0 (instruction unmapped in Angryier semantics corpus)")
+                    write!(
+                        f,
+                        "no semantic provider for form 0x0 (instruction unmapped in Angryier semantics corpus)"
+                    )
                 } else {
                     write!(f, "no semantic provider for form {form:#x} ({form})")
                 }
@@ -546,10 +543,8 @@ impl Process {
     /// Stubs a function at `address` to immediately return `return_value` in RAX
     /// and pop the call return address from RSP.
     pub fn stub_function(&mut self, address: Address, return_value: u64) {
-        self.simproc_instances.insert(
-            address,
-            Arc::new(KernelReturnStub { value: return_value }),
-        );
+        self.simproc_instances
+            .insert(address, Arc::new(KernelReturnStub { value: return_value }));
         self.step_cache.remove(&address);
         self.block_cache.remove(&address);
     }
@@ -648,11 +643,13 @@ impl Process {
         let Some((dll, export)) = self.pe_import_stubs.get(&pc) else {
             return;
         };
-        if import_audit::classify(dll, export, false)
-            != import_audit::ImportBehavior::ApproximateScalar
-            || self.state.fidelity.entries.iter().any(|entry| {
-                entry.kind == AnalysisDebtKind::Concretized && entry.source == pc
-            })
+        if import_audit::classify(dll, export, false) != import_audit::ImportBehavior::ApproximateScalar
+            || self
+                .state
+                .fidelity
+                .entries
+                .iter()
+                .any(|entry| entry.kind == AnalysisDebtKind::Concretized && entry.source == pc)
         {
             return;
         }
@@ -666,10 +663,13 @@ impl Process {
     /// This is a necessary condition for native control-flow validity, not
     /// proof that bytes at the address decode to a reachable instruction.
     pub fn is_executable_control_target(&self, target: Address) -> bool {
-        self.state.memory.regions().iter().any(|region| {
-            region.executable && target >= region.base && target - region.base < region.size
-        }) || self.simproc_hooks.contains_key(&target)
-           || self.simproc_instances.contains_key(&target)
+        self.state
+            .memory
+            .regions()
+            .iter()
+            .any(|region| region.executable && target >= region.base && target - region.base < region.size)
+            || self.simproc_hooks.contains_key(&target)
+            || self.simproc_instances.contains_key(&target)
     }
 
     /// Reads the current program counter (RIP).
@@ -3568,9 +3568,9 @@ impl<D: Decoder> Runtime<D> {
             SimResult::Blocked { handle, timeout_ms } => Err(RuntimeError::Environment(format!(
                 "Win32 {name} blocked on {handle:#x} (timeout={timeout_ms}); a thread scheduler or observed wakeup is required"
             ))),
-            SimResult::Unsupported(reason) => Err(RuntimeError::Environment(format!(
-                "Win32 {name} unsupported: {reason}"
-            ))),
+            SimResult::Unsupported(reason) => {
+                Err(RuntimeError::Environment(format!("Win32 {name} unsupported: {reason}")))
+            }
             SimResult::Return(val) => {
                 // Write return value to RAX (GPR 0).
                 process.state.registers = process
@@ -3714,9 +3714,9 @@ impl<D: Decoder> Runtime<D> {
             SimResult::Blocked { handle, timeout_ms } => Err(RuntimeError::Environment(format!(
                 "Win32 {name} blocked on {handle:#x} (timeout={timeout_ms}); no wakeup schedule was supplied"
             ))),
-            SimResult::Unsupported(reason) => Err(RuntimeError::Environment(format!(
-                "Win32 {name} unsupported: {reason}"
-            ))),
+            SimResult::Unsupported(reason) => {
+                Err(RuntimeError::Environment(format!("Win32 {name} unsupported: {reason}")))
+            }
             SimResult::Exit => {
                 process.terminated = true;
                 Ok(StepOutcome::SimProcedure { address, name })
@@ -5608,11 +5608,7 @@ mod tests {
     #[test]
     fn bounded_return_recovery_rejects_ambiguous_or_overflowing_candidates() {
         let rsp = 0x1000u64;
-        let candidates = [
-            (rsp, 0x2000),
-            (rsp + 8, 0x3000),
-            (rsp + 0x10, 0x4000),
-        ];
+        let candidates = [(rsp, 0x2000), (rsp + 8, 0x3000), (rsp + 0x10, 0x4000)];
         let read = |addr| candidates.iter().find(|(a, _)| *a == addr).map(|(_, value)| *value);
         let mapped = |target| matches!(target, 0x3000 | 0x4000);
         assert_eq!(select_bounded_stack_return(rsp, read, mapped), None);
@@ -5635,14 +5631,18 @@ mod tests {
         let mut process = minimal_process()?;
         assert!(!process.is_executable_control_target(0x1404_04e10));
         assert!(!process.is_executable_control_target(0x6));
-        process.state.memory = process.state.memory.with_region(angryier_memory::MemoryRegion {
-            object: angryier_types::ObjectId(0x8765),
-            base: 0x3000_0000,
-            size: 0x4000,
-            readable: true,
-            writable: false,
-            executable: true,
-        }).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        process.state.memory = process
+            .state
+            .memory
+            .with_region(angryier_memory::MemoryRegion {
+                object: angryier_types::ObjectId(0x8765),
+                base: 0x3000_0000,
+                size: 0x4000,
+                readable: true,
+                writable: false,
+                executable: true,
+            })
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
         assert!(process.is_executable_control_target(0x3000_0000));
         assert!(process.is_executable_control_target(0x3000_3fff));
         assert!(!process.is_executable_control_target(0x3000_4000));
@@ -5660,10 +5660,9 @@ mod tests {
         let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
         let mut process = minimal_process()?;
         let stub = 0x7000_0000_4140u64;
-        process.pe_import_stubs.insert(
-            stub,
-            ("kernel32.dll".to_string(), "CreateThread".to_string()),
-        );
+        process
+            .pe_import_stubs
+            .insert(stub, ("kernel32.dll".to_string(), "CreateThread".to_string()));
         process.write_pc(stub)?;
         let rsp_before = process.read_register(register_id::GPR_BASE + 4)?;
         let result = runtime.step(&mut process);
@@ -5682,10 +5681,9 @@ mod tests {
     fn synthetic_success_stub_records_bounded_approximation_debt() -> Result<(), RuntimeError> {
         let mut process = minimal_process()?;
         let stub = 0x7000_0000_4140;
-        process.pe_import_stubs.insert(
-            stub,
-            ("kernel32.dll".into(), "IsProcessorFeaturePresent".into()),
-        );
+        process
+            .pe_import_stubs
+            .insert(stub, ("kernel32.dll".into(), "IsProcessorFeaturePresent".into()));
         assert!(process.state.fidelity.is_exact());
         process.record_approximate_import(stub);
         assert!(!process.state.fidelity.is_exact());
@@ -5704,15 +5702,17 @@ mod tests {
         let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
         let mut process = minimal_process()?;
         let stub = 0x7000_0000_4140u64;
-        process.pe_import_stubs.insert(
-            stub, ("kernel32.dll".to_string(), "CreateThread".to_string()),
-        );
+        process
+            .pe_import_stubs
+            .insert(stub, ("kernel32.dll".to_string(), "CreateThread".to_string()));
         process.write_pc(stub)?;
         let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
         let mut session = SymbolicSession::new(&runtime, &arena, process.clone());
         let outcome = session.step_state(0);
         assert!(matches!(outcome, Err(RuntimeError::Environment(ref message)) if message.contains("CreateThread")));
-        assert!(matches!(runtime.step(&mut process), Err(RuntimeError::Environment(ref message)) if message.contains("CreateThread")));
+        assert!(
+            matches!(runtime.step(&mut process), Err(RuntimeError::Environment(ref message)) if message.contains("CreateThread"))
+        );
         process.stub_function(stub, 0x1234);
         assert!(process.unmodeled_import_error(stub).is_none());
         Ok(())
@@ -5730,11 +5730,16 @@ mod tests {
             writable: true,
             executable: true,
         };
-        process.state.memory = process.state.memory.with_region(region)
+        process.state.memory = process
+            .state
+            .memory
+            .with_region(region)
             .map_err(|error| RuntimeError::Memory(format!("{error:?}")))?;
         let rsp = 0x8000u64;
         process.write_register(register_id::GPR_BASE + 4, rsp)?;
-        process.state.memory = process.state.memory
+        process.state.memory = process
+            .state
+            .memory
             .load_concrete(rsp, &0x1040u64.to_le_bytes())
             .map_err(|error| RuntimeError::Memory(format!("{error:?}")))?;
         let stub = 0x2000u64;
@@ -5763,19 +5768,41 @@ mod tests {
             writable: true,
             executable: true,
         };
-        process.state.memory = process.state.memory.with_region(region).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        process.state.memory = process
+            .state
+            .memory
+            .with_region(region)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
 
         let rsp = 0x8000u64;
         let return_address = 0x1040u64;
         process.write_register(register_id::GPR_BASE + 4, rsp)?; // RSP
-        process.state.memory = process.state.memory.write(rsp, &[ByteValue::Concrete(0x40), ByteValue::Concrete(0x10), ByteValue::Concrete(0), ByteValue::Concrete(0), ByteValue::Concrete(0), ByteValue::Concrete(0), ByteValue::Concrete(0), ByteValue::Concrete(0)]).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        process.state.memory = process
+            .state
+            .memory
+            .write(
+                rsp,
+                &[
+                    ByteValue::Concrete(0x40),
+                    ByteValue::Concrete(0x10),
+                    ByteValue::Concrete(0),
+                    ByteValue::Concrete(0),
+                    ByteValue::Concrete(0),
+                    ByteValue::Concrete(0),
+                    ByteValue::Concrete(0),
+                    ByteValue::Concrete(0),
+                ],
+            )
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
 
         let stub_addr = 0x2000u64;
         process.write_pc(stub_addr)?;
         process.stub_function(stub_addr, 0x1337);
 
         let outcome = runtime.step(&mut process)?;
-        assert!(matches!(outcome, StepOutcome::SimProcedure { address, ref name } if address == stub_addr && name == "kernel_stub_return"));
+        assert!(
+            matches!(outcome, StepOutcome::SimProcedure { address, ref name } if address == stub_addr && name == "kernel_stub_return")
+        );
         assert_eq!(process.pc()?, return_address);
         assert_eq!(process.read_register(register_id::GPR_BASE + 4)?, rsp + 8);
         assert_eq!(process.read_register(register_id::GPR_BASE)?, 0x1337); // RAX
@@ -5811,12 +5838,27 @@ mod tests {
             writable: true,
             executable: true,
         };
-        process.state.memory = process.state.memory.with_region(region).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        process.state.memory = process
+            .state
+            .memory
+            .with_region(region)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
 
         process.patch_bytes(0x1000, &[0x90, 0xeb, 0x05])?;
         let mut buf = [ByteValue::Concrete(0); 3];
-        process.state.memory.read_into(0x1000, &mut buf).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
-        assert_eq!(buf, [ByteValue::Concrete(0x90), ByteValue::Concrete(0xeb), ByteValue::Concrete(0x05)]);
+        process
+            .state
+            .memory
+            .read_into(0x1000, &mut buf)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        assert_eq!(
+            buf,
+            [
+                ByteValue::Concrete(0x90),
+                ByteValue::Concrete(0xeb),
+                ByteValue::Concrete(0x05)
+            ]
+        );
         Ok(())
     }
 }
@@ -7260,9 +7302,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             operands: Vec::new(),
                             immediate: bytes,
                         }) {
-                            state
-                                .registers
-                                .insert(reg_id, (expr, angryier_ir::IrType::Bits(64)));
+                            state.registers.insert(reg_id, (expr, angryier_ir::IrType::Bits(64)));
                         }
                     }
                 }
@@ -8123,8 +8163,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             u64::from_le_bytes(buffer)
                         });
                     let mut shadow_desync_recovered = false;
-                    let target = direct
-                        .or_else(|| angryier_execution::constant_value(self.arena, target_expr).ok());
+                    let target = direct.or_else(|| angryier_execution::constant_value(self.arena, target_expr).ok());
                     // Ret-form ground truth: the tracked stack cell holds the
                     // real return address. The IR's load address can drift off
                     // the tracked rsp binding (observed after stub-ret pops),
@@ -8145,37 +8184,30 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         let rsp = state
                             .registers
                             .get(&(register_id::GPR_BASE + 4))
-                            .and_then(|(expr, _)| {
-                                angryier_execution::constant_value(self.arena, *expr).ok()
-                            })
-                            .or_else(|| {
-                                state.process.read_register(register_id::GPR_BASE + 4).ok()
-                            });
+                            .and_then(|(expr, _)| angryier_execution::constant_value(self.arena, *expr).ok())
+                            .or_else(|| state.process.read_register(register_id::GPR_BASE + 4).ok());
                         let cell = rsp.and_then(|rsp| {
                             select_bounded_stack_return(
                                 rsp,
                                 |addr| {
-                                    state.memory.read(self.arena, addr, 64).ok().and_then(
-                                        |expr| angryier_execution::constant_value(self.arena, expr).ok(),
-                                    )
+                                    state
+                                        .memory
+                                        .read(self.arena, addr, 64)
+                                        .ok()
+                                        .and_then(|expr| angryier_execution::constant_value(self.arena, expr).ok())
                                 },
                                 |address| state.process.is_executable_control_target(address),
                             )
                         });
-                        let is_valid_target = target.map(|t| {
-                            state.process.is_executable_control_target(t)
-                        }).unwrap_or(false);
+                        let is_valid_target = target
+                            .map(|t| state.process.is_executable_control_target(t))
+                            .unwrap_or(false);
 
                         if !is_valid_target && let Some((cell_rsp, cell_value)) = cell {
-                            state.process.state.fidelity = state
-                                .process
-                                .state
-                                .fidelity
-                                .record(AnalysisDebtKind::Concretized, pc);
+                            state.process.state.fidelity =
+                                state.process.state.fidelity.record(AnalysisDebtKind::Concretized, pc);
                             let new_rsp = cell_rsp.wrapping_add(8);
-                            let _ = state
-                                .process
-                                .write_register(register_id::GPR_BASE + 4, new_rsp);
+                            let _ = state.process.write_register(register_id::GPR_BASE + 4, new_rsp);
                             state.concrete_registers.insert(register_id::GPR_BASE + 4, new_rsp);
                             if let Ok(rsp_expr) = self.arena.intern(angryier_expr::ExprNode {
                                 sort: angryier_expr::ExprSort::BitVec(64),
@@ -8183,10 +8215,9 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                                 operands: Vec::new(),
                                 immediate: new_rsp.to_le_bytes().to_vec(),
                             }) {
-                                state.registers.insert(
-                                    register_id::GPR_BASE + 4,
-                                    (rsp_expr, angryier_ir::IrType::Bits(64)),
-                                );
+                                state
+                                    .registers
+                                    .insert(register_id::GPR_BASE + 4, (rsp_expr, angryier_ir::IrType::Bits(64)));
                             }
                             shadow_desync_recovered = true;
                             Some(cell_value)
@@ -8220,46 +8251,26 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             // record Concretized debt; never execute data.
                             let exec = state.process.is_executable_control_target(target);
                             if !exec {
-                                state.process.state.fidelity = state
-                                    .process
-                                    .state
-                                    .fidelity
-                                    .record(AnalysisDebtKind::Concretized, pc);
+                                state.process.state.fidelity =
+                                    state.process.state.fidelity.record(AnalysisDebtKind::Concretized, pc);
                                 if let Some(rsp) = state
                                     .registers
                                     .get(&(register_id::GPR_BASE + 4))
-                                    .and_then(|(expr, _)| {
-                                        angryier_execution::constant_value(self.arena, *expr).ok()
-                                    })
-                                    .or_else(|| {
-                                        state
-                                            .process
-                                            .read_register(register_id::GPR_BASE + 4)
-                                            .ok()
-                                    })
+                                    .and_then(|(expr, _)| angryier_execution::constant_value(self.arena, *expr).ok())
+                                    .or_else(|| state.process.read_register(register_id::GPR_BASE + 4).ok())
                                     .and_then(|rsp| {
                                         state
                                             .memory
                                             .read(self.arena, rsp, 64)
                                             .ok()
-                                            .and_then(|expr| {
-                                                angryier_execution::constant_value(
-                                                    self.arena,
-                                                    expr,
-                                                )
-                                                .ok()
-                                            })
+                                            .and_then(|expr| angryier_execution::constant_value(self.arena, expr).ok())
                                             .map(|ret| (rsp, ret))
                                     })
                                 {
                                     let (rsp, ret) = rsp;
                                     let new_rsp = rsp.wrapping_add(8);
-                                    let _ = state
-                                        .process
-                                        .write_register(register_id::GPR_BASE + 4, new_rsp);
-                                    state
-                                        .concrete_registers
-                                        .insert(register_id::GPR_BASE + 4, new_rsp);
+                                    let _ = state.process.write_register(register_id::GPR_BASE + 4, new_rsp);
+                                    state.concrete_registers.insert(register_id::GPR_BASE + 4, new_rsp);
                                     if let Ok(rsp_expr) = self.arena.intern(angryier_expr::ExprNode {
                                         sort: angryier_expr::ExprSort::BitVec(64),
                                         op: angryier_expr::ExprOp::Constant,
@@ -8271,9 +8282,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                                             (rsp_expr, angryier_ir::IrType::Bits(64)),
                                         );
                                     }
-                                    let _ = state
-                                        .process
-                                        .write_register(register_id::GPR_BASE, 0);
+                                    let _ = state.process.write_register(register_id::GPR_BASE, 0);
                                     state.concrete_registers.insert(register_id::GPR_BASE, 0);
                                     let _ = state.process.write_pc(ret);
                                     return Ok(SymbolicStepOutcome::Stepped { next_pc: ret });
@@ -8304,7 +8313,10 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     match rsp_val.map(|r| (r, state.memory.read(self.arena, r, 64))) {
                         Some((r, Ok(expr))) => {
                             let op = self.arena.get(expr).map(|n| format!("{:?}", n.op));
-                            eprintln!("JMPIND-DEBUG pc={pc:#x} rsp={r:#x} target_cell_op={op:?} jump_target_present={}", summary.jump_target.is_some());
+                            eprintln!(
+                                "JMPIND-DEBUG pc={pc:#x} rsp={r:#x} target_cell_op={op:?} jump_target_present={}",
+                                summary.jump_target.is_some()
+                            );
                         }
                         Some((r, Err(e))) => eprintln!("JMPIND-DEBUG pc={pc:#x} rsp={r:#x} read_err={e}"),
                         None => eprintln!("JMPIND-DEBUG pc={pc:#x} rsp_unresolvable"),
@@ -8336,13 +8348,11 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             None => out.push_str(" <no-node>"),
                         }
                     }
-                    let jt = summary
-                        .jump_target
-                        .map(|t| {
-                            let mut s = String::new();
-                            dump_tree(self.arena, t, 0, &mut s);
-                            s
-                        });
+                    let jt = summary.jump_target.map(|t| {
+                        let mut s = String::new();
+                        dump_tree(self.arena, t, 0, &mut s);
+                        s
+                    });
                     eprintln!("JMPIND-DEBUG pc={pc:#x} tree={jt:?}");
                     if let Some(r) = state
                         .registers
@@ -8395,9 +8405,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         .get(&(register_id::GPR_BASE + 4))
                         .and_then(|(expr, _)| self.arena.get(*expr))
                         .map(|n| n.op == angryier_expr::ExprOp::Constant);
-                    eprintln!(
-                        "RET-DEBUG pc={pc:#x} rsp={rsp:?} rsp_binding_constant={binding_const:?}"
-                    );
+                    eprintln!("RET-DEBUG pc={pc:#x} rsp={rsp:?} rsp_binding_constant={binding_const:?}");
                 }
                 if let Some(rsp) = rsp
                     && let Ok(ret_expr) = state.memory.read(self.arena, rsp, 64)

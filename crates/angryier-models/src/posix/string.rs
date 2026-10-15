@@ -2,8 +2,8 @@
 
 //! Comprehensive POSIX Libc string, memory, and character simulation procedures.
 
-use crate::{SimProcedure, SimResult, SimState};
 use super::heap::TrackedHeap;
+use crate::{SimProcedure, SimResult, SimState};
 
 // ---------------------------------------------------------------------------
 // String Length & Comparison

@@ -14,15 +14,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use angryier::driver_ioctl::{
-    DriverIoctlTarget, DriverVerdict, KernelLayout, StaticHandoff,
-    DEVICE_EXTENSION_ADDR, DEVICE_OBJECT_ADDR, INPUT_BUFFER_ADDR, IRP_ADDR, IRP_MJ_DEVICE_CONTROL,
-    IRP_STACK_ADDR,
+    DEVICE_EXTENSION_ADDR, DEVICE_OBJECT_ADDR, DriverIoctlTarget, DriverVerdict, INPUT_BUFFER_ADDR, IRP_ADDR,
+    IRP_MJ_DEVICE_CONTROL, IRP_STACK_ADDR, KernelLayout, StaticHandoff,
 };
 use angryier::{Engine, RunReport};
 use angryier_solver::{SolverOutcomeKind, SolverQuery};
-use angryier_types::{
-    ConstraintCanonicalizationVersion, DependencyKey, ExprId, SolverQueryId, TargetProfileId,
-};
+use angryier_types::{ConstraintCanonicalizationVersion, DependencyKey, ExprId, SolverQueryId, TargetProfileId};
 
 /// Base address for the synthetic PE driver.
 const DRIVER_IMAGE_BASE: u64 = 0;
@@ -140,29 +137,70 @@ fn build_synthetic_driver_pe(code: &[u8]) -> (Vec<u8>, u64, u64) {
     let rdata_raw_size = 0x200u32;
 
     // Helper closure to write a 40-byte section header
-    let mut write_section_hdr = |offset: usize, name: &[u8], va: u32, vsize: u32, raw_ptr: u32, raw_sz: u32, chars: u32| {
-        pe[offset..offset + 8].copy_from_slice(name);
-        pe[offset + 8..offset + 12].copy_from_slice(&vsize.to_le_bytes());
-        pe[offset + 12..offset + 16].copy_from_slice(&va.to_le_bytes());
-        pe[offset + 16..offset + 20].copy_from_slice(&raw_sz.to_le_bytes());
-        pe[offset + 20..offset + 24].copy_from_slice(&raw_ptr.to_le_bytes());
-        pe[offset + 36..offset + 40].copy_from_slice(&chars.to_le_bytes());
-    };
+    let mut write_section_hdr =
+        |offset: usize, name: &[u8], va: u32, vsize: u32, raw_ptr: u32, raw_sz: u32, chars: u32| {
+            pe[offset..offset + 8].copy_from_slice(name);
+            pe[offset + 8..offset + 12].copy_from_slice(&vsize.to_le_bytes());
+            pe[offset + 12..offset + 16].copy_from_slice(&va.to_le_bytes());
+            pe[offset + 16..offset + 20].copy_from_slice(&raw_sz.to_le_bytes());
+            pe[offset + 20..offset + 24].copy_from_slice(&raw_ptr.to_le_bytes());
+            pe[offset + 36..offset + 40].copy_from_slice(&chars.to_le_bytes());
+        };
 
     // Section 1: .text at 0x188
-    write_section_hdr(0x188, b".text\0\0\0", DRIVER_ENTRY_RVA, 0x1000, text_raw_ptr, text_raw_size, 0x6000_0000);
+    write_section_hdr(
+        0x188,
+        b".text\0\0\0",
+        DRIVER_ENTRY_RVA,
+        0x1000,
+        text_raw_ptr,
+        text_raw_size,
+        0x6000_0000,
+    );
     // Section 2: .rdata at 0x1B0
-    write_section_hdr(0x1B0, b".rdata\0\0", DRIVER_RDATA_RVA, 0x1000, rdata_raw_ptr, rdata_raw_size, 0x4000_0000);
+    write_section_hdr(
+        0x1B0,
+        b".rdata\0\0",
+        DRIVER_RDATA_RVA,
+        0x1000,
+        rdata_raw_ptr,
+        rdata_raw_size,
+        0x4000_0000,
+    );
     // Section 3: .devobj at 0x1D8 (DEVICE_OBJECT_ADDR)
-    write_section_hdr(0x1D8, b".devobj\0", DEVICE_OBJECT_ADDR as u32, 0x1000, 0, 0, 0xC000_0000);
+    write_section_hdr(
+        0x1D8,
+        b".devobj\0",
+        DEVICE_OBJECT_ADDR as u32,
+        0x1000,
+        0,
+        0,
+        0xC000_0000,
+    );
     // Section 4: .irp at 0x200 (IRP_ADDR)
     write_section_hdr(0x200, b".irp\0\0\0\0", IRP_ADDR as u32, 0x1000, 0, 0, 0xC000_0000);
     // Section 5: .stack at 0x228 (IRP_STACK_ADDR)
     write_section_hdr(0x228, b".stack\0\0", IRP_STACK_ADDR as u32, 0x1000, 0, 0, 0xC000_0000);
     // Section 6: .inbuf at 0x250 (INPUT_BUFFER_ADDR)
-    write_section_hdr(0x250, b".inbuf\0\0", INPUT_BUFFER_ADDR as u32, 0x1000, 0, 0, 0xC000_0000);
+    write_section_hdr(
+        0x250,
+        b".inbuf\0\0",
+        INPUT_BUFFER_ADDR as u32,
+        0x1000,
+        0,
+        0,
+        0xC000_0000,
+    );
     // Section 7: .devext at 0x278 (DEVICE_EXTENSION_ADDR)
-    write_section_hdr(0x278, b".devext\0", DEVICE_EXTENSION_ADDR as u32, 0x1000, 0, 0, 0xC000_0000);
+    write_section_hdr(
+        0x278,
+        b".devext\0",
+        DEVICE_EXTENSION_ADDR as u32,
+        0x1000,
+        0,
+        0,
+        0xC000_0000,
+    );
 
     // Raw section bytes
     pe.resize((text_raw_ptr + text_raw_size) as usize, 0);
@@ -384,9 +422,7 @@ fn test_synthetic_driver_layout_and_ioctl_dispatch_reachability() {
         sink_va: sink_mm_map_va,
         ioctl_code: Some(IOCTL_MM_MAP_IO_SPACE),
     };
-    let opts1 = target_mm_map_pinned
-        .run_options(256, 16)
-        .expect("build run options");
+    let opts1 = target_mm_map_pinned.run_options(256, 16).expect("build run options");
     assert_eq!(opts1.entry, Some(handler_va));
     assert_eq!(opts1.find, vec![sink_mm_map_va]);
     assert!(opts1.solve);
@@ -418,15 +454,10 @@ fn test_synthetic_driver_layout_and_ioctl_dispatch_reachability() {
         sink_va: sink_mm_map_va,
         ioctl_code: None,
     };
-    let opts2 = target_mm_map_symbolic
-        .run_options(256, 16)
-        .expect("build run options");
+    let opts2 = target_mm_map_symbolic.run_options(256, 16).expect("build run options");
     // Verify IOCTL slot was left symbolic (not poked)
     assert!(
-        !opts2
-            .poke
-            .iter()
-            .any(|(addr, _)| *addr == IRP_STACK_ADDR + 0x18),
+        !opts2.poke.iter().any(|(addr, _)| *addr == IRP_STACK_ADDR + 0x18),
         "symbolic IOCTL code must not be poked concretely"
     );
 
@@ -457,9 +488,7 @@ fn test_synthetic_driver_layout_and_ioctl_dispatch_reachability() {
         sink_va: sink_zw_open_va,
         ioctl_code: Some(IOCTL_ZW_OPEN_PROCESS),
     };
-    let opts3 = target_zw_open
-        .run_options(256, 16)
-        .expect("build run options");
+    let opts3 = target_zw_open.run_options(256, 16).expect("build run options");
     let report3 = engine.run(&image, &opts3).expect("run symbolic execution");
     assert!(
         report3.found_pcs.contains(&sink_zw_open_va),
@@ -534,10 +563,22 @@ fn test_solver_model_extraction_trigger_values_and_buffer_sizes() {
     let model2_bytes: Vec<u8> = found_model2.iter().map(|val| val[0]).collect();
 
     // Verify solver extracted the 4 concrete bytes of 0x1337C0DE: [0xDE, 0xC0, 0x37, 0x13]
-    assert!(model2_bytes.contains(&0xDE), "model must contain byte 0xDE of trigger PID");
-    assert!(model2_bytes.contains(&0xC0), "model must contain byte 0xC0 of trigger PID");
-    assert!(model2_bytes.contains(&0x37), "model must contain byte 0x37 of trigger PID");
-    assert!(model2_bytes.contains(&0x13), "model must contain byte 0x13 of trigger PID");
+    assert!(
+        model2_bytes.contains(&0xDE),
+        "model must contain byte 0xDE of trigger PID"
+    );
+    assert!(
+        model2_bytes.contains(&0xC0),
+        "model must contain byte 0xC0 of trigger PID"
+    );
+    assert!(
+        model2_bytes.contains(&0x37),
+        "model must contain byte 0x37 of trigger PID"
+    );
+    assert!(
+        model2_bytes.contains(&0x13),
+        "model must contain byte 0x13 of trigger PID"
+    );
 
     let _ = std::fs::remove_file(temp_path);
 }
@@ -617,7 +658,11 @@ fn test_failure_paths_honesty_timeouts_and_unknowns_never_safe() {
         "pruned states MUST NEVER be reported as safe"
     );
     assert!(
-        verdict3.notes.as_deref().unwrap_or("").contains("explosion_threshold_hit")
+        verdict3
+            .notes
+            .as_deref()
+            .unwrap_or("")
+            .contains("explosion_threshold_hit")
     );
 
     // -----------------------------------------------------------------------

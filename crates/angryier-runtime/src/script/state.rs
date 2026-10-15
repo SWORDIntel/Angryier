@@ -51,10 +51,7 @@ impl LuaState {
         let inner = this_inner(&self.inner);
         let state = Self::state_ref(&inner, self.state_id)
             .ok_or_else(|| mlua::Error::external("state not found in session"))?;
-        state
-            .process
-            .pc()
-            .map_err(|e| mlua::Error::external(format!("{e:?}")))
+        state.process.pc().map_err(|e| mlua::Error::external(format!("{e:?}")))
     }
 
     /// Exact hex form of the PC ([`super::hex64`]). Kernel-address PCs

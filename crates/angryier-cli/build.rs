@@ -4,12 +4,7 @@ use std::process::Command;
 
 fn git(args: &[&str]) -> Option<String> {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-    let result = Command::new("git")
-        .arg("-C")
-        .arg(manifest)
-        .args(args)
-        .output()
-        .ok()?;
+    let result = Command::new("git").arg("-C").arg(manifest).args(args).output().ok()?;
     if !result.status.success() {
         return None;
     }

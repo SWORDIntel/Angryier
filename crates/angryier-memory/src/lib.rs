@@ -859,9 +859,7 @@ impl PersistentMemory {
             Err(MemoryError::Unmapped(first)) if self.uc_memory_armed() => {
                 self.uc_resolve_unmapped(address, len, access, first)
             }
-            Err(MemoryError::AddressOverflow)
-                if self.uc_memory_armed() && access != MemoryAccessKind::Execute =>
-            {
+            Err(MemoryError::AddressOverflow) if self.uc_memory_armed() && access != MemoryAccessKind::Execute => {
                 if let Some(mut ledger) = self.uc_ledger() {
                     ledger.record_hit(UcMemoryOp::Read, address, 0);
                 }
@@ -1317,19 +1315,12 @@ impl LayeredMemory for PersistentMemory {
             Err(MemoryError::PermissionDenied {
                 address: denied,
                 access: MemoryAccessKind::Write,
-            }) if self.uc_memory_armed()
-                && self.uc_drop_exec_write
-                && self.exec_region_contains(denied)? =>
-            {
+            }) if self.uc_memory_armed() && self.uc_drop_exec_write && self.exec_region_contains(denied)? => {
                 // Executable target: a store here would clobber code. Drop
                 // the store and record the hit — reported debt, never a
                 // silent modification of code bytes.
                 if let Some(mut ledger) = self.uc_ledger() {
-                    ledger.record_hit(
-                        UcMemoryOp::WriteExec,
-                        denied,
-                        Self::page_base(denied),
-                    );
+                    ledger.record_hit(UcMemoryOp::WriteExec, denied, Self::page_base(denied));
                 }
                 return Ok(());
             }

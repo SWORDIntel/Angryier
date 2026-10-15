@@ -22,34 +22,37 @@ pub struct HeapBlock {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HeapViolation {
     /// An attempt to free a block that has already been deallocated.
-    DoubleFree {
-        ptr: u64,
-        size: u64,
-        alloc_id: u64,
-    },
+    DoubleFree { ptr: u64, size: u64, alloc_id: u64 },
     /// An attempt to free an unallocated or interior pointer.
-    InvalidFree {
-        ptr: u64,
-    },
+    InvalidFree { ptr: u64 },
     /// Memory read/write attempted on a deallocated block.
-    UseAfterFree {
-        ptr: u64,
-        accessed_addr: u64,
-        size: u64,
-    },
+    UseAfterFree { ptr: u64, accessed_addr: u64, size: u64 },
 }
 
 impl core::fmt::Display for HeapViolation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::DoubleFree { ptr, size, alloc_id } => {
-                write!(f, "DoubleFree: block at {ptr:#x} (size {size}, alloc #{alloc_id}) freed multiple times")
+                write!(
+                    f,
+                    "DoubleFree: block at {ptr:#x} (size {size}, alloc #{alloc_id}) freed multiple times"
+                )
             }
             Self::InvalidFree { ptr } => {
-                write!(f, "InvalidFree: pointer {ptr:#x} was not allocated or is an interior pointer")
+                write!(
+                    f,
+                    "InvalidFree: pointer {ptr:#x} was not allocated or is an interior pointer"
+                )
             }
-            Self::UseAfterFree { ptr, accessed_addr, size } => {
-                write!(f, "UseAfterFree: access at {accessed_addr:#x} within freed block {ptr:#x} (size {size})")
+            Self::UseAfterFree {
+                ptr,
+                accessed_addr,
+                size,
+            } => {
+                write!(
+                    f,
+                    "UseAfterFree: access at {accessed_addr:#x} within freed block {ptr:#x} (size {size})"
+                )
             }
         }
     }
@@ -225,7 +228,10 @@ impl TrackedHeap {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        state.violations.iter().any(|v| matches!(v, HeapViolation::DoubleFree { .. }))
+        state
+            .violations
+            .iter()
+            .any(|v| matches!(v, HeapViolation::DoubleFree { .. }))
     }
 
     /// Clears recorded violations.

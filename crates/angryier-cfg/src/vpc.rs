@@ -58,8 +58,7 @@
 use std::collections::BTreeMap;
 
 use angryier_arch::{
-    AccessKind, DecodedInstruction, MemoryBase, MemoryIndex, MemoryOperand, OperandKind,
-    RegisterId, RegisterView,
+    AccessKind, DecodedInstruction, MemoryBase, MemoryIndex, MemoryOperand, OperandKind, RegisterId, RegisterView,
 };
 use angryier_semantics_intel64::forms;
 use angryier_types::Address;
@@ -189,15 +188,11 @@ fn register_writes(instruction: &DecodedInstruction) -> Vec<RegisterView> {
 }
 
 fn reads_register(instruction: &DecodedInstruction, register: RegisterId) -> bool {
-    register_reads(instruction)
-        .iter()
-        .any(|view| view.parent == register)
+    register_reads(instruction).iter().any(|view| view.parent == register)
 }
 
 fn writes_register(instruction: &DecodedInstruction, register: RegisterId) -> bool {
-    register_writes(instruction)
-        .iter()
-        .any(|view| view.parent == register)
+    register_writes(instruction).iter().any(|view| view.parent == register)
 }
 
 fn memory_operand(instruction: &DecodedInstruction) -> Option<MemoryOperand> {
@@ -267,9 +262,7 @@ fn table_anchor(instruction: &DecodedInstruction) -> Option<Address> {
 fn bounds_guarded_between(body: &[DecodedInstruction], register: RegisterId, after: usize) -> bool {
     body[after + 1..]
         .iter()
-        .any(|instruction| {
-            BOUNDS_CHECK_FORMS.contains(&instruction.form_id) && reads_register(instruction, register)
-        })
+        .any(|instruction| BOUNDS_CHECK_FORMS.contains(&instruction.form_id) && reads_register(instruction, register))
 }
 
 /// Position of the last instruction in `body` that redefines `register`
@@ -283,10 +276,7 @@ fn table_load_defining(body: &[DecodedInstruction], register: RegisterId) -> Opt
 /// Heuristic 2 evidence: the register the terminator jumps *through* was
 /// redefined by an unguarded table load in this same block — returns that
 /// register together with the load's table anchor.
-fn table_load_chain(
-    body: &[DecodedInstruction],
-    jump_through: RegisterId,
-) -> Option<(RegisterId, Option<Address>)> {
+fn table_load_chain(body: &[DecodedInstruction], jump_through: RegisterId) -> Option<(RegisterId, Option<Address>)> {
     let load_pos = table_load_defining(body, jump_through)?;
     if bounds_guarded_between(body, jump_through, load_pos) {
         return None;
@@ -305,11 +295,9 @@ fn analyze(block: &VpcBlock<'_>) -> Option<DispatchSite> {
     let term_pos = block.instructions.len() - 1;
     let body = &block.instructions[..term_pos];
     let defined_pos = body.iter().rposition(|insn| writes_register(insn, register));
-    let bounds_guarded =
-        defined_pos.is_some_and(|pos| bounds_guarded_between(body, register, pos));
-    let loaded_from_table = defined_pos.is_some_and(|pos| {
-        TABLE_LOAD_FORMS.contains(&block.instructions[pos].form_id) && !bounds_guarded
-    });
+    let bounds_guarded = defined_pos.is_some_and(|pos| bounds_guarded_between(body, register, pos));
+    let loaded_from_table =
+        defined_pos.is_some_and(|pos| TABLE_LOAD_FORMS.contains(&block.instructions[pos].form_id) && !bounds_guarded);
     Some(DispatchSite {
         native_pc: block.native_pc,
         register,
@@ -378,17 +366,8 @@ pub fn identify_vpc_candidates(blocks: &[VpcBlock<'_>]) -> Vec<VpcCandidate> {
 
         // (2) Table-load chain: a register redefined by a table load that
         // this block then jumps through — the handler-entry fetch.
-        if let Some((jumped, anchor)) = site
-            .jump_through
-            .and_then(|jumped| table_load_chain(body, jumped))
-        {
-            record(
-                &mut ranked,
-                site.native_pc,
-                jumped,
-                anchor,
-                TABLE_LOAD_CHAIN_CONFIDENCE,
-            );
+        if let Some((jumped, anchor)) = site.jump_through.and_then(|jumped| table_load_chain(body, jumped)) {
+            record(&mut ranked, site.native_pc, jumped, anchor, TABLE_LOAD_CHAIN_CONFIDENCE);
         }
     }
 
@@ -424,15 +403,13 @@ pub fn identify_vpc_candidates(blocks: &[VpcBlock<'_>]) -> Vec<VpcCandidate> {
         if earlier.register == later.register {
             continue;
         }
-        let rotated = [pair[0].0.instructions, pair[1].0.instructions].iter().any(
-            |body| {
-                body.iter().any(|insn| {
-                    REGISTER_MOVE_FORMS.contains(&insn.form_id)
-                        && reads_register(insn, earlier.register)
-                        && writes_register(insn, later.register)
-                })
-            },
-        );
+        let rotated = [pair[0].0.instructions, pair[1].0.instructions].iter().any(|body| {
+            body.iter().any(|insn| {
+                REGISTER_MOVE_FORMS.contains(&insn.form_id)
+                    && reads_register(insn, earlier.register)
+                    && writes_register(insn, later.register)
+            })
+        });
         if rotated {
             record(
                 &mut ranked,
@@ -453,14 +430,12 @@ pub fn identify_vpc_candidates(blocks: &[VpcBlock<'_>]) -> Vec<VpcCandidate> {
 
     ranked
         .into_iter()
-        .map(
-            |((native_pc, register), (confidence, table_base))| VpcCandidate {
-                native_pc,
-                register,
-                table_base,
-                confidence,
-            },
-        )
+        .map(|((native_pc, register), (confidence, table_base))| VpcCandidate {
+            native_pc,
+            register,
+            table_base,
+            confidence,
+        })
         .collect()
 }
 
@@ -474,8 +449,7 @@ mod tests {
 
     use super::*;
     use angryier_arch::{
-        InstructionModifiers, MemoryBase, MemoryOperand, Operand, OperandKind, OperandVisibility,
-        RegisterView,
+        InstructionModifiers, MemoryBase, MemoryOperand, Operand, OperandKind, OperandVisibility, RegisterView,
     };
 
     // Synthetic Intel 64 register file (standard encoding order).
@@ -514,10 +488,7 @@ mod tests {
             width_bits: 32,
             access: AccessKind::Read,
             visibility: OperandVisibility::Explicit,
-            kind: OperandKind::Immediate(angryier_arch::ImmediateOperand {
-                value,
-                signed: false,
-            }),
+            kind: OperandKind::Immediate(angryier_arch::ImmediateOperand { value, signed: false }),
         }
     }
 
@@ -558,12 +529,7 @@ mod tests {
     }
 
     // mov r64, [base + disp] / mov r64, [rip + disp32]
-    fn mov_r64_mem64(
-        dst: RegisterId,
-        base: Option<MemoryBase>,
-        displacement: i64,
-        length: u8,
-    ) -> DecodedInstruction {
+    fn mov_r64_mem64(dst: RegisterId, base: Option<MemoryBase>, displacement: i64, length: u8) -> DecodedInstruction {
         insn(
             forms::MOV_R64_MEM64,
             length,
@@ -600,10 +566,7 @@ mod tests {
         insn(
             forms::CMP_R32_IMM8,
             3,
-            vec![
-                reg_op(0, 32, AccessKind::Read, register),
-                imm_op(1, value),
-            ],
+            vec![reg_op(0, 32, AccessKind::Read, register), imm_op(1, value)],
         )
     }
 
@@ -691,10 +654,7 @@ mod tests {
     fn heuristic2_table_load_then_jump_through() {
         // mov rbx, [rip + 0x2000]  ; handler entry fetched from the table
         // jmp *rbx                 ; ... and the block jumps through it
-        let mut body = vec![
-            mov_r64_mem64(RBX, Some(rip()), 0x2000, 7),
-            jmp_r64(RBX),
-        ];
+        let mut body = vec![mov_r64_mem64(RBX, Some(rip()), 0x2000, 7), jmp_r64(RBX)];
         let blocks = [laid_out(0x3000, &mut body)];
         let found = identify_vpc_candidates(&blocks);
         assert_eq!(found.len(), 1);
@@ -745,10 +705,7 @@ mod tests {
         // block B: mov rcx, rbx ; jmp *rcx  ; handler rotates VPC into RCX
         let mut body_a = vec![jmp_r64(RBX)];
         let mut body_b = vec![mov_r64_r64(RCX, RBX), jmp_r64(RCX)];
-        let blocks = [
-            laid_out(0x5000, &mut body_a),
-            laid_out(0x5010, &mut body_b),
-        ];
+        let blocks = [laid_out(0x5000, &mut body_a), laid_out(0x5010, &mut body_b)];
         let found = identify_vpc_candidates(&blocks);
         assert_eq!(found.len(), 2);
         assert_eq!(

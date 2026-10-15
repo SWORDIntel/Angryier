@@ -1,11 +1,11 @@
 //! Regression suite for the exact Microsoft x64 ABI and tracked event state.
 
-use angryier_models::{SimProcedure, SimResult, SimState};
 use angryier_models::win32::file::{Win32HandleKind, Win32HandleTable};
 use angryier_models::win32::{
-    CreateEventAProcedure, CreateEventWProcedure, ResetEventProcedure,
-    SetEventProcedure, WaitForMultipleObjectsProcedure, WaitForSingleObjectProcedure,
+    CreateEventAProcedure, CreateEventWProcedure, ResetEventProcedure, SetEventProcedure,
+    WaitForMultipleObjectsProcedure, WaitForSingleObjectProcedure,
 };
+use angryier_models::{SimProcedure, SimResult, SimState};
 
 fn make_event(handles: &Win32HandleTable, manual: bool, initial: bool) -> Result<u64, String> {
     let proc = CreateEventWProcedure::new(handles.clone());
@@ -32,14 +32,22 @@ fn harg(handle: u64, timeout: u32) -> SimState {
 fn win64_args_are_not_read_from_rax_and_event_state_is_shared() -> Result<(), String> {
     let handles = Win32HandleTable::new();
     let event = make_event(&handles, false, false)?;
-    assert_eq!(handles.get_kind(event), Some(Win32HandleKind::Event {
-        manual_reset: false, signaled: false,
-    }));
+    assert_eq!(
+        handles.get_kind(event),
+        Some(Win32HandleKind::Event {
+            manual_reset: false,
+            signaled: false,
+        })
+    );
     let wait = WaitForSingleObjectProcedure::new(handles.clone());
     assert_eq!(wait.apply(&harg(event, 0)), SimResult::Return(258)); // zero-time poll
-    assert_eq!(wait.apply(&harg(event, u32::MAX)), SimResult::Blocked {
-        handle: event, timeout_ms: u32::MAX,
-    });
+    assert_eq!(
+        wait.apply(&harg(event, u32::MAX)),
+        SimResult::Blocked {
+            handle: event,
+            timeout_ms: u32::MAX,
+        }
+    );
     let set = SetEventProcedure::new(handles.clone());
     let reset = ResetEventProcedure::new(handles.clone());
     assert_eq!(set.apply(&harg(event, 0)), SimResult::Return(1));
@@ -83,15 +91,23 @@ fn wait_all_is_atomic_and_wait_any_consumes_lowest_auto_reset() -> Result<(), St
     state.shadow_memory(0x1234, list);
     assert_eq!(proc.apply(&state), SimResult::Return(258));
     // Wait-all failed: first event must remain signaled.
-    assert_eq!(handles.get_kind(one), Some(Win32HandleKind::Event {
-        signaled: true, manual_reset: false,
-    }));
+    assert_eq!(
+        handles.get_kind(one),
+        Some(Win32HandleKind::Event {
+            signaled: true,
+            manual_reset: false,
+        })
+    );
     let set = SetEventProcedure::new(handles.clone());
     assert_eq!(set.apply(&harg(two, 0)), SimResult::Return(1));
     assert_eq!(proc.apply(&state), SimResult::Return(0));
-    assert_eq!(handles.get_kind(one), Some(Win32HandleKind::Event {
-        signaled: false, manual_reset: false,
-    }));
+    assert_eq!(
+        handles.get_kind(one),
+        Some(Win32HandleKind::Event {
+            signaled: false,
+            manual_reset: false,
+        })
+    );
 
     // Either event can now be signaled; wait-any returns its zero-based index.
     assert_eq!(set.apply(&harg(two, 0)), SimResult::Return(1));

@@ -17,14 +17,11 @@ use angryier_expr::{ExprArena, ExprNode, ExprOp, ExprReader, ExprSort, ShardedEx
 use angryier_models::{SimProcedure, SimResult, SimState};
 use angryier_runtime::jni::JNI_HEAP_BASE;
 use angryier_runtime::{
-    JniArgumentTaint, JniPathStatus, JniReachabilityConfig, JniSinkDescriptor,
-    JniSinkReachabilityAnalyzer, Runtime, SinkConstraintPredicate,
-    SinkControlledParam,
+    JniArgumentTaint, JniPathStatus, JniReachabilityConfig, JniSinkDescriptor, JniSinkReachabilityAnalyzer, Runtime,
+    SinkConstraintPredicate, SinkControlledParam,
 };
 use angryier_taint::TaintLabel;
-use angryier_types::{
-    Address, ExpressionNormalizationVersion, SemanticVersion, TaintId, TargetProfileId,
-};
+use angryier_types::{Address, ExpressionNormalizationVersion, SemanticVersion, TaintId, TargetProfileId};
 
 /// Dummy synthetic decoder for testing SimProcedure and redirect stepping.
 #[derive(Clone, Copy, Debug, Default)]
@@ -129,7 +126,10 @@ fn test_jni_reachability_memcpy_user_controlled_length_feasible() {
     // Register entry procedure and control flow redirect to sink
     process.simproc_instances.insert(
         entry_pc,
-        Arc::new(MockJniMemcpyEntryProcedure { _sink_pc: sink_pc, dest_addr }),
+        Arc::new(MockJniMemcpyEntryProcedure {
+            _sink_pc: sink_pc,
+            dest_addr,
+        }),
     );
     process.redirects.insert(entry_pc, sink_pc);
 
@@ -166,7 +166,9 @@ fn test_jni_reachability_memcpy_user_controlled_length_feasible() {
             initial_constraints: Vec::new(),
         });
 
-    let result = analyzer.analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend).unwrap();
+    let result = analyzer
+        .analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend)
+        .unwrap();
 
     assert_eq!(result.status, JniPathStatus::Feasible);
     assert!(!result.model_values.is_empty(), "Solver model values must be generated");
@@ -201,45 +203,52 @@ fn test_jni_reachability_sanitized_sink_branch_unsat() {
 
     process.simproc_instances.insert(
         entry_pc,
-        Arc::new(MockJniMemcpyEntryProcedure { _sink_pc: sink_pc, dest_addr }),
+        Arc::new(MockJniMemcpyEntryProcedure {
+            _sink_pc: sink_pc,
+            dest_addr,
+        }),
     );
     process.redirects.insert(entry_pc, sink_pc);
 
-    let taint_specs = vec![
-        JniArgumentTaint::Int {
-            arg_index: 2, // RDX
-            initial_value: 10,
-            taint_id: TaintId(0x100),
-            label: TaintLabel::UserInput,
-            symbolic: true,
-        },
-    ];
+    let taint_specs = vec![JniArgumentTaint::Int {
+        arg_index: 2, // RDX
+        initial_value: 10,
+        taint_id: TaintId(0x100),
+        label: TaintLabel::UserInput,
+        symbolic: true,
+    }];
 
     let arena = Arc::new(ShardedExprArena::new(ExpressionNormalizationVersion(1)));
 
     // Create a path constraint modeling a sanitizer: length <= 32
     // Symbol index 1000 is the first symbol generated for taint_specs
-    let len_sym = arena.intern(ExprNode {
-        sort: ExprSort::BitVec(64),
-        op: ExprOp::Symbol,
-        operands: Vec::new(),
-        immediate: 1000u64.to_le_bytes().to_vec(),
-    }).unwrap();
+    let len_sym = arena
+        .intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Symbol,
+            operands: Vec::new(),
+            immediate: 1000u64.to_le_bytes().to_vec(),
+        })
+        .unwrap();
 
-    let bound_32 = arena.intern(ExprNode {
-        sort: ExprSort::BitVec(64),
-        op: ExprOp::Constant,
-        operands: Vec::new(),
-        immediate: 32u64.to_le_bytes().to_vec(),
-    }).unwrap();
+    let bound_32 = arena
+        .intern(ExprNode {
+            sort: ExprSort::BitVec(64),
+            op: ExprOp::Constant,
+            operands: Vec::new(),
+            immediate: 32u64.to_le_bytes().to_vec(),
+        })
+        .unwrap();
 
     // length <= 32
-    let sanitizer_constraint = arena.intern(ExprNode {
-        sort: ExprSort::Bool,
-        op: ExprOp::Ule,
-        operands: vec![len_sym, bound_32],
-        immediate: Vec::new(),
-    }).unwrap();
+    let sanitizer_constraint = arena
+        .intern(ExprNode {
+            sort: ExprSort::Bool,
+            op: ExprOp::Ule,
+            operands: vec![len_sym, bound_32],
+            immediate: Vec::new(),
+        })
+        .unwrap();
 
     // Sink asserts length > 64: combined with sanitizer (length <= 32), this is UNSAT!
     let sink = JniSinkDescriptor::memcpy(sink_pc, Some(64));
@@ -256,7 +265,9 @@ fn test_jni_reachability_sanitized_sink_branch_unsat() {
             initial_constraints: vec![sanitizer_constraint],
         });
 
-    let result = analyzer.analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend).unwrap();
+    let result = analyzer
+        .analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend)
+        .unwrap();
 
     assert_eq!(result.status, JniPathStatus::Unsat);
     assert!(result.model_values.is_empty());
@@ -280,15 +291,13 @@ fn test_jni_reachability_unreachable_sink_branch() {
     // Redirect execution away from sink to exit
     process.redirects.insert(entry_pc, exit_pc);
 
-    let taint_specs = vec![
-        JniArgumentTaint::Int {
-            arg_index: 2,
-            initial_value: 10,
-            taint_id: TaintId(0x100),
-            label: TaintLabel::UserInput,
-            symbolic: true,
-        },
-    ];
+    let taint_specs = vec![JniArgumentTaint::Int {
+        arg_index: 2,
+        initial_value: 10,
+        taint_id: TaintId(0x100),
+        label: TaintLabel::UserInput,
+        symbolic: true,
+    }];
 
     let sink = JniSinkDescriptor::memcpy(sink_pc, Some(64));
 
@@ -305,7 +314,9 @@ fn test_jni_reachability_unreachable_sink_branch() {
             initial_constraints: Vec::new(),
         });
 
-    let result = analyzer.analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend).unwrap();
+    let result = analyzer
+        .analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend)
+        .unwrap();
 
     assert_eq!(result.status, JniPathStatus::Unsat);
 }
@@ -330,15 +341,13 @@ fn test_jni_reachability_bounded_execution_step_budget_exhausted() {
     process.redirects.insert(block1_pc, block2_pc);
     process.redirects.insert(block2_pc, sink_pc);
 
-    let taint_specs = vec![
-        JniArgumentTaint::Int {
-            arg_index: 2,
-            initial_value: 10,
-            taint_id: TaintId(0x100),
-            label: TaintLabel::UserInput,
-            symbolic: true,
-        },
-    ];
+    let taint_specs = vec![JniArgumentTaint::Int {
+        arg_index: 2,
+        initial_value: 10,
+        taint_id: TaintId(0x100),
+        label: TaintLabel::UserInput,
+        symbolic: true,
+    }];
 
     let sink = JniSinkDescriptor::memcpy(sink_pc, Some(64));
 
@@ -356,7 +365,9 @@ fn test_jni_reachability_bounded_execution_step_budget_exhausted() {
             initial_constraints: Vec::new(),
         });
 
-    let result = analyzer.analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend).unwrap();
+    let result = analyzer
+        .analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend)
+        .unwrap();
 
     match result.status {
         JniPathStatus::BoundedUnknown { reason } => {
@@ -367,7 +378,10 @@ fn test_jni_reachability_bounded_execution_step_budget_exhausted() {
         }
         other => panic!("Expected BoundedUnknown, got {other:?}"),
     }
-    assert!(!result.model_debt.is_empty(), "Model debt must record incomplete exploration");
+    assert!(
+        !result.model_debt.is_empty(),
+        "Model debt must record incomplete exploration"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -389,15 +403,13 @@ fn test_jni_reachability_bounded_execution_depth_limit_exceeded() {
     process.redirects.insert(block1_pc, block2_pc);
     process.redirects.insert(block2_pc, sink_pc);
 
-    let taint_specs = vec![
-        JniArgumentTaint::Int {
-            arg_index: 2,
-            initial_value: 10,
-            taint_id: TaintId(0x100),
-            label: TaintLabel::UserInput,
-            symbolic: true,
-        },
-    ];
+    let taint_specs = vec![JniArgumentTaint::Int {
+        arg_index: 2,
+        initial_value: 10,
+        taint_id: TaintId(0x100),
+        label: TaintLabel::UserInput,
+        symbolic: true,
+    }];
 
     let sink = JniSinkDescriptor::memcpy(sink_pc, None);
 
@@ -415,7 +427,9 @@ fn test_jni_reachability_bounded_execution_depth_limit_exceeded() {
             initial_constraints: Vec::new(),
         });
 
-    let result = analyzer.analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend).unwrap();
+    let result = analyzer
+        .analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend)
+        .unwrap();
 
     match result.status {
         JniPathStatus::BoundedUnknown { reason } => {
@@ -426,7 +440,10 @@ fn test_jni_reachability_bounded_execution_depth_limit_exceeded() {
         }
         other => panic!("Expected BoundedUnknown, got {other:?}"),
     }
-    assert!(!result.model_debt.is_empty(), "Model debt must record depth limit bound");
+    assert!(
+        !result.model_debt.is_empty(),
+        "Model debt must record depth limit bound"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -444,14 +461,12 @@ fn test_jni_reachability_store_sink_controlled_pointer() {
 
     process.redirects.insert(entry_pc, sink_pc);
 
-    let taint_specs = vec![
-        JniArgumentTaint::Register {
-            register_index: 7, // RDI (Destination)
-            initial_value: 0x6000_1000,
-            taint_id: TaintId(0x300),
-            label: TaintLabel::UserInput,
-        },
-    ];
+    let taint_specs = vec![JniArgumentTaint::Register {
+        register_index: 7, // RDI (Destination)
+        initial_value: 0x6000_1000,
+        taint_id: TaintId(0x300),
+        label: TaintLabel::UserInput,
+    }];
 
     let sink = JniSinkDescriptor::store(
         sink_pc,
@@ -472,7 +487,9 @@ fn test_jni_reachability_store_sink_controlled_pointer() {
             initial_constraints: Vec::new(),
         });
 
-    let result = analyzer.analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend).unwrap();
+    let result = analyzer
+        .analyze(&mut process, entry_pc, &taint_specs, sink, &mut backend)
+        .unwrap();
 
     assert_eq!(result.status, JniPathStatus::Feasible);
     assert!(!result.model_values.is_empty());
@@ -491,15 +508,13 @@ fn test_jni_reachability_analyze_elf_wrapper() {
     let entry_pc = 0x400078u64; // ELF entry point
     let sink_pc = 0x400078u64;
 
-    let taint_specs = vec![
-        JniArgumentTaint::Int {
-            arg_index: 2,
-            initial_value: 42,
-            taint_id: TaintId(0x100),
-            label: TaintLabel::UserInput,
-            symbolic: true,
-        },
-    ];
+    let taint_specs = vec![JniArgumentTaint::Int {
+        arg_index: 2,
+        initial_value: 42,
+        taint_id: TaintId(0x100),
+        label: TaintLabel::UserInput,
+        symbolic: true,
+    }];
 
     let sink = JniSinkDescriptor::memcpy(sink_pc, Some(10));
 
@@ -516,7 +531,9 @@ fn test_jni_reachability_analyze_elf_wrapper() {
             initial_constraints: Vec::new(),
         });
 
-    let result = analyzer.analyze_elf(&elf_bytes, entry_pc, &taint_specs, sink, &mut backend).unwrap();
+    let result = analyzer
+        .analyze_elf(&elf_bytes, entry_pc, &taint_specs, sink, &mut backend)
+        .unwrap();
     assert_eq!(result.status, JniPathStatus::Feasible);
     assert!(!result.model_values.is_empty());
 }

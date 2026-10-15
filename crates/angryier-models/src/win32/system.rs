@@ -2,8 +2,8 @@
 
 //! Win32 system information, timing, synchronization, and process control procedures.
 
-use crate::{SimProcedure, SimResult, SimState};
 use super::file::{Win32HandleKind, Win32HandleTable};
+use crate::{SimProcedure, SimResult, SimState};
 
 // ---------------------------------------------------------------------------
 // System Information
@@ -437,7 +437,10 @@ impl SimProcedure for WaitForSingleObjectProcedure {
             super::file::Win32WaitStatus::Signaled(index) => SimResult::Return(u64::from(index)),
             super::file::Win32WaitStatus::Invalid => SimResult::Return(0xFFFF_FFFF), // WAIT_FAILED
             super::file::Win32WaitStatus::Pending if timeout == 0 => SimResult::Return(258), // WAIT_TIMEOUT
-            super::file::Win32WaitStatus::Pending => SimResult::Blocked { handle, timeout_ms: timeout },
+            super::file::Win32WaitStatus::Pending => SimResult::Blocked {
+                handle,
+                timeout_ms: timeout,
+            },
         }
     }
 }
@@ -457,8 +460,10 @@ impl SimProcedure for WaitForMultipleObjectsProcedure {
     }
     fn apply(&self, state: &SimState) -> SimResult {
         let (Some(count), Some(ptr), Some(all), Some(timeout)) = (
-            state.try_win64_arg(0), state.try_win64_arg(1),
-            state.try_win64_arg(2), state.try_win64_arg(3),
+            state.try_win64_arg(0),
+            state.try_win64_arg(1),
+            state.try_win64_arg(2),
+            state.try_win64_arg(3),
         ) else {
             return SimResult::Unsupported("WaitForMultipleObjects missing arguments");
         };
@@ -468,10 +473,13 @@ impl SimProcedure for WaitForMultipleObjectsProcedure {
         let Some(bytes) = state.try_read_bytes(ptr, count as usize * 8) else {
             return SimResult::Unsupported("WaitForMultipleObjects handle array not captured");
         };
-        let handles: Vec<u64> = bytes.chunks_exact(8).filter_map(|chunk| {
-            let raw: [u8; 8] = chunk.try_into().ok()?;
-            Some(u64::from_le_bytes(raw))
-        }).collect();
+        let handles: Vec<u64> = bytes
+            .chunks_exact(8)
+            .filter_map(|chunk| {
+                let raw: [u8; 8] = chunk.try_into().ok()?;
+                Some(u64::from_le_bytes(raw))
+            })
+            .collect();
         if handles.len() != count as usize {
             return SimResult::Unsupported("incomplete HANDLE array");
         }
@@ -480,7 +488,10 @@ impl SimProcedure for WaitForMultipleObjectsProcedure {
             super::file::Win32WaitStatus::Signaled(index) => SimResult::Return(u64::from(index)),
             super::file::Win32WaitStatus::Invalid => SimResult::Return(0xFFFF_FFFF),
             super::file::Win32WaitStatus::Pending if timeout == 0 => SimResult::Return(258),
-            super::file::Win32WaitStatus::Pending => SimResult::Blocked { handle: ptr, timeout_ms: timeout },
+            super::file::Win32WaitStatus::Pending => SimResult::Blocked {
+                handle: ptr,
+                timeout_ms: timeout,
+            },
         }
     }
 }

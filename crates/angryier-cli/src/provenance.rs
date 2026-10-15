@@ -7,13 +7,14 @@ use std::io::Read;
 use std::process::Command;
 
 fn sha256_file(path: &std::path::Path) -> Result<String, String> {
-    let mut reader = std::io::BufReader::new(
-        std::fs::File::open(path).map_err(|e| format!("binary open failed: {e}"))?,
-    );
+    let mut reader =
+        std::io::BufReader::new(std::fs::File::open(path).map_err(|e| format!("binary open failed: {e}"))?);
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        let n = reader.read(&mut buffer).map_err(|e| format!("binary read failed: {e}"))?;
+        let n = reader
+            .read(&mut buffer)
+            .map_err(|e| format!("binary read failed: {e}"))?;
         if n == 0 {
             break;
         }
@@ -68,7 +69,11 @@ pub fn doctor(args: &[String]) -> Result<String, String> {
         cfg!(feature = "inspect"),
     );
     if show_paths {
-        out.push_str(&format!("\nbinary_path={}\nworking_directory={}", binary.display(), cwd.display()));
+        out.push_str(&format!(
+            "\nbinary_path={}\nworking_directory={}",
+            binary.display(),
+            cwd.display()
+        ));
     } else {
         out.push_str("\npaths=redacted (use --show-paths for local diagnosis)");
     }

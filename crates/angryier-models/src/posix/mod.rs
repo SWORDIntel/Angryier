@@ -12,10 +12,10 @@ pub use heap::{
     TrackedFreeProcedure, TrackedHeap, TrackedMallocProcedure,
 };
 pub use io::{
-    AcceptProcedure, AccessProcedure, BindProcedure, ChdirProcedure, CloseProcedure, ConnectProcedure,
-    DupProcedure, FdKind, FstatProcedure, GetcwdProcedure, ListenProcedure, LseekProcedure, MkdirProcedure,
-    OpenProcedure, PipeProcedure, PollProcedure, ReadProcedure, RecvProcedure, RmdirProcedure, SelectProcedure,
-    SendProcedure, SimFd, SimFdTable, SocketProcedure, StatProcedure, UnlinkProcedure, WriteProcedure,
+    AcceptProcedure, AccessProcedure, BindProcedure, ChdirProcedure, CloseProcedure, ConnectProcedure, DupProcedure,
+    FdKind, FstatProcedure, GetcwdProcedure, ListenProcedure, LseekProcedure, MkdirProcedure, OpenProcedure,
+    PipeProcedure, PollProcedure, ReadProcedure, RecvProcedure, RmdirProcedure, SelectProcedure, SendProcedure, SimFd,
+    SimFdTable, SocketProcedure, StatProcedure, UnlinkProcedure, WriteProcedure,
 };
 pub use process::{
     AbortProcedure, AbsProcedure, ExecveProcedure, ExitProcedure, ForkProcedure, GetegidProcedure, GeteuidProcedure,
@@ -25,23 +25,19 @@ pub use process::{
     TimeProcedure, UnameProcedure, WaitpidProcedure,
 };
 pub use string::{
-    AtoiProcedure, AtolProcedure, AtollProcedure, FputsProcedure, IsalnumProcedure, IsalphaProcedure,
-    IsdigitProcedure, IsprintProcedure, IsspaceProcedure, IsxdigitProcedure, MemchrProcedure, MemcmpProcedure,
-    MemcpyProcedure, MemmoveProcedure, MemrchrProcedure, MemsetProcedure, PutcharProcedure, PutsProcedure,
-    SnprintfProcedure, SprintfProcedure, StrcasecmpProcedure, StrcatProcedure, StrchrProcedure, StrcmpProcedure,
-    StrcpyProcedure, StrcspnProcedure, StrdupProcedure, StrlenProcedure, StrncasecmpProcedure, StrncatProcedure,
-    StrncmpProcedure, StrncpyProcedure, StrndupProcedure, StrrchrProcedure, StrspnProcedure, StrstrProcedure,
-    StrtolProcedure, StrtoulProcedure, TolowerProcedure, ToupperProcedure,
+    AtoiProcedure, AtolProcedure, AtollProcedure, FputsProcedure, IsalnumProcedure, IsalphaProcedure, IsdigitProcedure,
+    IsprintProcedure, IsspaceProcedure, IsxdigitProcedure, MemchrProcedure, MemcmpProcedure, MemcpyProcedure,
+    MemmoveProcedure, MemrchrProcedure, MemsetProcedure, PutcharProcedure, PutsProcedure, SnprintfProcedure,
+    SprintfProcedure, StrcasecmpProcedure, StrcatProcedure, StrchrProcedure, StrcmpProcedure, StrcpyProcedure,
+    StrcspnProcedure, StrdupProcedure, StrlenProcedure, StrncasecmpProcedure, StrncatProcedure, StrncmpProcedure,
+    StrncpyProcedure, StrndupProcedure, StrrchrProcedure, StrspnProcedure, StrstrProcedure, StrtolProcedure,
+    StrtoulProcedure, TolowerProcedure, ToupperProcedure,
 };
 
 use crate::SimProcedureRegistry;
 
 /// Registers all POSIX Libc models into the target procedure registry.
-pub fn register_posix_procedures(
-    registry: &mut SimProcedureRegistry,
-    heap: TrackedHeap,
-    table: SimFdTable,
-) {
+pub fn register_posix_procedures(registry: &mut SimProcedureRegistry, heap: TrackedHeap, table: SimFdTable) {
     // Heap management
     registry.register(Box::new(TrackedMallocProcedure::new(heap.clone())));
     registry.register(Box::new(CallocProcedure::new(heap.clone())));

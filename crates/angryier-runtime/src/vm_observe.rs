@@ -14,8 +14,8 @@ use angryier_arch::Decoder;
 use angryier_ir::{
     IrBlock,
     vm_trace::{
-        collect_observed_vm_trace, VmObservedBlock, VmObservedLocation, VmTraceFootprint,
-        VmTraceIdentity, VmTraceLimits,
+        VmObservedBlock, VmObservedLocation, VmTraceFootprint, VmTraceIdentity, VmTraceLimits,
+        collect_observed_vm_trace,
     },
 };
 
@@ -53,16 +53,12 @@ pub struct VmHandlerCapture {
     /// COW process state from BEFORE the first captured native instruction.
     /// Needed for exact entry-state SSA/expr materialization; never use the
     /// mutated final process or an unrelated load-time entry_state instead.
-    pub initial_state: angryier_state::ExecutionState<
-        angryier_state::PersistentRegisters,
-        angryier_memory::PersistentMemory,
-    >,
+    pub initial_state:
+        angryier_state::ExecutionState<angryier_state::PersistentRegisters, angryier_memory::PersistentMemory>,
     /// Actual post-handler state from the native execution path. A
     /// candidate's concrete replay is compared against this COW snapshot.
-    pub final_state: angryier_state::ExecutionState<
-        angryier_state::PersistentRegisters,
-        angryier_memory::PersistentMemory,
-    >,
+    pub final_state:
+        angryier_state::ExecutionState<angryier_state::PersistentRegisters, angryier_memory::PersistentMemory>,
     pub steps: Vec<VmRecordedInstruction>,
     pub footprint: VmTraceFootprint,
 }
@@ -96,9 +92,7 @@ impl<D: Decoder> Runtime<D> {
     where
         F: FnMut(&Process) -> Result<VmStateObservation, RuntimeError>,
     {
-        if process.image_id != window.identity.image
-            || process.target_profile != window.identity.target_profile
-        {
+        if process.image_id != window.identity.image || process.target_profile != window.identity.target_profile {
             return Err(RuntimeError::Environment(
                 "VM handler capture image/profile identity mismatch".into(),
             ));
@@ -107,7 +101,10 @@ impl<D: Decoder> Runtime<D> {
             window.identity.executable_digest,
             window.identity.capture_digest,
             window.identity.initial_state_digest,
-        ].iter().any(|digest| *digest == [0; 32]) {
+        ]
+        .iter()
+        .any(|digest| *digest == [0; 32])
+        {
             return Err(RuntimeError::Environment(
                 "VM handler observation lacks executable/capture/initial-state identity".into(),
             ));
@@ -143,9 +140,11 @@ impl<D: Decoder> Runtime<D> {
                 }
                 Ok(())
             })?;
-            let block = recorded_block.ok_or_else(|| RuntimeError::Environment(
-                "VM handler window crossed an unrecorded hook/redirect/model; capture incomplete".into(),
-            ))?;
+            let block = recorded_block.ok_or_else(|| {
+                RuntimeError::Environment(
+                    "VM handler window crossed an unrecorded hook/redirect/model; capture incomplete".into(),
+                )
+            })?;
             let after_pc = process.pc()?;
             let after_obs = observe(process)?;
             let after = observation_location(after_pc, after_obs);
@@ -165,24 +164,26 @@ impl<D: Decoder> Runtime<D> {
                 outcome,
             });
         }
-        let scoped: Vec<VmObservedBlock<'_>> = steps.iter().map(|step| VmObservedBlock {
-            block: &step.block,
-            before: step.before,
-            after: step.after,
-            code_epoch: step.code_epoch,
-        }).collect();
-        let footprint = collect_observed_vm_trace(
-            window.identity,
-            window.entry,
-            window.exit,
-            &scoped,
-            window.limits,
-        )
-        .map_err(|error| RuntimeError::Environment(format!(
-            "VM handler trace validation failed: {error:?}"
-        )))?;
+        let scoped: Vec<VmObservedBlock<'_>> = steps
+            .iter()
+            .map(|step| VmObservedBlock {
+                block: &step.block,
+                before: step.before,
+                after: step.after,
+                code_epoch: step.code_epoch,
+            })
+            .collect();
+        let footprint =
+            collect_observed_vm_trace(window.identity, window.entry, window.exit, &scoped, window.limits)
+                .map_err(|error| RuntimeError::Environment(format!("VM handler trace validation failed: {error:?}")))?;
         let final_state = process.state.clone();
-        Ok(VmHandlerCapture { window, initial_state, final_state, steps, footprint })
+        Ok(VmHandlerCapture {
+            window,
+            initial_state,
+            final_state,
+            steps,
+            footprint,
+        })
     }
 }
 
@@ -254,12 +255,11 @@ mod tests {
         };
         let capture = runtime.observe_vm_handler(&mut process, window, |state| {
             let pc = state.pc()?;
-            let offset = pc.checked_sub(0x1000).ok_or_else(|| {
-                RuntimeError::Environment("unexpected native program counter".into())
-            })?;
-            let offset = u8::try_from(offset).map_err(|_| {
-                RuntimeError::Environment("virtual counter beyond synthetic fixture".into())
-            })?;
+            let offset = pc
+                .checked_sub(0x1000)
+                .ok_or_else(|| RuntimeError::Environment("unexpected native program counter".into()))?;
+            let offset = u8::try_from(offset)
+                .map_err(|_| RuntimeError::Environment("virtual counter beyond synthetic fixture".into()))?;
             Ok(VmStateObservation {
                 virtual_pc: u64::from(offset),
                 context_digest: [offset + 1; 32],
@@ -355,10 +355,7 @@ mod tests {
         // An actual capture must validate this through collect_observed_vm_trace;
         // constructing an untrusted window alone cannot produce a footprint.
         assert!(matches!(
-            collect_observed_vm_trace(
-                window.identity, window.entry, window.exit,
-                &[], window.limits
-            ),
+            collect_observed_vm_trace(window.identity, window.entry, window.exit, &[], window.limits),
             Err(angryier_ir::vm_trace::VmTraceError::EmptyTrace)
         ));
     }

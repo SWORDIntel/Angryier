@@ -12,9 +12,21 @@ pub enum FdKind {
     Stdin,
     Stdout,
     Stderr,
-    File { path: String, flags: u32, offset: u64 },
-    Socket { domain: i32, sock_type: i32, protocol: i32, connected: bool },
-    Pipe { read_end: bool, peer_fd: i32 },
+    File {
+        path: String,
+        flags: u32,
+        offset: u64,
+    },
+    Socket {
+        domain: i32,
+        sock_type: i32,
+        protocol: i32,
+        connected: bool,
+    },
+    Pipe {
+        read_end: bool,
+        peer_fd: i32,
+    },
     Epoll,
 }
 
@@ -35,9 +47,30 @@ pub struct SimFdTableState {
 impl Default for SimFdTableState {
     fn default() -> Self {
         let mut fds = BTreeMap::new();
-        fds.insert(0, SimFd { fd: 0, kind: FdKind::Stdin, buffer: Vec::new() });
-        fds.insert(1, SimFd { fd: 1, kind: FdKind::Stdout, buffer: Vec::new() });
-        fds.insert(2, SimFd { fd: 2, kind: FdKind::Stderr, buffer: Vec::new() });
+        fds.insert(
+            0,
+            SimFd {
+                fd: 0,
+                kind: FdKind::Stdin,
+                buffer: Vec::new(),
+            },
+        );
+        fds.insert(
+            1,
+            SimFd {
+                fd: 1,
+                kind: FdKind::Stdout,
+                buffer: Vec::new(),
+            },
+        );
+        fds.insert(
+            2,
+            SimFd {
+                fd: 2,
+                kind: FdKind::Stderr,
+                buffer: Vec::new(),
+            },
+        );
         Self { fds, next_fd: 3 }
     }
 }
@@ -61,7 +94,14 @@ impl SimFdTable {
         };
         let fd = state.next_fd;
         state.next_fd = state.next_fd.saturating_add(1);
-        state.fds.insert(fd, SimFd { fd, kind, buffer: Vec::new() });
+        state.fds.insert(
+            fd,
+            SimFd {
+                fd,
+                kind,
+                buffer: Vec::new(),
+            },
+        );
         fd
     }
 
@@ -71,11 +111,7 @@ impl SimFdTable {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        if state.fds.remove(&fd).is_some() {
-            0
-        } else {
-            -1
-        }
+        if state.fds.remove(&fd).is_some() { 0 } else { -1 }
     }
 
     /// Checks if a file descriptor is open and valid.
@@ -114,11 +150,7 @@ impl SimProcedure for OpenProcedure {
         let path_bytes = state.read_null_terminated_string(path_addr, 4096);
         let path = String::from_utf8_lossy(&path_bytes).into_owned();
 
-        let fd = self.table.alloc_fd(FdKind::File {
-            path,
-            flags,
-            offset: 0,
-        });
+        let fd = self.table.alloc_fd(FdKind::File { path, flags, offset: 0 });
         SimResult::Return(fd as u32 as u64)
     }
 }
@@ -286,8 +318,14 @@ impl SimProcedure for PipeProcedure {
 
     fn apply(&self, state: &SimState) -> SimResult {
         let pipefd_addr = state.get_arg(0);
-        let read_fd = self.table.alloc_fd(FdKind::Pipe { read_end: true, peer_fd: -1 });
-        let write_fd = self.table.alloc_fd(FdKind::Pipe { read_end: false, peer_fd: read_fd });
+        let read_fd = self.table.alloc_fd(FdKind::Pipe {
+            read_end: true,
+            peer_fd: -1,
+        });
+        let write_fd = self.table.alloc_fd(FdKind::Pipe {
+            read_end: false,
+            peer_fd: read_fd,
+        });
 
         let mut data = Vec::with_capacity(8);
         data.extend_from_slice(&read_fd.to_le_bytes());
@@ -429,7 +467,7 @@ impl SimProcedure for AcceptProcedure {
             return SimResult::Return(u64::MAX);
         }
         let client_fd = self.table.alloc_fd(FdKind::Socket {
-            domain: 2, // AF_INET
+            domain: 2,    // AF_INET
             sock_type: 1, // SOCK_STREAM
             protocol: 0,
             connected: true,
