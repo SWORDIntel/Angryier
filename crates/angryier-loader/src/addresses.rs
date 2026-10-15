@@ -289,10 +289,10 @@ mod tests {
     fn rejects_ambiguous_and_out_of_range_sections() {
         let mut bytes = fixture();
         bytes[0x188 + 12..0x188 + 16].copy_from_slice(&0x100u32.to_le_bytes());
-        assert_eq!(PeAddressMap::parse(&bytes), Err(PeAddressError::AmbiguousMapping));
+        assert!(matches!(PeAddressMap::parse(&bytes), Err(PeAddressError::AmbiguousMapping)));
         let mut bytes = fixture();
         bytes[0x188 + 20..0x188 + 24].copy_from_slice(&0x700u32.to_le_bytes());
-        assert_eq!(PeAddressMap::parse(&bytes), Err(PeAddressError::OutOfBounds));
+        assert!(matches!(PeAddressMap::parse(&bytes), Err(PeAddressError::OutOfBounds)));
         assert!(matches!(PeAddressMap::parse(&bytes[..0x90]), Err(PeAddressError::InvalidImage)));
     }
 }
