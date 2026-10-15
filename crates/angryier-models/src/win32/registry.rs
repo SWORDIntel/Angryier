@@ -22,8 +22,8 @@ impl SimProcedure for RegOpenKeyExAProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let subkey_addr = state.get_arg(1);
-        let phk_result = state.get_arg(4);
+        let subkey_addr = state.get_win64_arg(1);
+        let phk_result = state.get_win64_arg(4);
 
         let subkey_bytes = state.read_null_terminated_string(subkey_addr, 512);
         let subkey = String::from_utf8_lossy(&subkey_bytes).into_owned();
@@ -59,7 +59,7 @@ impl SimProcedure for RegOpenKeyExWProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let phk_result = state.get_arg(4);
+        let phk_result = state.get_win64_arg(4);
         let handle = self.handles.alloc_handle(Win32HandleKind::RegKey {
             path: "<wide_reg_key>".into(),
         });
@@ -85,9 +85,9 @@ impl SimProcedure for RegQueryValueExAProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let type_ptr = state.get_arg(3);
-        let data_ptr = state.get_arg(4);
-        let cb_data_ptr = state.get_arg(5);
+        let type_ptr = state.get_win64_arg(3);
+        let data_ptr = state.get_win64_arg(4);
+        let cb_data_ptr = state.get_win64_arg(5);
 
         let mut next = state.clone();
 
@@ -117,9 +117,9 @@ impl SimProcedure for RegQueryValueExWProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let type_ptr = state.get_arg(3);
-        let data_ptr = state.get_arg(4);
-        let cb_data_ptr = state.get_arg(5);
+        let type_ptr = state.get_win64_arg(3);
+        let data_ptr = state.get_win64_arg(4);
+        let cb_data_ptr = state.get_win64_arg(5);
 
         let mut next = state.clone();
 
@@ -182,7 +182,7 @@ impl SimProcedure for RegCloseKeyProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let h_key = state.get_arg(0);
+        let h_key = state.get_win64_arg(0);
         let _ = self.handles.close_handle(h_key);
         SimResult::Return(0)
     }
