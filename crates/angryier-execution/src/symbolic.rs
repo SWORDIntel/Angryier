@@ -4747,11 +4747,12 @@ mod tests {
                 },
             })
             .map_err(|e| format!("{e:?}"))?;
+        let cond = eq(&arena, 128, a, b)?;
         let parent = SymbolicStateSnapshot::default();
         let left = SymbolicStateSnapshot {
             registers: BTreeMap::from([(ZMM0, (a, vec_ty(128, 8)))]),
             concrete_registers: BTreeMap::new(),
-            constraints: Vec::new(),
+            constraints: vec![cond],
             symbols: Vec::new(),
             expr_concrete: BTreeMap::new(),
         };

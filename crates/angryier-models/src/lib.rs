@@ -12,8 +12,10 @@ use angryier_types::{DependencyKey, EnvironmentModelId, EnvironmentModelVersion,
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-
 pub use syscall::SyscallDispatchTable;
+
+pub mod posix;
+pub mod win32;
 
 // ---------------------------------------------------------------------------
 // Summary precision and model key
@@ -483,6 +485,29 @@ impl SimProcedureRegistry {
         self.register(Box::new(FutexWakeProcedure::new(futex_tracker.clone())));
         self.register(Box::new(FutexProcedure::new(futex_tracker)));
         self.register(Box::new(PthreadCreateProcedure::new(thread_tracker)));
+    }
+
+    /// Registers all extended POSIX Libc models (tracked heap, string/mem, I/O, process).
+    pub fn register_posix_procedures(&mut self) {
+        let heap = posix::heap::TrackedHeap::default();
+        let table = posix::io::SimFdTable::default();
+        posix::register_posix_procedures(self, heap, table);
+    }
+
+    /// Registers all Win32 userland API models (virtual memory, heap, handles, files, device IOCTL, registry, system).
+    pub fn register_win32_procedures(&mut self) {
+        let vm = win32::memory::VirtualMemoryTracker::default();
+        let handles = win32::file::Win32HandleTable::default();
+        win32::register_win32_procedures(self, vm, handles);
+    }
+
+    /// Creates a registry pre-populated with standard library stubs, POSIX libc models, and Win32 APIs.
+    pub fn with_all_environments() -> Self {
+        let mut registry = Self::new();
+        registry.register_standard_library();
+        registry.register_posix_procedures();
+        registry.register_win32_procedures();
+        registry
     }
 
     /// Inserts a boxed procedure into the registry.
