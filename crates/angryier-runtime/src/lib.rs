@@ -3461,6 +3461,12 @@ impl<D: Decoder> Runtime<D> {
         process.simproc_dispatches += 1;
 
         match result {
+            SimResult::Blocked { handle, timeout_ms } => Err(RuntimeError::Environment(format!(
+                "Win32 {name} blocked on {handle:#x} (timeout={timeout_ms}); a thread scheduler or observed wakeup is required"
+            ))),
+            SimResult::Unsupported(reason) => Err(RuntimeError::Environment(format!(
+                "Win32 {name} unsupported: {reason}"
+            ))),
             SimResult::Return(val) => {
                 // Write return value to RAX (GPR 0).
                 process.state.registers = process
@@ -3588,6 +3594,12 @@ impl<D: Decoder> Runtime<D> {
         process.simproc_dispatches += 1;
 
         match result {
+            SimResult::Blocked { handle, timeout_ms } => Err(RuntimeError::Environment(format!(
+                "Win32 {name} blocked on {handle:#x} (timeout={timeout_ms}); no wakeup schedule was supplied"
+            ))),
+            SimResult::Unsupported(reason) => Err(RuntimeError::Environment(format!(
+                "Win32 {name} unsupported: {reason}"
+            ))),
             SimResult::Exit => {
                 process.terminated = true;
                 Ok(StepOutcome::SimProcedure { address, name })
