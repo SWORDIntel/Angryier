@@ -2,6 +2,7 @@
 
 pub mod addresses;
 pub mod minidump;
+pub mod minidump_file;
 
 use std::fmt;
 use std::sync::Mutex;
