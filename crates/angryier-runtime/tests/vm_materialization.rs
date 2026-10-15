@@ -33,22 +33,37 @@ fn location(pc: u64, vpc: u64, state: u8) -> VmObservedLocation {
 fn block(pc: u64, index: u64, source: u32, increment: u64) -> IrBlock {
     let v = |id, op| IrInstruction { result: Some(IrValueId(id)), op };
     let e = |op| IrInstruction { result: None, op };
+    let mut instructions = vec![
+        v(0, IrOp::ReadRegister { register: source, ty: IrType::Bits(64) }),
+        v(1, IrOp::Constant {
+            ty: IrType::Bits(64), bytes_le: increment.to_le_bytes().to_vec(),
+        }),
+        v(2, IrOp::Primitive {
+            op: IrPrimitive::Add, ty: IrType::Bits(64),
+            inputs: vec![IrValueId(0), IrValueId(1)],
+        }),
+    ];
+    if index == 1 {
+        // Faultable load whose value is deliberately unused; expression
+        // reduction must not discard its exception obligation.
+        instructions.push(v(3, IrOp::Constant {
+            ty: IrType::Bits(64), bytes_le: 0x1000u64.to_le_bytes().to_vec(),
+        }));
+        instructions.push(v(4, IrOp::Load {
+            address: IrValueId(3), ty: IrType::Bits(8),
+        }));
+    }
+    instructions.push(e(IrOp::WriteRegister {
+        register: 1, value: IrValueId(2), kind: RegisterWriteKind::ReplaceParent,
+    }));
+    instructions.push(e(IrOp::Jump { target: pc + 1 }));
     IrBlock {
         key: IrBlockKey {
             image: ImageId(1), block: BlockId(index), address: pc,
             semantic_content: ContentId([8; 32]), target_profile: TargetProfileId(1),
             code_versions: Vec::new(),
         },
-        instructions: vec![
-            v(0, IrOp::ReadRegister { register: source, ty: IrType::Bits(64) }),
-            v(1, IrOp::Constant { ty: IrType::Bits(64),
-                bytes_le: increment.to_le_bytes().to_vec() }),
-            v(2, IrOp::Primitive { op: IrPrimitive::Add, ty: IrType::Bits(64),
-                inputs: vec![IrValueId(0), IrValueId(1)] }),
-            e(IrOp::WriteRegister { register: 1, value: IrValueId(2),
-                kind: RegisterWriteKind::ReplaceParent }),
-            e(IrOp::Jump { target: pc + 1 }),
-        ],
+        instructions,
     }
 }
 fn fixture() -> Result<VmHandlerCapture, String> {
@@ -99,6 +114,7 @@ fn two_blocks_reuse_symbolic_state_not_numeric_ssa_ids() -> Result<(), String> {
         .map_err(|e| format!("{e:?}"))?;
     assert_eq!(candidate.reduced.effects.len(), 2);
     assert_eq!(candidate.original_effects.len(), 2);
+    assert_eq!(candidate.potentially_faulting_reads.len(), 1);
     let first = candidate.reduced.effects[0].value;
     let second = candidate.reduced.effects[1].value;
     assert_eq!(angryier_execution::constant_value(&arena, first).map_err(|e| e.to_string())?, 7);
@@ -111,6 +127,20 @@ fn edited_footprint_is_rejected_before_materialization() -> Result<(), String> {
     let mut capture = fixture()?;
     let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
     capture.footprint.effects.clear();
+    assert!(materialize_vm_handler(&capture, &arena, 1024).is_err());
+    Ok(())
+}
+
+#[test]
+fn fabricated_native_step_outcome_fails_closed() -> Result<(), String> {
+    let mut capture = fixture()?;
+    capture.steps[0].outcome = StepOutcome::Stepped {
+        pc: 0xdeaf,
+        next_pc: 0x1001,
+        length: 1,
+        form_id: 1,
+    };
+    let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
     assert!(materialize_vm_handler(&capture, &arena, 1024).is_err());
     Ok(())
 }
