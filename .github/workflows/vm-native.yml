@@ -42,6 +42,8 @@ jobs:
         run: cargo test -p angryier-models
       - name: VM runtime integration tests
         run: cargo test -p angryier-runtime --features "xed script" --test lua_api
+      - name: Windows PE call-return fidelity regressions
+        run: cargo test -p angryier-runtime --features "xed script" --test pe_driver
       - name: CLI forensic command tests
         run: cargo test -p angryier-cli
       # Existing main has unrelated clippy warnings. Retain diagnostic output
