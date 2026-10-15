@@ -3728,6 +3728,60 @@ mod tests {
     }
 
     #[test]
+    fn ir_concat_low_high_matches_concrete_and_symbolic_expression_order()
+        -> Result<(), SymbolicEvalError>
+    {
+        let arena = arena();
+        let candidate = block(vec![
+            IrInstruction {
+                result: Some(IrValueId(0)),
+                op: IrOp::Constant {
+                    ty: bits(8),
+                    bytes_le: vec![0x34],
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(1)),
+                op: IrOp::Constant {
+                    ty: bits(8),
+                    bytes_le: vec![0x12],
+                },
+            },
+            IrInstruction {
+                result: Some(IrValueId(2)),
+                op: IrOp::Primitive {
+                    op: IrPrimitive::Concat,
+                    ty: bits(16),
+                    inputs: vec![IrValueId(0), IrValueId(1)],
+                },
+            },
+            IrInstruction {
+                result: None,
+                op: IrOp::WriteRegister {
+                    register: 1,
+                    value: IrValueId(2),
+                    kind: RegisterWriteKind::ReplaceParent,
+                },
+            },
+        ]);
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        evaluator.eval_block(&candidate)?;
+        let resulting = evaluator
+            .register_value(1)
+            .ok_or(SymbolicEvalError::UnsupportedOperation("concat produced no register value".into()))?;
+        assert_eq!(constant_value(&arena, resulting)?, 0x1234);
+        assert_eq!(
+            eval_primitive_concrete(
+                IrPrimitive::Concat,
+                16,
+                &[(0x34u128, 8u16), (0x12u128, 8u16)],
+            ),
+            Some(0x1234),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn producer_expressions_are_exposed_without_reimplementing_evaluation()
         -> Result<(), SymbolicEvalError>
     {
