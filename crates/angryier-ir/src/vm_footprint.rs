@@ -15,23 +15,45 @@ use std::collections::BTreeSet;
 use angryier_types::ExprId;
 
 use crate::{
-    BasicIrVerifier, IrBlock, IrOp, IrPrimitive, IrValueId, IrVerificationError,
-    IrVerifier, RegisterWriteKind,
+    BasicIrVerifier, IrBlock, IrOp, IrPrimitive, IrValueId, IrVerificationError, IrVerifier, RegisterWriteKind,
 };
 
 /// An effect in original instruction order. Store ordering must be preserved:
 /// aliasing writes cannot be sorted or coalesced without a proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmIrEffect {
-    MemoryRead { address: IrValueId, mask: Option<IrValueId>, result: IrValueId },
-    MemoryWrite { address: IrValueId, value: IrValueId },
-    RegisterWrite { register: u32, value: IrValueId, kind: RegisterWriteKind },
-    Branch { condition: IrValueId, taken: u64, not_taken: u64 },
-    Jump { target: u64 },
-    IndirectJump { target: IrValueId },
-    Call { target: u64 },
+    MemoryRead {
+        address: IrValueId,
+        mask: Option<IrValueId>,
+        result: IrValueId,
+    },
+    MemoryWrite {
+        address: IrValueId,
+        value: IrValueId,
+    },
+    RegisterWrite {
+        register: u32,
+        value: IrValueId,
+        kind: RegisterWriteKind,
+    },
+    Branch {
+        condition: IrValueId,
+        taken: u64,
+        not_taken: u64,
+    },
+    Jump {
+        target: u64,
+    },
+    IndirectJump {
+        target: IrValueId,
+    },
+    Call {
+        target: u64,
+    },
     Return,
-    Trap { vector: u32 },
+    Trap {
+        vector: u32,
+    },
 }
 
 /// Inputs referenced by the retained SSA slice. A memory read is represented
@@ -98,10 +120,7 @@ pub struct VmIrFootprint {
 /// The result is a starting point for a handler effect collector, not a
 /// complete handler semantics summary. To analyze multiple blocks, retain
 /// each block's independent SSA namespace and explicit path/VM context.
-pub fn collect_vm_ir_effects(
-    block: &IrBlock,
-    limits: VmIrLimits,
-) -> Result<VmIrFootprint, VmIrError> {
+pub fn collect_vm_ir_effects(block: &IrBlock, limits: VmIrLimits) -> Result<VmIrFootprint, VmIrError> {
     if block.instructions.len() > limits.max_instructions {
         return Err(VmIrError::InstructionBudgetExceeded {
             required: block.instructions.len(),
@@ -127,7 +146,9 @@ pub fn collect_vm_ir_effects(
         match &instruction.op {
             IrOp::WriteRegister { register, value, kind } => {
                 effects.push(VmIrEffect::RegisterWrite {
-                    register: *register, value: *value, kind: *kind,
+                    register: *register,
+                    value: *value,
+                    kind: *kind,
                 });
                 roots.push(*value);
                 if matches!(kind, RegisterWriteKind::PreserveParent { .. }) {
@@ -136,7 +157,8 @@ pub fn collect_vm_ir_effects(
             }
             IrOp::Store { address, value } => {
                 effects.push(VmIrEffect::MemoryWrite {
-                    address: *address, value: *value,
+                    address: *address,
+                    value: *value,
                 });
                 roots.extend([*address, *value]);
             }
@@ -145,7 +167,9 @@ pub fn collect_vm_ir_effects(
                     u32::try_from(producers.len()).unwrap_or(u32::MAX),
                 )))?;
                 effects.push(VmIrEffect::MemoryRead {
-                    address: *address, mask: None, result,
+                    address: *address,
+                    mask: None,
+                    result,
                 });
                 roots.push(result);
             }
@@ -154,13 +178,21 @@ pub fn collect_vm_ir_effects(
                     u32::try_from(producers.len()).unwrap_or(u32::MAX),
                 )))?;
                 effects.push(VmIrEffect::MemoryRead {
-                    address: *address, mask: Some(*mask), result,
+                    address: *address,
+                    mask: Some(*mask),
+                    result,
                 });
                 roots.push(result);
             }
-            IrOp::Branch { condition, taken, not_taken } => {
+            IrOp::Branch {
+                condition,
+                taken,
+                not_taken,
+            } => {
                 effects.push(VmIrEffect::Branch {
-                    condition: *condition, taken: *taken, not_taken: *not_taken,
+                    condition: *condition,
+                    taken: *taken,
+                    not_taken: *not_taken,
                 });
                 roots.push(*condition);
             }
@@ -174,9 +206,7 @@ pub fn collect_vm_ir_effects(
             IrOp::Trap { vector } => effects.push(VmIrEffect::Trap { vector: *vector }),
             IrOp::Primitive { op, .. } => {
                 if let Some(result) = instruction.result {
-                    caveats.push(VmIrCaveat::PrimitiveRequiresSemanticReview {
-                        result, primitive: *op,
-                    });
+                    caveats.push(VmIrCaveat::PrimitiveRequiresSemanticReview { result, primitive: *op });
                 }
             }
             IrOp::Constant { .. } | IrOp::ExprRef { .. } | IrOp::ReadRegister { .. } => {}
@@ -250,7 +280,10 @@ mod tests {
     }
 
     fn value(id: u32, op: IrOp) -> IrInstruction {
-        IrInstruction { result: Some(IrValueId(id)), op }
+        IrInstruction {
+            result: Some(IrValueId(id)),
+            op,
+        }
     }
 
     fn effect(op: IrOp) -> IrInstruction {
@@ -264,21 +297,51 @@ mod tests {
     #[test]
     fn preserves_unused_faulting_load_and_ordered_aliasing_writes() -> Result<(), String> {
         let b = block(vec![
-            value(0, IrOp::ReadRegister { register: 14, ty: IrType::Bits(64) }),
-            value(1, IrOp::Load { address: IrValueId(0), ty: IrType::Bits(64) }),
-            value(2, IrOp::Constant { ty: IrType::Bits(64), bytes_le: 7u64.to_le_bytes().to_vec() }),
-            effect(IrOp::Store { address: IrValueId(0), value: IrValueId(2) }),
-            effect(IrOp::Store { address: IrValueId(0), value: IrValueId(2) }),
+            value(
+                0,
+                IrOp::ReadRegister {
+                    register: 14,
+                    ty: IrType::Bits(64),
+                },
+            ),
+            value(
+                1,
+                IrOp::Load {
+                    address: IrValueId(0),
+                    ty: IrType::Bits(64),
+                },
+            ),
+            value(
+                2,
+                IrOp::Constant {
+                    ty: IrType::Bits(64),
+                    bytes_le: 7u64.to_le_bytes().to_vec(),
+                },
+            ),
+            effect(IrOp::Store {
+                address: IrValueId(0),
+                value: IrValueId(2),
+            }),
+            effect(IrOp::Store {
+                address: IrValueId(0),
+                value: IrValueId(2),
+            }),
             effect(IrOp::Return),
         ]);
         let p = collect_vm_ir_effects(&b, limits()).map_err(|error| format!("{error:?}"))?;
         assert_eq!(p.effects.len(), 4);
-        assert!(matches!(p.effects[0], VmIrEffect::MemoryRead { result: IrValueId(1), .. }));
+        assert!(matches!(
+            p.effects[0],
+            VmIrEffect::MemoryRead {
+                result: IrValueId(1),
+                ..
+            }
+        ));
         assert_eq!(p.effects[1], p.effects[2]);
-        assert_eq!(p.sources, vec![
-            VmIrSource::Register(14),
-            VmIrSource::MemoryRead(IrValueId(1)),
-        ]);
+        assert_eq!(
+            p.sources,
+            vec![VmIrSource::Register(14), VmIrSource::MemoryRead(IrValueId(1)),]
+        );
         assert_eq!(p.dependencies, vec![IrValueId(0), IrValueId(1), IrValueId(2)]);
         Ok(())
     }
@@ -286,63 +349,157 @@ mod tests {
     #[test]
     fn retains_mask_and_indirect_dispatch_dependencies() -> Result<(), String> {
         let b = block(vec![
-            value(0, IrOp::ReadRegister { register: 10, ty: IrType::Bits(64) }),
-            value(1, IrOp::ReadRegister { register: 11, ty: IrType::Bits(8) }),
-            value(2, IrOp::PredicatedVectorLoad {
-                address: IrValueId(0),
-                mask: IrValueId(1),
-                ty: IrType::Vector { width_bits: 256, lane_bits: 32 },
-            }),
-            value(3, IrOp::ExprRef { expression: ExprId(55), ty: IrType::Bits(64) }),
+            value(
+                0,
+                IrOp::ReadRegister {
+                    register: 10,
+                    ty: IrType::Bits(64),
+                },
+            ),
+            value(
+                1,
+                IrOp::ReadRegister {
+                    register: 11,
+                    ty: IrType::Bits(8),
+                },
+            ),
+            value(
+                2,
+                IrOp::PredicatedVectorLoad {
+                    address: IrValueId(0),
+                    mask: IrValueId(1),
+                    ty: IrType::Vector {
+                        width_bits: 256,
+                        lane_bits: 32,
+                    },
+                },
+            ),
+            value(
+                3,
+                IrOp::ExprRef {
+                    expression: ExprId(55),
+                    ty: IrType::Bits(64),
+                },
+            ),
             effect(IrOp::JumpIndirect { target: IrValueId(3) }),
         ]);
         let p = collect_vm_ir_effects(&b, limits()).map_err(|error| format!("{error:?}"))?;
-        assert_eq!(p.sources, vec![
-            VmIrSource::Register(10),
-            VmIrSource::Register(11),
-            VmIrSource::Expression(ExprId(55)),
-            VmIrSource::MemoryRead(IrValueId(2)),
-        ]);
+        assert_eq!(
+            p.sources,
+            vec![
+                VmIrSource::Register(10),
+                VmIrSource::Register(11),
+                VmIrSource::Expression(ExprId(55)),
+                VmIrSource::MemoryRead(IrValueId(2)),
+            ]
+        );
         assert!(p.dependencies.contains(&IrValueId(1)));
-        assert!(p.effects.iter().any(|effect| matches!(effect, VmIrEffect::IndirectJump { target: IrValueId(3) })));
+        assert!(
+            p.effects
+                .iter()
+                .any(|effect| matches!(effect, VmIrEffect::IndirectJump { target: IrValueId(3) }))
+        );
         Ok(())
     }
 
     #[test]
     fn partial_register_update_keeps_implicit_parent_and_path_condition() -> Result<(), String> {
         let b = block(vec![
-            value(0, IrOp::Constant { ty: IrType::Bits(8), bytes_le: vec![1] }),
+            value(
+                0,
+                IrOp::Constant {
+                    ty: IrType::Bits(8),
+                    bytes_le: vec![1],
+                },
+            ),
             effect(IrOp::WriteRegister {
                 register: 4,
                 value: IrValueId(0),
-                kind: RegisterWriteKind::PreserveParent { bit_offset: 8, width_bits: 8 },
+                kind: RegisterWriteKind::PreserveParent {
+                    bit_offset: 8,
+                    width_bits: 8,
+                },
             }),
-            effect(IrOp::Branch { condition: IrValueId(0), taken: 0x10, not_taken: 0x20 }),
+            effect(IrOp::Branch {
+                condition: IrValueId(0),
+                taken: 0x10,
+                not_taken: 0x20,
+            }),
         ]);
         let p = collect_vm_ir_effects(&b, limits()).map_err(|error| format!("{error:?}"))?;
         assert_eq!(p.sources, vec![VmIrSource::Register(4)]);
-        assert!(matches!(p.effects[1], VmIrEffect::Branch { condition: IrValueId(0), .. }));
+        assert!(matches!(
+            p.effects[1],
+            VmIrEffect::Branch {
+                condition: IrValueId(0),
+                ..
+            }
+        ));
         Ok(())
     }
 
     #[test]
     fn refuses_unverified_ir_and_budgets_without_partial_results() -> Result<(), String> {
         let bad = block(vec![effect(IrOp::Store {
-            address: IrValueId(44), value: IrValueId(45),
+            address: IrValueId(44),
+            value: IrValueId(45),
         })]);
-        assert!(matches!(collect_vm_ir_effects(&bad, limits()), Err(VmIrError::InvalidIr(_))));
+        assert!(matches!(
+            collect_vm_ir_effects(&bad, limits()),
+            Err(VmIrError::InvalidIr(_))
+        ));
         let b = block(vec![
-            value(0, IrOp::ReadRegister { register: 1, ty: IrType::Bits(64) }),
-            value(1, IrOp::ReadRegister { register: 2, ty: IrType::Bits(64) }),
-            value(2, IrOp::Primitive {
-                op: IrPrimitive::Add, ty: IrType::Bits(64),
-                inputs: vec![IrValueId(0), IrValueId(1)],
+            value(
+                0,
+                IrOp::ReadRegister {
+                    register: 1,
+                    ty: IrType::Bits(64),
+                },
+            ),
+            value(
+                1,
+                IrOp::ReadRegister {
+                    register: 2,
+                    ty: IrType::Bits(64),
+                },
+            ),
+            value(
+                2,
+                IrOp::Primitive {
+                    op: IrPrimitive::Add,
+                    ty: IrType::Bits(64),
+                    inputs: vec![IrValueId(0), IrValueId(1)],
+                },
+            ),
+            effect(IrOp::WriteRegister {
+                register: 3,
+                value: IrValueId(2),
+                kind: RegisterWriteKind::ReplaceParent,
             }),
-            effect(IrOp::WriteRegister { register: 3, value: IrValueId(2), kind: RegisterWriteKind::ReplaceParent }),
         ]);
-        assert!(matches!(collect_vm_ir_effects(&b, VmIrLimits { max_instructions: 2, max_dependency_values: 8 }), Err(VmIrError::InstructionBudgetExceeded { .. })));
-        assert!(matches!(collect_vm_ir_effects(&b, VmIrLimits { max_instructions: 8, max_dependency_values: 2 }), Err(VmIrError::DependencyBudgetExceeded { .. })));
-        assert!(matches!(collect_vm_ir_effects(&b, limits()), Ok(VmIrFootprint { caveats, .. }) if caveats.iter().any(|c| matches!(c, VmIrCaveat::PrimitiveRequiresSemanticReview { .. }))));
+        assert!(matches!(
+            collect_vm_ir_effects(
+                &b,
+                VmIrLimits {
+                    max_instructions: 2,
+                    max_dependency_values: 8
+                }
+            ),
+            Err(VmIrError::InstructionBudgetExceeded { .. })
+        ));
+        assert!(matches!(
+            collect_vm_ir_effects(
+                &b,
+                VmIrLimits {
+                    max_instructions: 8,
+                    max_dependency_values: 2
+                }
+            ),
+            Err(VmIrError::DependencyBudgetExceeded { .. })
+        ));
+        assert!(
+            matches!(collect_vm_ir_effects(&b, limits()), Ok(VmIrFootprint { caveats, .. }) if caveats.iter().any(|c| matches!(c, VmIrCaveat::PrimitiveRequiresSemanticReview { .. })))
+        );
         Ok(())
     }
 }
