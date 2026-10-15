@@ -220,7 +220,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn memory64_file_reads_only_requested_bytes() {
+    fn memory64_file_reads_only_requested_bytes() -> Result<(), MiniDumpFileError> {
         let mut dump = vec![0u8; 0x200];
         dump[0..4].copy_from_slice(b"MDMP");
         dump[8..12].copy_from_slice(&1u32.to_le_bytes());
@@ -239,16 +239,17 @@ mod tests {
             std::process::id(),
             std::thread::current().id(),
         ));
-        let mut file = File::create(&dir).expect("fixture file");
-        file.write_all(&dump).expect("fixture write");
+        let mut file = File::create(&dir)?;
+        file.write_all(&dump)?;
         drop(file);
-        let mut reader = MiniDumpFile::open(&dir).expect("stream reader");
+        let mut reader = MiniDumpFile::open(&dir)?;
         assert_eq!(reader.file_size(), 512);
-        assert_eq!(reader.read(0x094464c0, 4).expect("capture"), vec![0x41; 4]);
+        assert_eq!(reader.read(0x094464c0, 4)?, vec![0x41; 4]);
         assert!(matches!(
             reader.read(0x09446500, 1),
             Err(MiniDumpFileError::Format(MiniDumpError::MissingCapture { address: 0x09446500 }))
         ));
-        std::fs::remove_file(&dir).expect("cleanup");
+        std::fs::remove_file(&dir)?;
+        Ok(())
     }
 }
