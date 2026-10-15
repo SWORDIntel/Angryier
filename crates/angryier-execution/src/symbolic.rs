@@ -316,6 +316,15 @@ pub struct SymbolicBlockSummary {
     pub jump_target: Option<ExprId>,
 }
 
+/// Evaluated block values in this block's *local* SSA namespace.
+/// Each entry is indexed by IrValueId. Never reuse numeric IDs across
+/// different blocks, and never infer semantic equivalence from this table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolicBlockValueTrace {
+    pub summary: SymbolicBlockSummary,
+    pub values: Vec<Option<(ExprId, IrType)>>,
+}
+
 /// Symbolically evaluates AngryIR blocks with a shared symbolic register file.
 pub struct SymbolicEvaluator<'a> {
     arena: &'a SymbolicArena,
@@ -511,6 +520,21 @@ impl<'a> SymbolicEvaluator<'a> {
         block: &IrBlock,
         memory: &mut SymbolicSessionMemory,
     ) -> Result<SymbolicBlockSummary, SymbolicEvalError> {
+        self.eval_block_with_memory_values(block, memory)
+            .map(|evaluation| evaluation.summary)
+    }
+
+    /// Evaluate with the same semantics and side effects, additionally
+    /// retaining the producer expressions for this block's SSA values.
+    /// This is a readout of the existing evaluator, NOT a second engine.
+    /// Caller-owned scopes must distinguish identical IrValueId numbers
+    /// in different blocks; control and memory effects still require
+    /// independent replay validation before using a derived summary.
+    pub fn eval_block_with_memory_values(
+        &mut self,
+        block: &IrBlock,
+        memory: &mut SymbolicSessionMemory,
+    ) -> Result<SymbolicBlockValueTrace, SymbolicEvalError> {
         // Block-local fresh-symbol ids: re-evaluations rebuild identical
         // expressions (see `block_local_symbols`). Fresh symbols stay
         // distinct WITHIN one evaluation — the counter still advances — so
@@ -755,11 +779,14 @@ impl<'a> SymbolicEvaluator<'a> {
             }
         }
 
-        Ok(SymbolicBlockSummary {
-            branch,
-            written_registers,
-            terminated,
-            jump_target,
+        Ok(SymbolicBlockValueTrace {
+            summary: SymbolicBlockSummary {
+                branch,
+                written_registers,
+                terminated,
+                jump_target,
+            },
+            values,
         })
     }
 
@@ -3667,6 +3694,30 @@ mod tests {
                 },
             },
         ])
+    }
+
+    #[test]
+    fn producer_expressions_are_exposed_without_reimplementing_evaluation()
+        -> Result<(), SymbolicEvalError>
+    {
+        let arena = arena();
+        let block = compare_block(0, 42);
+        let mut evaluator = SymbolicEvaluator::new(&arena);
+        let mut memory = SymbolicSessionMemory::new(
+            angryier_memory::PersistentMemory::new(Vec::new())
+                .map_err(|error| SymbolicEvalError::UnsupportedOperation(format!("{error:?}")))?,
+        );
+        let detailed = evaluator.eval_block_with_memory_values(&block, &mut memory)?;
+        assert!(detailed.summary.branch.is_some());
+        assert!(detailed.values.iter().flatten().count() >= 2);
+        // Numeric expression IDs are arena-global; the *slot indices* are
+        // block-local IrValueId numbers, requiring explicit trace-step scope.
+        for instruction in &block.instructions {
+            if let Some(result) = instruction.result {
+                assert!(detailed.values.get(result.0 as usize).is_some_and(Option::is_some));
+            }
+        }
+        Ok(())
     }
 
     #[test]
