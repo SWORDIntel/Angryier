@@ -51,7 +51,7 @@ pub fn doctor(args: &[String]) -> Result<String, String> {
     let cwd_sha = git_head(&cwd);
     let compiled_sha = env!("ANGRYIER_BUILD_SHA");
     let verdict = match cwd_sha.as_deref() {
-        Some(sha) if compiled_sha == "unknown" => "unknown-compiled-revision",
+        Some(_) if compiled_sha == "unknown" => "unknown-compiled-revision",
         Some(sha) if sha == compiled_sha => "matching-revisions",
         Some(_) => "mismatched-checkout-and-binary",
         None => "no-git-checkout-in-working-directory",
