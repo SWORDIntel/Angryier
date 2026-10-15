@@ -18,6 +18,7 @@
 pub mod import_audit;
 pub mod capture;
 pub mod call_audit;
+pub mod vm_observe;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
