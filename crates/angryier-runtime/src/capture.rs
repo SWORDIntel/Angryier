@@ -145,3 +145,117 @@ pub fn import_captured_memory(
         baseline,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use angryier_arch::{DecodedInstruction, Decoder};
+    use angryier_loader::{LoadedImage, Segment};
+    use angryier_memory::{ByteValue, LayeredMemory};
+    use angryier_types::{ImageId, SemanticVersion, TargetProfileId};
+    use crate::Runtime;
+
+    #[derive(Debug)]
+    struct NoDecode;
+    impl Decoder for NoDecode {
+        type Error = ();
+        fn decode(&self, _address: u64, _bytes: &[u8]) -> Result<DecodedInstruction, ()> {
+            Err(())
+        }
+    }
+
+    fn make_process() -> Result<Process, String> {
+        let image = LoadedImage {
+            id: ImageId(1),
+            entry: 0x1000,
+            target_profile: TargetProfileId(1),
+            segments: vec![Segment {
+                address: 0x1000,
+                bytes: vec![0x90, 0xc3],
+                readable: true,
+                writable: false,
+                executable: true,
+            }],
+            symbols: Vec::new(),
+            program_headers: None,
+            dynamic: None,
+            pe: None,
+        };
+        Runtime::new(NoDecode, SemanticVersion(1), TargetProfileId(1))
+            .load_image(image)
+            .map_err(|error| error.to_string())
+    }
+
+    fn capture_file() -> Result<std::path::PathBuf, String> {
+        let mut bytes = vec![0u8; 0x200];
+        bytes[0..4].copy_from_slice(b"MDMP");
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&0x40u32.to_le_bytes());
+        bytes[0x40..0x44].copy_from_slice(&9u32.to_le_bytes());
+        bytes[0x44..0x48].copy_from_slice(&32u32.to_le_bytes());
+        bytes[0x48..0x4c].copy_from_slice(&0x60u32.to_le_bytes());
+        bytes[0x60..0x68].copy_from_slice(&1u64.to_le_bytes());
+        bytes[0x68..0x70].copy_from_slice(&0x100u64.to_le_bytes());
+        bytes[0x70..0x78].copy_from_slice(&0x60000000u64.to_le_bytes());
+        bytes[0x78..0x80].copy_from_slice(&32u64.to_le_bytes());
+        for i in 0..32 {
+            bytes[0x100 + i] = (0xa0 + i) as u8;
+        }
+        let filename = format!(
+            "angryier-capture-{}-{:?}.dmp",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let path = std::env::temp_dir().join(filename);
+        std::fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+        Ok(path)
+    }
+
+    fn range(len: u64) -> CaptureRange {
+        CaptureRange {
+            address: 0x60000000,
+            length: len,
+            readable: true,
+            writable: true,
+            executable: false,
+        }
+    }
+
+    #[test]
+    fn captured_heap_overlay_is_exact_and_replayable() -> Result<(), String> {
+        let path = capture_file()?;
+        let mut dump = MiniDumpFile::open(&path).map_err(|error| format!("{error:?}"))?;
+        let mut process = make_process()?;
+        let report = import_captured_memory(
+            &mut process, &mut dump, &[range(32)], CaptureBaseline::ReplayMemory,
+        ).map_err(|error| error.to_string())?;
+        assert_eq!(report.bytes, 32);
+        assert_eq!(report.mapped_new_ranges, 1);
+        let snapshot = process.state.memory.read(0x60000000, 32)
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(snapshot.first(), Some(&ByteValue::Concrete(0xa0)));
+        assert_eq!(snapshot.last(), Some(&ByteValue::Concrete(0xbf)));
+        process.reset_to_entry();
+        assert_eq!(
+            process.state.memory.read(0x60000000, 32).map_err(|error| format!("{error:?}"))?,
+            snapshot,
+        );
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_dump_bytes_cannot_partially_mutate_process() -> Result<(), String> {
+        let path = capture_file()?;
+        let mut dump = MiniDumpFile::open(&path).map_err(|error| format!("{error:?}"))?;
+        let mut process = make_process()?;
+        let before = process.state.memory.regions().len();
+        assert!(import_captured_memory(
+            &mut process, &mut dump, &[range(48)], CaptureBaseline::ReplayMemory
+        ).is_err());
+        assert_eq!(process.state.memory.regions().len(), before);
+        assert!(process.state.memory.read(0x60000000, 1).is_err());
+        std::fs::remove_file(path).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+}
