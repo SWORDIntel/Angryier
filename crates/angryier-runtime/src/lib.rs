@@ -5587,7 +5587,7 @@ mod tests {
             stub, ("kernel32.dll".to_string(), "CreateThread".to_string()),
         );
         process.write_pc(stub)?;
-        let arena = SymbolicArena::new(angryier_types::ExpressionNormalizationVersion(1));
+        let arena = angryier_expr::ShardedExprArena::new(angryier_types::ExpressionNormalizationVersion(1));
         let mut session = SymbolicSession::new(&runtime, &arena, process.clone());
         let outcome = session.step_state(0);
         assert!(matches!(outcome, Err(RuntimeError::Environment(ref message)) if message.contains("CreateThread")));
