@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 pub enum Win32HandleKind {
     File { path: String, offset: u64 },
     Device { name: String },
-    Event { signaled: bool },
+    Event { signaled: bool, manual_reset: bool },
     RegKey { path: String },
     Process { pid: u32 },
     Thread { tid: u32 },
@@ -30,6 +30,15 @@ impl Default for Win32HandleTableState {
             next_handle: 0x100,
         }
     }
+}
+
+/// A nonblocking readiness probe. The runtime must schedule actual waits
+/// instead of pretending all pending handles were signaled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Win32WaitStatus {
+    Signaled(u32),
+    Pending,
+    Invalid,
 }
 
 /// Thread-safe Win32 handle registry.
@@ -71,6 +80,88 @@ impl Win32HandleTable {
             Err(p) => p.into_inner(),
         };
         state.handles.contains_key(&handle)
+    }
+
+    /// Mutate only a real event handle. Returning false distinguishes an
+    /// invalid/non-event handle from a successful Win32 API operation.
+    pub fn set_event_signal(&self, handle: u64, signaled: bool) -> bool {
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match state.handles.get_mut(&handle) {
+            Some(Win32HandleKind::Event { signaled: value, .. }) => {
+                *value = signaled;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Atomic try-wait on a tracked event. An auto-reset event consumes its
+    /// signal when a waiter actually succeeds.
+    pub fn wait_event(&self, handle: u64) -> Win32WaitStatus {
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match state.handles.get_mut(&handle) {
+            Some(Win32HandleKind::Event { signaled, manual_reset }) => {
+                if !*signaled {
+                    Win32WaitStatus::Pending
+                } else {
+                    if !*manual_reset {
+                        *signaled = false;
+                    }
+                    Win32WaitStatus::Signaled(0)
+                }
+            }
+            Some(Win32HandleKind::Thread { .. }) | Some(Win32HandleKind::Process { .. }) => {
+                // Thread/process completion is not emulated yet.
+                Win32WaitStatus::Pending
+            }
+            _ => Win32WaitStatus::Invalid,
+        }
+    }
+
+    /// Windows WaitForMultipleObjects result selection. An all-wait consumes
+    /// auto-reset signals only if every requested event is ready. Wait-any
+    /// selects the lowest signaled index, matching Windows return indexing.
+    pub fn wait_events(&self, handles: &[u64], all: bool) -> Win32WaitStatus {
+        if handles.is_empty() || handles.len() > 64 {
+            return Win32WaitStatus::Invalid;
+        }
+        let mut state = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if handles.iter().collect::<std::collections::BTreeSet<_>>().len() != handles.len() {
+            return Win32WaitStatus::Invalid;
+        }
+        let mut ready = Vec::new();
+        for (index, handle) in handles.iter().enumerate() {
+            match state.handles.get(handle) {
+                Some(Win32HandleKind::Event { signaled, .. }) => {
+                    if *signaled {
+                        ready.push(index);
+                    }
+                }
+                Some(Win32HandleKind::Thread { .. }) | Some(Win32HandleKind::Process { .. }) => {}
+                _ => return Win32WaitStatus::Invalid,
+            }
+        }
+        if (all && ready.len() != handles.len()) || (!all && ready.is_empty()) {
+            return Win32WaitStatus::Pending;
+        }
+        if all {
+            for handle in handles {
+                if let Some(Win32HandleKind::Event { signaled, manual_reset }) = state.handles.get_mut(handle)
+                    && !*manual_reset
+                {
+                    *signaled = false;
+                }
+            }
+            Win32WaitStatus::Signaled(0)
+        } else {
+            let index = ready[0];
+            if let Some(Win32HandleKind::Event { signaled, manual_reset }) = state.handles.get_mut(&handles[index])
+                && !*manual_reset
+            {
+                *signaled = false;
+            }
+            Win32WaitStatus::Signaled(index as u32)
+        }
     }
 
     /// Retrieves the object kind for a handle.
