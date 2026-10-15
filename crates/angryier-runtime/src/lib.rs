@@ -20,6 +20,7 @@ pub mod capture;
 pub mod call_audit;
 pub mod vm_observe;
 pub mod vm_materialize;
+pub mod vm_replay;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
