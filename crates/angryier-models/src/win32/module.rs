@@ -68,7 +68,7 @@ impl SimProcedure for GetProcAddressProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let h_module = state.get_arg(0);
+        let h_module = state.get_win64_arg(0);
         let base = if h_module != 0 { h_module } else { DEFAULT_HMODULE_BASE };
         // Deterministic export address: base + 0x1000
         SimResult::Return(base.saturating_add(0x1000))
@@ -97,7 +97,7 @@ impl SimProcedure for GetModuleHandleAProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let mod_name_ptr = state.get_arg(0);
+        let mod_name_ptr = state.get_win64_arg(0);
         if mod_name_ptr == 0 {
             SimResult::Return(0x140000000) // Default base of main image
         } else {
@@ -115,7 +115,7 @@ impl SimProcedure for GetModuleHandleWProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let mod_name_ptr = state.get_arg(0);
+        let mod_name_ptr = state.get_win64_arg(0);
         if mod_name_ptr == 0 {
             SimResult::Return(0x140000000)
         } else {
@@ -133,7 +133,7 @@ impl SimProcedure for GetModuleFileNameAProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let filename_ptr = state.get_arg(1);
+        let filename_ptr = state.get_win64_arg(1);
         let path = b"C:\\Windows\\System32\\target.exe\0";
 
         let mut next = state.clone();
@@ -153,7 +153,7 @@ impl SimProcedure for GetModuleFileNameWProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let filename_ptr = state.get_arg(1);
+        let filename_ptr = state.get_win64_arg(1);
         let path_utf16: Vec<u8> = "C:\\Windows\\System32\\target.exe\0"
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())
