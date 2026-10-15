@@ -62,6 +62,8 @@ pub struct VmMaterializedBranch {
 pub struct VmMaterializedCandidate {
     /// Full pre-reduction effects (ordered). No store may be discarded.
     pub original_effects: Vec<VmEffect>,
+    /// Original trace step corresponding to every ordered effect.
+    pub effect_steps: Vec<usize>,
     /// Algebraically reduced version and non-negated branch-condition roots.
     pub reduced: VmReducedEffects,
     /// Loads kept even when the corresponding result is otherwise dead.
@@ -192,6 +194,7 @@ pub fn materialize_vm_handler(
     });
     let mut memory = SymbolicSessionMemory::new(capture.initial_state.memory.clone());
     let mut effects = Vec::new();
+    let mut effect_steps = Vec::new();
     let mut reads = Vec::new();
     let mut branches = Vec::new();
     let mut guards = Vec::new();
@@ -240,6 +243,7 @@ pub fn materialize_vm_handler(
                     let bytes = byte_width(ty).ok_or(VmMaterializationError::UnsupportedValueType {
                         step: step_index, value, ty,
                     })?;
+                    effect_steps.push(step_index);
                     effects.push(VmEffect {
                         kind: VmEffectKind::Memory { address: addr, bytes },
                         value: val,
@@ -252,6 +256,7 @@ pub fn materialize_vm_handler(
                     // retaining it is also semantically equivalent.
                     let expression = after_registers.get(&register)
                         .map(|(expr, _)| *expr).unwrap_or(raw_expr);
+                    effect_steps.push(step_index);
                     effects.push(VmEffect {
                         kind: VmEffectKind::Register { register },
                         value: expression,
@@ -285,6 +290,7 @@ pub fn materialize_vm_handler(
                 }
                 VmIrEffect::IndirectJump { target } => {
                     let (expr, _) = value_at(&evaluation.values, step_index, target)?;
+                    effect_steps.push(step_index);
                     effects.push(VmEffect { kind: VmEffectKind::DispatchTarget, value: expr });
                 }
                 VmIrEffect::Jump { .. } | VmIrEffect::Call { .. }
@@ -304,6 +310,7 @@ pub fn materialize_vm_handler(
         .map_err(|error| VmMaterializationError::Reduction(format!("{error:?}")))?;
     Ok(VmMaterializedCandidate {
         original_effects: effects,
+        effect_steps,
         reduced,
         potentially_faulting_reads: reads,
         chosen_branches: branches,
