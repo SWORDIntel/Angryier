@@ -211,13 +211,16 @@ mod tests {
             pe: None,
         };
         let mut process = runtime.load_image(image)?;
-        let locate = |pc: u64| VmObservedLocation {
-            native_pc: pc,
-            virtual_pc: pc - 0x1000,
-            context_digest: [u8::try_from(pc - 0x1000)? + 1; 32],
+        let start = VmObservedLocation {
+            native_pc: 0x1000,
+            virtual_pc: 0,
+            context_digest: [1; 32],
         };
-        let start = locate(0x1000)?;
-        let end = locate(0x1002)?;
+        let end = VmObservedLocation {
+            native_pc: 0x1002,
+            virtual_pc: 2,
+            context_digest: [3; 32],
+        };
         let window = VmHandlerWindow {
             entry: start,
             exit: end,
