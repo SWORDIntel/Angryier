@@ -304,3 +304,93 @@ fn repeated_writes_and_partial_parent_updates_replay_in_original_order()
     assert!(verified.observed_input_only);
     Ok(())
 }
+
+#[cfg(feature = "xed")]
+#[test]
+fn native_xed_two_instruction_execution_replays_materialized_effects()
+    -> Result<(), String>
+{
+    use angryier_runtime::{
+        vm_observe::VmStateObservation,
+        vm_replay::check_vm_concrete_replay,
+    };
+
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let image = LoadedImage {
+        id: ImageId(1),
+        entry: 0x1000,
+        target_profile: TargetProfileId(1),
+        // mov eax, 7 ; add eax, 2 ; nop
+        // The actual x86 interpreter runs both instructions and produces
+        // the final register/flag state used as an independent witness.
+        segments: vec![Segment {
+            address: 0x1000,
+            bytes: vec![0xB8, 7, 0, 0, 0, 0x83, 0xC0, 2, 0x90],
+            readable: true,
+            writable: false,
+            executable: true,
+        }],
+        symbols: Vec::new(),
+        program_headers: None,
+        dynamic: None,
+        pe: None,
+    };
+    let mut process = runtime.load_image(image).map_err(|error| error.to_string())?;
+    let location = |native_pc: u64| {
+        let offset = native_pc.saturating_sub(0x1000);
+        VmObservedLocation {
+            native_pc,
+            virtual_pc: offset,
+            context_digest: [u8::try_from(offset).unwrap_or(u8::MAX).saturating_add(1); 32],
+        }
+    };
+    let window = VmHandlerWindow {
+        entry: location(0x1000),
+        exit: location(0x1008),
+        identity: VmTraceIdentity {
+            image: ImageId(1),
+            target_profile: TargetProfileId(1),
+            // Synthetic nonzero identities, not forensic attestations.
+            executable_digest: [1; 32],
+            capture_digest: [2; 32],
+            initial_state_digest: [3; 32],
+        },
+        limits: VmTraceLimits {
+            max_steps: 2,
+            ..VmTraceLimits::default()
+        },
+    };
+    let captured = runtime.observe_vm_handler(&mut process, window, |running| {
+        let pc = running.pc()?;
+        let offset = pc.checked_sub(0x1000)
+            .ok_or_else(|| angryier_runtime::RuntimeError::Environment(
+                "native trace left fixture region".into()
+            ))?;
+        let context_byte = u8::try_from(offset)
+            .map_err(|_| angryier_runtime::RuntimeError::Environment(
+                "native trace offset outside byte fixture".into()
+            ))?.saturating_add(1);
+        Ok(VmStateObservation {
+            virtual_pc: offset,
+            context_digest: [context_byte; 32],
+            code_epoch: 0,
+        })
+    }).map_err(|error| error.to_string())?;
+
+    assert_eq!(captured.steps.len(), 2);
+    assert_eq!(process.pc().map_err(|error| error.to_string())?, 0x1008);
+    assert_eq!(
+        process.read_register(0).map_err(|error| error.to_string())?,
+        9,
+    );
+
+    let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+    let candidate = materialize_vm_handler(&captured, &arena, 4096)
+        .map_err(|error| format!("{error:?}"))?;
+    let report = check_vm_concrete_replay(&captured, &candidate, &arena)
+        .map_err(|error| format!("{error:?}"))?;
+    assert!(report.checked_registers > 0);
+    assert!(report.observed_input_only);
+    assert_eq!(report.checked_indirect_targets, 0);
+    Ok(())
+}
