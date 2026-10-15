@@ -81,7 +81,7 @@ pub struct SymbolicDebtSite {
 /// Everything else about vectors is exact: whole-vector moves, loads, stores
 /// and register traffic lower through the existing Concat/Extract/ZExt
 /// machinery over a flat `BitVec(width_bits)` (the engine's `ExprOp::Concat`
-/// is binary little-endian, operands[0] = low bits, and `Extract` immediates
+/// takes (high, low), while AngryIR `IrPrimitive::Concat` takes (low, high); `Extract` immediates
 /// encode `[start:u16 LE, width:u16 LE]`), and scalar bitvector primitives
 /// applied to whole-vector values stay exact flat 128-bit arithmetic.
 fn is_vector_debt_primitive(op: IrPrimitive) -> bool {
@@ -663,7 +663,9 @@ impl<'a> SymbolicEvaluator<'a> {
                                         Some(prev) => self.intern(
                                             ExprSort::BitVec(spliced_width + part_width),
                                             ExprOp::Concat,
-                                            vec![prev, part],
+                                            // ExprOp::Concat is (high, low):
+                                            // new upper slice goes on the left.
+                                            vec![part, prev],
                                             Vec::new(),
                                         )?,
                                     });
@@ -1842,11 +1844,17 @@ fn primitive_expr(
                     "concat {left_width}+{right_width}"
                 )));
             }
+            if operands.len() != 2 {
+                return Err(SymbolicEvalError::UnsupportedOperation("concat requires two inputs".into()));
+            }
+            // AngryIR's concrete interpreter defines Concat(low, high).
+            // The expression DAG/SMT convention is Concat(high, low);
+            // translating namespaces without swapping corrupts bytes.
             let value = intern(
                 arena,
                 ExprSort::BitVec(output_width),
                 ExprOp::Concat,
-                operands,
+                vec![operands[1], operands[0]],
                 Vec::new(),
             )?;
             Ok((value, ty))
@@ -3216,7 +3224,7 @@ fn eval_primitive_concrete(op: IrPrimitive, output_width: u16, inputs: &[(u128, 
             }
         }
         IrPrimitive::Concat => {
-            // Operand order matches the expression language: (low, high).
+            // The IR primitive is (low, high); expression DAG is high-first.
             let low_width = inputs[0].1;
             (inputs[1].0 << low_width) | (inputs[0].0 & mask_u128(low_width))
         }
@@ -4312,17 +4320,17 @@ mod tests {
         assert_eq!(arena.sort_of(expr), Some(ExprSort::BitVec(512)));
         let node = arena.get(expr).ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
         assert_eq!(node.op, ExprOp::Concat);
-        // Little-endian concat: operands[0] is the written low 64 bits,
-        // operands[1] the preserved high 448 bits.
-        let low = arena
+        // Expression concat is (high, low). The high preserved parent
+        // bits must be FIRST, and the written low 64 bits SECOND.
+        let high = arena
             .get(node.operands[0])
+            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
+        assert_eq!(high.op, ExprOp::Extract);
+        let low = arena
+            .get(node.operands[1])
             .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
         assert_eq!(low.op, ExprOp::Constant);
         assert_eq!(low.immediate, 0x42u64.to_le_bytes().to_vec());
-        let high = arena
-            .get(node.operands[1])
-            .ok_or(SymbolicEvalError::UndefinedValue(IrValueId(0)))?;
-        assert_eq!(high.op, ExprOp::Extract);
         // Extract immediate = [start:u16 LE][width:u16 LE].
         let start = high
             .immediate
