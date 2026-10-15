@@ -582,6 +582,19 @@ impl Process {
         self.terminated = false;
     }
 
+    /// Whether the target is executable in the current mapped address
+    /// space, or has an explicit SimProcedure/exit hook. No per-application
+    /// address constants: mappings and hook registrations are authoritative.
+    ///
+    /// This is a necessary condition for native control-flow validity, not
+    /// proof that bytes at the address decode to a reachable instruction.
+    pub fn is_executable_control_target(&self, target: Address) -> bool {
+        self.state.memory.regions().iter().any(|region| {
+            region.executable && target >= region.base && target - region.base < region.size
+        }) || self.simproc_hooks.contains_key(&target)
+           || self.simproc_instances.contains_key(&target)
+    }
+
     /// Reads the current program counter (RIP).
     pub fn pc(&self) -> Result<Address, RuntimeError> {
         read_register_u64(&self.state.registers, register_id::RIP.0)
@@ -5511,6 +5524,32 @@ mod tests {
     }
 
     #[test]
+    fn control_target_validation_uses_dynamic_regions_and_hooks() -> Result<(), RuntimeError> {
+        let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
+        let mut process = minimal_process()?;
+        assert!(!process.is_executable_control_target(0x1404_04e10));
+        assert!(!process.is_executable_control_target(0x6));
+        process.state.memory = process.state.memory.with_region(angryier_memory::MemoryRegion {
+            object: angryier_types::ObjectId(0x8765),
+            base: 0x3000_0000,
+            size: 0x4000,
+            readable: true,
+            writable: false,
+            executable: true,
+        }).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        assert!(process.is_executable_control_target(0x3000_0000));
+        assert!(process.is_executable_control_target(0x3000_3fff));
+        assert!(!process.is_executable_control_target(0x3000_4000));
+        process.hook_simproc(0x7000_1234, "exit");
+        assert!(process.is_executable_control_target(0x7000_1234));
+        process.stub_function(0x7000_4567, 1);
+        assert!(process.is_executable_control_target(0x7000_4567));
+        // No implicit assumption about the previous Sarin image base.
+        let _ = runtime;
+        Ok(())
+    }
+
+    #[test]
     fn unmodeled_create_thread_stub_does_not_fake_a_return() -> Result<(), RuntimeError> {
         let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
         let mut process = minimal_process()?;
@@ -7969,16 +8008,14 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                                     })
                             };
                             let direct = read_cell(rsp).filter(|v| {
-                                (0x140001000..0x1419A3000).contains(v)
-                                    || (0x1437F5000..0x1437F6000).contains(v)
+                                state.process.is_executable_control_target(*v)
                             });
                             direct.map(|value| (rsp, value)).or_else(|| {
                                 let mut best: Option<(i64, u64, u64)> = None;
                                 for delta in [-0x40i64, -0x38, -0x30, -0x28, -0x20, -0x18, -0x10, -0x8, 8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40] {
                                     let addr = (rsp as i64 + delta) as u64;
                                     if let Some(value) = read_cell(addr).filter(|v| {
-                                        (0x140001000..0x1419A3000).contains(v)
-                                            || (0x1437F5000..0x1437F6000).contains(v)
+                                        state.process.is_executable_control_target(*v)
                                     }) {
                                         let distance = delta.abs();
                                         if best.map(|(d, _, _)| distance < d).unwrap_or(true) {
@@ -7990,10 +8027,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             })
                         });
                         let is_valid_target = target.map(|t| {
-                            (0x140001000..0x1419A3000).contains(&t)
-                                || (0x1437F5000..0x1437F6000).contains(&t)
-                                || (PE_DRIVER_STUB_BASE..PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_SIZE).contains(&t)
-                                || t == EXIT_HOOK
+                            state.process.is_executable_control_target(t)
                         }).unwrap_or(false);
 
                         if !is_valid_target && let Some((cell_rsp, cell_value)) = cell {
@@ -8048,9 +8082,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             // callee as one that immediately returns 0 —
                             // pop the frame the IR pushed, rax = 0, and
                             // record Concretized debt; never execute data.
-                            let exec = state.process.state.memory.regions().iter().any(|r| {
-                                target >= r.base && target < r.base + r.size && r.executable
-                            });
+                            let exec = state.process.is_executable_control_target(target);
                             if !exec {
                                 state.process.state.fidelity = state
                                     .process
