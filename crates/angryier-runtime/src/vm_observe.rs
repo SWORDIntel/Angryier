@@ -57,6 +57,12 @@ pub struct VmHandlerCapture {
         angryier_state::PersistentRegisters,
         angryier_memory::PersistentMemory,
     >,
+    /// Actual post-handler state from the native execution path. A
+    /// candidate's concrete replay is compared against this COW snapshot.
+    pub final_state: angryier_state::ExecutionState<
+        angryier_state::PersistentRegisters,
+        angryier_memory::PersistentMemory,
+    >,
     pub steps: Vec<VmRecordedInstruction>,
     pub footprint: VmTraceFootprint,
 }
@@ -175,7 +181,8 @@ impl<D: Decoder> Runtime<D> {
         .map_err(|error| RuntimeError::Environment(format!(
             "VM handler trace validation failed: {error:?}"
         )))?;
-        Ok(VmHandlerCapture { window, initial_state, steps, footprint })
+        let final_state = process.state.clone();
+        Ok(VmHandlerCapture { window, initial_state, final_state, steps, footprint })
     }
 }
 
