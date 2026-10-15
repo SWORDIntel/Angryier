@@ -15,14 +15,16 @@ angryier-runtime = { path = "../angryier-runtime", optional = true }
 angryier-models = { path = "../angryier-models", optional = true }
 angryier-types = { path = "../angryier-types", optional = true }
 mlua = { version = "0.12", features = ["lua54", "vendored"], optional = true }
+angryier-loader = { path = "../angryier-loader", optional = true }
 
 [features]
+inspect = ["dep:angryier-loader"]
 # `run` ships by default: the binary is the product, and a bare
 # `cargo build --release` must yield a run-capable `angryier` (incl. driver
 # mode). This pulls mlua (vendored Lua 5.4), xed-sys (XED built from source)
 # and the system libz3 via `angryier-runtime/script` -> `z3`; build the
 # minimal rustc-only CLI with `cargo build -p angryier-cli --no-default-features`.
-default = ["run"]
+default = ["run", "inspect"]
 run = ["dep:angryier", "dep:angryier-runtime", "dep:angryier-models", "dep:angryier-types", "dep:mlua", "angryier-runtime/xed", "angryier-runtime/script"]
 
 [lints]
