@@ -1803,6 +1803,19 @@ impl<D: Decoder> Runtime<D> {
         Ok(angryier_cfg::vm::inspect_native_cfg(&cfg))
     }
 
+    /// Build a source-backed callsite and RIP-relative reference index from
+    /// the bounded CFG. Unknown indirect targets remain unresolved; imported
+    /// call slots refer to the IAT location, not a speculative callee.
+    pub fn inspect_xrefs_window(
+        &self,
+        process: &Process,
+        entry: Address,
+        max_bytes: u64,
+    ) -> Result<angryier_cfg::xrefs::XrefIndex, RuntimeError> {
+        let cfg = self.recover_cfg_window(process, entry, max_bytes)?;
+        Ok(angryier_cfg::xrefs::XrefIndex::from_cfg(&cfg))
+    }
+
     /// Recovers the image CFG and extracts pure induction loops — a
     /// straight-line body (one block, or a chain of blocks linked only by
     /// unconditional jumps or adjacency) whose only state effects are
