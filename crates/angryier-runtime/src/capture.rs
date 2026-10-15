@@ -6,7 +6,7 @@
 //! Admission is atomic across all selected ranges; no partial mutation.
 
 use angryier_loader::minidump_file::MiniDumpFile;
-use angryier_memory::{MemoryRegion, PersistentMemory};
+use angryier_memory::{LayeredMemory, MemoryRegion, PersistentMemory};
 use angryier_types::ObjectId;
 
 use crate::{Process, RuntimeError};
