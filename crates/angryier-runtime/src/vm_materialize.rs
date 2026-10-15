@@ -9,7 +9,7 @@
 //! It is an *unverified candidate summary*; differential replay/SMT
 //! equivalence remains mandatory before substituting it for execution.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use angryier_arch_intel64::register_id;
 use angryier_execution::{
@@ -17,7 +17,7 @@ use angryier_execution::{
 };
 use angryier_expr::{ExprArena, vm_effects::{reduce_vm_effects, VmEffect, VmEffectKind, VmReducedEffects}};
 use angryier_ir::{
-    IrType, IrValueId, RegisterWriteKind,
+    IrOp, IrType, IrValueId,
     vm_footprint::{VmIrEffect, VmIrSource},
     vm_trace::{collect_observed_vm_trace, VmObservedBlock, VmScopedValue, VmTraceCaveat},
 };
@@ -36,6 +36,7 @@ pub enum VmMaterializationError {
     UnsupportedValueType { step: usize, value: IrValueId, ty: IrType },
     UnsupportedPartialRegister { step: usize, register: u32 },
     MultipleWritesToRegister { step: usize, register: u32 },
+    InconsistentRegisterWriteTrace { step: usize, register: u32 },
     MissingBranchEvidence { step: usize },
     SymbolicEvaluation { step: usize, reason: String },
     UnderconstrainedSemanticDebt { count: u64 },
@@ -101,10 +102,10 @@ fn byte_width(ty: IrType) -> Option<u32> {
 /// Convert a captured and structurally checked handler path to candidate
 /// expressions, using only the existing evaluator and input COW state.
 ///
-/// For this initial bridge, blocks containing partial-parent register writes
-/// or more than one write to the same register are REFUSED. Their effect
-/// ordering needs an intermediate-write observer; using the final register
-/// value for an earlier write would be incorrect. No approximation is made.
+/// The evaluator emits a post-write expression for EVERY register effect,
+/// including repeated writes and partial-parent preservation. Those effects
+/// are matched back to the original instruction index; a mismatch fails
+/// closed rather than using an unrelated final-register expression.
 ///
 /// No `PROVE` claim: the output is still path-specific, may contain
 /// uninterpreted input symbols, and has not passed independent replay/SMT.
@@ -212,29 +213,13 @@ pub fn materialize_vm_handler(
         {
             return Err(VmMaterializationError::InvalidCapture("footprint/recorded-step identity mismatch"));
         }
-        let writes: Vec<(u32, RegisterWriteKind)> = capture.footprint.effects.iter()
-            .filter(|e| e.step == step_index)
-            .filter_map(|e| match e.effect {
-                VmIrEffect::RegisterWrite { register, kind, .. } => Some((register, kind)),
-                _ => None,
-            })
-            .collect();
-        let mut seen = BTreeSet::new();
-        for (register, kind) in &writes {
-            if !seen.insert(*register) {
-                return Err(VmMaterializationError::MultipleWritesToRegister { step: step_index, register: *register });
-            }
-            if matches!(kind, RegisterWriteKind::PreserveParent { .. }) {
-                return Err(VmMaterializationError::UnsupportedPartialRegister { step: step_index, register: *register });
-            }
-        }
         let evaluation = evaluator.eval_block_with_memory_values(&recorded.block, &mut memory)
             .map_err(|error| VmMaterializationError::SymbolicEvaluation {
                 step: step_index,
                 reason: error.to_string(),
             })?;
 
-        let after_registers = evaluator.snapshot().registers;
+        let mut write_cursor = 0usize;
         for scoped in capture.footprint.effects.iter().filter(|e| e.step == step_index) {
             match scoped.effect {
                 VmIrEffect::MemoryWrite { address, value } => {
@@ -249,17 +234,33 @@ pub fn materialize_vm_handler(
                         value: val,
                     });
                 }
-                VmIrEffect::RegisterWrite { register, value, .. } => {
-                    let (raw_expr, _) = value_at(&evaluation.values, step_index, value)?;
-                    // For zero-extend-parent writes, the evaluator's stored
-                    // full-width value is authoritative; for direct writes,
-                    // retaining it is also semantically equivalent.
-                    let expression = after_registers.get(&register)
-                        .map(|(expr, _)| *expr).unwrap_or(raw_expr);
+                VmIrEffect::RegisterWrite { register, value, kind } => {
+                    // Consume the actual post-write value, not the block's
+                    // FINAL register value. A handler can write RFLAGS/RSP
+                    // or a VM-context register dozens of times per block.
+                    let trace = evaluation.register_writes.get(write_cursor)
+                        .ok_or(VmMaterializationError::InconsistentRegisterWriteTrace {
+                            step: step_index, register,
+                        })?;
+                    write_cursor += 1;
+                    if !matches!(
+                        recorded.block.instructions.get(trace.instruction_index)
+                            .map(|instruction| &instruction.op),
+                        Some(IrOp::WriteRegister {
+                            register: actual_register,
+                            value: actual_value,
+                            kind: actual_kind,
+                        }) if *actual_register == register && *actual_value == value
+                            && *actual_kind == kind && trace.register == register
+                    ) {
+                        return Err(VmMaterializationError::InconsistentRegisterWriteTrace {
+                            step: step_index, register,
+                        });
+                    }
                     effect_steps.push(step_index);
                     effects.push(VmEffect {
                         kind: VmEffectKind::Register { register },
-                        value: expression,
+                        value: trace.expression,
                     });
                 }
                 VmIrEffect::MemoryRead { address, mask, result } => {
@@ -296,6 +297,11 @@ pub fn materialize_vm_handler(
                 VmIrEffect::Jump { .. } | VmIrEffect::Call { .. }
                 | VmIrEffect::Return | VmIrEffect::Trap { .. } => {}
             }
+        }
+        if write_cursor != evaluation.register_writes.len() {
+            return Err(VmMaterializationError::InvalidCapture(
+                "unconsumed ordered register writes after materialization"
+            ));
         }
     }
     if evaluator.debt_total() > 0 {
