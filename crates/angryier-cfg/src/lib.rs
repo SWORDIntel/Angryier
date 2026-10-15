@@ -16,6 +16,9 @@ use angryier_arch::{DecodedInstruction, Decoder, OperandKind};
 use angryier_semantics_intel64::forms;
 use angryier_types::Address;
 
+pub mod themida;
+pub mod vpc;
+
 /// How control leaves a basic block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
@@ -33,6 +36,10 @@ pub enum EdgeKind {
     IndirectCall,
     /// Indirect jump — the target is data-dependent at runtime; a graph exit.
     IndirectJump,
+    /// Indirect jump resolved statically to a jump-table entry (compiler
+    /// switch tables, VM dispatch tables); `index` is the table entry the
+    /// edge came from — provenance for VPC/devirtualization work.
+    TableDispatch { index: u16 },
     /// `ret` — control returns to the caller's stack top; no static target.
     Return,
 }
@@ -385,7 +392,11 @@ impl Cfg {
                     continue;
                 }
                 for edge in self.edges.iter().filter(|e| {
-                    e.from == last_pc && !matches!(e.kind, EdgeKind::Call | EdgeKind::IndirectCall | EdgeKind::Return)
+                    e.from == last_pc
+                        && !matches!(
+                            e.kind,
+                            EdgeKind::Call | EdgeKind::IndirectCall | EdgeKind::Return
+                        )
                 }) {
                     if let Some(to) = edge.to
                         && !entries.contains(&to)
@@ -759,6 +770,452 @@ fn static_target(insn: &DecodedInstruction) -> Option<Address> {
     })
 }
 
+
+/// Abstract per-register value while interpreting one basic block, used to
+/// resolve indirect-jump terminators to jump-table entries.
+#[derive(Clone, Copy, Debug)]
+enum AbstractVal {
+    /// A known constant (mov reg,imm; lea reg,[rip+d]; folded arithmetic).
+    Const(u64),
+    /// Value loaded from `table_base + idx*scale + disp` — a table entry;
+    /// `idx` stays symbolic (the switch variable).
+    TableEntry { base: u64, index: angryier_arch::RegisterId, scale: u8, disp: i64 },
+    /// TableEntry plus a constant — PIE-style `add entry, base`.
+    EntryPlusConst { base: u64, index: angryier_arch::RegisterId, scale: u8, disp: i64, add: u64 },
+}
+
+/// Block-local facts: per-register abstract values plus the latest
+/// `cmp reg, imm` bound per register (invalidated when the register is
+/// rewritten, so a stale bound never resolves a table).
+#[derive(Default)]
+struct BlockFacts {
+    values: std::collections::BTreeMap<angryier_arch::RegisterId, AbstractVal>,
+    cmp_imm: std::collections::BTreeMap<angryier_arch::RegisterId, u64>,
+}
+
+fn kill(facts: &mut BlockFacts, parent: angryier_arch::RegisterId) {
+    facts.values.remove(&parent);
+    facts.cmp_imm.remove(&parent);
+}
+
+fn write_const(facts: &mut BlockFacts, parent: angryier_arch::RegisterId, value: u64) {
+    facts.values.insert(parent, AbstractVal::Const(value));
+    facts.cmp_imm.remove(&parent);
+}
+
+/// Interprets one decoded block into `BlockFacts`. Unhandled instructions
+/// conservatively kill every register they write (AccessKind-based), so a
+/// definition the interpreter does not model can never masquerade as a
+/// known table base or survive as a stale bound.
+fn interpret_block(instructions: &[DecodedInstruction]) -> BlockFacts {
+    let mut facts = BlockFacts::default();
+    for insn in instructions {
+        let written: Vec<angryier_arch::RegisterId> = insn
+            .operands
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op.access,
+                    angryier_arch::AccessKind::Write | angryier_arch::AccessKind::ReadWrite
+                )
+            })
+            .filter_map(|op| match op.kind {
+                OperandKind::Register(view) => Some(view.parent),
+                _ => None,
+            })
+            .collect();
+        match insn.form_id {
+            forms::MOV_R64_IMM64 | forms::MOV_R32_IMM32 | forms::MOV_R8_IMM8 | forms::MOV_R16_IMM16 => {
+                if let (Some(dst), Some(imm)) = (reg_operand(insn, 0), imm_operand(insn, 1)) {
+                    write_const(&mut facts, dst.parent, imm);
+                    continue;
+                }
+            }
+            forms::MOV_R64_R64 | forms::MOV_R32_R32 | forms::MOV_R8_R8 | forms::MOV_R16_R16 => {
+                if let (Some(dst), Some(src)) = (reg_operand(insn, 0), reg_operand(insn, 1)) {
+                    let val = facts.values.get(&src.parent).copied();
+                    kill(&mut facts, dst.parent);
+                    if let Some(v) = val {
+                        facts.values.insert(dst.parent, v);
+                    }
+                    continue;
+                }
+            }
+            forms::MOVZX_R64_R32 | forms::MOVSX_R64_R32 | forms::MOVZX_R64_R8 | forms::MOVSX_R64_R8 => {
+                if let (Some(dst), Some(src_op)) = (reg_operand(insn, 0), insn.operands.iter().find(|o| o.index == 1)) {
+                    let val = facts.values.get(&src_op_parent(src_op)).copied();
+                    kill(&mut facts, dst.parent);
+                    if let Some(AbstractVal::Const(c)) = val {
+                        let w = u32::from(src_op.width_bits.min(64));
+                        let masked = if w >= 64 { c } else { c & ((1u64 << w) - 1) };
+                        let extended = if matches!(insn.form_id, forms::MOVSX_R64_R32 | forms::MOVSX_R64_R8)
+                            && w < 64
+                            && (masked >> (w - 1)) & 1 == 1
+                        {
+                            masked | !((1u64 << w) - 1)
+                        } else {
+                            masked
+                        };
+                        facts.values.insert(dst.parent, AbstractVal::Const(extended));
+                    }
+                    continue;
+                }
+            }
+            forms::LEA_R64_MEM => {
+                if let (Some(dst), Some(mem)) = (reg_operand(insn, 0), addr_or_mem_operand(insn)) {
+                    let resolved = match mem.base {
+                        Some(angryier_arch::MemoryBase::InstructionPointer { .. }) => {
+                            insn.address
+                                .checked_add(u64::from(insn.length))
+                                .and_then(|end| end.checked_add(mem.displacement as u64))
+                                .map(AbstractVal::Const)
+                        }
+                        Some(angryier_arch::MemoryBase::Register(b)) => {
+                            // Constant base (+ constant index*scale+disp) is
+                            // a plain address; a symbolic index makes this
+                            // &table[idx] — an address, not a target: Unknown.
+                            match (facts.values.get(&b.parent).copied(), mem.index) {
+                                (Some(AbstractVal::Const(c)), None) => {
+                                    c.checked_add(mem.displacement as u64).map(AbstractVal::Const)
+                                }
+                                _ => None,
+                            }
+                        }
+                        None => None,
+                    };
+                    kill(&mut facts, dst.parent);
+                    if let Some(v) = resolved {
+                        facts.values.insert(dst.parent, v);
+                    }
+                    continue;
+                }
+            }
+            forms::MOV_R64_MEM64 => {
+                if let (Some(dst), Some(mem)) = (reg_operand(insn, 0), mem_operand(insn)) {
+                    let loaded = match mem.base {
+                        Some(angryier_arch::MemoryBase::InstructionPointer { .. }) => {
+                            // RIP-based indexed load: table at a constant
+                            // address even without a base register.
+                            match mem.index {
+                                Some(angryier_arch::MemoryIndex::Register(idx)) => {
+                                    insn.address
+                                        .checked_add(u64::from(insn.length))
+                                        .and_then(|end| end.checked_add(mem.displacement as u64))
+                                        .map(|table| AbstractVal::TableEntry {
+                                            base: table,
+                                            index: idx.parent,
+                                            scale: mem.scale,
+                                            disp: 0,
+                                        })
+                                }
+                                _ => None,
+                            }
+                        }
+                        Some(angryier_arch::MemoryBase::Register(b)) => {
+                            match (facts.values.get(&b.parent).copied(), mem.index) {
+                                (Some(AbstractVal::Const(c)), Some(angryier_arch::MemoryIndex::Register(idx))) => {
+                                    c.checked_add(mem.displacement as u64).map(|table| AbstractVal::TableEntry {
+                                        base: table,
+                                        index: idx.parent,
+                                        scale: mem.scale,
+                                        disp: 0,
+                                    })
+                                }
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    kill(&mut facts, dst.parent);
+                    if let Some(v) = loaded {
+                        facts.values.insert(dst.parent, v);
+                    }
+                    continue;
+                }
+            }
+            forms::ADD_R64_R64 | forms::ADD_R32_R32 => {
+                if let (Some(dst), Some(src)) = (reg_operand(insn, 0), reg_operand(insn, 1)) {
+                    let a = facts.values.get(&dst.parent).copied();
+                    let b = facts.values.get(&src.parent).copied();
+                    let sum = match (a, b) {
+                        (Some(AbstractVal::Const(x)), Some(AbstractVal::Const(y))) => {
+                            Some(AbstractVal::Const(x.wrapping_add(y)))
+                        }
+                        (
+                            Some(AbstractVal::TableEntry { base, index, scale, disp }),
+                            Some(AbstractVal::Const(c)),
+                        )
+                        | (
+                            Some(AbstractVal::Const(c)),
+                            Some(AbstractVal::TableEntry { base, index, scale, disp }),
+                        ) => Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add: c }),
+                        (
+                            Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add }),
+                            Some(AbstractVal::Const(c)),
+                        )
+                        | (
+                            Some(AbstractVal::Const(c)),
+                            Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add }),
+                        ) => Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add: add.wrapping_add(c) }),
+                        _ => None,
+                    };
+                    kill(&mut facts, dst.parent);
+                    if let Some(v) = sum {
+                        facts.values.insert(dst.parent, v);
+                    }
+                    continue;
+                }
+            }
+            forms::ADD_R64_IMM32 | forms::ADD_R32_IMM8 => {
+                if let (Some(dst), Some(imm)) = (reg_operand(insn, 0), imm_operand(insn, 1)) {
+                    let a = facts.values.get(&dst.parent).copied();
+                    let sum = match a {
+                        Some(AbstractVal::Const(x)) => Some(AbstractVal::Const(x.wrapping_add(imm))),
+                        Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add }) => {
+                            Some(AbstractVal::EntryPlusConst { base, index, scale, disp, add: add.wrapping_add(imm) })
+                        }
+                        _ => None,
+                    };
+                    kill(&mut facts, dst.parent);
+                    if let Some(v) = sum {
+                        facts.values.insert(dst.parent, v);
+                    }
+                    continue;
+                }
+            }
+            forms::CMP_R64_IMM32 | forms::CMP_R32_IMM8 | forms::CMP_R8_IMM8 | forms::CMP_R16_IMM8 | forms::CMP_R16_IMM16 => {
+                if let (Some(dst), Some(imm)) = (reg_operand(insn, 0), imm_operand(insn, 1)) {
+                    facts.cmp_imm.insert(dst.parent, imm);
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        // Conservative default: kill every register this instruction writes.
+        for parent in written {
+            kill(&mut facts, parent);
+        }
+    }
+    facts
+}
+
+fn src_op_parent(op: &angryier_arch::Operand) -> angryier_arch::RegisterId {
+    match op.kind {
+        OperandKind::Register(view) => view.parent,
+        _ => angryier_arch::RegisterId(u32::MAX),
+    }
+}
+
+/// A candidate switch bound: (index register, exclusive-or-inclusive entry
+/// count base). MSVC `cmp idx,N; ja default` makes N the entry count.
+type BoundHint = (angryier_arch::RegisterId, u64);
+
+/// One enumerated table entry: its index (provenance) and target.
+struct TableTarget {
+    index: u16,
+    target: Address,
+}
+
+/// Statically resolves an indirect-jump terminator to jump-table entries.
+///
+/// Bulletproofing rules, all fail-closed:
+/// 1. The table base must be a constant the interpreter can prove (RIP lea,
+///    constant register base, movabs) — never guessed.
+/// 2. The entry count must come from a `cmp idx, imm` bound in the same
+///    block or a CFG predecessor block, on the SAME register the jump
+///    indexes with, and the bound dies if anything rewrites the register.
+/// 3. Every enumerated entry must land inside the region AND decode as a
+///    valid instruction. A single failing entry fails the WHOLE
+///    interpretation (no partial edge sets) — then the next interpretation
+///    candidate is tried; all failing leaves the jump unresolved.
+/// 4. Interpretations are tried in preference order: (relative-to-table,
+///    count N), (rel-table, N+1 — `jbe` bounds), (rel-jump-end — GCC
+///    `.long target - .Ljmp`, N), (rel-jump-end, N+1); 8-byte entries are
+///    absolute and only count varies. The first fully-verifying wins.
+fn resolve_indirect_jump(
+    decoder: &impl Decoder,
+    instructions: &[DecodedInstruction],
+    terminator: &DecodedInstruction,
+    base: Address,
+    region: &[u8],
+    extra_bound: Option<BoundHint>,
+) -> Option<Vec<TableTarget>> {
+    const MAX_ENTRIES: u64 = 4096;
+    let region_end = base.wrapping_add(region.len() as u64);
+    let facts = interpret_block(instructions);
+    let insn_end = terminator.address.checked_add(u64::from(terminator.length))?;
+
+    // Resolve (table_base, entry_size, index_reg, plus_const) from either
+    // terminator shape.
+    let (table, entry_size, index, plus_const): (Address, u64, angryier_arch::RegisterId, u64) =
+        match mem_operand(terminator) {
+            // jmp [mem]: RIP-based (table at insn_end+disp) or constant
+            // register base + idx*scale (+disp).
+            Some(mem) => {
+                let idx = match mem.index {
+                    Some(angryier_arch::MemoryIndex::Register(r)) => r.parent,
+                    _ => return None,
+                };
+                let table = match mem.base {
+                    Some(angryier_arch::MemoryBase::InstructionPointer { .. }) => {
+                        insn_end.checked_add(mem.displacement as u64)?
+                    }
+                    Some(angryier_arch::MemoryBase::Register(b)) => {
+                        match facts.values.get(&b.parent) {
+                            Some(AbstractVal::Const(c)) => c.checked_add(mem.displacement as u64)?,
+                            _ => return None,
+                        }
+                    }
+                    _ => return None,
+                };
+                (table, u64::from(mem.scale), idx, 0)
+            }
+            // jmp reg: the register must hold a (possibly offset) entry.
+            None => {
+                let reg = reg_operand(terminator, 0)?;
+                match facts.values.get(&reg.parent)? {
+                    AbstractVal::TableEntry { base: b, index, scale, .. } => {
+                        (*b, u64::from(*scale), *index, 0)
+                    }
+                    AbstractVal::EntryPlusConst { base: b, index, scale, add, .. } => {
+                        (*b, u64::from(*scale), *index, *add)
+                    }
+                    AbstractVal::Const(_) => return None,
+                }
+            }
+        };
+    if !matches!(entry_size, 4 | 8) {
+        return None;
+    }
+
+    // Bound: in-block cmp on the index register, else the predecessor hint.
+    let bound_n = facts
+        .cmp_imm
+        .get(&index)
+        .copied()
+        .or_else(|| extra_bound.filter(|(rid, _)| *rid == index).map(|(_, n)| n))?;
+    if bound_n == 0 || bound_n > MAX_ENTRIES {
+        return None;
+    }
+
+    let read_entry = |addr: Address| -> Option<u64> {
+        let off = usize::try_from(addr.checked_sub(base)?).ok()?;
+        match entry_size {
+            8 => {
+                let bytes = region.get(off..off.checked_add(8)?)?;
+                Some(u64::from_le_bytes(bytes.try_into().ok()?))
+            }
+            _ => {
+                let bytes = region.get(off..off.checked_add(4)?)?;
+                Some(u64::from(u32::from_le_bytes(bytes.try_into().ok()?)))
+            }
+        }
+    };
+    let verifies = |target: Address| -> bool {
+        if !(base..region_end).contains(&target) {
+            return false;
+        }
+        let Some(off) = target.checked_sub(base).and_then(|v| usize::try_from(v).ok()) else {
+            return false;
+        };
+        match region.get(off..) {
+            Some(bytes) => decoder.decode(target, bytes).is_ok(),
+            None => false,
+        }
+    };
+
+    let enumerate = |count: u64, rel_base: Option<Address>| -> Option<Vec<TableTarget>> {
+        let mut out = Vec::new();
+        for i in 0..count {
+            let cell = table.checked_add(i.checked_mul(entry_size)?)?;
+            let raw = read_entry(cell)?;
+            let target = match (entry_size, rel_base) {
+                (8, _) => raw,
+                (4, Some(rb)) => {
+                    // rb is the relocation base; for EntryPlusConst the
+                    // candidates already ARE plus_const — adding it here
+                    // would double the base.
+                    let rel = i64::from((raw as u32) as i32);
+                    rb.checked_add_signed(rel)?
+                }
+                (4, None) => return None,
+                _ => return None,
+            };
+            if !verifies(target) {
+                return None;
+            }
+            out.push(TableTarget { index: u16::try_from(i).ok()?, target });
+        }
+        Some(out)
+    };
+
+    // Preference-ordered interpretations; first full verification wins.
+    // An `add entry, base` (EntryPlusConst) pins the relocation base to
+    // the added constant — MSVC's `lea rcx,[table]; mov e,[rcx+idx*4];
+    // add e,rcx; jmp e` yields final = rel32 + table exactly once. Without
+    // the add, rel32 tables relocate against the table base (MSVC) or the
+    // jump's end (GCC `.long target - .`) — both candidates are tried.
+    let candidates: Vec<Option<Address>> = if plus_const != 0 {
+        vec![Some(plus_const)]
+    } else {
+        vec![Some(table), Some(insn_end)]
+    };
+    let mut best: Option<Vec<TableTarget>> = None;
+    for rel in candidates {
+        for count in [bound_n, bound_n + 1] {
+            if count > MAX_ENTRIES {
+                continue;
+            }
+            if let Some(targets) = enumerate(count, rel) {
+                best = Some(targets);
+                break;
+            }
+        }
+        if best.is_some() {
+            break;
+        }
+    }
+    // 8-byte entries are absolute: the rel base is ignored by enumerate.
+    best
+}
+
+fn reg_operand(insn: &DecodedInstruction, index: u8) -> Option<angryier_arch::RegisterView> {
+    insn.operands
+        .iter()
+        .find(|op| op.index == index)
+        .and_then(|op| match op.kind {
+            OperandKind::Register(view) => Some(view),
+            _ => None,
+        })
+}
+
+fn imm_operand(insn: &DecodedInstruction, index: u8) -> Option<u64> {
+    insn.operands
+        .iter()
+        .find(|op| op.index == index)
+        .and_then(|op| match op.kind {
+            OperandKind::Immediate(imm) => Some(imm.value),
+            _ => None,
+        })
+}
+
+fn mem_operand(insn: &DecodedInstruction) -> Option<angryier_arch::MemoryOperand> {
+    insn.operands.iter().find_map(|op| match op.kind {
+        OperandKind::Memory(mem) => Some(mem),
+        _ => None,
+    })
+}
+
+/// Like [`mem_operand`] but also accepts AddressGeneration operands —
+/// production LEA memory operands decode as AddressGeneration (see the
+/// XED adapter's normalize), so the LEA arms must see through both kinds.
+fn addr_or_mem_operand(insn: &DecodedInstruction) -> Option<angryier_arch::MemoryOperand> {
+    insn.operands.iter().find_map(|op| match op.kind {
+        OperandKind::Memory(mem) | OperandKind::AddressGeneration(mem) => Some(mem),
+        _ => None,
+    })
+}
+
 /// Recovers a CFG by recursive descent from `entry` across `region`
 /// (the instruction bytes mapped at `base`).
 ///
@@ -799,6 +1256,7 @@ pub fn recover_multi<D: Decoder>(
     worklist.extend(entries.filter(|e| (base..base.wrapping_add(region.len() as u64)).contains(e)));
     let mut visited = BTreeSet::new();
 
+    'discovery: loop {
     while let Some(head) = worklist.pop() {
         if !visited.insert(head) {
             continue;
@@ -917,6 +1375,35 @@ pub fn recover_multi<D: Decoder>(
                     terminator = EdgeKind::IndirectCall;
                     break;
                 }
+                Some(EdgeKind::IndirectJump) => {
+                    // Statically resolvable jump tables (compiler switch
+                    // tables, VM dispatch) become per-entry TableDispatch
+                    // edges; anything else stays an unresolved graph exit
+                    // and gets a second chance in the predecessor-bound
+                    // post-pass below (MSVC puts `cmp idx,N; ja` in the
+                    // block BEFORE the table walk).
+                    let resolved =
+                        resolve_indirect_jump(decoder, &instructions, &decoded, base, region, None);
+                    if let Some(targets) = resolved {
+                        for entry in &targets {
+                            edges.push(CfgEdge {
+                                from: decoded.address,
+                                to: Some(entry.target),
+                                kind: EdgeKind::TableDispatch { index: entry.index },
+                            });
+                            worklist.push(entry.target);
+                        }
+                        terminator = EdgeKind::TableDispatch { index: 0 };
+                    } else {
+                        edges.push(CfgEdge {
+                            from: decoded.address,
+                            to: None,
+                            kind: EdgeKind::IndirectJump,
+                        });
+                        terminator = EdgeKind::IndirectJump;
+                    }
+                    break;
+                }
                 Some(kind) => {
                     edges.push(CfgEdge {
                         from: decoded.address,
@@ -941,6 +1428,86 @@ pub fn recover_multi<D: Decoder>(
                 },
             );
         }
+    }
+
+    // Predecessor-bound post-pass: for every still-unresolved indirect
+    // jump, look for `cmp idx, imm` bounds in the CFG predecessor blocks
+    // (the canonical MSVC layout: the bound check's `ja` splits the block,
+    // so the cmp never shares a block with the table walk). The jmp block
+    // is re-interpreted with each predecessor bound; the same fail-closed
+    // verification applies.
+    let unresolved: Vec<Address> = blocks
+        .iter()
+        .filter(|(_, b)| b.terminator == EdgeKind::IndirectJump)
+        .map(|(&head, _)| head)
+        .collect();
+    for head in unresolved {
+        let Some(terminator_pc) = blocks
+            .get(&head)
+            .and_then(|b| b.instructions.last())
+            .map(|i| i.address)
+        else {
+            continue;
+        };
+        let mut new_edges = Vec::new();
+        for pred in blocks.values() {
+            let is_pred = edges.iter().any(|e| {
+                e.to == Some(head)
+                    && e.from
+                        == pred
+                            .instructions
+                            .last()
+                            .map(|i| i.address)
+                            .unwrap_or(pred.start)
+                    && !matches!(e.kind, EdgeKind::Call | EdgeKind::IndirectCall)
+            });
+            if !is_pred {
+                continue;
+            }
+            let pred_facts = interpret_block(&pred.instructions);
+            for (rid, bound) in pred_facts.cmp_imm {
+                let Some(block) = blocks.get(&head) else { continue };
+                let Some(term) = block.instructions.last() else { continue };
+                let term = DecodedInstruction {
+                    address: term.address,
+                    length: term.length,
+                    form_id: term.form_id,
+                    features: Vec::new(),
+                    operands: term.operands.clone(),
+                    modifiers: angryier_arch::InstructionModifiers::default(),
+                };
+                if let Some(targets) =
+                    resolve_indirect_jump(decoder, &block.instructions, &term, base, region, Some((rid, bound)))
+                {
+                    for entry in &targets {
+                        new_edges.push(CfgEdge {
+                            from: terminator_pc,
+                            to: Some(entry.target),
+                            kind: EdgeKind::TableDispatch { index: entry.index },
+                        });
+                        worklist.push(entry.target);
+                    }
+                    break;
+                }
+            }
+            if !new_edges.is_empty() {
+                break;
+            }
+        }
+        if !new_edges.is_empty() {
+            edges.retain(|e| !(e.from == terminator_pc && e.kind == EdgeKind::IndirectJump));
+            edges.extend(new_edges);
+            if let Some(block) = blocks.get_mut(&head) {
+                block.terminator = EdgeKind::TableDispatch { index: 0 };
+            }
+        }
+    }
+
+    // Post-pass discoveries re-enter the main discovery loop.
+    if !worklist.is_empty() {
+        continue 'discovery;
+    }
+    break 'discovery;
     }
 
     Ok(Cfg { entry, blocks, edges })
@@ -1004,6 +1571,243 @@ mod tests {
                     }],
                 ),
                 [0xc3, ..] => (1, forms::RET, vec![]),
+                // ---- parameterized synthetic resolver ops (F2..FB); reg
+                // byte rb -> RegisterId(0x100+rb), parent-keyed so widths
+                // are cosmetic (64 everywhere) ----
+                // F2 rb imm8: cmp reg, imm8
+                [0xf2, rb, imm, ..] => (
+                    3,
+                    forms::CMP_R32_IMM8,
+                    vec![
+                        r64_read(*rb, 0),
+                        angryier_arch::Operand {
+                            index: 1,
+                            width_bits: 8,
+                            access: angryier_arch::AccessKind::Read,
+                            visibility: angryier_arch::OperandVisibility::Explicit,
+                            kind: OperandKind::Immediate(angryier_arch::ImmediateOperand {
+                                value: u64::from(*imm),
+                                signed: false,
+                            }),
+                        },
+                    ],
+                ),
+                // F3 rb: jmp reg
+                [0xf3, rb, ..] => (2, forms::JMP_INDIRECT_R64, vec![r64_read(*rb, 0)]),
+                // F4 dst src: mov reg, reg
+                [0xf4, dst, src, ..] => (
+                    3,
+                    forms::MOV_R64_R64,
+                    vec![r64(*dst, 0), r64_read(*src, 1)],
+                ),
+                // F5 rb d0 d1 d2 d3: lea rb, [rip+disp32] (AddressGeneration!)
+                [0xf5, rb, d0, d1, d2, d3, ..] => (
+                    7,
+                    forms::LEA_R64_MEM,
+                    vec![
+                        r64(*rb, 0),
+                        angryier_arch::Operand {
+                            index: 1,
+                            width_bits: 64,
+                            access: angryier_arch::AccessKind::Read,
+                            visibility: angryier_arch::OperandVisibility::Explicit,
+                            kind: OperandKind::AddressGeneration(angryier_arch::MemoryOperand {
+                                memory_index: 0,
+                                address_width_bits: 64,
+                                segment: None,
+                                segment_base: None,
+                                base: Some(angryier_arch::MemoryBase::InstructionPointer {
+                                    width_bits: 64,
+                                }),
+                                index: None,
+                                scale: 1,
+                                displacement: i64::from(i32::from_le_bytes([*d0, *d1, *d2, *d3])),
+                                displacement_width_bits: 32,
+                            }),
+                        },
+                    ],
+                ),
+                // F6 dst base idx scale d0 d1 d2 d3: mov dst,[base+idx*s+disp]
+                [0xf6, dst, bse, idx, scale, d0, d1, d2, d3, ..] => (
+                    10,
+                    forms::MOV_R64_MEM64,
+                    vec![
+                        r64(*dst, 0),
+                        angryier_arch::Operand {
+                            index: 1,
+                            width_bits: 64,
+                            access: angryier_arch::AccessKind::Read,
+                            visibility: angryier_arch::OperandVisibility::Explicit,
+                            kind: OperandKind::Memory(angryier_arch::MemoryOperand {
+                                memory_index: 0,
+                                address_width_bits: 64,
+                                segment: None,
+                                segment_base: None,
+                                base: Some(angryier_arch::MemoryBase::Register(
+                                    angryier_arch::RegisterView::full(
+                                        angryier_arch::RegisterId(0x100 + u32::from(*bse)),
+                                        64,
+                                    ),
+                                )),
+                                index: Some(angryier_arch::MemoryIndex::Register(
+                                    angryier_arch::RegisterView::full(
+                                        angryier_arch::RegisterId(0x100 + u32::from(*idx)),
+                                        64,
+                                    ),
+                                )),
+                                scale: *scale,
+                                displacement: i64::from(i32::from_le_bytes([*d0, *d1, *d2, *d3])),
+                                displacement_width_bits: 32,
+                            }),
+                        },
+                    ],
+                ),
+                // F7 dst src: add dst, src
+                [0xf7, dst, src, ..] => (3, forms::ADD_R64_R64, vec![r64(*dst, 0), r64_read(*src, 1)]),
+                // F8 dst imm8: add dst, imm
+                [0xf8, dst, imm, ..] => (
+                    3,
+                    forms::ADD_R64_IMM32,
+                    vec![
+                        r64(*dst, 0),
+                        angryier_arch::Operand {
+                            index: 1,
+                            width_bits: 8,
+                            access: angryier_arch::AccessKind::Read,
+                            visibility: angryier_arch::OperandVisibility::Explicit,
+                            kind: OperandKind::Immediate(angryier_arch::ImmediateOperand {
+                                value: u64::from(*imm),
+                                signed: false,
+                            }),
+                        },
+                    ],
+                ),
+                // F9 rb scale d0 d1 d2 d3: jmp [rip + reg*scale + disp32]
+                [0xf9, rb, scale, d0, d1, d2, d3, ..] => (
+                    8,
+                    forms::JMP_INDIRECT_MEM64,
+                    vec![angryier_arch::Operand {
+                        index: 0,
+                        width_bits: 64,
+                        access: angryier_arch::AccessKind::Read,
+                        visibility: angryier_arch::OperandVisibility::Explicit,
+                        kind: OperandKind::Memory(angryier_arch::MemoryOperand {
+                            memory_index: 0,
+                            address_width_bits: 64,
+                            segment: None,
+                            segment_base: None,
+                            base: Some(angryier_arch::MemoryBase::InstructionPointer {
+                                width_bits: 64,
+                            }),
+                            index: Some(angryier_arch::MemoryIndex::Register(
+                                angryier_arch::RegisterView::full(
+                                    angryier_arch::RegisterId(0x100 + u32::from(*rb)),
+                                    64,
+                                ),
+                            )),
+                            scale: *scale,
+                            displacement: i64::from(i32::from_le_bytes([*d0, *d1, *d2, *d3])),
+                            displacement_width_bits: 32,
+                        }),
+                    }],
+                ),
+                // FA base idx scale: jmp [regbase + idx*scale]
+                [0xfa, bse, idx, scale, ..] => (
+                    4,
+                    forms::JMP_INDIRECT_MEM64,
+                    vec![angryier_arch::Operand {
+                        index: 0,
+                        width_bits: 64,
+                        access: angryier_arch::AccessKind::Read,
+                        visibility: angryier_arch::OperandVisibility::Explicit,
+                        kind: OperandKind::Memory(angryier_arch::MemoryOperand {
+                            memory_index: 0,
+                            address_width_bits: 64,
+                            segment: None,
+                            segment_base: None,
+                            base: Some(angryier_arch::MemoryBase::Register(
+                                angryier_arch::RegisterView::full(
+                                    angryier_arch::RegisterId(0x100 + u32::from(*bse)),
+                                    64,
+                                ),
+                            )),
+                            index: Some(angryier_arch::MemoryIndex::Register(
+                                angryier_arch::RegisterView::full(
+                                    angryier_arch::RegisterId(0x100 + u32::from(*idx)),
+                                    64,
+                                ),
+                            )),
+                            scale: *scale,
+                            displacement: 0,
+                            displacement_width_bits: 0,
+                        }),
+                    }],
+                ),
+                // FB rb i0..i7: mov reg, imm64 (movabs)
+                [0xfb, rb, i0, i1, i2, i3, i4, i5, i6, i7, ..] => (
+                    10,
+                    forms::MOV_R64_IMM64,
+                    vec![
+                        r64(*rb, 0),
+                        angryier_arch::Operand {
+                            index: 1,
+                            width_bits: 64,
+                            access: angryier_arch::AccessKind::Read,
+                            visibility: angryier_arch::OperandVisibility::Explicit,
+                            kind: OperandKind::Immediate(angryier_arch::ImmediateOperand {
+                                value: u64::from_le_bytes([*i0, *i1, *i2, *i3, *i4, *i5, *i6, *i7]),
+                                signed: false,
+                            }),
+                        },
+                    ],
+                ),
+                // test-only encodings for the jump-table resolver (0xFx
+                // prefix space, unused by real tests above):
+                // F0 imm8: cmp eax, imm8 (CMP_R32_IMM8, idx=eax)
+                [0xf0, imm, ..] => (
+                    2,
+                    forms::CMP_R32_IMM8,
+                    vec![
+                        reg_op(0, 32),
+                        angryier_arch::Operand {
+                            index: 1,
+                            width_bits: 8,
+                            access: angryier_arch::AccessKind::Read,
+                            visibility: angryier_arch::OperandVisibility::Explicit,
+                            kind: OperandKind::Immediate(angryier_arch::ImmediateOperand {
+                                value: u64::from(*imm),
+                                signed: false,
+                            }),
+                        },
+                    ],
+                ),
+                // F1 s d0 d1 d2 d3: jmp [rip + eax*scale + disp32]
+                [0xf1, s, d0, d1, d2, d3, ..] => (
+                    6,
+                    forms::JMP_INDIRECT_MEM64,
+                    vec![angryier_arch::Operand {
+                        index: 0,
+                        width_bits: 64,
+                        access: angryier_arch::AccessKind::Read,
+                        visibility: angryier_arch::OperandVisibility::Explicit,
+                        kind: OperandKind::Memory(angryier_arch::MemoryOperand {
+                            memory_index: 0,
+                            address_width_bits: 64,
+                            segment: None,
+                            segment_base: None,
+                            base: Some(angryier_arch::MemoryBase::InstructionPointer {
+                                width_bits: 64,
+                            }),
+                            index: Some(angryier_arch::MemoryIndex::Register(reg_view(
+                                angryier_arch::RegisterId(0x100),
+                                32,
+                            ))),
+                            scale: *s,
+                            displacement: i64::from(i32::from_le_bytes([*d0, *d1, *d2, *d3])),
+                            displacement_width_bits: 32,
+                        }),
+                    }],
+                ),
                 _ => return Err(format!("unknown opcode at {address:#x}")),
             };
             Ok(DecodedInstruction {
@@ -1014,6 +1818,49 @@ mod tests {
                 operands,
                 modifiers: angryier_arch::InstructionModifiers::default(),
             })
+        }
+    }
+
+    fn r64(rb: u8, index: u8) -> angryier_arch::Operand {
+        r64_acc(rb, index, angryier_arch::AccessKind::Write)
+    }
+
+    fn r64_read(rb: u8, index: u8) -> angryier_arch::Operand {
+        r64_acc(rb, index, angryier_arch::AccessKind::Read)
+    }
+
+    fn r64_acc(rb: u8, index: u8, access: angryier_arch::AccessKind) -> angryier_arch::Operand {
+        angryier_arch::Operand {
+            index,
+            width_bits: 64,
+            access,
+            visibility: angryier_arch::OperandVisibility::Explicit,
+            kind: OperandKind::Register(angryier_arch::RegisterView::full(
+                angryier_arch::RegisterId(0x100 + u32::from(rb)),
+                64,
+            )),
+        }
+    }
+
+    fn reg_view(parent: angryier_arch::RegisterId, width_bits: u16) -> angryier_arch::RegisterView {
+        angryier_arch::RegisterView {
+            parent,
+            bit_offset: 0,
+            width_bits,
+            write_behavior: angryier_arch::RegisterWriteBehavior::ZeroExtendParent,
+        }
+    }
+
+    fn reg_op(index: u8, width_bits: u16) -> angryier_arch::Operand {
+        angryier_arch::Operand {
+            index,
+            width_bits,
+            access: angryier_arch::AccessKind::ReadWrite,
+            visibility: angryier_arch::OperandVisibility::Explicit,
+            kind: OperandKind::Register(reg_view(
+                angryier_arch::RegisterId(0x100),
+                width_bits,
+            )),
         }
     }
 
@@ -1535,5 +2382,327 @@ mod tests {
         assert_eq!(forest.depth(1), 1);
         assert_eq!(forest.depth(2), 2);
         assert_eq!(forest.depth(3), 0);
+    }
+
+    #[test]
+    fn jump_table_resolves_to_entries() -> Result<(), String> {
+        // cmp eax,2; jmp [rip + eax*8 + disp] where disp points 2 entries
+        // of qwords past the jmp. Table lives after the terminator.
+        let code = [
+            0xf0, 0x02, // cmp eax, 2
+            0xf1, 0x08, 0x0a, 0x00, 0x00, 0x00, // jmp [rip+eax*8+10]
+            // (table at jmp_end+10 = 0x1008+10 = 0x1012; pad to there)
+            0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1008..0x1010
+            0x90, 0x90, // 0x1010..0x1012
+            // entries: 0x1022, 0x1026 (region ends 0x102A — both inside)
+            0x22, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x26, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // target code (0x1022 and 0x1026): nop; ret
+            0x90, 0xc3, 0x90, 0xc3, 0x90, 0xc3, 0x90, 0xc3,
+        ];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
+        let table_edges: Vec<_> = cfg
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::TableDispatch { .. }))
+            .collect();
+        assert_eq!(table_edges.len(), 2, "two resolved entries");
+        assert!(table_edges.iter().any(|e| e.to == Some(0x1022)));
+        assert!(table_edges.iter().any(|e| e.to == Some(0x1026)));
+        Ok(())
+    }
+
+    #[test]
+    fn jump_without_bound_stays_unresolved() -> Result<(), String> {
+        // jmp [rip+eax*8] with NO cmp bound in-block: fail closed.
+        let code = [
+            0xf1, 0x08, 0x0a, 0x00, 0x00, 0x00,
+            0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+            0x90, 0x90,
+            0x22, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x30, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1000, identity_form).map_err(|e| format!("{e:?}"))?;
+        assert!(cfg.edges.iter().any(|e| e.kind == EdgeKind::IndirectJump));
+        assert!(!cfg.edges.iter().any(|e| matches!(e.kind, EdgeKind::TableDispatch { .. })));
+        Ok(())
+    }
+
+    // ---- hard battery: layouts verified programmatically above each ----
+
+    fn table_edges(cfg: &Cfg) -> Vec<&CfgEdge> {
+        cfg.edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::TableDispatch { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn msvc_shape2_with_predecessor_bound() -> Result<(), String> {
+        // Block A: cmp rax,2; jnz +3 (splits). Block B (fall-through):
+        // lea rbx,[rip+table]; mov rax,[rbx+rax*4]; add rax,rbx; jmp rax.
+        // The bound lives in the PREDECESSOR block — post-pass territory.
+        let mut code: Vec<u8> = Vec::new();
+        let a = 0x1000u64;
+        code.extend([0xf2, 0x00, 0x02]); // cmp rax,2
+        code.extend([0x75, 0x3B]); // jnz -> clean landing pad 0x1040
+        let b = (a + 5) as u64; // 0x1005
+        let lea_at = (b - a) as usize; // file index of the lea (VA 0x1005)
+        code.extend([0xf5, 0x01, 0, 0, 0, 0, 0x00]); // lea rbx,[rip+disp] (disp patched below)
+        code.extend([0xf6, 0x00, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0]); // mov rax,[rbx+rax*4]
+        code.extend([0xf7, 0x00, 0x01]); // add rax,rbx
+        code.extend([0xf3, 0x00]); // jmp rax
+        let table = 0x1020u64;
+        let lea_end = (a + 5 + 7) as u64;
+        let disp = (table as i64 - lea_end as i64) as i32;
+        code[lea_at + 2..lea_at + 6].copy_from_slice(&disp.to_le_bytes());
+        while (code.len() as u64) < table - a {
+            code.push(0x90);
+        }
+        // rel32 entries (relative to table base), targets 0x1030, 0x1034
+        for t in [0x1030u32, 0x1034u32] {
+            code.extend(((t as i64 - table as i64) as i32).to_le_bytes());
+        }
+        while code.len() < 0x38 {
+            code.push(0x90);
+        }
+        // targets: nop; ret at 0x1030 and 0x1034; landing pad 0x1040
+        while code.len() < 0x30 {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]); // 0x1030
+        code.extend([0x90, 0x90]); // 0x1032
+        code.extend([0x90, 0xc3]); // 0x1034
+        while code.len() < 0x40 {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]); // 0x1040
+        let cfg = recover(&TestDecoder, a, &code, a, identity_form).map_err(|e| format!("{e:?}"))?;
+        let te = table_edges(&cfg);
+        assert_eq!(te.len(), 2, "two entries via predecessor bound");
+        assert!(te.iter().any(|e| e.to == Some(0x1030)));
+        assert!(te.iter().any(|e| e.to == Some(0x1034)));
+        Ok(())
+    }
+
+    #[test]
+    fn gcc_rel32_relocates_to_jump_end() -> Result<(), String> {
+        // Shape 1 where entries verify ONLY relative to the jump's end.
+        let a = 0x1000u64;
+        let mut code: Vec<u8> = Vec::new();
+        code.extend([0xf2, 0x00, 0x02]); // cmp rax,2  -> 0x1003
+        let table = 0x1010u64;
+        let disp = (table as i64 - 0x100B) as i32;
+        code.extend([0xf9, 0x00, 0x04]);
+        code.extend(disp.to_le_bytes());
+        while (code.len() as u64) < table - a {
+            code.push(0x90);
+        }
+        // rel32 to insn_end: targets 0x102B, 0x1033. table-relative would
+        // be 0x1030 (deliberately FF undecodable) and 0x1038 (out).
+        for e in [0x20i32, 0x28i32] {
+            code.extend(e.to_le_bytes());
+        }
+        while code.len() < 0x2B {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]); // 0x102B target
+        code.extend([0x90, 0x90, 0x90]); // 0x102D..0x1030
+        code.extend([0xff, 0xff, 0xff]); // 0x1030 undecodable
+        code.extend([0x90, 0xc3]); // 0x1033 target
+        let cfg = recover(&TestDecoder, a, &code, a, identity_form).map_err(|e| format!("{e:?}"))?;
+        let te = table_edges(&cfg);
+        assert_eq!(te.len(), 2, "gcc interpretation wins by verification");
+        assert!(te.iter().any(|e| e.to == Some(0x102B)));
+        assert!(te.iter().any(|e| e.to == Some(0x1033)));
+        Ok(())
+    }
+
+    #[test]
+    fn stale_index_redefinition_stays_unresolved() -> Result<(), String> {
+        // cmp rax,2; movabs rax,5; jmp [rip+rax*8] — the bound died when
+        // rax was rewritten; must stay an unresolved exit.
+        let a = 0x1000u64;
+        let mut code: Vec<u8> = Vec::new();
+        code.extend([0xf2, 0x00, 0x02]); // cmp rax,2
+        code.extend([0xfb, 0x00]); // movabs rax, 5
+        code.extend(5u64.to_le_bytes());
+        let table = 0x1030u64;
+        let disp = (table as i64 - 0x1015) as i32;
+        code.extend([0xf9, 0x00, 0x08]);
+        code.extend(disp.to_le_bytes());
+        while (code.len() as u64) < table - a {
+            code.push(0x90);
+        }
+        for t in [0x1040u64, 0x1048u64] {
+            code.extend(t.to_le_bytes());
+        }
+        while code.len() < 0x40 {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]);
+        code.extend([0x90, 0x90, 0x90, 0x90, 0x90, 0x90]);
+        code.extend([0x90, 0xc3]);
+        let cfg = recover(&TestDecoder, a, &code, a, identity_form).map_err(|e| format!("{e:?}"))?;
+        assert!(table_edges(&cfg).is_empty(), "stale bound must not resolve");
+        assert!(cfg.edges.iter().any(|e| e.kind == EdgeKind::IndirectJump));
+        Ok(())
+    }
+
+    #[test]
+    fn table_load_displacement_folds_into_base() -> Result<(), String> {
+        // movabs rbx,0x1030; cmp rcx,2; mov rax,[rbx+rcx*8+0x10]; jmp rax
+        // -> table at 0x1040, abs64 entries to 0x1050 and 0x1058.
+        let a = 0x1000u64;
+        let mut code: Vec<u8> = Vec::new();
+        code.extend([0xfb, 0x01]);
+        code.extend(0x1030u64.to_le_bytes()); // movabs rbx,0x1030
+        code.extend([0xf2, 0x02, 0x02]); // cmp rcx,2
+        code.extend([0xf6, 0x00, 0x01, 0x02, 0x08, 0x10, 0, 0, 0, 0]); // mov rax,[rbx+rcx*8+0x10]
+        code.extend([0xf3, 0x00]); // jmp rax
+        while (code.len() as u64) < 0x1040 - a {
+            code.push(0x90);
+        }
+        for t in [0x1050u64, 0x1058u64] {
+            code.extend(t.to_le_bytes());
+        }
+        while code.len() < 0x50 {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]);
+        code.extend([0x90, 0x90, 0x90, 0x90, 0x90, 0x90]);
+        code.extend([0x90, 0xc3]);
+        let cfg = recover(&TestDecoder, a, &code, a, identity_form).map_err(|e| format!("{e:?}"))?;
+        let te = table_edges(&cfg);
+        assert_eq!(te.len(), 2, "disp folded: table at 0x1040");
+        assert!(te.iter().any(|e| e.to == Some(0x1050)));
+        assert!(te.iter().any(|e| e.to == Some(0x1058)));
+        Ok(())
+    }
+
+    #[test]
+    fn one_bad_entry_fails_the_whole_table() -> Result<(), String> {
+        // cmp rax,2; jmp [rip+rax*8]: entry[0] valid, entry[1] out of
+        // region -> NO partial resolution; stays an unresolved exit.
+        let a = 0x1000u64;
+        let mut code: Vec<u8> = Vec::new();
+        code.extend([0xf2, 0x00, 0x02]);
+        let table = 0x1020u64;
+        let disp = (table as i64 - 0x100B) as i32;
+        code.extend([0xf9, 0x00, 0x08]);
+        code.extend(disp.to_le_bytes());
+        while (code.len() as u64) < table - a {
+            code.push(0x90);
+        }
+        code.extend(0x1030u64.to_le_bytes()); // valid target
+        code.extend(0xFFFF_F000u64.to_le_bytes()); // out of region
+        while code.len() < 0x30 {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]);
+        let cfg = recover(&TestDecoder, a, &code, a, identity_form).map_err(|e| format!("{e:?}"))?;
+        assert!(table_edges(&cfg).is_empty(), "no partial edge sets");
+        assert!(cfg.edges.iter().any(|e| e.kind == EdgeKind::IndirectJump));
+        Ok(())
+    }
+
+    #[test]
+    fn fully_valid_table_prefers_bound_n() -> Result<(), String> {
+        // cmp rax,2 with a 3-entry fully-valid table: BOTH the N=2 and
+        // N+1 interpretations verify. Documented conservative choice:
+        // N wins (ja-dominant) — a jbe-style bound undercounts by one
+        // rather than inventing an edge past a ja bound. Sequential
+        // enumeration also means a garbage MIDDLE entry fails every count
+        // (no partial sets) — this test pins that whole-table policy.
+        let a = 0x1000u64;
+        let mut code: Vec<u8> = Vec::new();
+        code.extend([0xf2, 0x00, 0x02]);
+        let table = 0x1020u64;
+        let disp = (table as i64 - 0x100B) as i32;
+        code.extend([0xf9, 0x00, 0x08]);
+        code.extend(disp.to_le_bytes());
+        while (code.len() as u64) < table - a {
+            code.push(0x90);
+        }
+        code.extend(0x1040u64.to_le_bytes()); // entry 0
+        code.extend(0x1044u64.to_le_bytes()); // entry 1
+        code.extend(0x1050u64.to_le_bytes()); // entry 2 (also decodable)
+        while code.len() < 0x40 {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]);
+        while code.len() < 0x50 {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]);
+        let cfg = recover(&TestDecoder, a, &code, a, identity_form).map_err(|e| format!("{e:?}"))?;
+        let te = table_edges(&cfg);
+        assert_eq!(te.len(), 2, "bound N preferred when both verify");
+        assert!(te.iter().any(|e| e.to == Some(0x1040)));
+        assert!(te.iter().any(|e| e.to == Some(0x1044)));
+        Ok(())
+    }
+
+    #[test]
+    fn movabs_base_direct_indexed_jump() -> Result<(), String> {
+        // movabs rbx,table; cmp rax,2; jmp [rbx+rax*8] — Shape 1b.
+        let a = 0x1000u64;
+        let mut code: Vec<u8> = Vec::new();
+        code.extend([0xfb, 0x01]);
+        let table = 0x1030u64;
+        code.extend(table.to_le_bytes());
+        code.extend([0xf2, 0x00, 0x02]); // cmp rax,2
+        code.extend([0xfa, 0x01, 0x00, 0x08]); // jmp [rbx+rax*8]
+        while (code.len() as u64) < table - a {
+            code.push(0x90);
+        }
+        for t in [0x1040u64, 0x1048u64] {
+            code.extend(t.to_le_bytes());
+        }
+        while code.len() < 0x40 {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]);
+        code.extend([0x90, 0x90, 0x90, 0x90, 0x90, 0x90]);
+        code.extend([0x90, 0xc3]);
+        let cfg = recover(&TestDecoder, a, &code, a, identity_form).map_err(|e| format!("{e:?}"))?;
+        let te = table_edges(&cfg);
+        assert_eq!(te.len(), 2);
+        assert!(te.iter().any(|e| e.to == Some(0x1040)));
+        assert!(te.iter().any(|e| e.to == Some(0x1048)));
+        Ok(())
+    }
+
+    #[test]
+    fn exact_bound_count_no_overrun() -> Result<(), String> {
+        // cmp rax,2 with exactly 2 valid entries followed by a third
+        // plausible qword: exactly 2 edges — (rel,N) verifies first and
+        // the N+1 candidate never runs.
+        let a = 0x1000u64;
+        let mut code: Vec<u8> = Vec::new();
+        code.extend([0xf2, 0x00, 0x02]);
+        let table = 0x1020u64;
+        let disp = (table as i64 - 0x100B) as i32;
+        code.extend([0xf9, 0x00, 0x08]);
+        code.extend(disp.to_le_bytes());
+        while (code.len() as u64) < table - a {
+            code.push(0x90);
+        }
+        // targets sit BEYOND the table's own extent (table ends 0x1038)
+        for t in [0x103Cu64, 0x1040u64, 0x1044u64] {
+            code.extend(t.to_le_bytes());
+        }
+        while code.len() < 0x3C {
+            code.push(0x90);
+        }
+        code.extend([0x90, 0xc3]); // 0x103C
+        code.extend([0x90, 0x90]);
+        code.extend([0x90, 0xc3]); // 0x1040
+        code.extend([0x90, 0x90]);
+        code.extend([0x90, 0xc3]); // 0x1044
+        let cfg = recover(&TestDecoder, a, &code, a, identity_form).map_err(|e| format!("{e:?}"))?;
+        let te = table_edges(&cfg);
+        assert_eq!(te.len(), 2, "no over-enumeration past the bound");
+        Ok(())
     }
 }

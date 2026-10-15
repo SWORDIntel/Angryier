@@ -257,6 +257,35 @@ suites require system Z3/XED):
 - **Replay/provenance:** in-memory capsule store + validator + durable
   `FileReplayStore`; tier schema, adaptive trace governor, per-worker
   `FlightRecorder` ring (Tier-0-first eviction, never drops Tier 1).
+- **VM-Aware Analysis & Deobfuscation (Phase 16 milestone, 2026-10-15):**
+  - **Indirect Jump Table Resolver (`angryier-cfg`):** Multi-shape jump table
+    resolution (indexed `[base+idx*scale+disp]` and PIE `lea; mov; add; jmp`)
+    with predecessor-bound tracking across block splits (`cmp idx, imm; ja default;
+    jmp table[idx]`), element-size verification (4/8 bytes), relative table and
+    jump-end relocation candidates, and fail-closed whole-table verification (22 tests).
+  - **Themida Dispatch Classification (`angryier-cfg/themida`):** Data-driven
+    classification informed by the 75M-instruction census of `.themida`/`.boot`
+    (`ContextTable` 541k, `Indexed` 60k, `RipSlot` 17k, `RegisterRaw` 136k);
+    backward base-register provenance walk tracking `Constant`, `ContextRegister`,
+    `PoppedFromStack`, `DerivedFrom`, and `Clobbered` (7 tests).
+  - **VPC Candidate Identification (`angryier-cfg/vpc`):** PUSHAN-style VPC
+    candidate identification (arXiv 2603.18355, Themida-Research `VM_CONTEXT`
+    randomized offsets) with 4 heuristics (dispatch read, table load, Themida
+    stable-VPC sibling tracking, VMProtect volatile register rotation) plus plain-switch
+    negative control (5 tests).
+  - **Deobfuscation Expression Simplifier (`angryier-expr/deobf`):** Fixpoint
+    MBA simplifier over hash-consed expression DAGs: boolean-arithmetic reductions
+    (`(x|y) + (x&y) = x+y`, `(x|y) - (x&y) = x^y`, `x + ~x = -1`, `x - x = 0`),
+    double-negation elimination, `not(x) = -1 - x` strength reduction, constant XOR
+    chains, and extension compositions, verified by differential testing over randomly
+    generated expression trees (21 tests).
+  - **Runtime & Memory Engine Extensions:** `load_mem` bulk memory loads,
+    `memory_dump_out` emulated memory export, exit state telemetry (`rax_exit`,
+    `exit_pc`, `exit_kind`), `JumpIndirect` ret-form ground truth recovery,
+    non-executable indirect call return-0 model with debt recording, user-mode BOOL
+    import stubs, and `UcMemoryOp::WriteExec` code-page store drop policy.
+  - **XED Iform Metadata:** Preserved source-level XED iform metadata across the
+    native bridge (`angryier-arch-xed-ffi`, `angryier-decode-xed`).
 
 **2026-10-03 — 1.0.0 regression closure.** The release train had shipped
 three test regressions; all fixed and verified: (1) APX POP2/POP2P wrote

@@ -226,6 +226,10 @@ pub enum UcMemoryOp {
     /// concrete image data (`uc_write_ro`, opt-in on top of `uc_memory`).
     /// Executable pages are never relaxed.
     WriteRO,
+    /// A store dropped because its target page is executable (`uc_memory`):
+    /// a garbage-pointer store would clobber code; the store is skipped and
+    /// the hit recorded as debt.
+    WriteExec,
 }
 
 impl UcMemoryOp {
@@ -235,6 +239,7 @@ impl UcMemoryOp {
             Self::Read => "read",
             Self::Write => "write",
             Self::WriteRO => "write_ro",
+            Self::WriteExec => "write_exec",
         }
     }
 }
@@ -509,9 +514,23 @@ pub struct PersistentMemory {
     /// current bytes are all concrete is allowed, debt-recorded, and its
     /// previous bytes logged. Fail-closed default (`false`).
     uc_write_ro: bool,
+    /// Executable-page write-drop relaxation (`uc_drop_exec_write`),
+    /// meaningful only while `uc` is armed: a store into an executable page
+    /// is dropped (preventing code clobber) and recorded as `WriteExec` debt.
+    /// Fail-closed default (`false`).
+    uc_drop_exec_write: bool,
 }
 
 impl PersistentMemory {
+    /// Whether the mapped region containing `address` is executable.
+    /// Unmapped addresses return false — the unmapped arm owns those.
+    fn exec_region_contains(&self, address: Address) -> Result<bool, MemoryError> {
+        Ok(self
+            .region_containing(address)
+            .map(|region| region.executable)
+            .unwrap_or(false))
+    }
+
     pub fn new(mut regions: Vec<MemoryRegion>) -> Result<Self, MemoryError> {
         regions.sort_by_key(|region| region.base);
 
@@ -554,6 +573,7 @@ impl PersistentMemory {
             code_versions: Arc::new(code_versions),
             uc: None,
             uc_write_ro: false,
+            uc_drop_exec_write: false,
         })
     }
 
@@ -596,6 +616,7 @@ impl PersistentMemory {
             code_versions: Arc::new(code_versions),
             uc: self.uc.clone(),
             uc_write_ro: self.uc_write_ro,
+            uc_drop_exec_write: self.uc_drop_exec_write,
         })
     }
 
@@ -640,6 +661,12 @@ impl PersistentMemory {
     /// the relaxation into, so the write keeps its exact permission error.
     pub fn with_uc_write_ro(mut self, enabled: bool) -> Self {
         self.uc_write_ro = enabled;
+        self
+    }
+
+    /// Opt-in relaxation for executable-page writes under `uc_memory`.
+    pub fn with_uc_drop_exec_write(mut self, enabled: bool) -> Self {
+        self.uc_drop_exec_write = enabled;
         self
     }
 
@@ -831,6 +858,14 @@ impl PersistentMemory {
             // execute accesses keep their exact strict errors.
             Err(MemoryError::Unmapped(first)) if self.uc_memory_armed() => {
                 self.uc_resolve_unmapped(address, len, access, first)
+            }
+            Err(MemoryError::AddressOverflow)
+                if self.uc_memory_armed() && access != MemoryAccessKind::Execute =>
+            {
+                if let Some(mut ledger) = self.uc_ledger() {
+                    ledger.record_hit(UcMemoryOp::Read, address, 0);
+                }
+                Ok(())
             }
             Err(error) => Err(error),
         }
@@ -1205,7 +1240,11 @@ impl LayeredMemory for PersistentMemory {
             return Ok(());
         }
 
-        let end = Self::inclusive_end(address, out.len())?;
+        let end = match Self::inclusive_end(address, out.len()) {
+            Ok(e) => e,
+            Err(MemoryError::AddressOverflow) if self.uc_memory_armed() => return Ok(()),
+            Err(e) => return Err(e),
+        };
         let last_page = Self::page_number(end);
         let mut cursor = address;
         let mut out_index = 0usize;
@@ -1274,6 +1313,31 @@ impl LayeredMemory for PersistentMemory {
             }) if self.uc_memory_armed() && self.uc_write_ro => {
                 self.uc_resolve_ro_write(address, bytes, denied)?;
                 self.write_materialized_in_place(address, bytes, true)
+            }
+            Err(MemoryError::PermissionDenied {
+                address: denied,
+                access: MemoryAccessKind::Write,
+            }) if self.uc_memory_armed()
+                && self.uc_drop_exec_write
+                && self.exec_region_contains(denied)? =>
+            {
+                // Executable target: a store here would clobber code. Drop
+                // the store and record the hit — reported debt, never a
+                // silent modification of code bytes.
+                if let Some(mut ledger) = self.uc_ledger() {
+                    ledger.record_hit(
+                        UcMemoryOp::WriteExec,
+                        denied,
+                        Self::page_base(denied),
+                    );
+                }
+                return Ok(());
+            }
+            Err(MemoryError::AddressOverflow) if self.uc_memory_armed() => {
+                if let Some(mut ledger) = self.uc_ledger() {
+                    ledger.record_hit(UcMemoryOp::Write, address, 0);
+                }
+                return Ok(());
             }
             Err(error) => Err(error),
         }

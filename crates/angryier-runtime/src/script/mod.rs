@@ -513,6 +513,24 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // whole run's debt even if every state dies.
     let uc_memory_probe = uc_memory_armed.then(|| process.state.memory.clone());
 
+    // Bulk memory loads from files: `load_mem = { { addr = 0x..., path =
+    // "..." }, ... }` — writes the file's bytes at `addr` (PE virtual-tail
+    // sections, live globals, heap snapshots). Pre-session like `poke`.
+    if let Ok(tbl) = opts.get::<Table>("load_mem") {
+        for pair in tbl.pairs::<Value, Table>() {
+            let (_, entry) = pair?;
+            let addr = entry.get::<i64>("addr")? as u64;
+            let path: String = entry.get("path")?;
+            let bytes = std::fs::read(&path)
+                .map_err(|e| mlua::Error::external(format!("load_mem {path}: {e}")))?;
+            process.state.memory = process
+                .state
+                .memory
+                .load_concrete(addr, &bytes)
+                .map_err(|e| mlua::Error::external(format!("load_mem {path}: {e:?}")))?;
+        }
+    }
+
     // The Z3 backend needs a shared arena reader — keep the arena in Arc.
     let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
         angryier_types::ExpressionNormalizationVersion(1),
@@ -1652,6 +1670,73 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
         }
         out.set("regs", regs)?;
         out.set("regs_hex", regs_hex)?;
+    }
+    // Exit state: rax and pc of the most relevant dead (or live) state —
+    // tells the caller whether the entry-overridden function returned, what
+    // it returned, and whether it exited through the sentinel.
+    {
+        let candidate = session
+            .dead
+            .last()
+            .or_else(|| session.dead.first())
+            .or_else(|| session.states.first());
+        if let Some(state) = candidate {
+            match state.process.read_register(crate::register_id::GPR_BASE) {
+                Ok(v) => {
+                    out.set("rax_exit", v)?;
+                }
+                Err(_) => {
+                    out.set("rax_exit_symbolic", true)?;
+                }
+            }
+            if let Ok(pc) = state.process.pc() {
+                out.set("exit_pc", pc)?;
+                out.set(
+                    "exit_kind",
+                    if pc == crate::EXIT_HOOK {
+                        "sentinel_ret"
+                    } else {
+                        "other"
+                    },
+                )?;
+            }
+        }
+    }
+    // Post-run memory export: `memory_dump_out = { addr, len, path }` —
+    // writes the final emulated bytes of the most relevant state (symbolic
+    // cells export as 0x00). Chained-run persistence and diagnosis.
+    if let Ok(tbl) = opts.get::<Table>("memory_dump_out") {
+        let dump_addr = tbl.get::<i64>("addr")? as u64;
+        let dump_len = tbl.get::<i64>("len")? as usize;
+        let dump_path: String = tbl.get("path")?;
+        let candidate = session
+            .dead
+            .last()
+            .or_else(|| session.dead.first())
+            .or_else(|| session.states.first());
+        if let Some(state) = candidate {
+            let mut outbytes = vec![0u8; dump_len];
+            for off in (0..dump_len).step_by(8) {
+                let n = std::cmp::min(8, dump_len - off);
+                if let Ok(expr) = state
+                    .memory
+                    .read(arena.as_ref(), dump_addr + off as u64, (n * 8) as u16)
+                {
+                    if let Some(node) = arena.get(expr) {
+                        if node.op == angryier_expr::ExprOp::Constant
+                            && node.immediate.len() >= n
+                        {
+                            outbytes[off..off + n]
+                                .copy_from_slice(&node.immediate[..n]);
+                        }
+                    }
+                }
+            }
+            std::fs::write(&dump_path, &outbytes).map_err(|e| {
+                mlua::Error::external(format!("memory_dump_out {dump_path}: {e}"))
+            })?;
+            out.set("memory_dump", dump_path.as_str())?;
+        }
     }
     Ok(out)
 }

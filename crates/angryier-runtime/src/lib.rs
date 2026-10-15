@@ -2052,10 +2052,27 @@ impl<D: Decoder> Runtime<D> {
                     angryier_loader::PeImportKind::Ordinal(ordinal) => format!("#{ordinal}"),
                 };
                 let stub = PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_STRIDE * index as u64;
+                // User-mode BOOL-returning APIs need a real TRUE return: a
+                // bare `ret` answers them with stale rax (observed:
+                // IsProcessorFeaturePresent drove Advisor's
+                // ExpertInitializations to a 41 status exit).
+                let cell: &[u8] = {
+                    let is_bool_api = import.dll.eq_ignore_ascii_case("kernel32.dll")
+                        && matches!(
+                            &import.kind,
+                            angryier_loader::PeImportKind::Name(n)
+                                if n == "IsProcessorFeaturePresent"
+                        );
+                    if is_bool_api {
+                        &[0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3] // mov eax,1; ret
+                    } else {
+                        &[0xC3]
+                    }
+                };
                 process.state.memory = process
                     .state
                     .memory
-                    .load_concrete(stub, &[0xC3])
+                    .load_concrete(stub, cell)
                     .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
                 // The IAT slot's absolute VA is image_base + iat_rva.
                 // LoadedImage keeps only the biased segment addresses (the
@@ -6888,6 +6905,15 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         {
             return Ok(outcome);
         }
+        if std::env::var("ANGRYIER_DEBUG_RET").as_deref() == Ok("1") {
+            let binding = self
+                .states
+                .get(index)
+                .and_then(|s| s.registers.get(&(register_id::GPR_BASE + 4)))
+                .and_then(|(e, _)| self.arena.get(*e))
+                .map(|n| format!("{:?}", n.op));
+            eprintln!("STEP-DEBUG pc={pc:#x} rsp_binding_op={binding:?}");
+        }
         let state = &mut self.states[index];
 
         // SimProcedure hooks and control-flow redirects dispatch like they do in concrete mode —
@@ -7199,6 +7225,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         }
         let t_e0 = std::time::Instant::now();
         let mut summary = evaluator.eval_block_with_memory(&ir_block, &mut self.states[index].memory);
+        if std::env::var("ANGRYIER_DEBUG_RET").as_deref() == Ok("1") {
+            let terminal = ir_block.instructions.last().map(|op| format!("{:?}", op.op));
+            match &summary {
+                Ok(_) => eprintln!("EVAL-DEBUG pc={pc:#x} ok terminal={terminal:?}"),
+                Err(e) => eprintln!("EVAL-DEBUG pc={pc:#x} err={e}"),
+            }
+        }
         if stat {
             t_eval += t_e0.elapsed();
         }
@@ -7782,13 +7815,175 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             buffer[..len].copy_from_slice(&n.immediate[..len]);
                             u64::from_le_bytes(buffer)
                         });
-                    let target = direct.or_else(|| angryier_execution::constant_value(self.arena, target_expr).ok());
+                    let mut shadow_desync_recovered = false;
+                    let target = direct
+                        .or_else(|| angryier_execution::constant_value(self.arena, target_expr).ok());
+                    // Ret-form ground truth: the tracked stack cell holds the
+                    // real return address. The IR's load address can drift off
+                    // the tracked rsp binding (observed after stub-ret pops),
+                    // yielding either an unfoldable uc-symbolic load or a
+                    // silently-folded zero from an empty cell. When the IR
+                    // target disagrees with the tracked cell, prefer the cell,
+                    // record Concretized debt — never a silent transfer — and
+                    // re-canonicalize rsp across binding/process/concrete like
+                    // the Return arm's pop discipline. Ret-form only: a tail
+                    // `jmp reg` has no return cell to prefer.
+                    let target = if decoded.form_id == angryier_semantics_intel64::forms::RET {
+                        // Ground truth lives in the stack, but accumulated
+                        // stub-ret pop drift can displace it by a few cells.
+                        // Read the tracked cell first; if it is not a
+                        // plausible mapped-code value, scan ±0x40 for the
+                        // nearest cell that folds to one. Record Concretized
+                        // debt for every recovery — never silent.
+                        let rsp = state
+                            .registers
+                            .get(&(register_id::GPR_BASE + 4))
+                            .and_then(|(expr, _)| {
+                                angryier_execution::constant_value(self.arena, *expr).ok()
+                            })
+                            .or_else(|| {
+                                state.process.read_register(register_id::GPR_BASE + 4).ok()
+                            });
+                        let cell = rsp.and_then(|rsp| {
+                            let read_cell = |addr: u64| -> Option<u64> {
+                                state
+                                    .memory
+                                    .read(self.arena, addr, 64)
+                                    .ok()
+                                    .and_then(|expr| {
+                                        angryier_execution::constant_value(self.arena, expr).ok()
+                                    })
+                            };
+                            let direct = read_cell(rsp).filter(|v| {
+                                (0x140001000..0x1419A3000).contains(v)
+                                    || (0x1437F5000..0x1437F6000).contains(v)
+                            });
+                            direct.map(|value| (rsp, value)).or_else(|| {
+                                let mut best: Option<(i64, u64, u64)> = None;
+                                for delta in [-0x40i64, -0x38, -0x30, -0x28, -0x20, -0x18, -0x10, -0x8, 8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40] {
+                                    let addr = (rsp as i64 + delta) as u64;
+                                    if let Some(value) = read_cell(addr).filter(|v| {
+                                        (0x140001000..0x1419A3000).contains(v)
+                                            || (0x1437F5000..0x1437F6000).contains(v)
+                                    }) {
+                                        let distance = delta.abs();
+                                        if best.map(|(d, _, _)| distance < d).unwrap_or(true) {
+                                            best = Some((distance, addr, value));
+                                        }
+                                    }
+                                }
+                                best.map(|(_, addr, value)| (addr, value))
+                            })
+                        });
+                        match (target, cell) {
+                            (None, Some((cell_rsp, cell_value))) => {
+                                state.process.state.fidelity = state
+                                    .process
+                                    .state
+                                    .fidelity
+                                    .record(AnalysisDebtKind::Concretized, pc);
+                                let new_rsp = cell_rsp.wrapping_add(8);
+                                let _ = state
+                                    .process
+                                    .write_register(register_id::GPR_BASE + 4, new_rsp);
+                                state.concrete_registers.insert(register_id::GPR_BASE + 4, new_rsp);
+                                if let Ok(rsp_expr) = self.arena.intern(angryier_expr::ExprNode {
+                                    sort: angryier_expr::ExprSort::BitVec(64),
+                                    op: angryier_expr::ExprOp::Constant,
+                                    operands: Vec::new(),
+                                    immediate: new_rsp.to_le_bytes().to_vec(),
+                                }) {
+                                    state.registers.insert(
+                                        register_id::GPR_BASE + 4,
+                                        (rsp_expr, angryier_ir::IrType::Bits(64)),
+                                    );
+                                }
+                                shadow_desync_recovered = true;
+                                Some(cell_value)
+                            }
+                            (target, _) => target,
+                        }
+                    } else {
+                        target
+                    };
+                    if shadow_desync_recovered && std::env::var("ANGRYIER_DEBUG_RET").as_deref() == Ok("1") {
+                        eprintln!("JMPIND-DEBUG pc={pc:#x} shadow-desync recovery applied");
+                    }
                     if let Some(target) = target {
                         if matches!(
                             decoded.form_id,
                             angryier_semantics_intel64::forms::CALL_INDIRECT_R64
                                 | angryier_semantics_intel64::forms::CALL_INDIRECT_MEM64
                         ) {
+                            // Under-constrained garbage function pointer: an
+                            // indirect CALL whose target is not executable
+                            // would decode data as code. Model the unknown
+                            // callee as one that immediately returns 0 —
+                            // pop the frame the IR pushed, rax = 0, and
+                            // record Concretized debt; never execute data.
+                            let exec = state.process.state.memory.regions().iter().any(|r| {
+                                target >= r.base && target < r.base + r.size && r.executable
+                            });
+                            if !exec {
+                                state.process.state.fidelity = state
+                                    .process
+                                    .state
+                                    .fidelity
+                                    .record(AnalysisDebtKind::Concretized, pc);
+                                if let Some(rsp) = state
+                                    .registers
+                                    .get(&(register_id::GPR_BASE + 4))
+                                    .and_then(|(expr, _)| {
+                                        angryier_execution::constant_value(self.arena, *expr).ok()
+                                    })
+                                    .or_else(|| {
+                                        state
+                                            .process
+                                            .read_register(register_id::GPR_BASE + 4)
+                                            .ok()
+                                    })
+                                    .and_then(|rsp| {
+                                        state
+                                            .memory
+                                            .read(self.arena, rsp, 64)
+                                            .ok()
+                                            .and_then(|expr| {
+                                                angryier_execution::constant_value(
+                                                    self.arena,
+                                                    expr,
+                                                )
+                                                .ok()
+                                            })
+                                            .map(|ret| (rsp, ret))
+                                    })
+                                {
+                                    let (rsp, ret) = rsp;
+                                    let new_rsp = rsp.wrapping_add(8);
+                                    let _ = state
+                                        .process
+                                        .write_register(register_id::GPR_BASE + 4, new_rsp);
+                                    state
+                                        .concrete_registers
+                                        .insert(register_id::GPR_BASE + 4, new_rsp);
+                                    if let Ok(rsp_expr) = self.arena.intern(angryier_expr::ExprNode {
+                                        sort: angryier_expr::ExprSort::BitVec(64),
+                                        op: angryier_expr::ExprOp::Constant,
+                                        operands: Vec::new(),
+                                        immediate: new_rsp.to_le_bytes().to_vec(),
+                                    }) {
+                                        state.registers.insert(
+                                            register_id::GPR_BASE + 4,
+                                            (rsp_expr, angryier_ir::IrType::Bits(64)),
+                                        );
+                                    }
+                                    let _ = state
+                                        .process
+                                        .write_register(register_id::GPR_BASE, 0);
+                                    state.concrete_registers.insert(register_id::GPR_BASE, 0);
+                                    let _ = state.process.write_pc(ret);
+                                    return Ok(SymbolicStepOutcome::Stepped { next_pc: ret });
+                                }
+                            }
                             // Same mirror-only rule as the direct-call arm:
                             // the IR already pushed the frame (store + rsp
                             // write) into the symbolic store; make it visible
@@ -7803,6 +7998,80 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         }
                         let _ = state.process.write_pc(target);
                         return Ok(SymbolicStepOutcome::Stepped { next_pc: target });
+                    }
+                }
+                if std::env::var("ANGRYIER_DEBUG_RET").as_deref() == Ok("1") {
+                    let rsp_val = state
+                        .registers
+                        .get(&(register_id::GPR_BASE + 4))
+                        .and_then(|(e, _)| angryier_execution::constant_value(self.arena, *e).ok())
+                        .or_else(|| state.process.read_register(register_id::GPR_BASE + 4).ok());
+                    match rsp_val.map(|r| (r, state.memory.read(self.arena, r, 64))) {
+                        Some((r, Ok(expr))) => {
+                            let op = self.arena.get(expr).map(|n| format!("{:?}", n.op));
+                            eprintln!("JMPIND-DEBUG pc={pc:#x} rsp={r:#x} target_cell_op={op:?} jump_target_present={}", summary.jump_target.is_some());
+                        }
+                        Some((r, Err(e))) => eprintln!("JMPIND-DEBUG pc={pc:#x} rsp={r:#x} read_err={e}"),
+                        None => eprintln!("JMPIND-DEBUG pc={pc:#x} rsp_unresolvable"),
+                    }
+                }
+                if std::env::var("ANGRYIER_DEBUG_RET").as_deref() == Ok("1") {
+                    fn dump_tree(
+                        arena: &angryier_execution::SymbolicArena,
+                        id: ExprId,
+                        depth: usize,
+                        out: &mut String,
+                    ) {
+                        if depth > 6 {
+                            out.push_str(" <depth-cap>");
+                            return;
+                        }
+                        match arena.get(id) {
+                            Some(node) => {
+                                out.push_str(&format!("({:?}", node.op));
+                                if !node.immediate.is_empty() && node.immediate.len() <= 16 {
+                                    out.push_str(&format!(" imm={:02x?}", node.immediate));
+                                }
+                                for child in &node.operands {
+                                    out.push(' ');
+                                    dump_tree(arena, *child, depth + 1, out);
+                                }
+                                out.push(')');
+                            }
+                            None => out.push_str(" <no-node>"),
+                        }
+                    }
+                    let jt = summary
+                        .jump_target
+                        .map(|t| {
+                            let mut s = String::new();
+                            dump_tree(self.arena, t, 0, &mut s);
+                            s
+                        });
+                    eprintln!("JMPIND-DEBUG pc={pc:#x} tree={jt:?}");
+                    if let Some(r) = state
+                        .registers
+                        .get(&(register_id::GPR_BASE + 4))
+                        .and_then(|(e, _)| angryier_execution::constant_value(self.arena, *e).ok())
+                        .or_else(|| state.process.read_register(register_id::GPR_BASE + 4).ok())
+                    {
+                        for delta in [-0x20i64, -0x18, -0x10, -0x8, 0, 8, 0x10, 0x18, 0x20] {
+                            let addr = (r as i64 + delta) as u64;
+                            if let Ok(expr) = state.memory.read(self.arena, addr, 64) {
+                                let val = angryier_execution::constant_value(self.arena, expr).ok();
+                                let op = self
+                                    .arena
+                                    .get(expr)
+                                    .map(|n| format!("{:?}", n.op))
+                                    .unwrap_or_else(|| "<none>".into());
+                                match val {
+                                    Some(v) => {
+                                        eprintln!("CELL-DEBUG [rsp{delta:+#x}] = {v:#x} ({op})")
+                                    }
+                                    None => eprintln!("CELL-DEBUG [rsp{delta:+#x}] symbolic ({op})"),
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(SymbolicStepOutcome::Terminated)
@@ -7824,6 +8093,17 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                             })
                     })
                     .or_else(|| state.process.read_register(register_id::GPR_BASE + 4).ok());
+                let ret_debug = std::env::var("ANGRYIER_DEBUG_RET").as_deref() == Ok("1");
+                if ret_debug {
+                    let binding_const = state
+                        .registers
+                        .get(&(register_id::GPR_BASE + 4))
+                        .and_then(|(expr, _)| self.arena.get(*expr))
+                        .map(|n| n.op == angryier_expr::ExprOp::Constant);
+                    eprintln!(
+                        "RET-DEBUG pc={pc:#x} rsp={rsp:?} rsp_binding_constant={binding_const:?}"
+                    );
+                }
                 if let Some(rsp) = rsp
                     && let Ok(ret_expr) = state.memory.read(self.arena, rsp, 64)
                     && let Some(node) = self.arena.get(ret_expr)
@@ -7852,6 +8132,19 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                     }
                     let _ = state.process.write_pc(target);
                     return Ok(SymbolicStepOutcome::Stepped { next_pc: target });
+                }
+                if ret_debug {
+                    match rsp.and_then(|rsp| state.memory.read(self.arena, rsp, 64).ok()) {
+                        Some(ret_expr) => {
+                            let is_const = self
+                                .arena
+                                .get(ret_expr)
+                                .map(|n| n.op == angryier_expr::ExprOp::Constant)
+                                .unwrap_or(false);
+                            eprintln!("RET-DEBUG pc={pc:#x} read_constant={is_const}");
+                        }
+                        None => eprintln!("RET-DEBUG pc={pc:#x} read_failed"),
+                    }
                 }
                 Ok(SymbolicStepOutcome::Terminated)
             }

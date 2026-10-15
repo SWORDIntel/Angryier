@@ -2,6 +2,8 @@
 
 use angryier_types::fx::FxHashMap;
 use angryier_types::{DependencyKey, ExprId, ExpressionNormalizationVersion};
+
+pub mod deobf;
 use std::sync::{
     RwLock,
     atomic::{AtomicU64, Ordering},
