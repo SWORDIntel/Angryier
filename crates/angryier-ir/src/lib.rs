@@ -2,6 +2,7 @@
 
 mod lower;
 mod verify;
+pub mod vm_footprint;
 
 pub use lower::{BasicSemanticLowerer, CachedSemanticLowerer, IrLoweringError};
 pub use verify::{BasicIrVerifier, IrVerificationError};
