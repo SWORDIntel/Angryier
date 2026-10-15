@@ -104,7 +104,7 @@ impl SimProcedure for CreateFileAProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let name_addr = state.get_arg(0);
+        let name_addr = state.get_win64_arg(0);
         let bytes = state.read_null_terminated_string(name_addr, 4096);
         let path = String::from_utf8_lossy(&bytes).into_owned();
 
@@ -136,7 +136,7 @@ impl SimProcedure for CreateFileWProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let name_addr = state.get_arg(0);
+        let name_addr = state.get_win64_arg(0);
         let bytes = state.read_bytes(name_addr, 512);
 
         // Decode UTF-16LE characters up to null terminator
@@ -178,10 +178,10 @@ impl SimProcedure for ReadFileProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let handle = state.get_arg(0);
-        let buffer = state.get_arg(1);
-        let count = (state.get_arg(2) as usize).min(65536);
-        let read_ptr = state.get_arg(3);
+        let handle = state.get_win64_arg(0);
+        let buffer = state.get_win64_arg(1);
+        let count = (state.get_win64_arg(2) as usize).min(65536);
+        let read_ptr = state.get_win64_arg(3);
 
         if !self.handles.is_valid(handle) {
             return SimResult::Return(0); // FALSE
@@ -216,9 +216,9 @@ impl SimProcedure for WriteFileProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let handle = state.get_arg(0);
-        let count = state.get_arg(2) as u32;
-        let written_ptr = state.get_arg(3);
+        let handle = state.get_win64_arg(0);
+        let count = state.get_win64_arg(2) as u32;
+        let written_ptr = state.get_win64_arg(3);
 
         if !self.handles.is_valid(handle) {
             return SimResult::Return(0); // FALSE
@@ -253,7 +253,7 @@ impl SimProcedure for CloseHandleProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let handle = state.get_arg(0);
+        let handle = state.get_win64_arg(0);
         let res = self.handles.close_handle(handle);
         SimResult::Return(if res { 1 } else { 0 })
     }
@@ -268,7 +268,7 @@ impl SimProcedure for GetFileSizeProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let high_ptr = state.get_arg(1);
+        let high_ptr = state.get_win64_arg(1);
         if high_ptr != 0 {
             let mut next = state.clone();
             next.write_memory(high_ptr, 0u32.to_le_bytes().to_vec());
@@ -290,7 +290,7 @@ impl SimProcedure for GetFileSizeExProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let size_ptr = state.get_arg(1);
+        let size_ptr = state.get_win64_arg(1);
         if size_ptr != 0 {
             let mut next = state.clone();
             next.write_memory(size_ptr, 4096u64.to_le_bytes().to_vec());
@@ -312,7 +312,7 @@ impl SimProcedure for SetFilePointerProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let dist = state.get_arg(1);
+        let dist = state.get_win64_arg(1);
         SimResult::Return(dist)
     }
 }
@@ -391,8 +391,8 @@ impl SimProcedure for GetCurrentDirectoryAProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let _len = state.get_arg(0) as usize;
-        let buf = state.get_arg(1);
+        let _len = state.get_win64_arg(0) as usize;
+        let buf = state.get_win64_arg(1);
         let path = b"C:\\Windows\\System32\0";
 
         let mut next = state.clone();
