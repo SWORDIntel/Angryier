@@ -49,6 +49,13 @@ pub struct VmRecordedInstruction {
 
 #[derive(Clone, Debug)]
 pub struct VmHandlerCapture {
+    /// COW process state from BEFORE the first captured native instruction.
+    /// Needed for exact entry-state SSA/expr materialization; never use the
+    /// mutated final process or an unrelated load-time entry_state instead.
+    pub initial_state: angryier_state::ExecutionState<
+        angryier_state::PersistentRegisters,
+        angryier_memory::PersistentMemory,
+    >,
     pub steps: Vec<VmRecordedInstruction>,
     pub footprint: VmTraceFootprint,
 }
@@ -103,6 +110,7 @@ impl<D: Decoder> Runtime<D> {
                 "VM handler capture requires a nonzero step budget".into(),
             ));
         }
+        let initial_state = process.state.clone();
         let mut steps = Vec::new();
         loop {
             let pc = process.pc()?;
@@ -166,7 +174,7 @@ impl<D: Decoder> Runtime<D> {
         .map_err(|error| RuntimeError::Environment(format!(
             "VM handler trace validation failed: {error:?}"
         )))?;
-        Ok(VmHandlerCapture { steps, footprint })
+        Ok(VmHandlerCapture { initial_state, steps, footprint })
     }
 }
 
