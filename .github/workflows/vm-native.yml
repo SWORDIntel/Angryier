@@ -8,6 +8,7 @@ on:
     paths:
       - 'crates/angryier-cfg/**'
       - 'crates/angryier-expr/**'
+      - 'crates/angryier-ir/**'
       - 'crates/angryier-loader/**'
       - 'crates/angryier-models/**'
       - 'crates/angryier-cli/**'
@@ -31,11 +32,13 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Check VM crates
-        run: cargo check -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-models -p angryier-runtime -p angryier-cli --all-targets
+        run: cargo check -p angryier-cfg -p angryier-expr -p angryier-ir -p angryier-loader -p angryier-models -p angryier-runtime -p angryier-cli --all-targets
       - name: VM CFG tests
         run: cargo test -p angryier-cfg
       - name: VM expression tests
         run: cargo test -p angryier-expr
+      - name: VM AngryIR effect tests
+        run: cargo test -p angryier-ir vm_footprint::
       - name: VM loader tests
         run: cargo test -p angryier-loader
       - name: Win32 API and synchronization tests
@@ -51,6 +54,6 @@ jobs:
       # Existing main has unrelated clippy warnings. Retain diagnostic output
       # instead of hiding the compile/test result behind that baseline debt.
       - name: Clippy analysis (baseline warnings reported)
-        run: cargo clippy -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-models -p angryier-runtime --lib
+        run: cargo clippy -p angryier-cfg -p angryier-expr -p angryier-ir -p angryier-loader -p angryier-models -p angryier-runtime --lib
       - name: Clippy forensic CLI
         run: cargo clippy -p angryier-cli --bin angryier
