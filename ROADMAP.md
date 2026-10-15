@@ -60,6 +60,16 @@
 - [x] **ANG-042**: BYOVD vulnerability checkers: detection of arbitrary physical memory mapping (`MmMapIoSpace`), physical section mapping (`ZwMapViewOfSection`), and arbitrary MSR read/write.
 - [x] **ANG-043**: Memory corruption bug detectors: Double Free (DF), Use-After-Free (UAF), and integer buffer overflow detection.
 - [ ] **ANG-044**: Minifilter and NDIS network driver environment simulation.
+- [ ] **ANG-045**: **Kernel Entry-Point Contracts & State Templates (`entry_context.py`)**:
+  - Initial-state contracts for `dispatch` (IRP non-NULL, valid `IO_STACK_LOCATION`, `PASSIVE_LEVEL`, concretized GS base cookie).
+  - `ioctl_handler` contract: symbolic `IoControlCode` with buffer length bounds ($\le 64\,\text{KiB}$) to avoid 64-bit solver path blowup.
+  - `dpc` contract: `DISPATCH_LEVEL` IRQL constraint where paged memory access triggers simulated `IRQL_NOT_LESS_OR_EQUAL` bugchecks.
+  - `work_item` and `completion_routine` contracts with explicit gap reporting (`IRP.RequestorMode`, unconstrained extension state) in findings metadata.
+- [ ] **ANG-046**: **Tier-1/2/3 Kernel API SimProcedure Models & Effect Contracts (`kernel_api_models.py`)**:
+  - WDK-audited structure offset table (`KERNEL_OFFSETS_V1`) for x64 `IRP` and `IO_STACK_LOCATION`.
+  - Tier-1 sound primitives: `ExAllocatePoolWithTag`/`ExAllocatePool2` with OOM `NULL` return modeling; `ExFreePool` pointer poisoning for double-free/UAF detection; `KeAcquireSpinLock`/`KeReleaseSpinLock` shadow IRQL modulation; `RtlCopyMemory` symbolic bounds checking.
+  - Tier-2 NTSTATUS dichotomy approximations (`ZwOpenKey`, `ZwQueryValueKey` branching on `{STATUS_SUCCESS, STATUS_OBJECT_NAME_NOT_FOUND}`).
+  - Tier-3 auditable NOPs (`DbgPrint`, `RtlInitUnicodeString`) recorded in `model_provenance` so abstractions are never silent.
 
 ### Phase S5: Android JNI & Cross-Runtime Symbolic Solving
 - [x] **ANG-050**: JNI native environment stubbing (`JNIEnv*`, `jobject`, `jstring`, `jbyteArray`).
@@ -78,6 +88,10 @@
 - [x] **ANG-072**: Native Engine Bridge & Automated Pipeline Integration (Supersedes fragmented MCP approach):
   - Expose native controls for path exploration, sink reachability solving, crash primitive verification, and triage harness generation via `AngryierBridge` and `AutomatedIntakePipeline`.
   - Full headless programmatic execution via `bridge/engine_bridge.py` and `bin/kp15_intake.py`.
+- [ ] **ANG-073**: **Engine-Agnostic Escalation Contract & 6-Verdict Taxonomy (`escalation_contract.py`)**:
+  - Implement standardized `EscalationRequest` $\to$ `EscalationVerdict` JSONL protocol for automated escalation from static findings to symbolic reachability.
+  - Strict 6-category verdict taxonomy: `FEASIBLE_VALIDATED` (witness confirmed by concrete replay), `INFEASIBLE_CLOSED` (provably closed within step/recursion bounds), `NO_WITNESS_FOUND` (budget exhausted, frontier open), `MODEL_LIMITED`, `DECODE_ERROR`, `TIMEOUT`.
+  - Enforce the Never-Safe Invariant: `is_safe = False` on all non-feasible/unknown outcomes; timeouts never translate to safety.
 
 ### Phase S8: angr-Grade OS Environment & SimProcedure Library
 - [ ] **ANG-080**: POSIX Libc SimProcedure Suite (250+ APIs):
