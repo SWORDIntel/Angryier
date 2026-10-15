@@ -1259,3 +1259,31 @@ fn test_lua_eval_symbolic_solution() {
     // rdi must satisfy either == 0x1337 or != 0x1337
     assert!(solved == 0x1337 || solved != 0x1337);
 }
+
+#[test]
+fn test_lua_scripts_syntax() {
+    let lua = init_lua();
+    let script_paths = [
+        "../../scripts/lua/symex_target.lua",
+        "../../scripts/lua/trace_transition.lua",
+        "../../scripts/lua/probe_function.lua",
+        "../../scripts/lua/state_mock_explorer.lua",
+        "../../scripts/lua/expert_initializations_driver.lua",
+        "../../scripts/lua/wait_site_prober.lua",
+        "../../scripts/lua/themida_dispatch_census.lua",
+        "../../scripts/lua/singleton_wait_solver.lua",
+        "../../scripts/lua/gdi_success_steerer.lua",
+    ];
+
+    for rel_path in script_paths {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let full_path = manifest_dir.join(rel_path);
+        if full_path.exists() {
+            let code = std::fs::read_to_string(&full_path).unwrap_or_else(|e| panic!("read {full_path:?}: {e}"));
+            lua.load(&code)
+                .into_function()
+                .unwrap_or_else(|e| panic!("parse {rel_path}: {e}"));
+        }
+    }
+}
+

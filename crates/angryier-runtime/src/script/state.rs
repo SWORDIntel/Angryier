@@ -32,6 +32,16 @@ impl LuaState {
         inner.session.states.iter().position(|s| s.id == state_id)
     }
 
+    /// Resolves a reference to this state whether alive or dead.
+    pub(crate) fn state_ref<'a>(inner: &'a SessionInner, state_id: u64) -> Option<&'a crate::SymbolicState> {
+        inner
+            .session
+            .states
+            .iter()
+            .find(|s| s.id == state_id)
+            .or_else(|| inner.session.dead.iter().find(|s| s.id == state_id))
+    }
+
     pub fn is_alive(&self) -> bool {
         let inner = this_inner(&self.inner);
         Self::active_index(&inner, self.state_id).is_some()
@@ -39,9 +49,9 @@ impl LuaState {
 
     pub fn get_pc(&self) -> Result<u64, mlua::Error> {
         let inner = this_inner(&self.inner);
-        let idx = Self::active_index(&inner, self.state_id)
-            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
-        inner.session.states[idx]
+        let state = Self::state_ref(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state not found in session"))?;
+        state
             .process
             .pc()
             .map_err(|e| mlua::Error::external(format!("{e:?}")))
@@ -72,9 +82,8 @@ impl LuaState {
     pub fn get_reg(&self, name: &str) -> Result<Option<u64>, mlua::Error> {
         let reg = reg_by_name(name).ok_or_else(|| mlua::Error::external(format!("unknown register '{name}'")))?;
         let inner = this_inner(&self.inner);
-        let idx = Self::active_index(&inner, self.state_id)
-            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
-        let state = &inner.session.states[idx];
+        let state = Self::state_ref(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state not found in session"))?;
 
         if let Some(&c) = state.concrete_registers.get(&reg) {
             Ok(Some(c))
@@ -106,9 +115,8 @@ impl LuaState {
 
     pub fn get_regs(&self, lua: &Lua) -> Result<Table, mlua::Error> {
         let inner = this_inner(&self.inner);
-        let idx = Self::active_index(&inner, self.state_id)
-            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
-        let state = &inner.session.states[idx];
+        let state = Self::state_ref(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state not found in session"))?;
         let tbl = lua.create_table()?;
 
         let base = angryier_arch_intel64::register_id::GPR_BASE;
@@ -137,9 +145,8 @@ impl LuaState {
     /// through `st:regs()` as lossy floats.
     pub fn get_regs_hex(&self, lua: &Lua) -> Result<Table, mlua::Error> {
         let inner = this_inner(&self.inner);
-        let idx = Self::active_index(&inner, self.state_id)
-            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
-        let state = &inner.session.states[idx];
+        let state = Self::state_ref(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state not found in session"))?;
         let tbl = lua.create_table()?;
 
         let base = angryier_arch_intel64::register_id::GPR_BASE;
@@ -164,9 +171,8 @@ impl LuaState {
 
     pub fn read_bytes_lua(&self, lua: &Lua, addr: u64, len: usize) -> Result<mlua::LuaString, mlua::Error> {
         let inner = this_inner(&self.inner);
-        let idx = Self::active_index(&inner, self.state_id)
-            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
-        let state = &inner.session.states[idx];
+        let state = Self::state_ref(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state not found in session"))?;
 
         let bytes = state
             .process
@@ -263,9 +269,8 @@ impl LuaState {
 
     pub fn get_trace(&self, lua: &Lua) -> Result<Table, mlua::Error> {
         let inner = this_inner(&self.inner);
-        let idx = Self::active_index(&inner, self.state_id)
-            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
-        let state = &inner.session.states[idx];
+        let state = Self::state_ref(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state not found in session"))?;
 
         let tbl = lua.create_table()?;
         for (i, pc) in state.process.trace.iter().enumerate() {
@@ -278,9 +283,8 @@ impl LuaState {
     /// the integer-safe variant for traces that cross i64::MAX.
     pub fn get_trace_hex(&self, lua: &Lua) -> Result<Table, mlua::Error> {
         let inner = this_inner(&self.inner);
-        let idx = Self::active_index(&inner, self.state_id)
-            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
-        let state = &inner.session.states[idx];
+        let state = Self::state_ref(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state not found in session"))?;
 
         let tbl = lua.create_table()?;
         for (i, pc) in state.process.trace.iter().enumerate() {
@@ -291,9 +295,9 @@ impl LuaState {
 
     pub fn constraints_count(&self) -> Result<usize, mlua::Error> {
         let inner = this_inner(&self.inner);
-        let idx = Self::active_index(&inner, self.state_id)
-            .ok_or_else(|| mlua::Error::external("state is dead or terminated"))?;
-        Ok(inner.session.states[idx].constraints.len())
+        let state = Self::state_ref(&inner, self.state_id)
+            .ok_or_else(|| mlua::Error::external("state not found in session"))?;
+        Ok(state.constraints.len())
     }
 
     pub fn solve(&self, lua: &Lua) -> Result<Table, mlua::Error> {

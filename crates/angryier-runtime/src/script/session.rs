@@ -537,18 +537,63 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
                 session.states[0].concrete_registers.insert(reg, value as u64);
             }
         }
+        if let Ok(tbl) = opts.get::<Table>("load_mem") {
+            for pair in tbl.pairs::<Value, Table>() {
+                let (_, entry) = pair?;
+                let addr = entry.get::<i64>("addr")? as u64;
+                let path: String = entry.get("path")?;
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| mlua::Error::external(format!("load_mem {path}: {e}")))?;
+                let mem = &session.states[0].process.state.memory;
+                session.states[0].process.state.memory = match mem.load_concrete(addr, &bytes) {
+                    Ok(m) => m,
+                    Err(angryier_memory::MemoryError::Unmapped(_)) => {
+                        let page_base = addr & !0xfff;
+                        let size = ((addr + bytes.len() as u64 + 0xfff) & !0xfff) - page_base;
+                        let region = angryier_memory::MemoryRegion {
+                            object: angryier_types::ObjectId(0),
+                            base: page_base,
+                            size: size as u64,
+                            readable: true,
+                            writable: true,
+                            executable: true,
+                        };
+                        let m = mem.with_region(region).unwrap_or_else(|_| mem.clone());
+                        m.load_concrete(addr, &bytes)
+                            .map_err(|e| mlua::Error::external(format!("load_mem {path}: {e:?}")))?
+                    }
+                    Err(e) => return Err(mlua::Error::external(format!("load_mem {path}: {e:?}"))),
+                };
+            }
+        }
         if let Ok(tbl) = opts.get::<Table>("poke") {
             for pair in tbl.pairs::<Value, Table>() {
                 let (_, entry) = pair?;
                 let addr = entry.get::<i64>("addr")? as u64;
                 let value = entry.get::<i64>("value")? as u64;
-                session.states[0].process.state.memory = session.states[0]
-                    .process
-                    .state
-                    .memory
-                    .load_concrete(addr, &value.to_le_bytes())
-                    .map_err(|e| mlua::Error::external(format!("poke: {e:?}")))?;
+                let bytes = value.to_le_bytes();
+                let mem = &session.states[0].process.state.memory;
+                session.states[0].process.state.memory = match mem.load_concrete(addr, &bytes) {
+                    Ok(m) => m,
+                    Err(angryier_memory::MemoryError::Unmapped(_)) => {
+                        let page_base = addr & !0xfff;
+                        let region = angryier_memory::MemoryRegion {
+                            object: angryier_types::ObjectId(0),
+                            base: page_base,
+                            size: 0x1000,
+                            readable: true,
+                            writable: true,
+                            executable: true,
+                        };
+                        let m = mem.with_region(region).unwrap_or_else(|_| mem.clone());
+                        m.load_concrete(addr, &bytes)
+                            .map_err(|e| mlua::Error::external(format!("poke: {e:?}")))?
+                    }
+                    Err(e) => return Err(mlua::Error::external(format!("poke: {e:?}"))),
+                };
             }
+            session.states[0].memory =
+                angryier_execution::SymbolicSessionMemory::new(session.states[0].process.state.memory.clone());
         }
         if let Ok(tbl) = opts.get::<Table>("symbolic_memory") {
             for pair in tbl.pairs::<Value, Table>() {
