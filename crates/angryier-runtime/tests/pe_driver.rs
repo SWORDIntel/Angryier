@@ -723,3 +723,42 @@ fn concrete_and_symbolic_direct_indirect_calls_share_stack_and_return_targets()
     }
     Ok(())
 }
+
+#[test]
+fn symbolic_indirect_import_cannot_summarize_create_thread_stub()
+    -> Result<(), Box<dyn std::error::Error>>
+{
+    use angryier_expr::ShardedExprArena;
+    use angryier_runtime::SymbolicSession;
+    use angryier_types::ExpressionNormalizationVersion;
+
+    // Reuse a real, minimal PE/IAT fixture while changing only the import's
+    // declared provenance. This tests symbolic call dispatch, not a mock PC
+    // write to an import stub. The stub remains RET-only; no worker exists.
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_pe_driver(&driver_image())?;
+    process.pe_import_stubs.insert(
+        PE_DRIVER_STUB_BASE,
+        ("kernel32.dll".into(), "CreateThread".into()),
+    );
+    let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+    let mut symbolic = SymbolicSession::new(&runtime, &arena, process);
+
+    // Entry = mov rax,[rip+IAT], then call rax. Lazy summarization must NOT
+    // inline a synthetic RET and skip the guarded API entry.
+    let mut reached_import = false;
+    for _ in 0..10 {
+        let pc = symbolic.states[0].process.pc()?;
+        if pc == PE_DRIVER_STUB_BASE {
+            reached_import = true;
+            let outcome = symbolic.step_state(0);
+            assert!(matches!(outcome, Err(angryier_runtime::RuntimeError::Environment(ref message))
+                if message.contains("CreateThread") && message.contains("worker scheduling")));
+            break;
+        }
+        let result = symbolic.step_state(0)?;
+        assert!(matches!(result, angryier_runtime::SymbolicStepOutcome::Stepped { .. }));
+    }
+    assert!(reached_import, "symbolic engine did not reach IAT stub; verify call summarizer");
+    Ok(())
+}
