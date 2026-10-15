@@ -157,32 +157,32 @@ mod tests {
         ShardedExprArena::new(ExpressionNormalizationVersion(1))
     }
 
-    fn symbol(arena: &ShardedExprArena, source: u64) -> ExprId {
+    fn symbol(arena: &ShardedExprArena, source: u64) -> Result<ExprId, String> {
         arena.intern(ExprNode {
             sort: ExprSort::BitVec(32),
             op: ExprOp::Symbol,
             operands: Vec::new(),
             immediate: source.to_le_bytes().to_vec(),
-        }).expect("symbol")
+        }).map_err(|error| format!("{error:?}"))
     }
 
-    fn binary(arena: &ShardedExprArena, op: ExprOp, x: ExprId, y: ExprId) -> ExprId {
+    fn binary(arena: &ShardedExprArena, op: ExprOp, x: ExprId, y: ExprId) -> Result<ExprId, String> {
         arena.intern(ExprNode {
             sort: ExprSort::BitVec(32),
             op,
             operands: vec![x, y],
             immediate: Vec::new(),
-        }).expect("expression")
+        }).map_err(|error| format!("{error:?}"))
     }
 
     #[test]
-    fn mba_handler_effect_reduces_and_retains_both_dependencies() {
+    fn mba_handler_effect_reduces_and_retains_both_dependencies() -> Result<(), String> {
         let arena = arena();
-        let x = symbol(&arena, 1);
-        let y = symbol(&arena, 2);
-        let lhs = binary(&arena, ExprOp::Or, x, y);
-        let rhs = binary(&arena, ExprOp::And, x, y);
-        let obfuscated = binary(&arena, ExprOp::Add, lhs, rhs);
+        let x = symbol(&arena, 1)?;
+        let y = symbol(&arena, 2)?;
+        let lhs = binary(&arena, ExprOp::Or, x, y)?;
+        let rhs = binary(&arena, ExprOp::And, x, y)?;
+        let obfuscated = binary(&arena, ExprOp::Add, lhs, rhs)?;
         let result = reduce_vm_effects(
             &arena,
             &[VmEffect {
@@ -191,17 +191,18 @@ mod tests {
             }],
             &[],
             64,
-        ).expect("reduction");
-        assert_eq!(result.effects[0].value, binary(&arena, ExprOp::Add, x, y));
+        ).map_err(|error| format!("{error:?}"))?;
+        assert_eq!(result.effects[0].value, binary(&arena, ExprOp::Add, x, y)?);
         assert!(result.reduced_nodes < result.original_nodes);
         assert_eq!(result.symbolic_sources, vec![1, 2]);
+        Ok(())
     }
 
     #[test]
-    fn memory_effect_keeps_symbolic_address_value_and_order() {
+    fn memory_effect_keeps_symbolic_address_value_and_order() -> Result<(), String> {
         let arena = arena();
-        let addr = symbol(&arena, 3);
-        let value = symbol(&arena, 4);
+        let addr = symbol(&arena, 3)?;
+        let value = symbol(&arena, 4)?;
         let effects = [
             VmEffect {
                 kind: VmEffectKind::Memory { address: addr, bytes: 4 },
@@ -212,18 +213,20 @@ mod tests {
                 value: addr,
             },
         ];
-        let result = reduce_vm_effects(&arena, &effects, &[addr], 16).expect("reduction");
+        let result = reduce_vm_effects(&arena, &effects, &[addr], 16)
+            .map_err(|error| format!("{error:?}"))?;
         assert_eq!(result.effects, effects);
         assert_eq!(result.guards, vec![addr]);
         assert_eq!(result.symbolic_sources, vec![3, 4]);
+        Ok(())
     }
 
     #[test]
-    fn unknown_root_and_small_budget_fail_without_truncation() {
+    fn unknown_root_and_small_budget_fail_without_truncation() -> Result<(), String> {
         let arena = arena();
-        let x = symbol(&arena, 1);
-        let y = symbol(&arena, 2);
-        let sum = binary(&arena, ExprOp::Add, x, y);
+        let x = symbol(&arena, 1)?;
+        let y = symbol(&arena, 2)?;
+        let sum = binary(&arena, ExprOp::Add, x, y)?;
         assert_eq!(
             reduce_vm_effects(&arena, &[], &[], 8),
             Err(VmReductionError::NoObservableRoots)
@@ -236,22 +239,24 @@ mod tests {
             reduce_vm_effects(&arena, &[], &[sum], 2),
             Err(VmReductionError::NodeBudgetExceeded { limit: 2 })
         );
+        Ok(())
     }
 
     #[test]
-    fn independent_arena_nodes_do_not_pollute_backward_slice() {
+    fn independent_arena_nodes_do_not_pollute_backward_slice() -> Result<(), String> {
         let arena = arena();
-        let x = symbol(&arena, 1);
-        let y = symbol(&arena, 2);
-        let _noise = binary(&arena, ExprOp::Add, y, y);
+        let x = symbol(&arena, 1)?;
+        let y = symbol(&arena, 2)?;
+        let _noise = binary(&arena, ExprOp::Add, y, y)?;
         let result = reduce_vm_effects(
             &arena,
             &[VmEffect { kind: VmEffectKind::VirtualPc, value: x }],
             &[],
             3,
-        ).expect("reduction");
+        ).map_err(|error| format!("{error:?}"))?;
         assert_eq!(result.original_nodes, 1);
         assert_eq!(result.reduced_nodes, 1);
         assert_eq!(result.symbolic_sources, vec![1]);
+        Ok(())
     }
 }
