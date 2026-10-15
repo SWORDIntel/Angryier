@@ -308,11 +308,11 @@ mod tests {
         let y = node(0x1000, 0x2001, 1);
         let z = node(0x1000, 0x2000, 2);
         for (from, to) in [(x, y), (y, z), (z, x)] {
-            session.observe(VmTransition {
+            assert_eq!(session.observe(VmTransition {
                 from,
                 to,
                 source: VmTransitionSource::ObservedTrace,
-            }).expect("transition");
+            }), Ok(()));
         }
         assert_eq!(session.nodes().len(), 3);
         assert_eq!(session.edges().len(), 3);
@@ -330,7 +330,7 @@ mod tests {
             VmTransitionSource::SymbolicCandidate,
             VmTransitionSource::ValidatedReplay,
         ] {
-            session.observe(VmTransition { from, to, source }).expect("transition");
+            assert_eq!(session.observe(VmTransition { from, to, source }), Ok(()));
         }
         let edge = &session.edges()[&(from, to)];
         assert_eq!(edge.observations, 3);
@@ -347,11 +347,11 @@ mod tests {
         let x = node(0x1000, 0x2000, 1);
         let y = node(0x1100, 0x2001, 1);
         let z = node(0x1200, 0x2002, 1);
-        session.observe(VmTransition {
+        assert_eq!(session.observe(VmTransition {
             from: x,
             to: y,
             source: VmTransitionSource::ObservedTrace,
-        }).expect("first");
+        }), Ok(()));
         assert_eq!(
             session.observe(VmTransition {
                 from: y,
