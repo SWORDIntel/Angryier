@@ -128,6 +128,9 @@ pub struct TraceIdentity {
 pub enum TraceDifference {
     IdentityMismatch,
     StepCount { expected: usize, actual: usize },
+    /// One trace had valid evidence for a field while the other did not.
+    /// Missing evidence is NOT equivalent to equality.
+    EvidenceGap { index: usize, field: &'static str },
     Control { index: usize, native: ControlSnapshot, emulated: ControlSnapshot },
 }
 
@@ -149,6 +152,12 @@ pub fn first_divergence(
             || (a.stack_top.is_some() && b.stack_top.is_some() && a.stack_top != b.stack_top)
         {
             return Some(TraceDifference::Control { index, native: *a, emulated: *b });
+        }
+        if a.rsp.is_some() != b.rsp.is_some() {
+            return Some(TraceDifference::EvidenceGap { index, field: "rsp" });
+        }
+        if a.stack_top.is_some() != b.stack_top.is_some() {
+            return Some(TraceDifference::EvidenceGap { index, field: "stack_top" });
         }
     }
     (native.len() != emulated.len()).then_some(TraceDifference::StepCount {
@@ -196,6 +205,11 @@ mod tests {
             first_divergence(id, &native, id, &emulated),
             Some(TraceDifference::Control { index: 1, .. })
         ));
+        let incomplete = [native[0], state(0x1100, None, None)];
+        assert_eq!(
+            first_divergence(id, &native, id, &incomplete),
+            Some(TraceDifference::EvidenceGap { index: 1, field: "rsp" }),
+        );
         let mut changed = id;
         changed.initial_state_digest = [9; 32];
         assert_eq!(
