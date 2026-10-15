@@ -1,0 +1,38 @@
+name: Native VM analysis validation
+
+on:
+  push:
+    branches:
+      - feat/themida-vm-structural-20261015
+  pull_request:
+    paths:
+      - 'crates/angryier-cfg/**'
+      - 'crates/angryier-expr/**'
+      - 'crates/angryier-loader/**'
+      - 'crates/angryier-runtime/**'
+      - '.github/workflows/vm-native.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  vm-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup show
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Check VM crates
+        run: cargo check -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-runtime --all-targets
+      - name: VM CFG tests
+        run: cargo test -p angryier-cfg
+      - name: VM expression tests
+        run: cargo test -p angryier-expr
+      - name: VM loader tests
+        run: cargo test -p angryier-loader
+      - name: VM runtime integration tests
+        run: cargo test -p angryier-runtime --features "xed script" --test lua_api
+      - name: Clippy changed crates
+        run: cargo clippy -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-runtime --all-targets -- -D warnings
