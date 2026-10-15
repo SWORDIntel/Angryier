@@ -6,7 +6,7 @@ pub mod symbolic;
 pub use interpreter::{ConcreteExecutionError, ConcreteInterpreter};
 pub use symbolic::{
     ConcolicBinding, ConcolicEvaluator, ConcolicImage, ConcolicSource, PathConstraint, SYMBOLIC_DEBT_SITE_CAP,
-    SymbolBinding, SymbolicArena, SymbolicBlockSummary, SymbolicBlockValueTrace, SymbolicBranch, SymbolicDebtSite, SymbolicEvalError,
+    SymbolBinding, SymbolicArena, SymbolicBlockSummary, SymbolicBlockValueTrace, SymbolicRegisterWriteTrace, SymbolicBranch, SymbolicDebtSite, SymbolicEvalError,
     SymbolicEvaluator, SymbolicSessionMemory, SymbolicStateSnapshot, bit_to_bool, constant_value, merge_snapshots,
 };
 
