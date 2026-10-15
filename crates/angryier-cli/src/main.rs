@@ -7,6 +7,8 @@
 
 #[cfg(feature = "inspect")]
 mod inspection;
+#[cfg(feature = "inspect")]
+mod provenance;
 
 /// Single version source: the workspace package version inherited via
 /// `version.workspace = true` in Cargo.toml. `angry.version()` (the runtime
@@ -313,7 +315,7 @@ fn help_output() -> String {
            help       Print this help message"
     )
     + if cfg!(feature = "inspect") {
-        "\n  pe-address <PE> <VA> [length]   Strict VA/RVA/file-offset lookup\n  dump-read <DMP> <VA> <length>   Read captured minidump bytes"
+        "\n  doctor [--show-paths]         Report executable hash/build source identity\n  pe-address <PE> <VA> [length]   Strict VA/RVA/file-offset lookup\n  dump-read <DMP> <VA> <length>   Read captured minidump bytes"
     } else {
         ""
     }
@@ -355,6 +357,20 @@ fn run(args: &[String]) -> i32 {
                      Or run directly: cargo run -p angryier-cli --features run -- run <binary>\n\
                      Hint: use 'angryier help' after rebuilding to inspect supported run flags."
                 );
+                1
+            }
+        }
+        Some("doctor") => {
+            #[cfg(feature = "inspect")]
+            {
+                match provenance::doctor(&args[2..]) {
+                    Ok(report) => { println!("{report}"); 0 }
+                    Err(error) => { eprintln!("error: {error}"); 1 }
+                }
+            }
+            #[cfg(not(feature = "inspect"))]
+            {
+                eprintln!("error: doctor requires --features inspect");
                 1
             }
         }
