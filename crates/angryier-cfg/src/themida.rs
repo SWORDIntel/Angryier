@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn lea_context_relative_is_not_a_constant() {
+    fn lea_context_relative_is_not_a_constant() -> Result<(), &'static str> {
         // lea rbx,[r14+0x28]; jmp [rbx+0x38]
         let block = [
             insn(
@@ -463,15 +463,17 @@ mod tests {
             ),
             insn(0x83, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
         ];
-        let site = DispatchWindow { instructions: &block }.classify().expect("site");
+        let site = (DispatchWindow { instructions: &block }).classify().ok_or("site unavailable")?;
+        let (_, provenance) = site.base.ok_or("base unavailable")?;
         assert!(matches!(
-            site.base.expect("base").1,
+            provenance,
             BaseProvenance::DerivedFrom { source } if source == RegisterId(0xe)
         ));
+        Ok(())
     }
 
     #[test]
-    fn lea_rip_relative_is_constant_but_two_registers_are_not() {
+    fn lea_rip_relative_is_constant_but_two_registers_are_not() -> Result<(), &'static str> {
         let rip = [
             insn(
                 0x90,
@@ -480,8 +482,8 @@ mod tests {
             ),
             insn(0x93, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
         ];
-        let site = DispatchWindow { instructions: &rip }.classify().expect("site");
-        assert!(matches!(site.base.expect("base").1, BaseProvenance::Constant));
+        let site = (DispatchWindow { instructions: &rip }).classify().ok_or("RIP site unavailable")?;
+        assert!(matches!(site.base.ok_or("RIP base unavailable")?.1, BaseProvenance::Constant));
 
         let ambiguous = [
             insn(
@@ -494,8 +496,9 @@ mod tests {
             ),
             insn(0xa3, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
         ];
-        let site = DispatchWindow { instructions: &ambiguous }.classify().expect("site");
-        assert!(matches!(site.base.expect("base").1, BaseProvenance::Clobbered));
+        let site = (DispatchWindow { instructions: &ambiguous }).classify().ok_or("ambiguous site unavailable")?;
+        assert!(matches!(site.base.ok_or("ambiguous base unavailable")?.1, BaseProvenance::Clobbered));
+        Ok(())
     }
 
     #[test]
