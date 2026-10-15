@@ -214,7 +214,26 @@ impl DispatchWindow<'_> {
         }
         use angryier_semantics_intel64::forms;
         match insn.form_id {
-            forms::MOV_R64_IMM64 | forms::MOV_R32_IMM32 | forms::LEA_R64_MEM => Def::Constant,
+            forms::MOV_R64_IMM64 | forms::MOV_R32_IMM32 => Def::Constant,
+            // LEA is a constant only with RIP/absolute addressing. A context-
+            // relative LEA is NOT a constant, even if its displacement is.
+            forms::LEA_R64_MEM => {
+                let mem = insn.operands.iter().find_map(|op| match op.kind {
+                    OperandKind::AddressGeneration(mem) | OperandKind::Memory(mem) => Some(mem),
+                    _ => None,
+                });
+                match mem.map(|m| (m.base, m.index)) {
+                    Some((Some(MemoryBase::InstructionPointer { .. }), None))
+                    | Some((None, None)) => Def::Constant,
+                    Some((Some(MemoryBase::Register(base)), None)) => Def::Derived(base.parent),
+                    Some((None, Some(MemoryIndex::Register(index)))) => {
+                        Def::Derived(index.parent)
+                    }
+                    // Two register inputs cannot be represented by the single-
+                    // source provenance relation. Retain uncertainty.
+                    _ => Def::ClobberedByUnmodeled,
+                }
+            },
             forms::MOV_R64_R64 | forms::MOV_R32_R32 | forms::MOVZX_R64_R32 | forms::MOVSX_R64_R32 => {
                 match register_source(insn) {
                     Some(src) => Def::From(src),
@@ -428,6 +447,55 @@ mod tests {
         let site = DispatchWindow { instructions: &block }.classify().expect("site");
         assert_eq!(site.kind, DispatchKind::RegisterRaw);
         assert_eq!(site.chain_register, Some(RegisterId(0)));
+    }
+
+    #[test]
+    fn lea_context_relative_is_not_a_constant() {
+        // lea rbx,[r14+0x28]; jmp [rbx+0x38]
+        let block = [
+            insn(
+                0x80,
+                forms::LEA_R64_MEM,
+                vec![
+                    reg_op(0, 2, AccessKind::Write),
+                    mem_op(1, Some(0xe), None, 1, 0x28),
+                ],
+            ),
+            insn(0x83, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
+        ];
+        let site = DispatchWindow { instructions: &block }.classify().expect("site");
+        assert!(matches!(
+            site.base.expect("base").1,
+            BaseProvenance::DerivedFrom { source } if source == RegisterId(0xe)
+        ));
+    }
+
+    #[test]
+    fn lea_rip_relative_is_constant_but_two_registers_are_not() {
+        let rip = [
+            insn(
+                0x90,
+                forms::LEA_R64_MEM,
+                vec![reg_op(0, 2, AccessKind::Write), rip_mem_op(-0x20)],
+            ),
+            insn(0x93, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
+        ];
+        let site = DispatchWindow { instructions: &rip }.classify().expect("site");
+        assert!(matches!(site.base.expect("base").1, BaseProvenance::Constant));
+
+        let ambiguous = [
+            insn(
+                0xa0,
+                forms::LEA_R64_MEM,
+                vec![
+                    reg_op(0, 2, AccessKind::Write),
+                    mem_op(1, Some(0xe), Some(0xd), 4, 0x28),
+                ],
+            ),
+            insn(0xa3, forms::JMP_INDIRECT_MEM64, vec![mem_op(0, Some(2), None, 1, 0x38)]),
+        ];
+        let site = DispatchWindow { instructions: &ambiguous }.classify().expect("site");
+        assert!(matches!(site.base.expect("base").1, BaseProvenance::Clobbered));
     }
 
     #[test]
