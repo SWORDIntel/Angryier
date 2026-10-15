@@ -32,7 +32,15 @@ const EXPECTED: &[(&str, u64, u64, usize, u64)] = &[
 
 #[test]
 fn vuln_fixture_verdicts() {
-    let dir = "/home/john/Documents/byovd-harness/ghidra_pipeline/fixtures/bin";
+    let dir = std::env::var("BYOVD_FIXTURES_DIR").unwrap_or_else(|_| {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let candidate = manifest_dir.join("../../../../byovd-harness/ghidra_pipeline/fixtures/bin");
+        if candidate.exists() {
+            candidate.to_string_lossy().to_string()
+        } else {
+            "byovd_fixtures_bin".to_string()
+        }
+    });
     let mut ran = 0;
     let mut failures = 0;
     for &(name, want_allocs, want_frees, want_df, want_uaf) in EXPECTED {

@@ -83,6 +83,7 @@ pub mod isanity_x87_memory;
 pub mod isanity_zero_operand;
 pub mod pipeline_speculation;
 pub mod speculative_concolic;
+pub mod triage;
 pub mod speculative_fork;
 pub mod speculative_summary;
 
