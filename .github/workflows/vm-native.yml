@@ -38,7 +38,7 @@ jobs:
       - name: VM expression tests
         run: cargo test -p angryier-expr
       - name: VM AngryIR effect tests
-        run: cargo test -p angryier-ir vm_footprint::
+        run: cargo test -p angryier-ir vm_footprint
       - name: VM loader tests
         run: cargo test -p angryier-loader
       - name: Win32 API and synchronization tests
