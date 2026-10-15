@@ -128,10 +128,10 @@ impl SimProcedure for VirtualAllocProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let lp_address = state.get_arg(0);
-        let dw_size = state.get_arg(1);
-        let fl_alloc = state.get_arg(2) as u32;
-        let fl_protect = state.get_arg(3) as u32;
+        let lp_address = state.get_win64_arg(0);
+        let dw_size = state.get_win64_arg(1);
+        let fl_alloc = state.get_win64_arg(2) as u32;
+        let fl_protect = state.get_win64_arg(3) as u32;
 
         let ptr = self.tracker.virtual_alloc(lp_address, dw_size, fl_alloc, fl_protect);
         SimResult::Return(ptr)
@@ -155,10 +155,10 @@ impl SimProcedure for VirtualAllocExProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let lp_address = state.get_arg(1);
-        let dw_size = state.get_arg(2);
-        let fl_alloc = state.get_arg(3) as u32;
-        let fl_protect = state.get_arg(4) as u32;
+        let lp_address = state.get_win64_arg(1);
+        let dw_size = state.get_win64_arg(2);
+        let fl_alloc = state.get_win64_arg(3) as u32;
+        let fl_protect = state.get_win64_arg(4) as u32;
 
         let ptr = self.tracker.virtual_alloc(lp_address, dw_size, fl_alloc, fl_protect);
         SimResult::Return(ptr)
@@ -182,9 +182,9 @@ impl SimProcedure for VirtualProtectProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let lp_address = state.get_arg(0);
-        let fl_new_protect = state.get_arg(2) as u32;
-        let lpfl_old_protect = state.get_arg(3);
+        let lp_address = state.get_win64_arg(0);
+        let fl_new_protect = state.get_win64_arg(2) as u32;
+        let lpfl_old_protect = state.get_win64_arg(3);
 
         let old = self.tracker.virtual_protect(lp_address, fl_new_protect).unwrap_or(0x04); // PAGE_READWRITE
 
@@ -217,7 +217,7 @@ impl SimProcedure for VirtualFreeProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let lp_address = state.get_arg(0);
+        let lp_address = state.get_win64_arg(0);
         let _ = self.tracker.virtual_free(lp_address);
         SimResult::Return(1) // TRUE
     }
@@ -265,7 +265,7 @@ impl SimProcedure for HeapAllocProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let dw_bytes = state.get_arg(2);
+        let dw_bytes = state.get_win64_arg(2);
         let ptr = self.tracker.virtual_alloc(0, dw_bytes, 0x1000, 0x04);
         SimResult::Return(ptr)
     }
@@ -288,7 +288,7 @@ impl SimProcedure for HeapFreeProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let lp_mem = state.get_arg(2);
+        let lp_mem = state.get_win64_arg(2);
         let _ = self.tracker.virtual_free(lp_mem);
         SimResult::Return(1) // TRUE
     }
@@ -346,7 +346,7 @@ impl SimProcedure for HeapDestroyProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let h_heap = state.get_arg(0);
+        let h_heap = state.get_win64_arg(0);
         let _ = self.tracker.virtual_free(h_heap);
         SimResult::Return(1)
     }
@@ -369,7 +369,7 @@ impl SimProcedure for GlobalAllocProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let dw_bytes = state.get_arg(1);
+        let dw_bytes = state.get_win64_arg(1);
         let ptr = self.tracker.virtual_alloc(0, dw_bytes, 0x1000, 0x04);
         SimResult::Return(ptr)
     }
@@ -392,7 +392,7 @@ impl SimProcedure for GlobalFreeProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let h_mem = state.get_arg(0);
+        let h_mem = state.get_win64_arg(0);
         let _ = self.tracker.virtual_free(h_mem);
         SimResult::Return(0) // NULL indicates success
     }
