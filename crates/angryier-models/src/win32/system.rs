@@ -319,105 +319,169 @@ impl SimProcedure for TerminateProcessProcedure {
 // Synchronization & Events
 // ---------------------------------------------------------------------------
 
-/// `HANDLE CreateEventA(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCSTR lpName)`
+/// `HANDLE CreateEventA/W(attributes, manual_reset, initial_state, name)`
+/// Both variants share the same kernel-style handle tracker.
 pub struct CreateEventAProcedure {
     handles: Win32HandleTable,
 }
-
 impl CreateEventAProcedure {
     pub fn new(handles: Win32HandleTable) -> Self {
         Self { handles }
     }
 }
-
 impl SimProcedure for CreateEventAProcedure {
     fn name(&self) -> &'static str {
         "CreateEventA"
     }
-
     fn apply(&self, state: &SimState) -> SimResult {
-        let initial_state = state.get_win64_arg(2) != 0;
-        let handle = self.handles.alloc_handle(Win32HandleKind::Event {
-            signaled: initial_state,
-        });
-        SimResult::Return(handle)
+        let Some(manual_reset) = state.try_win64_arg(1) else {
+            return SimResult::Unsupported("CreateEventA missing bManualReset");
+        };
+        let Some(initial_state) = state.try_win64_arg(2) else {
+            return SimResult::Unsupported("CreateEventA missing bInitialState");
+        };
+        SimResult::Return(self.handles.alloc_handle(Win32HandleKind::Event {
+            signaled: initial_state != 0,
+            manual_reset: manual_reset != 0,
+        }))
     }
 }
 
-/// `HANDLE CreateEventW(LPSECURITY_ATTRIBUTES lpEventAttributes, BOOL bManualReset, BOOL bInitialState, LPCWSTR lpName)`
 pub struct CreateEventWProcedure {
     handles: Win32HandleTable,
 }
-
 impl CreateEventWProcedure {
     pub fn new(handles: Win32HandleTable) -> Self {
         Self { handles }
     }
 }
-
 impl SimProcedure for CreateEventWProcedure {
     fn name(&self) -> &'static str {
         "CreateEventW"
     }
-
     fn apply(&self, state: &SimState) -> SimResult {
-        let initial_state = state.get_win64_arg(2) != 0;
-        let handle = self.handles.alloc_handle(Win32HandleKind::Event {
-            signaled: initial_state,
-        });
-        SimResult::Return(handle)
+        let Some(manual_reset) = state.try_win64_arg(1) else {
+            return SimResult::Unsupported("CreateEventW missing bManualReset");
+        };
+        let Some(initial_state) = state.try_win64_arg(2) else {
+            return SimResult::Unsupported("CreateEventW missing bInitialState");
+        };
+        SimResult::Return(self.handles.alloc_handle(Win32HandleKind::Event {
+            signaled: initial_state != 0,
+            manual_reset: manual_reset != 0,
+        }))
     }
 }
 
 /// `BOOL SetEvent(HANDLE hEvent)`
-pub struct SetEventProcedure;
-
+pub struct SetEventProcedure {
+    handles: Win32HandleTable,
+}
+impl SetEventProcedure {
+    pub fn new(handles: Win32HandleTable) -> Self {
+        Self { handles }
+    }
+}
 impl SimProcedure for SetEventProcedure {
     fn name(&self) -> &'static str {
         "SetEvent"
     }
-
-    fn apply(&self, _state: &SimState) -> SimResult {
-        SimResult::Return(1)
+    fn apply(&self, state: &SimState) -> SimResult {
+        match state.try_win64_arg(0) {
+            Some(handle) => SimResult::Return(u64::from(self.handles.set_event_signal(handle, true))),
+            None => SimResult::Unsupported("SetEvent missing event HANDLE"),
+        }
     }
 }
 
 /// `BOOL ResetEvent(HANDLE hEvent)`
-pub struct ResetEventProcedure;
-
+pub struct ResetEventProcedure {
+    handles: Win32HandleTable,
+}
+impl ResetEventProcedure {
+    pub fn new(handles: Win32HandleTable) -> Self {
+        Self { handles }
+    }
+}
 impl SimProcedure for ResetEventProcedure {
     fn name(&self) -> &'static str {
         "ResetEvent"
     }
-
-    fn apply(&self, _state: &SimState) -> SimResult {
-        SimResult::Return(1)
+    fn apply(&self, state: &SimState) -> SimResult {
+        match state.try_win64_arg(0) {
+            Some(handle) => SimResult::Return(u64::from(self.handles.set_event_signal(handle, false))),
+            None => SimResult::Unsupported("ResetEvent missing event HANDLE"),
+        }
     }
 }
 
 /// `DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)`
-pub struct WaitForSingleObjectProcedure;
-
+pub struct WaitForSingleObjectProcedure {
+    handles: Win32HandleTable,
+}
+impl WaitForSingleObjectProcedure {
+    pub fn new(handles: Win32HandleTable) -> Self {
+        Self { handles }
+    }
+}
 impl SimProcedure for WaitForSingleObjectProcedure {
     fn name(&self) -> &'static str {
         "WaitForSingleObject"
     }
-
-    fn apply(&self, _state: &SimState) -> SimResult {
-        SimResult::Return(0) // WAIT_OBJECT_0
+    fn apply(&self, state: &SimState) -> SimResult {
+        let (Some(handle), Some(timeout)) = (state.try_win64_arg(0), state.try_win64_arg(1)) else {
+            return SimResult::Unsupported("WaitForSingleObject missing HANDLE/timeout");
+        };
+        let timeout = timeout as u32;
+        match self.handles.wait_event(handle) {
+            super::file::Win32WaitStatus::Signaled(index) => SimResult::Return(u64::from(index)),
+            super::file::Win32WaitStatus::Invalid => SimResult::Return(0xFFFF_FFFF), // WAIT_FAILED
+            super::file::Win32WaitStatus::Pending if timeout == 0 => SimResult::Return(258), // WAIT_TIMEOUT
+            super::file::Win32WaitStatus::Pending => SimResult::Blocked { handle, timeout_ms: timeout },
+        }
     }
 }
 
-/// `DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE *lpHandles, BOOL bWaitAll, DWORD dwMilliseconds)`
-pub struct WaitForMultipleObjectsProcedure;
-
+/// `DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE*, BOOL all, DWORD timeout)`
+pub struct WaitForMultipleObjectsProcedure {
+    handles: Win32HandleTable,
+}
+impl WaitForMultipleObjectsProcedure {
+    pub fn new(handles: Win32HandleTable) -> Self {
+        Self { handles }
+    }
+}
 impl SimProcedure for WaitForMultipleObjectsProcedure {
     fn name(&self) -> &'static str {
         "WaitForMultipleObjects"
     }
-
-    fn apply(&self, _state: &SimState) -> SimResult {
-        SimResult::Return(0) // WAIT_OBJECT_0
+    fn apply(&self, state: &SimState) -> SimResult {
+        let (Some(count), Some(ptr), Some(all), Some(timeout)) = (
+            state.try_win64_arg(0), state.try_win64_arg(1),
+            state.try_win64_arg(2), state.try_win64_arg(3),
+        ) else {
+            return SimResult::Unsupported("WaitForMultipleObjects missing arguments");
+        };
+        if count == 0 || count > 64 {
+            return SimResult::Return(0xFFFF_FFFF); // WAIT_FAILED
+        }
+        let Some(bytes) = state.try_read_bytes(ptr, count as usize * 8) else {
+            return SimResult::Unsupported("WaitForMultipleObjects handle array not captured");
+        };
+        let handles: Vec<u64> = bytes.chunks_exact(8).filter_map(|chunk| {
+            let raw: [u8; 8] = chunk.try_into().ok()?;
+            Some(u64::from_le_bytes(raw))
+        }).collect();
+        if handles.len() != count as usize {
+            return SimResult::Unsupported("incomplete HANDLE array");
+        }
+        let timeout = timeout as u32;
+        match self.handles.wait_events(&handles, all != 0) {
+            super::file::Win32WaitStatus::Signaled(index) => SimResult::Return(u64::from(index)),
+            super::file::Win32WaitStatus::Invalid => SimResult::Return(0xFFFF_FFFF),
+            super::file::Win32WaitStatus::Pending if timeout == 0 => SimResult::Return(258),
+            super::file::Win32WaitStatus::Pending => SimResult::Blocked { handle: ptr, timeout_ms: timeout },
+        }
     }
 }
 
