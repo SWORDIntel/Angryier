@@ -315,7 +315,7 @@ fn help_output() -> String {
            help       Print this help message"
     )
     + if cfg!(feature = "inspect") {
-        "\n  doctor [--show-paths]         Report executable hash/build source identity\n  pe-address <PE> <VA> [length]   Strict VA/RVA/file-offset lookup\n  dump-read <DMP> <VA> <length>   Read captured minidump bytes"
+        "\n  doctor [--show-paths]         Report executable hash/build source identity\n  pe-address <PE> <VA> [length]   Strict VA/RVA/file-offset lookup\n  pe-imports <PE> [substring]   List exact IAT slot addresses and import names\n  dump-read <DMP> <VA> <length>   Read captured minidump bytes"
     } else {
         ""
     }
@@ -374,13 +374,13 @@ fn run(args: &[String]) -> i32 {
                 1
             }
         }
-        Some("pe-address") | Some("dump-read") => {
+        Some("pe-address") | Some("pe-imports") | Some("dump-read") => {
             #[cfg(feature = "inspect")]
             {
-                let outcome = if args.get(1).map(String::as_str) == Some("pe-address") {
-                    inspection::pe_address(&args[2..])
-                } else {
-                    inspection::minidump_read(&args[2..])
+                let outcome = match args.get(1).map(String::as_str) {
+                    Some("pe-address") => inspection::pe_address(&args[2..]),
+                    Some("pe-imports") => inspection::pe_imports(&args[2..]),
+                    _ => inspection::minidump_read(&args[2..]),
                 };
                 match outcome {
                     Ok(result) => {
