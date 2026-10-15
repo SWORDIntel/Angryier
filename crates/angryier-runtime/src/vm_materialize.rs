@@ -19,7 +19,7 @@ use angryier_expr::{ExprArena, vm_effects::{reduce_vm_effects, VmEffect, VmEffec
 use angryier_ir::{
     IrType, IrValueId, RegisterWriteKind,
     vm_footprint::{VmIrEffect, VmIrSource},
-    vm_trace::{VmScopedValue, VmTraceCaveat},
+    vm_trace::{collect_observed_vm_trace, VmObservedBlock, VmScopedValue, VmTraceCaveat},
 };
 use angryier_state::RegisterState;
 use angryier_types::ExprId;
@@ -116,6 +116,31 @@ pub fn materialize_vm_handler(
     {
         return Err(VmMaterializationError::InvalidCapture("missing steps/edges or zero expression budget"));
     }
+    // Caller-visible capture structures are mutable. Revalidate the entire
+    // scoped IR footprint against the pinned trace window before trusting
+    // its effect/source lists or evaluating any potentially faulting loads.
+    let replay_steps: Vec<VmObservedBlock<'_>> = capture.steps.iter().map(|step| VmObservedBlock {
+        block: &step.block,
+        before: step.before,
+        after: step.after,
+        code_epoch: step.code_epoch,
+    }).collect();
+    let verified = collect_observed_vm_trace(
+        capture.window.identity,
+        capture.window.entry,
+        capture.window.exit,
+        &replay_steps,
+        capture.window.limits,
+    ).map_err(|_| VmMaterializationError::InvalidCapture("trace identity/IR revalidation failed"))?;
+    if verified != capture.footprint {
+        return Err(VmMaterializationError::InvalidCapture("capture footprint differs from recorded IR"));
+    }
+    let rip = capture.initial_state.registers.read(register_id::RIP.0)
+        .map_err(|_| VmMaterializationError::InvalidCapture("entry RIP unavailable"))?;
+    if rip.as_slice() != capture.window.entry.native_pc.to_le_bytes() {
+        return Err(VmMaterializationError::InvalidCapture("initial-state RIP differs from captured handler entry"));
+    }
+
     let mut seeded_registers = BTreeMap::new();
     for source in &capture.footprint.sources {
         match source.source {
