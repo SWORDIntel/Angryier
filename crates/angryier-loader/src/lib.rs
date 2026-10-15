@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod addresses;
+pub mod minidump;
 
 use std::fmt;
 use std::sync::Mutex;
