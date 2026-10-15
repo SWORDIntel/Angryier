@@ -209,6 +209,44 @@ where
     hash
 }
 
+/// Recover a return address from the canonical RSP cell, or at most one
+/// nearby executable candidate when the canonical cell is unusable.
+///
+/// The latter is a diagnostic fallback for a desynchronized symbolic
+/// stack, NOT a proof of the call/return relationship. An ambiguous window
+/// deliberately yields None instead of choosing an arbitrary nearest code
+/// pointer. The caller must record Concretized debt on any such recovery.
+fn select_bounded_stack_return<Read, Valid>(
+    rsp: Address,
+    mut read: Read,
+    valid: Valid,
+) -> Option<(Address, Address)>
+where
+    Read: FnMut(Address) -> Option<Address>,
+    Valid: Fn(Address) -> bool,
+{
+    if let Some(value) = read(rsp).filter(|&target| valid(target)) {
+        return Some((rsp, value));
+    }
+    const OFFSETS: [i64; 16] = [
+        -0x40, -0x38, -0x30, -0x28, -0x20, -0x18, -0x10, -0x08,
+        0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40,
+    ];
+    let mut unique: Option<(Address, Address)> = None;
+    for delta in OFFSETS {
+        let Some(addr) = rsp.checked_add_signed(delta) else {
+            continue;
+        };
+        if let Some(target) = read(addr).filter(|&value| valid(value)) {
+            if unique.is_some() {
+                return None;
+            }
+            unique = Some((addr, target));
+        }
+    }
+    unique
+}
+
 /// Default whole-run wall-clock budget shared by the stable Rust API and
 /// scripting/CLI frontends. Keeping this below the script feature boundary
 /// prevents public surfaces from silently drifting.
@@ -5543,6 +5581,30 @@ mod tests {
     }
 
     #[test]
+    fn bounded_return_recovery_rejects_ambiguous_or_overflowing_candidates() {
+        let rsp = 0x1000u64;
+        let candidates = [
+            (rsp, 0x2000),
+            (rsp + 8, 0x3000),
+            (rsp + 0x10, 0x4000),
+        ];
+        let read = |addr| candidates.iter().find(|(a, _)| *a == addr).map(|(_, value)| *value);
+        let mapped = |target| matches!(target, 0x3000 | 0x4000);
+        assert_eq!(select_bounded_stack_return(rsp, read, mapped), None);
+        assert_eq!(
+            select_bounded_stack_return(rsp, read, |value| value == 0x3000),
+            Some((rsp + 8, 0x3000)),
+        );
+        assert_eq!(
+            select_bounded_stack_return(rsp, read, |value| value == 0x2000),
+            Some((rsp, 0x2000)),
+        );
+        // Negative offsets around address zero are skipped, never wrapped
+        // into the high canonical address range.
+        assert_eq!(select_bounded_stack_return(0, |_| None, |_| true), None);
+    }
+
+    #[test]
     fn control_target_validation_uses_dynamic_regions_and_hooks() -> Result<(), RuntimeError> {
         let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
         let mut process = minimal_process()?;
@@ -8043,33 +8105,15 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                                 state.process.read_register(register_id::GPR_BASE + 4).ok()
                             });
                         let cell = rsp.and_then(|rsp| {
-                            let read_cell = |addr: u64| -> Option<u64> {
-                                state
-                                    .memory
-                                    .read(self.arena, addr, 64)
-                                    .ok()
-                                    .and_then(|expr| {
-                                        angryier_execution::constant_value(self.arena, expr).ok()
-                                    })
-                            };
-                            let direct = read_cell(rsp).filter(|v| {
-                                state.process.is_executable_control_target(*v)
-                            });
-                            direct.map(|value| (rsp, value)).or_else(|| {
-                                let mut best: Option<(i64, u64, u64)> = None;
-                                for delta in [-0x40i64, -0x38, -0x30, -0x28, -0x20, -0x18, -0x10, -0x8, 8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40] {
-                                    let addr = (rsp as i64 + delta) as u64;
-                                    if let Some(value) = read_cell(addr).filter(|v| {
-                                        state.process.is_executable_control_target(*v)
-                                    }) {
-                                        let distance = delta.abs();
-                                        if best.map(|(d, _, _)| distance < d).unwrap_or(true) {
-                                            best = Some((distance, addr, value));
-                                        }
-                                    }
-                                }
-                                best.map(|(_, addr, value)| (addr, value))
-                            })
+                            select_bounded_stack_return(
+                                rsp,
+                                |addr| {
+                                    state.memory.read(self.arena, addr, 64).ok().and_then(
+                                        |expr| angryier_execution::constant_value(self.arena, expr).ok(),
+                                    )
+                                },
+                                |address| state.process.is_executable_control_target(address),
+                            )
                         });
                         let is_valid_target = target.map(|t| {
                             state.process.is_executable_control_target(t)
