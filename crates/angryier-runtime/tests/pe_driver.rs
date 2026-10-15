@@ -690,6 +690,15 @@ fn concrete_and_symbolic_direct_indirect_calls_share_stack_and_return_targets()
 
         let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
         let mut symbolic = SymbolicSession::new(&runtime, &arena, tracking);
+        // Exact step-for-step comparison cannot use call summarization:
+        // the optimizer is allowed to collapse a pure call+RET into one
+        // symbolic step, while concrete execution still enters the callee.
+        // Exercise each architectural call/return boundary instead.
+        symbolic.set_function_summary_cost_model(std::sync::Arc::new(
+            angryier_runtime::function_summaries::DepthWidthCostModel {
+                max_summary_cost: 0,
+            },
+        ));
         for (step, (pc, rsp)) in expected.iter().enumerate() {
             assert_eq!(symbolic.states[0].process.pc()?, *pc,
                 "{kind}: symbolic PC diverged before step {step}");
