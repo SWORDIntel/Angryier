@@ -104,7 +104,18 @@ fn fixture() -> Result<VmHandlerCapture, String> {
     let footprint = collect_observed_vm_trace(
         window.identity, a, c, &borrowed, window.limits
     ).map_err(|e| format!("{e:?}"))?;
-    Ok(VmHandlerCapture { window, initial_state: process.state, steps, footprint })
+    // Independent expected concrete result for the synthetic two-block
+    // ADD handler: initial RAX=0, RCX=7, then RCX=RCX+2 => 9.
+    let mut final_process = process.clone();
+    final_process.write_register(1, 9).map_err(|error| error.to_string())?;
+    final_process.write_pc(0x1002).map_err(|error| error.to_string())?;
+    Ok(VmHandlerCapture {
+        window,
+        initial_state: process.state,
+        final_state: final_process.state,
+        steps,
+        footprint,
+    })
 }
 #[test]
 fn two_blocks_reuse_symbolic_state_not_numeric_ssa_ids() -> Result<(), String> {
