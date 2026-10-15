@@ -1790,6 +1790,19 @@ impl<D: Decoder> Runtime<D> {
         })
     }
 
+    /// Analyze native VM-dispatch candidates within a bounded executable
+    /// window. This opt-in scan does not claim virtual-PC recovery or execute
+    /// any discovered indirect target; confidence is structural only.
+    pub fn inspect_vm_window(
+        &self,
+        process: &Process,
+        entry: Address,
+        max_bytes: u64,
+    ) -> Result<angryier_cfg::vm::VmDispatchReport, RuntimeError> {
+        let cfg = self.recover_cfg_window(process, entry, max_bytes)?;
+        Ok(angryier_cfg::vm::inspect_native_cfg(&cfg))
+    }
+
     /// Recovers the image CFG and extracts pure induction loops — a
     /// straight-line body (one block, or a chain of blocks linked only by
     /// unconditional jumps or adjacency) whose only state effects are
