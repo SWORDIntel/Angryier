@@ -39,6 +39,10 @@ local CONFIG = {
         { addr = 0x1423E7C00, file = "tail_4_23E7C00.bin" },
         { addr = 0x1423E8000, file = "tail_5_23E8000.bin" },
         { addr = 0x1437E9E00, file = "tail_6_37E9E00.bin" },
+        -- Live Heap slices from diag_1892.dmp:
+        { addr = 0x00690000,  file = "tail_heap_provider.bin" },
+        { addr = 0x09417000,  file = "tail_heap_singleton.bin" },
+        { addr = 0x0946b000,  file = "tail_heap_list.bin" },
     },
 }
 
