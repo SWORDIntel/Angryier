@@ -2386,6 +2386,29 @@ mod tests {
     }
 
     #[test]
+    fn negative_rip_relative_jump_table_displacement_resolves() -> Result<(), String> {
+        // The two qword targets sit BEFORE the dispatch, so the RIP-relative
+        // displacement is negative. A u64 cast used to reject this case.
+        let code = [
+            0x18, 0x10, 0, 0, 0, 0, 0, 0, // 0x1000 -> 0x1018
+            0x1a, 0x10, 0, 0, 0, 0, 0, 0, // 0x1008 -> 0x101a
+            0xf0, 0x02,                 // cmp eax,2  @ 0x1010
+            0xf1, 0x08, 0xe8, 0xff, 0xff, 0xff, // jmp [rip+eax*8-24], end=0x1018
+            0x90, 0xc3,                 // nop; ret @ 0x1018
+            0x90, 0xc3,                 // nop; ret @ 0x101a
+        ];
+        let cfg = recover(&TestDecoder, 0x1000, &code, 0x1010, identity_form)
+            .map_err(|error| format!("{error:?}"))?;
+        assert!(cfg.edges.iter().any(|edge| {
+            matches!(edge.kind, EdgeKind::TableDispatch { .. }) && edge.to == Some(0x1018)
+        }));
+        assert!(cfg.edges.iter().any(|edge| {
+            matches!(edge.kind, EdgeKind::TableDispatch { .. }) && edge.to == Some(0x101a)
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn jump_table_resolves_to_entries() -> Result<(), String> {
         // cmp eax,2; jmp [rip + eax*8 + disp] where disp points 2 entries
         // of qwords past the jmp. Table lives after the terminator.
