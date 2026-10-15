@@ -315,6 +315,58 @@ impl SimState {
         0
     }
 
+    /// Decode an MS x64 ABI argument from the actual architectural register
+    /// file, not the generic simulation positional-index convention.
+    ///
+    /// RCX/RDX/R8/R9 carry the first four args. Upon entry to a callee, RSP
+    /// addresses the return address; arg 5 starts at [RSP+0x28] after the
+    /// 32-byte mandatory shadow space. Missing registers or memory remain
+    /// unknown (None), never silently become valid zero-valued arguments.
+    pub fn try_win64_arg(&self, index: usize) -> Option<u64> {
+        match index {
+            0 => self.registers.get(&1).copied(), // RCX
+            1 => self.registers.get(&2).copied(), // RDX
+            2 => self.registers.get(&8).copied(), // R8
+            3 => self.registers.get(&9).copied(), // R9
+            _ => {
+                let slot = u64::try_from(index.checked_sub(4)?).ok()?;
+                let rsp = *self.registers.get(&4)?;
+                let offset = slot.checked_mul(8)?.checked_add(0x28)?;
+                let addr = rsp.checked_add(offset)?;
+                let end = addr.checked_add(8)?;
+                let mut data = [0u8; 8];
+                for (i, byte) in data.iter_mut().enumerate() {
+                    let location = addr.checked_add(u64::try_from(i).ok()?)?;
+                    if location >= end {
+                        return None;
+                    }
+                    *byte = self.read_byte(location)?;
+                }
+                Some(u64::from_le_bytes(data))
+            }
+        }
+    }
+
+    /// Legacy-compatible Win64 argument accessor for existing model code.
+    /// Prefer try_win64_arg for fidelity-sensitive APIs: unknown arguments
+    /// cannot be distinguished from a real zero through this convenience.
+    pub fn get_win64_arg(&self, index: usize) -> u64 {
+        self.try_win64_arg(index).unwrap_or(0)
+    }
+
+    /// Read only memory represented by the simulation; never fabricate
+    /// absent bytes. Required for stack arguments and snapshot provenance.
+    pub fn try_read_bytes(&self, addr: u64, len: usize) -> Option<Vec<u8>> {
+        if len > 1_048_576 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            out.push(self.read_byte(addr.checked_add(u64::try_from(i).ok()?)?)?);
+        }
+        Some(out)
+    }
+
     /// Sets an argument by direct index in the register file.
     pub fn set_arg(&mut self, index: usize, val: u64) {
         self.registers.insert(index as u64, val);
@@ -2589,6 +2641,28 @@ mod tests {
         // Direct arg0 overrides RDI
         state.set_arg(0, 0x9999);
         assert_eq!(state.get_arg(0), 0x9999);
+    }
+
+    #[test]
+    fn win64_args_use_registers_and_shadow_space_not_simulation_indices() {
+        let mut state = SimState::new();
+        state.set_reg(0, 0xDEAD); // RAX is NOT the first argument
+        state.set_reg(1, 0x1234); // RCX
+        state.set_reg(2, 0x2345); // RDX
+        state.set_reg(8, 0x3456); // R8
+        state.set_reg(9, 0x4567); // R9
+        state.set_reg(4, 0x8000); // RSP
+        state.shadow_memory(0x8028, 0x5678u64.to_le_bytes().to_vec());
+        state.shadow_memory(0x8030, 0x6789u64.to_le_bytes().to_vec());
+        assert_eq!(state.try_win64_arg(0), Some(0x1234));
+        assert_eq!(state.try_win64_arg(1), Some(0x2345));
+        assert_eq!(state.try_win64_arg(2), Some(0x3456));
+        assert_eq!(state.try_win64_arg(3), Some(0x4567));
+        assert_eq!(state.try_win64_arg(4), Some(0x5678));
+        assert_eq!(state.try_win64_arg(5), Some(0x6789));
+        assert_eq!(state.try_win64_arg(6), None);
+        assert_eq!(state.try_read_bytes(0x8040, 8), None);
+        assert_eq!(state.get_arg(0), 0xDEAD); // separate generic convention
     }
 
     #[test]
