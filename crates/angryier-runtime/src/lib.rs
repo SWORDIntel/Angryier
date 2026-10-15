@@ -15,6 +15,8 @@
 //! The runtime is generic over the decoder backend so it works with both
 //! native XED (behind feature gates) and synthetic decoders for testing.
 
+pub mod import_audit;
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -2420,6 +2422,20 @@ impl<D: Decoder> Runtime<D> {
         // attempted/executed PC before any early environment-model dispatch.
         // This includes syscalls, CPUID, SimProcedures and terminating blocks.
         process.record_trace_pc(pc);
+
+        // A native RET-only IAT stub does not implement Windows userland API
+        // side effects. Refuse to invent successful thread/event/file/graphics
+        // operations. Explicit analyst-installed models remain permitted and
+        // are separately identifiable through import_audit::inspect_imports.
+        if let Some((dll, export)) = process.pe_import_stubs.get(&pc)
+            && !process.simproc_instances.contains_key(&pc)
+            && import_audit::classify(dll, export, false)
+                == import_audit::ImportBehavior::UnsupportedUserland
+        {
+            return Err(RuntimeError::Environment(format!(
+                "unmodeled user-mode import {dll}!{export} at synthetic stub {pc:#x}; no Win32 API effects or worker scheduling occurred"
+            )));
+        }
 
         // Control-flow redirects: divert execution to target PC before SimProcedure
         // or instruction decode.
@@ -5485,6 +5501,29 @@ mod tests {
         assert_eq!(process.step_count, 2);
         assert!(!process.terminated);
 
+        Ok(())
+    }
+
+    #[test]
+    fn unmodeled_create_thread_stub_does_not_fake_a_return() -> Result<(), RuntimeError> {
+        let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
+        let mut process = minimal_process()?;
+        let stub = 0x7000_0000_4140u64;
+        process.pe_import_stubs.insert(
+            stub,
+            ("kernel32.dll".to_string(), "CreateThread".to_string()),
+        );
+        process.write_pc(stub)?;
+        let rsp_before = process.read_register(register_id::GPR_BASE + 4)?;
+        let result = runtime.step(&mut process);
+        assert!(matches!(result, Err(RuntimeError::Environment(ref message))
+            if message.contains("CreateThread") && message.contains("worker scheduling")));
+        assert_eq!(process.pc()?, stub);
+        assert_eq!(process.read_register(register_id::GPR_BASE + 4)?, rsp_before);
+        assert_eq!(
+            import_audit::inspect_imports(&process)[0].behavior,
+            import_audit::ImportBehavior::UnsupportedUserland
+        );
         Ok(())
     }
 
