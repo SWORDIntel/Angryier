@@ -222,6 +222,7 @@ impl JniTaintTracker {
         Self::default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_buffer(
         &mut self,
         base: Address,
@@ -278,12 +279,9 @@ impl JniTaintTracker {
     }
 
     pub fn get_buffer(&self, addr: Address) -> Option<&TaintedBuffer> {
-        for buf in self.buffers.values() {
-            if addr >= buf.base && addr < buf.base.wrapping_add(buf.size as u64) {
-                return Some(buf);
-            }
-        }
-        None
+        self.buffers
+            .values()
+            .find(|buf| addr >= buf.base && addr < buf.base.wrapping_add(buf.size as u64))
     }
 
     pub fn clear_range(&mut self, base: Address, len: usize) {
@@ -719,10 +717,10 @@ impl JniEnvironment {
         }
 
         // Mode 0 (free) or Mode 2 (abort, free): mark released
-        if mode == 0 || mode == JNI_ABORT {
-            if let Some(buf) = self.native_buffers.get_mut(&elems_ptr) {
-                buf.released = true;
-            }
+        if (mode == 0 || mode == JNI_ABORT)
+            && let Some(buf) = self.native_buffers.get_mut(&elems_ptr)
+        {
+            buf.released = true;
         }
 
         let mut next = state.clone();
@@ -832,31 +830,30 @@ impl JniEnvironment {
             symbolic_bytes,
             ..
         }) = self.objects.get(&array_handle)
+            && start + len <= data.len()
         {
-            if start + len <= data.len() {
-                let slice = data[start..start + len].to_vec();
-                next.write_memory(buf_ptr, slice);
+            let slice = data[start..start + len].to_vec();
+            next.write_memory(buf_ptr, slice);
 
-                if *tainted {
-                    let tid = taint_id.unwrap_or(TaintId(1));
-                    let lbl = label.unwrap_or(TaintLabel::UserInput);
-                    let sub_syms = symbolic_bytes.as_ref().and_then(|s| {
-                        if start + len <= s.len() {
-                            Some(s[start..start + len].to_vec())
-                        } else {
-                            None
-                        }
-                    });
-                    self.taint_tracker.record_buffer(
-                        buf_ptr,
-                        len,
-                        tid,
-                        lbl,
-                        array_handle,
-                        "jbyteArray",
-                        sub_syms,
-                    );
-                }
+            if *tainted {
+                let tid = taint_id.unwrap_or(TaintId(1));
+                let lbl = label.unwrap_or(TaintLabel::UserInput);
+                let sub_syms = symbolic_bytes.as_ref().and_then(|s| {
+                    if start + len <= s.len() {
+                        Some(s[start..start + len].to_vec())
+                    } else {
+                        None
+                    }
+                });
+                self.taint_tracker.record_buffer(
+                    buf_ptr,
+                    len,
+                    tid,
+                    lbl,
+                    array_handle,
+                    "jbyteArray",
+                    sub_syms,
+                );
             }
         }
 
@@ -884,15 +881,14 @@ impl JniEnvironment {
             label: label_slot,
             ..
         }) = self.objects.get_mut(&array_handle)
+            && start + len <= data.len()
         {
-            if start + len <= data.len() {
-                data[start..start + len].copy_from_slice(&src_bytes);
-                if is_tainted {
-                    *tainted = true;
-                    if let Some(meta) = taint_meta {
-                        *id_slot = Some(meta.taint_id);
-                        *label_slot = Some(meta.label);
-                    }
+            data[start..start + len].copy_from_slice(&src_bytes);
+            if is_tainted {
+                *tainted = true;
+                if let Some(meta) = taint_meta {
+                    *id_slot = Some(meta.taint_id);
+                    *label_slot = Some(meta.label);
                 }
             }
         }

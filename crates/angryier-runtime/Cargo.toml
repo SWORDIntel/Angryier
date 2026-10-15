@@ -41,6 +41,7 @@ script = ["dep:mlua", "z3"]
 
 [dev-dependencies]
 angryier-solver-fuzzy = { path = "../angryier-solver-fuzzy" }
+angryier-solver-z3 = { path = "../angryier-solver-z3", features = ["ffi"] }
 
 # Throwaway callgrind driver: needs native XED (`Runtime::with_native_xed`);
 # gated so default-feature `--all-targets` builds stay green.

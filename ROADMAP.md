@@ -64,7 +64,7 @@
 ### Phase S5: Android JNI & Cross-Runtime Symbolic Solving
 - [x] **ANG-050**: JNI native environment stubbing (`JNIEnv*`, `jobject`, `jstring`, `jbyteArray`).
 - [x] **ANG-051**: Symbolic taint propagation from Android Java parameters into native C/C++ `.so` functions.
-- [ ] **ANG-052**: Path reachability from exported JNI entry points to native vulnerability sinks.
+- [x] **ANG-052**: Path reachability from exported JNI entry points to native vulnerability sinks.
 
 ### Phase S6: Exploit Primitive Synthesis & Trigger Generation
 - [x] **ANG-060**: Concrete model extraction: extraction of satisfying assignments (`uint64_t` registers, memory buffer bytes).

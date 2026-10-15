@@ -87,6 +87,13 @@ pub mod triage;
 pub mod speculative_fork;
 pub mod speculative_summary;
 pub mod jni;
+pub mod jni_reachability;
+
+pub use jni_reachability::{
+    JniArgumentTaint, JniPathStatus, JniReachabilityConfig, JniReachabilityResult,
+    JniReplayCapsuleMetadata, JniSinkDescriptor, JniSinkKind, JniSinkReachabilityAnalyzer,
+    SinkConstraintPredicate, SinkControlledParam,
+};
 
 /// Default stack size in bytes (64 KiB).
 const STACK_SIZE: u64 = 0x1_0000;
@@ -3453,10 +3460,10 @@ impl<D: Decoder> Runtime<D> {
                     process.write_register(register_id::GPR_BASE, val)?;
                 }
                 let jni_opt = process.jni_env.clone();
-                if let Some(jni) = jni_opt {
-                    if let Ok(jni_guard) = jni.read() {
-                        let _ = jni_guard.apply_symbolic_memory_taint(&mut process.state.memory);
-                    }
+                if let Some(jni) = jni_opt
+                    && let Ok(jni_guard) = jni.read()
+                {
+                    let _ = jni_guard.apply_symbolic_memory_taint(&mut process.state.memory);
                 }
                 // For continue results, advance PC by 1.
                 let next_pc = address.wrapping_add(1);
@@ -3568,10 +3575,10 @@ impl<D: Decoder> Runtime<D> {
                     process.write_register(register_id::GPR_BASE, val)?;
                 }
                 let jni_opt = process.jni_env.clone();
-                if let Some(jni) = jni_opt {
-                    if let Ok(jni_guard) = jni.read() {
-                        let _ = jni_guard.apply_symbolic_memory_taint(&mut process.state.memory);
-                    }
+                if let Some(jni) = jni_opt
+                    && let Ok(jni_guard) = jni.read()
+                {
+                    let _ = jni_guard.apply_symbolic_memory_taint(&mut process.state.memory);
                 }
                 pop_call_return(process)?;
                 Ok(StepOutcome::SimProcedure { address, name })
@@ -6902,18 +6909,28 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             };
             state.memory = angryier_execution::SymbolicSessionMemory::new(state.process.state.memory.clone());
             for i in 0..16u32 {
-                if let Ok(value) = state.process.read_register(register_id::GPR_BASE + i) {
-                    state.concrete_registers.insert(register_id::GPR_BASE + i, value);
-                    let bytes = value.to_le_bytes().to_vec();
-                    if let Ok(expr) = self.arena.intern(angryier_expr::ExprNode {
-                        sort: angryier_expr::ExprSort::BitVec(64),
-                        op: angryier_expr::ExprOp::Constant,
-                        operands: Vec::new(),
-                        immediate: bytes,
-                    }) {
-                        state
-                            .registers
-                            .insert(register_id::GPR_BASE + i, (expr, angryier_ir::IrType::Bits(64)));
+                let reg_id = register_id::GPR_BASE + i;
+                if let Ok(value) = state.process.read_register(reg_id) {
+                    let prev_val = state.concrete_registers.insert(reg_id, value);
+                    let changed = prev_val != Some(value);
+                    let is_symbolic = state
+                        .registers
+                        .get(&reg_id)
+                        .and_then(|(expr, _)| self.arena.get(*expr))
+                        .map(|node| node.op != angryier_expr::ExprOp::Constant)
+                        .unwrap_or(false);
+                    if changed || !is_symbolic {
+                        let bytes = value.to_le_bytes().to_vec();
+                        if let Ok(expr) = self.arena.intern(angryier_expr::ExprNode {
+                            sort: angryier_expr::ExprSort::BitVec(64),
+                            op: angryier_expr::ExprOp::Constant,
+                            operands: Vec::new(),
+                            immediate: bytes,
+                        }) {
+                            state
+                                .registers
+                                .insert(reg_id, (expr, angryier_ir::IrType::Bits(64)));
+                        }
                     }
                 }
             }
