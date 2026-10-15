@@ -323,6 +323,21 @@ pub struct SymbolicBlockSummary {
 pub struct SymbolicBlockValueTrace {
     pub summary: SymbolicBlockSummary,
     pub values: Vec<Option<(ExprId, IrType)>>,
+    /// Every architectural write in original instruction order, with the
+    /// *post-write* full-parent expression. Final block register state is
+    /// insufficient when one handler writes the same register repeatedly.
+    pub register_writes: Vec<SymbolicRegisterWriteTrace>,
+}
+
+/// Value and width at the point an AngryIR WriteRegister effect executes.
+/// The original instruction index prevents confusion with block-local
+/// IrValueId numbers and with later writes to the same parent register.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SymbolicRegisterWriteTrace {
+    pub instruction_index: usize,
+    pub register: u32,
+    pub expression: ExprId,
+    pub ty: IrType,
 }
 
 /// Symbolically evaluates AngryIR blocks with a shared symbolic register file.
@@ -545,11 +560,12 @@ impl<'a> SymbolicEvaluator<'a> {
         }
         let mut values: Vec<Option<(ExprId, IrType)>> = Vec::new();
         let mut written_registers = Vec::new();
+        let mut register_writes = Vec::new();
         let mut branch = None;
         let mut terminated = false;
         let mut jump_target = None;
 
-        for instruction in &block.instructions {
+        for (instruction_index, instruction) in block.instructions.iter().enumerate() {
             let produced = match &instruction.op {
                 IrOp::Constant { ty, bytes_le } => Some((self.constant(*ty, bytes_le)?, *ty)),
                 IrOp::ExprRef { expression, ty } => Some((*expression, *ty)),
@@ -662,6 +678,12 @@ impl<'a> SymbolicEvaluator<'a> {
                     };
                     self.registers.insert(*register, (expression, ty));
                     written_registers.push(*register);
+                    register_writes.push(SymbolicRegisterWriteTrace {
+                        instruction_index,
+                        register: *register,
+                        expression,
+                        ty,
+                    });
                     None
                 }
                 IrOp::Branch {
@@ -787,6 +809,7 @@ impl<'a> SymbolicEvaluator<'a> {
                 jump_target,
             },
             values,
+            register_writes,
         })
     }
 
