@@ -196,3 +196,111 @@ fn captured_replay_detects_changed_register_and_rejects_debt() -> Result<(), Str
     );
     Ok(())
 }
+
+#[test]
+fn repeated_writes_and_partial_parent_updates_replay_in_original_order()
+    -> Result<(), String>
+{
+    use angryier_state::RegisterState;
+    use angryier_runtime::vm_replay::check_vm_concrete_replay;
+
+    let mut capture = fixture()?;
+    // Make the high bits nonzero so an incorrect low-byte replacement
+    // cannot accidentally appear equivalent to PreserveParent.
+    let wide = 0x1_0000_0007u64;
+    capture.steps[0].block.instructions[1].op = IrOp::Constant {
+        ty: IrType::Bits(64),
+        bytes_le: wide.to_le_bytes().to_vec(),
+    };
+
+    // The second block first writes RCX = original + 2, then RCX += 5,
+    // then replaces only the low byte with 3. Three writes to the same
+    // parent register MUST be materialized as three distinct effects.
+    let instructions = &mut capture.steps[1].block.instructions;
+    let terminal = instructions.pop().ok_or("missing direct jump")?;
+    assert!(matches!(terminal.op, IrOp::Jump { .. }));
+    instructions.push(IrInstruction {
+        result: Some(IrValueId(3)),
+        op: IrOp::Constant {
+            ty: IrType::Bits(64),
+            bytes_le: 5u64.to_le_bytes().to_vec(),
+        },
+    });
+    instructions.push(IrInstruction {
+        result: Some(IrValueId(4)),
+        op: IrOp::Primitive {
+            op: IrPrimitive::Add,
+            ty: IrType::Bits(64),
+            inputs: vec![IrValueId(2), IrValueId(3)],
+        },
+    });
+    instructions.push(IrInstruction {
+        result: None,
+        op: IrOp::WriteRegister {
+            register: 1,
+            value: IrValueId(4),
+            kind: RegisterWriteKind::ReplaceParent,
+        },
+    });
+    instructions.push(IrInstruction {
+        result: Some(IrValueId(5)),
+        op: IrOp::Constant {
+            ty: IrType::Bits(8),
+            bytes_le: vec![3],
+        },
+    });
+    instructions.push(IrInstruction {
+        result: None,
+        op: IrOp::WriteRegister {
+            register: 1,
+            value: IrValueId(5),
+            kind: RegisterWriteKind::PreserveParent {
+                bit_offset: 0,
+                width_bits: 8,
+            },
+        },
+    });
+    instructions.push(terminal);
+
+    let borrowed: Vec<_> = capture.steps.iter().map(|step| VmObservedBlock {
+        block: &step.block, before: step.before, after: step.after,
+        code_epoch: step.code_epoch,
+    }).collect();
+    capture.footprint = collect_observed_vm_trace(
+        capture.window.identity,
+        capture.window.entry,
+        capture.window.exit,
+        &borrowed,
+        capture.window.limits,
+    ).map_err(|error| format!("{error:?}"))?;
+
+    let expected = 0x1_0000_0003u64;
+    capture.final_state.registers = capture.final_state.registers
+        .write(1, &expected.to_le_bytes())
+        .map_err(|error| format!("{error:?}"))?;
+
+    let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+    let candidate = materialize_vm_handler(&capture, &arena, 4096)
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(candidate.effect_steps, vec![0, 1, 1, 1]);
+    let expected_writes = [
+        wide,
+        wide + 2,
+        wide + 7,
+        expected,
+    ];
+    for (index, value) in expected_writes.iter().enumerate() {
+        let expression = candidate.reduced.effects[index].value;
+        assert_eq!(
+            angryier_execution::constant_value(&arena, expression)
+                .map_err(|error| error.to_string())?,
+            *value,
+            "write {index} was replaced by a later write",
+        );
+    }
+    let verified = check_vm_concrete_replay(&capture, &candidate, &arena)
+        .map_err(|error| format!("{error:?}"))?;
+    assert!(verified.checked_registers > 0);
+    assert!(verified.observed_input_only);
+    Ok(())
+}
