@@ -117,6 +117,54 @@ Acceptance gates for future milestones:
 - multi-successor, context-sensitive CFG recovery with measured state budgets;
 - versioned IR/CFG handoff to METHRA, without rebuilding a second decompiler.
 
+## Sarin Advisor 8.3 — native forensic continuation
+
+The terminal record identifies a PE file-offset mistake and an unsolved
+wait/singleton state. The following commands replace the repeated external
+PE section and dump-memory probes. They do **not** bypass a wait condition or
+prove the runtime's loaded image matches the on-disk file.
+
+For the lightweight, no-XED/no-Z3 CLI:
+
+```sh
+cargo build --release -p angryier-cli --no-default-features --features inspect
+./target/release/angryier pe-address advisor_unpacked_state.exe 0x140404e10 16
+./target/release/angryier dump-read diag_1892.dmp 0x094464c0 64
+```
+
+The first command should report the mapped section, RVA and original
+file offset (verify the transcript's reported 0x404e10 -> 0x404410 with
+your exact PE file). The second opens MINIDUMP_MEMORY_LIST (5) or
+MINIDUMP_MEMORY64_LIST (9) **without loading the whole dump** and reads
+only the requested captured bytes. If the target heap page is missing,
+the reader returns `MissingCapture` with the exact first absent address.
+
+The file mapping and memory dump are distinct evidence sources. A dump
+may reflect a rebased, unpacked or patched image; translating a VA through
+the original PE tells you only where original file bytes reside. Do not
+substitute one for the other without matching image hashes, load bases,
+code-page versions and timestamps.
+
+Relevant native APIs:
+
+- `angryier_loader::addresses::PeAddressMap::{parse,locate_va,file_offset,bytes_at_va}`
+- `angryier_loader::minidump::MiniDumpMemory` (borrowed in-memory captures)
+- `angryier_loader::minidump_file::MiniDumpFile` (streaming large dump files)
+- `angryier_cfg::xrefs::XrefIndex::{from_cfg,callers_of,to,from}`
+- `Runtime::inspect_xrefs_window` for source-backed direct and RIP-relative
+  references in a bounded executable region.
+
+Still missing for exact execution-state replay: thread-context selection,
+module mappings and relocations, page protection/version snapshots, Windows
+TEB/PEB/loader state, lock/event handle models and a partial-page unknown
+policy. The capture reader alone does not safely initialize an
+`angryier_runtime::Process`. Keep this work separate from guessed
+singleton-object values.
+
+The observed wait at 0x140404e10 and the two conflicting reported R8 values
+must be correlated to one exact dump/thread/timepoint. This branch does not
+claim that the wait predicate or GDI+ continuation has been solved.
+
 ## Explicitly not yet implemented
 
 - Automatic virtual-PC discovery with runtime-state confirmation;
