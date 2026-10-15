@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn malformed_and_overlap_fail_closed() {
-        assert_eq!(MiniDumpMemory::parse(b"bad"), Err(MiniDumpError::InvalidSignature));
+        assert!(matches!(MiniDumpMemory::parse(b"bad"), Err(MiniDumpError::InvalidSignature)));
         let mut bytes = memory_list_fixture();
         bytes[0x70..0x74].copy_from_slice(&0x1f0u32.to_le_bytes());
         assert!(matches!(MiniDumpMemory::parse(&bytes), Err(MiniDumpError::InvalidRange)));
