@@ -115,11 +115,11 @@ pub fn register_win32_procedures(
 
     // Synchronization & Events
     registry.register(Box::new(CreateEventAProcedure::new(handles.clone())));
-    registry.register(Box::new(CreateEventWProcedure::new(handles)));
-    registry.register(Box::new(SetEventProcedure));
-    registry.register(Box::new(ResetEventProcedure));
-    registry.register(Box::new(WaitForSingleObjectProcedure));
-    registry.register(Box::new(WaitForMultipleObjectsProcedure));
+    registry.register(Box::new(CreateEventWProcedure::new(handles.clone())));
+    registry.register(Box::new(SetEventProcedure::new(handles.clone())));
+    registry.register(Box::new(ResetEventProcedure::new(handles.clone())));
+    registry.register(Box::new(WaitForSingleObjectProcedure::new(handles.clone())));
+    registry.register(Box::new(WaitForMultipleObjectsProcedure::new(handles)));
     registry.register(Box::new(InitializeCriticalSectionProcedure));
     registry.register(Box::new(EnterCriticalSectionProcedure));
     registry.register(Box::new(LeaveCriticalSectionProcedure));
