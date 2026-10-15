@@ -16,9 +16,10 @@ angryier-models = { path = "../angryier-models", optional = true }
 angryier-types = { path = "../angryier-types", optional = true }
 mlua = { version = "0.12", features = ["lua54", "vendored"], optional = true }
 angryier-loader = { path = "../angryier-loader", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [features]
-inspect = ["dep:angryier-loader"]
+inspect = ["dep:angryier-loader", "dep:sha2"]
 # `run` ships by default: the binary is the product, and a bare
 # `cargo build --release` must yield a run-capable `angryier` (incl. driver
 # mode). This pulls mlua (vendored Lua 5.4), xed-sys (XED built from source)
