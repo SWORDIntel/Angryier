@@ -188,6 +188,128 @@ mod tests {
         assert_eq!(location.context_digest, [7; 32]);
     }
 
+    #[cfg(feature = "xed")]
+    #[test]
+    fn real_runtime_steps_feed_an_observed_two_block_trace() -> Result<(), Box<dyn std::error::Error>> {
+        use angryier_loader::{LoadedImage, Segment};
+        use angryier_types::{ImageId, SemanticVersion, TargetProfileId};
+        let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+        let image = LoadedImage {
+            id: ImageId(1),
+            entry: 0x1000,
+            target_profile: TargetProfileId(1),
+            segments: vec![Segment {
+                address: 0x1000,
+                bytes: vec![0x90, 0x90, 0xC3], // NOP; NOP; RET
+                readable: true,
+                writable: false,
+                executable: true,
+            }],
+            symbols: Vec::new(),
+            program_headers: None,
+            dynamic: None,
+            pe: None,
+        };
+        let mut process = runtime.load_image(image)?;
+        let locate = |pc: u64| VmObservedLocation {
+            native_pc: pc,
+            virtual_pc: pc - 0x1000,
+            context_digest: [u8::try_from(pc - 0x1000)? + 1; 32],
+        };
+        let start = locate(0x1000)?;
+        let end = locate(0x1002)?;
+        let window = VmHandlerWindow {
+            entry: start,
+            exit: end,
+            identity: VmTraceIdentity {
+                image: ImageId(1),
+                target_profile: TargetProfileId(1),
+                executable_digest: [5; 32],
+                capture_digest: [6; 32],
+                initial_state_digest: [7; 32],
+            },
+            limits: VmTraceLimits {
+                max_steps: 2,
+                ..VmTraceLimits::default()
+            },
+        };
+        let capture = runtime.observe_vm_handler(&mut process, window, |state| {
+            let pc = state.pc()?;
+            let offset = pc.checked_sub(0x1000).ok_or_else(|| {
+                RuntimeError::Environment("unexpected native program counter".into())
+            })?;
+            let offset = u8::try_from(offset).map_err(|_| {
+                RuntimeError::Environment("virtual counter beyond synthetic fixture".into())
+            })?;
+            Ok(VmStateObservation {
+                virtual_pc: u64::from(offset),
+                context_digest: [offset + 1; 32],
+                code_epoch: 0,
+            })
+        })?;
+        assert_eq!(capture.steps.len(), 2);
+        assert_eq!(capture.footprint.edges.len(), 2);
+        assert_eq!(capture.footprint.total_instructions > 0, true);
+        assert_eq!(capture.steps[0].before, start);
+        assert_eq!(capture.steps[1].after, end);
+        assert_eq!(process.pc()?, 0x1002);
+        Ok(())
+    }
+
+    #[cfg(feature = "xed")]
+    #[test]
+    fn captured_handler_rejects_missing_identity_before_execution() -> Result<(), Box<dyn std::error::Error>> {
+        use angryier_loader::{LoadedImage, Segment};
+        use angryier_types::{ImageId, SemanticVersion, TargetProfileId};
+        let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+        let image = LoadedImage {
+            id: ImageId(1),
+            entry: 0x1000,
+            target_profile: TargetProfileId(1),
+            segments: vec![Segment {
+                address: 0x1000,
+                bytes: vec![0x90],
+                readable: true,
+                writable: false,
+                executable: true,
+            }],
+            symbols: Vec::new(),
+            program_headers: None,
+            dynamic: None,
+            pe: None,
+        };
+        let mut process = runtime.load_image(image)?;
+        let here = VmObservedLocation {
+            native_pc: 0x1000,
+            virtual_pc: 0,
+            context_digest: [1; 32],
+        };
+        let out = VmObservedLocation {
+            native_pc: 0x1001,
+            virtual_pc: 1,
+            context_digest: [2; 32],
+        };
+        let window = VmHandlerWindow {
+            entry: here,
+            exit: out,
+            identity: VmTraceIdentity {
+                image: ImageId(1),
+                target_profile: TargetProfileId(1),
+                executable_digest: [0; 32],
+                capture_digest: [0; 32],
+                initial_state_digest: [0; 32],
+            },
+            limits: VmTraceLimits::default(),
+        };
+        let result = runtime.observe_vm_handler(&mut process, window, |_| {
+            Err(RuntimeError::Environment("observer must not be invoked".into()))
+        });
+        assert!(matches!(result, Err(RuntimeError::Environment(message)) if message.contains("identity")));
+        assert_eq!(process.step_count, 0);
+        assert_eq!(process.pc()?, 0x1000);
+        Ok(())
+    }
+
     #[test]
     fn scoped_handler_window_cannot_claim_missing_capture_identity() {
         let window = VmHandlerWindow {
