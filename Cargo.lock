@@ -245,6 +245,7 @@ dependencies = [
  "angryier-solver-fuzzy",
  "angryier-solver-z3",
  "angryier-state",
+ "angryier-taint",
  "angryier-types",
  "mlua",
 ]

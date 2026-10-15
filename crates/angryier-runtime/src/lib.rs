@@ -86,6 +86,7 @@ pub mod speculative_concolic;
 pub mod triage;
 pub mod speculative_fork;
 pub mod speculative_summary;
+pub mod jni;
 
 /// Default stack size in bytes (64 KiB).
 const STACK_SIZE: u64 = 0x1_0000;
@@ -246,6 +247,8 @@ pub enum RuntimeError {
     NoBranchInTrace,
     /// The environment model does not implement this syscall number.
     UnsupportedSyscall(u64),
+    /// Environment model or JNI error.
+    Environment(String),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -274,6 +277,7 @@ impl std::fmt::Display for RuntimeError {
             Self::NoCachedBlock(address) => write!(f, "no cached block for address {address:#x}"),
             Self::NoBranchInTrace => write!(f, "execution trace contains no conditional branch"),
             Self::UnsupportedSyscall(number) => write!(f, "unsupported syscall number {number}"),
+            Self::Environment(e) => write!(f, "environment error: {e}"),
         }
     }
 }
@@ -403,6 +407,8 @@ pub struct Process {
     /// ([`Runtime::attach_kernel_pool_model`]); the dispatch loop records
     /// modeled alloc/free events (pointer + caller) into it.
     pub kernel_pool: Option<std::sync::Arc<angryier_models::KernelPoolTracker>>,
+    /// JNI native environment state when attached (`Runtime::attach_jni_environment`).
+    pub jni_env: Option<std::sync::Arc<std::sync::RwLock<crate::jni::JniEnvironment>>>,
     /// PCI configuration-address register (port 0xCF8 write value): the
     /// runtime's port-I/O model consults it for config reads at 0xCFC-0xCFF
     /// (see `execute_port_in`/`execute_port_out`).
@@ -798,6 +804,19 @@ impl<D: Decoder> Runtime<D> {
         }
         process.kernel_pool = Some(tracker);
         Ok(())
+    }
+
+    /// Wires a JNI native environment into `process`, setting up the JNI interface region,
+    /// JNINativeInterface vtable, and stub table with SimProcedures registered for all slots.
+    /// Returns the `JNIEnv*` pointer address.
+    pub fn attach_jni_environment(
+        &self,
+        process: &mut Process,
+        env: std::sync::Arc<std::sync::RwLock<crate::jni::JniEnvironment>>,
+    ) -> Result<Address, RuntimeError> {
+        let env_ptr = crate::jni::JniEnvironment::setup_in_process(env.clone(), process)?;
+        process.jni_env = Some(env);
+        Ok(env_ptr)
     }
 
     /// Creates a new runtime with the given decoder, semantic version, and target profile.
@@ -1519,6 +1538,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_instances: BTreeMap::new(),
             redirects: BTreeMap::new(),
             kernel_pool: None,
+            jni_env: None,
             pci_config_address: 0,
             symbols: Vec::new(),
             trace: Vec::new(),
@@ -1681,6 +1701,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_instances: BTreeMap::new(),
             redirects: BTreeMap::new(),
             kernel_pool: None,
+            jni_env: None,
             pci_config_address: 0,
             symbols: image.symbols.clone(),
             trace: Vec::new(),
@@ -2300,6 +2321,7 @@ impl<D: Decoder> Runtime<D> {
             simproc_instances: BTreeMap::new(),
             redirects: BTreeMap::new(),
             kernel_pool: None,
+            jni_env: None,
             pci_config_address: 0,
             symbols: image.symbols,
             trace: Vec::new(),
@@ -3370,8 +3392,8 @@ impl<D: Decoder> Runtime<D> {
         // Bridge ExecutionState → SimState.
         let mut sim_state = SimState::new();
 
-        // Copy GPRs (RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7).
-        for index in 0u32..8 {
+        // Copy GPRs (RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5, RSI=6, RDI=7, R8..R15).
+        for index in 0u32..16 {
             let reg_id = register_id::GPR_BASE + index;
             if let Ok(val) = process.state.registers.read(reg_id) {
                 let mut buf = [0u8; 8];
@@ -3413,7 +3435,29 @@ impl<D: Decoder> Runtime<D> {
                     name: name.to_string(),
                 })
             }
-            SimResult::Continue(_) => {
+            SimResult::Continue(next) => {
+                for (base, bytes) in &next.memory_writes {
+                    let values: Vec<ByteValue> = bytes.iter().map(|b| ByteValue::Concrete(*b)).collect();
+                    process.state.memory = process
+                        .state
+                        .memory
+                        .write(*base, &values)
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                }
+                for (index, value) in &next.registers {
+                    if *index < 8 {
+                        process.write_register(register_id::GPR_BASE + (*index as u32), *value)?;
+                    }
+                }
+                if let Some(val) = next.return_value {
+                    process.write_register(register_id::GPR_BASE, val)?;
+                }
+                let jni_opt = process.jni_env.clone();
+                if let Some(jni) = jni_opt {
+                    if let Ok(jni_guard) = jni.read() {
+                        let _ = jni_guard.apply_symbolic_memory_taint(&mut process.state.memory);
+                    }
+                }
                 // For continue results, advance PC by 1.
                 let next_pc = address.wrapping_add(1);
                 process.write_pc(next_pc)?;
@@ -3441,9 +3485,9 @@ impl<D: Decoder> Runtime<D> {
     ) -> Result<StepOutcome, RuntimeError> {
         // Bridge ExecutionState → SimState (GPR bridging mirrors
         // `dispatch_simproc`: RAX=0, RCX=1, RDX=2, RBX=3, RSP=4, RBP=5,
-        // RSI=6, RDI=7).
+        // RSI=6, RDI=7, R8..R15).
         let mut sim_state = SimState::new();
-        for index in 0u32..8 {
+        for index in 0u32..16 {
             let reg_id = register_id::GPR_BASE + index;
             if let Ok(val) = process.state.registers.read(reg_id) {
                 let mut buf = [0u8; 8];
@@ -3518,6 +3562,15 @@ impl<D: Decoder> Runtime<D> {
                 for (index, value) in &next.registers {
                     if *index < 8 {
                         process.write_register(register_id::GPR_BASE + (*index as u32), *value)?;
+                    }
+                }
+                if let Some(val) = next.return_value {
+                    process.write_register(register_id::GPR_BASE, val)?;
+                }
+                let jni_opt = process.jni_env.clone();
+                if let Some(jni) = jni_opt {
+                    if let Ok(jni_guard) = jni.read() {
+                        let _ = jni_guard.apply_symbolic_memory_taint(&mut process.state.memory);
                     }
                 }
                 pop_call_return(process)?;
@@ -5004,6 +5057,7 @@ mod tests {
             simproc_instances: BTreeMap::new(),
             redirects: BTreeMap::new(),
             kernel_pool: None,
+            jni_env: None,
             pci_config_address: 0,
             symbols: Vec::new(),
             trace: Vec::new(),

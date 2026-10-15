@@ -62,8 +62,8 @@
 - [ ] **ANG-044**: Minifilter and NDIS network driver environment simulation.
 
 ### Phase S5: Android JNI & Cross-Runtime Symbolic Solving
-- [ ] **ANG-050**: JNI native environment stubbing (`JNIEnv*`, `jobject`, `jstring`, `jbyteArray`).
-- [ ] **ANG-051**: Symbolic taint propagation from Android Java parameters into native C/C++ `.so` functions.
+- [x] **ANG-050**: JNI native environment stubbing (`JNIEnv*`, `jobject`, `jstring`, `jbyteArray`).
+- [x] **ANG-051**: Symbolic taint propagation from Android Java parameters into native C/C++ `.so` functions.
 - [ ] **ANG-052**: Path reachability from exported JNI entry points to native vulnerability sinks.
 
 ### Phase S6: Exploit Primitive Synthesis & Trigger Generation
