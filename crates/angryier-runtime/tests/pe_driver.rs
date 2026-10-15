@@ -636,3 +636,81 @@ fn real_inbox_driver_execution() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// A second PE fixture using CALL rel32 into a local RET, so concrete and
+/// symbolic paths exercise different call forms with the same stack ABI.
+fn direct_call_fixture() -> Vec<u8> {
+    let mut image = driver_image();
+    let mut code = vec![0x90u8; 0x21];
+    // mov eax, 0x42
+    code[..5].copy_from_slice(&[0xB8, 0x42, 0x00, 0x00, 0x00]);
+    // call +0x16: return address entry+0xA, target entry+0x20
+    code[5..10].copy_from_slice(&[0xE8, 0x16, 0x00, 0x00, 0x00]);
+    code[10..13].copy_from_slice(&[0x48, 0x89, 0x01]); // mov [rcx],rax
+    code[13] = 0xC3; // entry returns via driver EXIT_HOOK
+    code[0x20] = 0xC3; // local callable routine
+    image[0x198..0x19c].copy_from_slice(&(code.len() as u32).to_le_bytes());
+    image[0x200..0x200 + code.len()].copy_from_slice(&code);
+    image
+}
+
+#[test]
+fn concrete_and_symbolic_direct_indirect_calls_share_stack_and_return_targets()
+    -> Result<(), Box<dyn std::error::Error>>
+{
+    use angryier_expr::ShardedExprArena;
+    use angryier_runtime::{SymbolicSession, SymbolicStepOutcome};
+    use angryier_types::ExpressionNormalizationVersion;
+
+    for (kind, image) in [
+        ("direct-rel32", direct_call_fixture()),
+        ("indirect-rax-import", driver_image()),
+    ] {
+        let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+        let mut concrete = runtime.load_pe_driver(&image)?;
+        let mut tracking = runtime.load_pe_driver(&image)?;
+        if kind == "indirect-rax-import" {
+            concrete.hook_export_return("ntoskrnl.exe", "DbgPrint", 0x42)?;
+            tracking.hook_export_return("ntoskrnl.exe", "DbgPrint", 0x42)?;
+        }
+
+        let mut expected = Vec::new();
+        for _ in 0..100 {
+            if concrete.terminated {
+                break;
+            }
+            expected.push((
+                concrete.pc()?,
+                concrete.read_register(register_id::GPR_BASE + 4)?,
+            ));
+            runtime.step(&mut concrete)?;
+        }
+        assert!(concrete.terminated, "{kind}: concrete run did not return");
+        assert!(expected.len() > 3, "{kind}: fixture did not exercise a call");
+
+        let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
+        let mut symbolic = SymbolicSession::new(&runtime, &arena, tracking);
+        for (step, (pc, rsp)) in expected.iter().enumerate() {
+            assert_eq!(symbolic.states[0].process.pc()?, *pc,
+                "{kind}: symbolic PC diverged before step {step}");
+            assert_eq!(
+                symbolic.states[0].process.read_register(register_id::GPR_BASE + 4)?,
+                *rsp,
+                "{kind}: symbolic RSP diverged before step {step}"
+            );
+            let _ = symbolic.step_state(0)?;
+        }
+        assert_eq!(
+            symbolic.states[0].process.read_register(register_id::GPR_BASE + 4)?,
+            concrete.read_register(register_id::GPR_BASE + 4)?,
+            "{kind}: mismatched post-return stack"
+        );
+        // Ending at the exit sentinel is a SimProcedure terminal state.
+        assert!(
+            symbolic.states[0].process.terminated
+                || matches!(symbolic.step_state(0), Ok(SymbolicStepOutcome::Terminated)),
+            "{kind}: symbolic run did not terminate"
+        );
+    }
+    Ok(())
+}
