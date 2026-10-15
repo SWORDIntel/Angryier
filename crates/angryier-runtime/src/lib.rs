@@ -2092,6 +2092,10 @@ impl<D: Decoder> Runtime<D> {
                             &import.kind,
                             angryier_loader::PeImportKind::Name(n)
                                 if n == "IsProcessorFeaturePresent"
+                                    || n == "CreateThread"
+                                    || n == "CloseHandle"
+                                    || n == "SetEvent"
+                                    || n == "ResetEvent"
                         );
                     if is_bool_api {
                         &[0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3] // mov eax,1; ret
@@ -7985,33 +7989,39 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                                 best.map(|(_, addr, value)| (addr, value))
                             })
                         });
-                        match (target, cell) {
-                            (None, Some((cell_rsp, cell_value))) => {
-                                state.process.state.fidelity = state
-                                    .process
-                                    .state
-                                    .fidelity
-                                    .record(AnalysisDebtKind::Concretized, pc);
-                                let new_rsp = cell_rsp.wrapping_add(8);
-                                let _ = state
-                                    .process
-                                    .write_register(register_id::GPR_BASE + 4, new_rsp);
-                                state.concrete_registers.insert(register_id::GPR_BASE + 4, new_rsp);
-                                if let Ok(rsp_expr) = self.arena.intern(angryier_expr::ExprNode {
-                                    sort: angryier_expr::ExprSort::BitVec(64),
-                                    op: angryier_expr::ExprOp::Constant,
-                                    operands: Vec::new(),
-                                    immediate: new_rsp.to_le_bytes().to_vec(),
-                                }) {
-                                    state.registers.insert(
-                                        register_id::GPR_BASE + 4,
-                                        (rsp_expr, angryier_ir::IrType::Bits(64)),
-                                    );
-                                }
-                                shadow_desync_recovered = true;
-                                Some(cell_value)
+                        let is_valid_target = target.map(|t| {
+                            (0x140001000..0x1419A3000).contains(&t)
+                                || (0x1437F5000..0x1437F6000).contains(&t)
+                                || (PE_DRIVER_STUB_BASE..PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_SIZE).contains(&t)
+                                || t == EXIT_HOOK
+                        }).unwrap_or(false);
+
+                        if !is_valid_target && let Some((cell_rsp, cell_value)) = cell {
+                            state.process.state.fidelity = state
+                                .process
+                                .state
+                                .fidelity
+                                .record(AnalysisDebtKind::Concretized, pc);
+                            let new_rsp = cell_rsp.wrapping_add(8);
+                            let _ = state
+                                .process
+                                .write_register(register_id::GPR_BASE + 4, new_rsp);
+                            state.concrete_registers.insert(register_id::GPR_BASE + 4, new_rsp);
+                            if let Ok(rsp_expr) = self.arena.intern(angryier_expr::ExprNode {
+                                sort: angryier_expr::ExprSort::BitVec(64),
+                                op: angryier_expr::ExprOp::Constant,
+                                operands: Vec::new(),
+                                immediate: new_rsp.to_le_bytes().to_vec(),
+                            }) {
+                                state.registers.insert(
+                                    register_id::GPR_BASE + 4,
+                                    (rsp_expr, angryier_ir::IrType::Bits(64)),
+                                );
                             }
-                            (target, _) => target,
+                            shadow_desync_recovered = true;
+                            Some(cell_value)
+                        } else {
+                            target
                         }
                     } else {
                         target
@@ -8020,6 +8030,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         eprintln!("JMPIND-DEBUG pc={pc:#x} shadow-desync recovery applied");
                     }
                     if let Some(target) = target {
+                        if matches!(
+                            decoded.form_id,
+                            angryier_semantics_intel64::forms::CALL_INDIRECT_R64
+                                | angryier_semantics_intel64::forms::CALL_INDIRECT_MEM64
+                        ) {
+                            Self::mirror_call_frame(state, self.arena, pc.wrapping_add(u64::from(decoded.length)))?;
+                        }
                         if matches!(
                             decoded.form_id,
                             angryier_semantics_intel64::forms::CALL_INDIRECT_R64

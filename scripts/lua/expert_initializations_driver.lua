@@ -34,6 +34,11 @@ local TAIL_SPECS = {
     { addr = 0x1423E7C00, file = "tail_4_23E7C00.bin" },
     { addr = 0x1423E8000, file = "tail_5_23E8000.bin" },
     { addr = 0x1437E9E00, file = "tail_6_37E9E00.bin" },
+    -- Live Heap slices from diag_1892.dmp:
+    { addr = 0x00690000,  file = "tail_heap_provider.bin" },
+    { addr = 0x05c9a000,  file = "tail_heap_5c9a.bin" },
+    { addr = 0x09417000,  file = "tail_heap_singleton.bin" },
+    { addr = 0x0946b000,  file = "tail_heap_list.bin" },
 }
 
 -- Optional registration-list experiments. Empty preserves dumped globals.
@@ -324,6 +329,13 @@ for _, site in ipairs(sites) do
         site.label, site.hex,
         #indices > 0 and "observed" or "not_observed",
         table.concat(indices, ",")))
+end
+
+if #trace > 0 then
+    print("\n=== Trace Tail (last 15 blocks) ===")
+    for i = math.max(1, #trace - 14), #trace do
+        print(string.format("  [%04d] %s", i, trace[i]))
+    end
 end
 
 local crossed = false
