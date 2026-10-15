@@ -124,3 +124,20 @@
 - [ ] **ANG-102**: Verified Standalone Exploit Emission:
   - Generate standalone, ready-to-compile C exploit code (`exploit_poc.c`) with socket/device trigger and memory payload.
 
+### Phase S11: VM-Aware Analysis, VPC Candidate Identification & Fixpoint MBA Deobfuscation
+- [x] **ANG-110**: Multi-Shape Indirect Jump Table Resolver (`angryier-cfg`):
+  - Multi-shape jump table resolution (indexed `[base+idx*scale+disp]` and PIE `lea; mov; add; jmp`) with predecessor-bound tracking across block splits (`cmp idx, imm; ja default; jmp table[idx]`).
+  - Element-size verification (4/8 bytes), relative table and jump-end relocation candidates, and fail-closed whole-table verification (22 tests).
+- [x] **ANG-111**: Themida Dispatch Classification (`angryier-cfg/themida`):
+  - Data-driven classification informed by 75M-instruction census of `.themida`/`.boot` (`ContextTable`, `Indexed`, `RipSlot`, `RegisterRaw`).
+  - Backward base-register provenance walk tracking `Constant`, `ContextRegister`, `PoppedFromStack`, `DerivedFrom`, and `Clobbered` (7 tests).
+- [x] **ANG-112**: PUSHAN-style VPC Candidate Identification (`angryier-cfg/vpc`):
+  - VPC candidate identification (arXiv 2603.18355, Themida-Research `VM_CONTEXT` randomized offsets) with 4 heuristics (dispatch read, table load, stable-VPC sibling tracking, VMProtect volatile register rotation) plus plain-switch negative control (5 tests).
+- [x] **ANG-113**: Fixpoint MBA Deobfuscation Expression Simplifier (`angryier-expr/deobf`):
+  - Fixpoint MBA simplifier over hash-consed expression DAGs: boolean-arithmetic reductions (`(x|y) + (x&y) = x+y`, `(x|y) - (x&y) = x^y`, `x + ~x = -1`, `x - x = 0`), double-negation elimination, `not(x) = -1 - x` strength reduction, constant XOR chains, and extension compositions (21 tests).
+- [x] **ANG-114**: Runtime & Memory Engine Extensions:
+  - `load_mem` bulk memory loads, `memory_dump_out` emulated memory export, exit state telemetry (`rax_exit`, `exit_pc`, `exit_kind`), `JumpIndirect` ret-form ground truth recovery, and non-executable indirect call return-0 model with debt recording.
+- [x] **ANG-115**: XED Iform Metadata Preservation:
+  - Preserved source-level XED iform metadata across the native bridge (`angryier-arch-xed-ffi`, `angryier-decode-xed`).
+
+
