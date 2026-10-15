@@ -194,12 +194,20 @@ pub fn import_captured_memory(
     }
 
     let mut staged = process.state.memory.clone();
+    // Object IDs are persistent memory-layer identities; a second import
+    // must never reuse the same arbitrary ID for a different captured map.
+    let mut next_object_id = staged.regions().iter().map(|r| r.object.0).max()
+        .unwrap_or(0).checked_add(1)
+        .ok_or_else(|| capture_error("no free memory object identity"))?;
     let mut new_regions = 0usize;
-    for (index, range) in ordered.iter().enumerate() {
+    for range in &ordered {
         let add_region = region_placement(&staged, range.address, range.length)?;
         if add_region {
+            let object = ObjectId(next_object_id);
+            next_object_id = next_object_id.checked_add(1)
+                .ok_or_else(|| capture_error("memory object identity overflow"))?;
             staged = staged.with_region(MemoryRegion {
-                object: ObjectId(0x9000 + index as u64),
+                object,
                 base: range.address,
                 size: range.length,
                 readable: range.readable,
