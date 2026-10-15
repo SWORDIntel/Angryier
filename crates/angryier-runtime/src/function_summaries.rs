@@ -540,6 +540,11 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         let process = self.states.get(index)?;
         if process.process.simproc_hooks.contains_key(&target)
             || process.process.simproc_instances.contains_key(&target)
+            // A PE IAT stub is not a pure function, even when its first
+            // bytes happen to be MOV EAX,1; RET. Its effects belong to the
+            // imported API contract and must reach the runtime fidelity gate
+            // instead of being erased by lazy call summarization.
+            || process.process.pe_import_stubs.contains_key(&target)
         {
             return None;
         }
