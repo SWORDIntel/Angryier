@@ -38,6 +38,7 @@ pub enum VmMaterializationError {
     MultipleWritesToRegister { step: usize, register: u32 },
     MissingBranchEvidence { step: usize },
     SymbolicEvaluation { step: usize, reason: String },
+    UnderconstrainedSemanticDebt { count: u64 },
     Reduction(String),
 }
 
@@ -196,6 +197,13 @@ pub fn materialize_vm_handler(
     let mut guards = Vec::new();
 
     for (step_index, recorded) in capture.steps.iter().enumerate() {
+        match recorded.outcome {
+            crate::StepOutcome::Stepped { pc, next_pc, .. }
+                if pc == recorded.before.native_pc && next_pc == recorded.after.native_pc => {}
+            _ => return Err(VmMaterializationError::InvalidCapture(
+                "recorded execution outcome does not match native transition",
+            )),
+        }
         if recorded.before != capture.footprint.edges[step_index].from
             || recorded.after != capture.footprint.edges[step_index].to
         {
@@ -283,6 +291,11 @@ pub fn materialize_vm_handler(
                 | VmIrEffect::Return | VmIrEffect::Trap { .. } => {}
             }
         }
+    }
+    if evaluator.debt_total() > 0 {
+        return Err(VmMaterializationError::UnderconstrainedSemanticDebt {
+            count: evaluator.debt_total(),
+        });
     }
     if effects.is_empty() && guards.is_empty() {
         return Err(VmMaterializationError::InvalidCapture("no effect/guard roots to reduce"));
