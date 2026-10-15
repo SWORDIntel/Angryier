@@ -16,6 +16,8 @@
 //! native XED (behind feature gates) and synthetic decoders for testing.
 
 pub mod import_audit;
+pub mod capture;
+pub mod call_audit;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -5524,6 +5526,37 @@ mod tests {
             import_audit::inspect_imports(&process)[0].behavior,
             import_audit::ImportBehavior::UnsupportedUserland
         );
+        Ok(())
+    }
+
+    #[test]
+    fn audited_simprocedure_return_matches_stack_contract() -> Result<(), RuntimeError> {
+        let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
+        let mut process = minimal_process()?;
+        let region = angryier_memory::MemoryRegion {
+            object: angryier_types::ObjectId(0x81),
+            base: 0x1000,
+            size: 0x10000,
+            readable: true,
+            writable: true,
+            executable: true,
+        };
+        process.state.memory = process.state.memory.with_region(region)
+            .map_err(|error| RuntimeError::Memory(format!("{error:?}")))?;
+        let rsp = 0x8000u64;
+        process.write_register(register_id::GPR_BASE + 4, rsp)?;
+        process.state.memory = process.state.memory
+            .load_concrete(rsp, &0x1040u64.to_le_bytes())
+            .map_err(|error| RuntimeError::Memory(format!("{error:?}")))?;
+        let stub = 0x2000u64;
+        process.write_pc(stub)?;
+        process.stub_function(stub, 0x1337);
+        let audit = runtime.step_audited(&mut process)?;
+        assert!(matches!(audit.outcome, Ok(StepOutcome::SimProcedure { .. })));
+        assert_eq!(audit.return_validation, call_audit::ReturnValidation::Verified);
+        assert_eq!(audit.before.stack_top, Some(0x1040));
+        assert_eq!(audit.after.pc, 0x1040);
+        assert_eq!(audit.after.rsp, Some(rsp + 8));
         Ok(())
     }
 
