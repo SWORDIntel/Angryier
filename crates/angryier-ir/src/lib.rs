@@ -9,7 +9,7 @@ pub use verify::{BasicIrVerifier, IrVerificationError};
 
 use angryier_types::{Address, BlockId, CodeVersionGuard, ContentId, ExprId, ImageId, TargetProfileId};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IrValueId(pub u32);
 
 /// How a register write relates to the register's parent width.
