@@ -49,6 +49,7 @@ pub struct VmRecordedInstruction {
 
 #[derive(Clone, Debug)]
 pub struct VmHandlerCapture {
+    pub window: VmHandlerWindow,
     /// COW process state from BEFORE the first captured native instruction.
     /// Needed for exact entry-state SSA/expr materialization; never use the
     /// mutated final process or an unrelated load-time entry_state instead.
@@ -174,7 +175,7 @@ impl<D: Decoder> Runtime<D> {
         .map_err(|error| RuntimeError::Environment(format!(
             "VM handler trace validation failed: {error:?}"
         )))?;
-        Ok(VmHandlerCapture { initial_state, steps, footprint })
+        Ok(VmHandlerCapture { window, initial_state, steps, footprint })
     }
 }
 
