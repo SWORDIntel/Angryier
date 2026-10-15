@@ -18,7 +18,7 @@ impl SimProcedure for GetSystemInfoProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let info_ptr = state.get_arg(0);
+        let info_ptr = state.get_win64_arg(0);
         let mut sys_info = vec![0u8; 48];
 
         // wProcessorArchitecture: 9 (PROCESSOR_ARCHITECTURE_AMD64)
@@ -64,7 +64,7 @@ impl SimProcedure for GetVersionExAProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let ver_ptr = state.get_arg(0);
+        let ver_ptr = state.get_win64_arg(0);
         let mut ver = vec![0u8; 148];
 
         // dwOSVersionInfoSize: 148
@@ -95,7 +95,7 @@ impl SimProcedure for GetVersionExWProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let ver_ptr = state.get_arg(0);
+        let ver_ptr = state.get_win64_arg(0);
         let mut ver = vec![0u8; 276];
 
         ver[0..4].copy_from_slice(&276u32.to_le_bytes());
@@ -207,7 +207,7 @@ impl SimProcedure for QueryPerformanceCounterWin32Procedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let count_ptr = state.get_arg(0);
+        let count_ptr = state.get_win64_arg(0);
         if count_ptr != 0 {
             let mut next = state.clone();
             next.write_memory(count_ptr, 10000000u64.to_le_bytes().to_vec());
@@ -229,7 +229,7 @@ impl SimProcedure for QueryPerformanceFrequencyWin32Procedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let freq_ptr = state.get_arg(0);
+        let freq_ptr = state.get_win64_arg(0);
         if freq_ptr != 0 {
             let mut next = state.clone();
             next.write_memory(freq_ptr, 10000000u64.to_le_bytes().to_vec()); // 10 MHz
@@ -336,7 +336,7 @@ impl SimProcedure for CreateEventAProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let initial_state = state.get_arg(2) != 0;
+        let initial_state = state.get_win64_arg(2) != 0;
         let handle = self.handles.alloc_handle(Win32HandleKind::Event {
             signaled: initial_state,
         });
@@ -361,7 +361,7 @@ impl SimProcedure for CreateEventWProcedure {
     }
 
     fn apply(&self, state: &SimState) -> SimResult {
-        let initial_state = state.get_arg(2) != 0;
+        let initial_state = state.get_win64_arg(2) != 0;
         let handle = self.handles.alloc_handle(Win32HandleKind::Event {
             signaled: initial_state,
         });
