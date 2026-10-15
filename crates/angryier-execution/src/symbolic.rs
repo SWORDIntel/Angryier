@@ -535,20 +535,27 @@ impl<'a> SymbolicEvaluator<'a> {
         block: &IrBlock,
         memory: &mut SymbolicSessionMemory,
     ) -> Result<SymbolicBlockSummary, SymbolicEvalError> {
-        self.eval_block_with_memory_values(block, memory)
+        // No per-register trace allocation in the ordinary execution path.
+        self.eval_block_with_memory_inner(block, memory, false)
             .map(|evaluation| evaluation.summary)
     }
 
     /// Evaluate with the same semantics and side effects, additionally
-    /// retaining the producer expressions for this block's SSA values.
-    /// This is a readout of the existing evaluator, NOT a second engine.
-    /// Caller-owned scopes must distinguish identical IrValueId numbers
-    /// in different blocks; control and memory effects still require
-    /// independent replay validation before using a derived summary.
+    /// retaining the producer expressions and ordered register writes for
+    /// this block. This is the opt-in VM-handler analysis path.
     pub fn eval_block_with_memory_values(
         &mut self,
         block: &IrBlock,
         memory: &mut SymbolicSessionMemory,
+    ) -> Result<SymbolicBlockValueTrace, SymbolicEvalError> {
+        self.eval_block_with_memory_inner(block, memory, true)
+    }
+
+    fn eval_block_with_memory_inner(
+        &mut self,
+        block: &IrBlock,
+        memory: &mut SymbolicSessionMemory,
+        trace_register_writes: bool,
     ) -> Result<SymbolicBlockValueTrace, SymbolicEvalError> {
         // Block-local fresh-symbol ids: re-evaluations rebuild identical
         // expressions (see `block_local_symbols`). Fresh symbols stay
@@ -691,12 +698,14 @@ impl<'a> SymbolicEvaluator<'a> {
                     };
                     self.registers.insert(*register, (expression, ty));
                     written_registers.push(*register);
-                    register_writes.push(SymbolicRegisterWriteTrace {
-                        instruction_index,
-                        register: *register,
-                        expression,
-                        ty,
-                    });
+                    if trace_register_writes {
+                        register_writes.push(SymbolicRegisterWriteTrace {
+                            instruction_index,
+                            register: *register,
+                            expression,
+                            ty,
+                        });
+                    }
                     None
                 }
                 IrOp::Branch {
