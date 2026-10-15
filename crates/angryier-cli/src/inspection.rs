@@ -61,6 +61,53 @@ pub fn pe_address(args: &[String]) -> Result<String, String> {
     Ok(output)
 }
 
+/// Resolve the PE import directory to source file/IAT VA evidence. Import
+/// names are *metadata*, not evidence that a kernel/user API was executed.
+pub fn pe_imports(args: &[String]) -> Result<String, String> {
+    if !(1..=2).contains(&args.len()) {
+        return Err("usage: angryier pe-imports <image.exe> [substring]".to_string());
+    }
+    use angryier_loader::{ImageLoader, Pe32Loader, PeImportKind};
+    let bytes = std::fs::read(&args[0])
+        .map_err(|e| format!("cannot open PE: {e}"))?;
+    let map = PeAddressMap::parse(&bytes)
+        .map_err(|e| format!("PE address map: {e:?}"))?;
+    let image = Pe32Loader::new().load(&bytes)
+        .map_err(|e| format!("PE import parse: {e}"))?;
+    let imports = image.pe_imports().ok_or("not a PE image")?;
+    let filter = args.get(1).map(|s| s.to_ascii_lowercase());
+    let mut out = format!(
+        "image_base=0x{:x} imports={}\n", map.image_base(), imports.len()
+    );
+    let mut displayed = 0usize;
+    for entry in imports {
+        let symbol = match &entry.kind {
+            PeImportKind::Name(name) => name.clone(),
+            PeImportKind::Ordinal(ordinal) => format!("#{ordinal}"),
+        };
+        let qualified = format!("{}!{}", entry.dll, symbol);
+        if filter.as_ref().is_some_and(|query| !qualified.to_ascii_lowercase().contains(query)) {
+            continue;
+        }
+        let slot = map.rva_to_va(entry.iat_rva)
+            .map_err(|e| format!("IAT RVA overflow: {e:?}"))?;
+        let offset = match map.locate_rva(entry.iat_rva) {
+            Ok(PeLocation::Header { file_offset } | PeLocation::Section { file_offset, .. }) => {
+                format!("0x{file_offset:x}")
+            }
+            Ok(PeLocation::ZeroFill { .. }) => "no-file-byte".to_string(),
+            Err(_) => "unmapped".to_string(),
+        };
+        out.push_str(&format!("slot=0x{slot:x} rva=0x{:x} file_offset={offset} import={qualified}\n", entry.iat_rva));
+        displayed += 1;
+        if displayed > 100_000 {
+            return Err("too many imports to display safely".to_string());
+        }
+    }
+    out.push_str(&format!("shown={displayed}"));
+    Ok(out)
+}
+
 pub fn minidump_read(args: &[String]) -> Result<String, String> {
     if args.len() != 3 {
         return Err("usage: angryier dump-read <capture.dmp> <VA> <length<=4096>".to_string());
