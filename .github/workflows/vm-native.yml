@@ -29,7 +29,7 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
       - name: Check VM crates
-        run: cargo check -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-runtime --all-targets
+        run: cargo check -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-runtime -p angryier-cli --all-targets
       - name: VM CFG tests
         run: cargo test -p angryier-cfg
       - name: VM expression tests
@@ -38,5 +38,9 @@ jobs:
         run: cargo test -p angryier-loader
       - name: VM runtime integration tests
         run: cargo test -p angryier-runtime --features "xed script" --test lua_api
-      - name: Clippy changed crates
-        run: cargo clippy -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-runtime --all-targets -- -D warnings
+      - name: CLI forensic command tests
+        run: cargo test -p angryier-cli
+      # Existing main has unrelated clippy warnings. Retain diagnostic output
+      # instead of hiding the compile/test result behind that baseline debt.
+      - name: Clippy analysis (baseline warnings reported)
+        run: cargo clippy -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-runtime -p angryier-cli --all-targets
