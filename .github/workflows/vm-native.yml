@@ -43,4 +43,6 @@ jobs:
       # Existing main has unrelated clippy warnings. Retain diagnostic output
       # instead of hiding the compile/test result behind that baseline debt.
       - name: Clippy analysis (baseline warnings reported)
-        run: cargo clippy -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-runtime -p angryier-cli --lib
+        run: cargo clippy -p angryier-cfg -p angryier-expr -p angryier-loader -p angryier-runtime --lib
+      - name: Clippy forensic CLI
+        run: cargo clippy -p angryier-cli --bin angryier
