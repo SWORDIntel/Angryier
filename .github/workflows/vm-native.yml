@@ -37,12 +37,10 @@ jobs:
         run: cargo test -p angryier-cfg
       - name: VM expression tests
         run: cargo test -p angryier-expr
-      - name: Symbolic SSA readout tests
-        run: cargo test -p angryier-execution producer_expressions_are_exposed
-      - name: VM AngryIR effect tests
-        run: cargo test -p angryier-ir vm_footprint
-      - name: Observed multi-block trace tests
-        run: cargo test -p angryier-ir vm_trace
+      - name: Symbolic/Concolic execution regression suite
+        run: cargo test -p angryier-execution
+      - name: AngryIR effect and trace regression suite
+        run: cargo test -p angryier-ir
       - name: VM loader tests
         run: cargo test -p angryier-loader
       - name: Win32 API and synchronization tests
