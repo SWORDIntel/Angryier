@@ -41,6 +41,44 @@ replace the existing concolic/symbolic engine.
    existing `deobf` simplifier, and reports source dependencies and node
    counts. Unknown nodes and capacity overruns fail closed.
 
+## AngryIR effect-footprint discovery (experimental)
+
+`angryier_ir::vm_footprint::collect_vm_ir_effects` now collects an
+**instruction-order-preserving syntactic footprint** from a verified, single
+AngryIR block. It discovers register writes (including partial parent-register
+updates), ordered memory writes, memory reads even when their result is dead
+(the read may fault), masked-load address/mask dependencies, branches, indirect
+dispatches, direct calls, returns, and explicit traps. It returns the backward
+SSA dependency closure in producer order, including source registers, external
+expression references and memory read results. Invalid IR or exhausted
+instruction/dependency budgets abort the collection without a partial result.
+
+```rust
+use angryier_ir::vm_footprint::{collect_vm_ir_effects, VmIrLimits};
+
+// `ir_block` is one lowered, source-identified AngryIR block.
+let footprint = collect_vm_ir_effects(&ir_block, VmIrLimits::default())?;
+// Consume `footprint.effects` in original order; do not sort stores.
+// `footprint.dependencies` are IR value IDs, NOT ExprIds.
+// `footprint.caveats` prohibits interpreting this as verified semantics.
+```
+
+This collector is deliberately **not** a handler synthesizer. It has no
+cross-block memory SSA, confirmed VPC role, path-condition accumulation,
+Windows process restoration or proof that every architectural exception is
+represented. It marks all primitives for semantic review. Do not discard a
+register write merely because it appears VM-internal; boundary/state evidence
+must justify that decision. In particular, a register write with
+`PreserveParent` implicitly depends on the pre-write parent register.
+
+**Next integration gate:** for a trace with independently established handler
+boundaries and VPC/context values, keep each block's SSA namespace distinct,
+materialize its retained IR values into expression IDs under the recorded
+entry state, and feed ordered, width-qualified effects to
+`angryier_expr::vm_effects::reduce_vm_effects`. Differential replay must
+validate the resulting summary before it can replace native interpreter
+execution. No automatic full Themida devirtualization is implied.
+
 ## Minimal native use
 
 ```rust
