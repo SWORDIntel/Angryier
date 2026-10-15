@@ -19,6 +19,7 @@ use angryier_types::Address;
 pub mod themida;
 pub mod vpc;
 pub mod vm;
+pub mod xrefs;
 
 /// How control leaves a basic block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
