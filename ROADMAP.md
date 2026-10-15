@@ -75,10 +75,9 @@
 ### Phase S7: QIHSE Knowledge DAG & Tool Surface
 - [x] **ANG-070**: Content-addressed persistence: push SMT queries and verification results to QIHSE DAG as `angryier.finding.v1`.
 - [x] **ANG-071**: CLI dispatcher: `kp15ctl symbolic <target> --solve --steps 500 --driver`.
-- [ ] **ANG-072**: Canonical MCP tool endpoints:
-  - `solve_reachability`: Check if target sink address is reachable from given entry point.
-  - `evaluate_branch_steering`: Invert branches along trace to reach alternate targets.
-  - `synthesize_exploit_poc`: Generate verifiable C trigger code for satisfying paths.
+- [x] **ANG-072**: Native Engine Bridge & Automated Pipeline Integration (Supersedes fragmented MCP approach):
+  - Expose native controls for path exploration, sink reachability solving, crash primitive verification, and triage harness generation via `AngryierBridge` and `AutomatedIntakePipeline`.
+  - Full headless programmatic execution via `bridge/engine_bridge.py` and `bin/kp15_intake.py`.
 
 ### Phase S8: angr-Grade OS Environment & SimProcedure Library
 - [ ] **ANG-080**: POSIX Libc SimProcedure Suite (250+ APIs):
