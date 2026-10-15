@@ -315,7 +315,7 @@ pub fn collect_observed_vm_trace(
             Some(IrOp::Trap { .. }) => {
                 return Err(VmTraceError::TrapRequiresExceptionEvidence { step: index });
             }
-            Some(IrOp::Jump { .. } | IrOp::Call { .. } | IrOp::Branch { .. }) => {}
+            Some(IrOp::Jump { .. } | IrOp::Call { .. }) => {}
             _ => caveats.push(VmTraceCaveat::FallthroughObservedOnly { step: index }),
         }
         edges.push(VmObservedEdge {
