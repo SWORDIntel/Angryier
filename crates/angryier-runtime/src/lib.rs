@@ -582,6 +582,21 @@ impl Process {
         self.terminated = false;
     }
 
+    /// Return an explicit error when a synthetic return-only stub would be
+    /// mistaken for a user-mode Windows API implementation. This helper is
+    /// shared by the native interpreter and full symbolic engine.
+    pub fn unmodeled_import_error(&self, pc: Address) -> Option<RuntimeError> {
+        if self.simproc_instances.contains_key(&pc) || self.redirects.contains_key(&pc) {
+            return None;
+        }
+        let (dll, export) = self.pe_import_stubs.get(&pc)?;
+        (import_audit::classify(dll, export, false)
+            == import_audit::ImportBehavior::UnsupportedUserland)
+            .then(|| RuntimeError::Environment(format!(
+                "unmodeled user-mode import {dll}!{export} at synthetic stub {pc:#x}; no Win32 API effects or worker scheduling occurred"
+            )))
+    }
+
     /// Whether the target is executable in the current mapped address
     /// space, or has an explicit SimProcedure/exit hook. No per-application
     /// address constants: mappings and hook registrations are authoritative.
@@ -2442,18 +2457,9 @@ impl<D: Decoder> Runtime<D> {
         // This includes syscalls, CPUID, SimProcedures and terminating blocks.
         process.record_trace_pc(pc);
 
-        // A native RET-only IAT stub does not implement Windows userland API
-        // side effects. Refuse to invent successful thread/event/file/graphics
-        // operations. Explicit analyst-installed models remain permitted and
-        // are separately identifiable through import_audit::inspect_imports.
-        if let Some((dll, export)) = process.pe_import_stubs.get(&pc)
-            && !process.simproc_instances.contains_key(&pc)
-            && import_audit::classify(dll, export, false)
-                == import_audit::ImportBehavior::UnsupportedUserland
-        {
-            return Err(RuntimeError::Environment(format!(
-                "unmodeled user-mode import {dll}!{export} at synthetic stub {pc:#x}; no Win32 API effects or worker scheduling occurred"
-            )));
+        // Identical Win32 API fidelity gate for concrete and symbolic paths.
+        if let Some(error) = process.unmodeled_import_error(pc) {
+            return Err(error);
         }
 
         // Control-flow redirects: divert execution to target PC before SimProcedure
@@ -5573,6 +5579,25 @@ mod tests {
     }
 
     #[test]
+    fn imported_userland_api_guard_applies_to_symbolic_and_concrete_modes() -> Result<(), RuntimeError> {
+        let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
+        let mut process = minimal_process()?;
+        let stub = 0x7000_0000_4140u64;
+        process.pe_import_stubs.insert(
+            stub, ("kernel32.dll".to_string(), "CreateThread".to_string()),
+        );
+        process.write_pc(stub)?;
+        let arena = SymbolicArena::new(angryier_types::ExpressionNormalizationVersion(1));
+        let mut session = SymbolicSession::new(&runtime, &arena, process.clone());
+        let outcome = session.step_state(0);
+        assert!(matches!(outcome, Err(RuntimeError::Environment(ref message)) if message.contains("CreateThread")));
+        assert!(matches!(runtime.step(&mut process), Err(RuntimeError::Environment(ref message)) if message.contains("CreateThread")));
+        process.stub_function(stub, 0x1234);
+        assert!(process.unmodeled_import_error(stub).is_none());
+        Ok(())
+    }
+
+    #[test]
     fn audited_simprocedure_return_matches_stack_contract() -> Result<(), RuntimeError> {
         let runtime = Runtime::new(SyntheticDecoder::new(), SemanticVersion(1), TargetProfileId(1));
         let mut process = minimal_process()?;
@@ -7049,6 +7074,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             if let Some(state) = self.states.get_mut(index) {
                 state.process.record_trace_pc(pc);
             }
+        }
+
+        // A symbolic interpreter must not bypass the same import fidelity
+        // gate that concrete Runtime::step enforces. Previous runs decoded
+        // a synthetic MOV EAX,1 / RET here and silently lost worker effects.
+        if let Some(error) = self.states[index].process.unmodeled_import_error(pc) {
+            return Err(error);
         }
 
         // Loop summarization: a summarized header with concrete inputs
