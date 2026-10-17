@@ -15,7 +15,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use angryier_arch::{DecodedInstruction, MemoryBase, MemoryOperand, OperandKind, RegisterId};
 use angryier_expr::deobf::deobfuscate;
@@ -64,6 +64,11 @@ pub enum PruningAction {
         removed_target: Address,
         kind: OpaquePredicateKind,
     },
+    /// Purges a disconnected, unreachable dead basic block and its outgoing edges.
+    PurgeDeadBlock {
+        block_address: Address,
+        instruction_count: usize,
+    },
     /// Merges predecessor and successor when dead branch is removed.
     StraightenBlocks {
         predecessor: Address,
@@ -107,6 +112,22 @@ pub struct PruningReport {
     pub straightened_blocks: usize,
     /// Number of overlapping junk sequences neutralized.
     pub neutralized_junk: usize,
+    /// Number of unreachable dead basic blocks purged from the CFG.
+    pub purged_dead_blocks: usize,
+    /// Number of outgoing/dangling edges purged along with dead blocks.
+    pub purged_dead_edges: usize,
+    /// Initial basic block count before de-spaghettification.
+    pub initial_blocks: usize,
+    /// Final basic block count after de-spaghettification.
+    pub final_blocks: usize,
+    /// Initial edge count before de-spaghettification.
+    pub initial_edges: usize,
+    /// Final edge count after de-spaghettification.
+    pub final_edges: usize,
+    /// Initial natural loop count before de-spaghettification.
+    pub initial_loops: usize,
+    /// Final natural loop count after de-spaghettification.
+    pub final_loops: usize,
     /// All detected opaque predicates and junk patterns.
     pub detected: Vec<DetectedOpaquePredicate>,
     /// Exact sequence of transformations applied.
@@ -811,9 +832,15 @@ impl OpaquePredicateDetector {
     }
 }
 
-/// Prunes detected opaque predicates and overlapping junk code from the CFG.
+/// Prunes detected opaque predicates, overlapping junk code, and unreachable dead
+/// subgraphs from the CFG, straightening resulting linear block chains to fixpoint.
 pub fn prune_opaque_predicates(cfg: &mut ControlFlowGraph, limits: PruningLimits) -> PruningReport {
-    let mut report = PruningReport::default();
+    let mut report = PruningReport {
+        initial_blocks: cfg.blocks.len(),
+        initial_edges: cfg.edges.len(),
+        initial_loops: cfg.loops().len(),
+        ..Default::default()
+    };
     let detector = OpaquePredicateDetector::new();
     let mut total_instructions_scanned = 0usize;
 
@@ -860,7 +887,16 @@ pub fn prune_opaque_predicates(cfg: &mut ControlFlowGraph, limits: PruningLimits
                 }
         }
 
-        // 3. Straighten basic block pairs where branch was pruned
+        // 3. Purge unreachable dead blocks & their outgoing edges (collapsing fake diamonds and bogus loops)
+        let (purged_blocks, purged_edges) = purge_unreachable_blocks(cfg);
+        if !purged_blocks.is_empty() || purged_edges > 0 {
+            report.purged_dead_blocks += purged_blocks.len();
+            report.purged_dead_edges += purged_edges;
+            report.actions.extend(purged_blocks);
+            pass_changed = true;
+        }
+
+        // 4. Straighten basic block pairs where branch or incoming dead edge was pruned
         if report.straightened_blocks < limits.max_blocks_straightened {
             let max_straighten = limits.max_blocks_straightened - report.straightened_blocks;
             let straightened = straighten_all_blocks(cfg, max_straighten);
@@ -876,7 +912,71 @@ pub fn prune_opaque_predicates(cfg: &mut ControlFlowGraph, limits: PruningLimits
         }
     }
 
+    report.final_blocks = cfg.blocks.len();
+    report.final_edges = cfg.edges.len();
+    report.final_loops = cfg.loops().len();
     report
+}
+
+/// Purges all basic blocks (and their outgoing/incoming edges) that are
+/// unreachable from `cfg.entry`.
+pub fn purge_unreachable_blocks(cfg: &mut ControlFlowGraph) -> (Vec<PruningAction>, usize) {
+    if cfg.blocks.is_empty() || !cfg.blocks.contains_key(&cfg.entry) {
+        return (Vec::new(), 0);
+    }
+
+    let mut reachable = BTreeSet::new();
+    let mut worklist = VecDeque::new();
+    reachable.insert(cfg.entry);
+    worklist.push_back(cfg.entry);
+
+    while let Some(block_addr) = worklist.pop_front() {
+        let Some(block) = cfg.blocks.get(&block_addr) else {
+            continue;
+        };
+        for succ in cfg.successors(block) {
+            if cfg.blocks.contains_key(&succ) && reachable.insert(succ) {
+                worklist.push_back(succ);
+            }
+        }
+    }
+
+    let dead_addrs: Vec<Address> = cfg
+        .blocks
+        .keys()
+        .copied()
+        .filter(|addr| !reachable.contains(addr))
+        .collect();
+
+    if dead_addrs.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let mut dead_insn_addrs = BTreeSet::new();
+    let mut actions = Vec::with_capacity(dead_addrs.len());
+
+    for &dead_addr in &dead_addrs {
+        dead_insn_addrs.insert(dead_addr);
+        if let Some(dead_block) = cfg.blocks.remove(&dead_addr) {
+            for insn in &dead_block.instructions {
+                dead_insn_addrs.insert(insn.address);
+            }
+            actions.push(PruningAction::PurgeDeadBlock {
+                block_address: dead_addr,
+                instruction_count: dead_block.instructions.len(),
+            });
+        }
+    }
+
+    let dead_set: BTreeSet<Address> = dead_addrs.into_iter().collect();
+    let edges_before = cfg.edges.len();
+    cfg.edges.retain(|edge| {
+        !dead_insn_addrs.contains(&edge.from)
+            && !edge.to.is_some_and(|to| dead_set.contains(&to))
+    });
+    let purged_edges = edges_before.saturating_sub(cfg.edges.len());
+
+    (actions, purged_edges)
 }
 
 /// Eliminates a dead branch in `cfg` at `block_addr` based on `pred`.
@@ -1076,18 +1176,32 @@ pub fn straighten_all_blocks(cfg: &mut ControlFlowGraph, max_merges: usize) -> V
             break;
         };
 
+        // Neutralize any unconditional jump at the end of P that jumped to S
+        // so no branch instruction remains in the middle of the merged block.
+        if let Some(seam_insn) = p_block.instructions.last_mut()
+            && seam_insn.form_id == forms::JMP_REL32
+        {
+            seam_insn.form_id = forms::NOP;
+            seam_insn.operands.clear();
+        }
+
+        let s_insn_addrs: BTreeSet<Address> = s_block.instructions.iter().map(|i| i.address).collect();
+
         p_block.instructions.extend(s_block.instructions);
-        p_block.end = s_block.end;
+        p_block.end = p_block.end.max(s_block.end);
         p_block.terminator = s_block.terminator;
 
         let p_last_addr = p_block.instructions.last().map(|i| i.address).unwrap_or(p_addr);
 
         // Remove the edge P -> S
-        cfg.edges.retain(|e| !(e.to == Some(s_addr)));
+        cfg.edges.retain(|e| e.to != Some(s_addr));
 
-        // Remap outgoing edges that left S so they point from P's terminator
+        // Remap outgoing edges that left S so they point from P's new terminator
         for e in &mut cfg.edges {
-            if e.from == s_addr || (s_block.start..s_block.end).contains(&e.from) {
+            if e.from == s_addr
+                || s_insn_addrs.contains(&e.from)
+                || (s_block.start..s_block.end).contains(&e.from)
+            {
                 e.from = p_last_addr;
             }
         }

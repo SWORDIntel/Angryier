@@ -25,7 +25,7 @@ pub mod xrefs;
 pub type ControlFlowGraph = Cfg;
 pub use opaque::{
     DetectedOpaquePredicate, OpaquePredicateDetector, OpaquePredicateKind, PruningAction,
-    PruningLimits, PruningReport, prune_opaque_predicates,
+    PruningLimits, PruningReport, prune_opaque_predicates, purge_unreachable_blocks,
 };
 
 /// How control leaves a basic block.
@@ -103,6 +103,15 @@ pub struct Cfg {
 }
 
 impl Cfg {
+    /// De-spaghettifies this CFG in-place by neutralizing mid-instruction junk
+    /// overlaps, eliminating invariant opaque predicate branches, purging all
+    /// unreachable dead basic blocks and bogus edges (breaking fake diamonds
+    /// and bogus loops), and straightening single-successor/single-predecessor
+    /// basic block chains to fixpoint.
+    pub fn de_spaghettify(&mut self, limits: opaque::PruningLimits) -> opaque::PruningReport {
+        opaque::prune_opaque_predicates(self, limits)
+    }
+
     /// Returns the successors of `block` reachable via static edges.
     pub fn successors(&self, block: &BasicBlock) -> Vec<Address> {
         let last = block.instructions.last().map(|insn| insn.address);
@@ -123,9 +132,16 @@ impl Cfg {
         if self.blocks.contains_key(&insn) {
             return Some(insn);
         }
+        if let Some(exact) = self
+            .blocks
+            .values()
+            .find(|bl| bl.instructions.iter().any(|i| i.address == insn))
+        {
+            return Some(exact.start);
+        }
         self.blocks
             .values()
-            .filter(|bl| (bl.start..bl.end).contains(&insn) || bl.instructions.iter().any(|i| i.address == insn))
+            .filter(|bl| (bl.start..bl.end).contains(&insn))
             .map(|bl| bl.start)
             .max()
     }

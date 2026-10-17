@@ -1884,6 +1884,21 @@ impl<D: Decoder> Runtime<D> {
         })
     }
 
+    /// Recovers a bounded CFG window and de-spaghettifies it in-place by
+    /// neutralizing overlapping junk instructions, pruning invariant opaque
+    /// predicate branches, purging unreachable dead subgraphs, and
+    /// straightening linear basic block chains.
+    pub fn de_spaghettify_cfg_window(
+        &self,
+        process: &Process,
+        entry: Address,
+        max_bytes: u64,
+    ) -> Result<(angryier_cfg::Cfg, angryier_cfg::PruningReport), RuntimeError> {
+        let mut cfg = self.recover_cfg_window(process, entry, max_bytes)?;
+        let report = cfg.de_spaghettify(angryier_cfg::PruningLimits::default());
+        Ok((cfg, report))
+    }
+
     /// Analyze native VM-dispatch candidates within a bounded executable
     /// window. This opt-in scan does not claim virtual-PC recovery or execute
     /// any discovered indirect target; confidence is structural only.
@@ -1893,7 +1908,7 @@ impl<D: Decoder> Runtime<D> {
         entry: Address,
         max_bytes: u64,
     ) -> Result<angryier_cfg::vm::VmDispatchReport, RuntimeError> {
-        let cfg = self.recover_cfg_window(process, entry, max_bytes)?;
+        let (cfg, _) = self.de_spaghettify_cfg_window(process, entry, max_bytes)?;
         Ok(angryier_cfg::vm::inspect_native_cfg(&cfg))
     }
 
