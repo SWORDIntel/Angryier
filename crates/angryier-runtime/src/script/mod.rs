@@ -31,6 +31,8 @@
 
 use angryier_expr::ExprArena;
 use angryier_loader::ImageLoader;
+use angryier_memory::{ByteValue, LayeredMemory};
+use crate::{PE_DRIVER_STUB_BASE, PE_DRIVER_STUB_SIZE};
 use mlua::{Lua, Table, Value};
 
 /// Default instruction-step budget for `angry.run` (`opts.steps`). Shared
@@ -505,8 +507,14 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // executable pages are never relaxed.
     let uc_memory_armed = opts.get::<bool>("uc_memory").unwrap_or(false);
     let uc_write_ro = opts.get::<bool>("uc_write_ro").unwrap_or(false);
+    let uc_drop_exec = opts.get::<bool>("uc_drop_exec_write").unwrap_or(true);
     if uc_memory_armed {
-        process.state.memory = process.state.memory.with_uc_memory().with_uc_write_ro(uc_write_ro);
+        process.state.memory = process
+            .state
+            .memory
+            .with_uc_memory()
+            .with_uc_write_ro(uc_write_ro)
+            .with_uc_drop_exec_write(uc_drop_exec);
     }
     // Every clone/fork of the armed memory shares one debt ledger, so this
     // probe — cloned before the process moves into the session — reports the
@@ -672,34 +680,53 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     if let Ok(tbl) = opts.get::<Table>("stubs") {
         for pair in tbl.pairs::<Value, Value>() {
             let (k, v) = pair?;
-            let (addr, ret_val) = if let Some(addr) = utils::parse_lua_u64(&k) {
-                let ret = match v {
-                    Value::Table(entry) => entry
-                        .get::<Value>("ret")
-                        .or_else(|_| entry.get::<Value>("value"))
-                        .ok()
-                        .and_then(|v| utils::parse_lua_u64(&v))
-                        .unwrap_or(0),
-                    _ => utils::parse_lua_u64(&v).unwrap_or(0),
-                };
-                (addr, ret)
-            } else if let Value::Table(entry) = v {
-                let a = entry.get::<Value>("addr").ok().and_then(|v| utils::parse_lua_u64(&v));
-                let r = entry
+            let ret_val = match &v {
+                Value::Table(entry) => entry
                     .get::<Value>("ret")
                     .or_else(|_| entry.get::<Value>("value"))
                     .ok()
                     .and_then(|v| utils::parse_lua_u64(&v))
-                    .unwrap_or(0);
-                if let Some(addr) = a {
-                    (addr, r)
-                } else {
-                    continue;
+                    .unwrap_or(0),
+                _ => utils::parse_lua_u64(&v).unwrap_or(0),
+            };
+
+            let addrs = if let Some(addr) = utils::parse_lua_u64(&k) {
+                let mut list = vec![addr];
+                if let Ok(bytes) = session.states[0].process.state.memory.read(addr, 8) {
+                    let mut buf = [0u8; 8];
+                    for (i, b) in bytes.iter().enumerate() {
+                        if let ByteValue::Concrete(val) = b {
+                            buf[i] = *val;
+                        }
+                    }
+                    let ptr = u64::from_le_bytes(buf);
+                    if ptr >= PE_DRIVER_STUB_BASE && ptr < PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_SIZE {
+                        list.push(ptr);
+                    }
                 }
+                list
+            } else if let Value::String(s) = &k
+                && let Ok(name) = s.to_str()
+            {
+                let mut list = Vec::new();
+                for (stub_addr, (dll, export)) in &session.states[0].process.pe_import_stubs {
+                    if export.eq_ignore_ascii_case(name.as_ref()) || format!("{dll}!{export}").eq_ignore_ascii_case(name.as_ref()) {
+                        list.push(*stub_addr);
+                    }
+                }
+                list
+            } else if let Value::Table(entry) = &v
+                && let Ok(a) = entry.get::<Value>("addr")
+                && let Some(addr) = utils::parse_lua_u64(&a)
+            {
+                vec![addr]
             } else {
                 continue;
             };
-            session.states[0].process.stub_function(addr, ret_val);
+
+            for a in addrs {
+                session.states[0].process.stub_function(a, ret_val);
+            }
         }
     }
     if let Ok(tbl) = opts.get::<Table>("redirects") {

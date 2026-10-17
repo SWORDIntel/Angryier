@@ -1308,13 +1308,6 @@ impl LayeredMemory for PersistentMemory {
             Err(MemoryError::PermissionDenied {
                 address: denied,
                 access: MemoryAccessKind::Write,
-            }) if self.uc_memory_armed() && self.uc_write_ro => {
-                self.uc_resolve_ro_write(address, bytes, denied)?;
-                self.write_materialized_in_place(address, bytes, true)
-            }
-            Err(MemoryError::PermissionDenied {
-                address: denied,
-                access: MemoryAccessKind::Write,
             }) if self.uc_memory_armed() && self.uc_drop_exec_write && self.exec_region_contains(denied)? => {
                 // Executable target: a store here would clobber code. Drop
                 // the store and record the hit — reported debt, never a
@@ -1323,6 +1316,13 @@ impl LayeredMemory for PersistentMemory {
                     ledger.record_hit(UcMemoryOp::WriteExec, denied, Self::page_base(denied));
                 }
                 return Ok(());
+            }
+            Err(MemoryError::PermissionDenied {
+                address: denied,
+                access: MemoryAccessKind::Write,
+            }) if self.uc_memory_armed() && self.uc_write_ro => {
+                self.uc_resolve_ro_write(address, bytes, denied)?;
+                self.write_materialized_in_place(address, bytes, true)
             }
             Err(MemoryError::AddressOverflow) if self.uc_memory_armed() => {
                 if let Some(mut ledger) = self.uc_ledger() {

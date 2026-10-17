@@ -36,8 +36,8 @@ local ENTRY_PC = tonumber(os.getenv("ANGRY_ENTRY")) or 0x1405E1044
 
 local ADDR_GDI_CALL   = 0x1405E1043
 local ADDR_GDI_CONT   = 0x1405E1049
-local ADDR_TARGET_WIN = 0x1405E3BBC -- mov bl, 1 (SUCCESS)
-local ADDR_TARGET_ERR = 0x1405E3B82 -- mov ecx, 29h (status 41 abort)
+local ADDR_TARGET_WIN = tonumber(os.getenv("ANGRY_FIND")) or 0x1405E3B6C -- mov bl, 1 (SUCCESS)
+local ADDR_TARGET_ERR = tonumber(os.getenv("ANGRY_AVOID")) or 0x1405E3B82 -- mov ecx, 29h (status 41 abort)
 
 local TAIL_SPECS = {
     { addr = 0x142142000, file = "tail_1_2142000.bin" },

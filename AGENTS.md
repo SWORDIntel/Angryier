@@ -2,7 +2,6 @@
 
 <!-- START: RELATIVE_PATHS_RULE -->
 ## Path Resolution Policy
-> **CRITICAL RULE**: Never use absolute paths (e.g. `/home/...`, `/fast/home/...`).
-> All paths must be strictly relative or dynamically resolved across all projects, configurations, code, scripts, subagents, and tools.
-> Use relative paths (`./`, `../`), `PROJECT_ROOT`, `$(dirname ...)`, `Path(__file__)`, or dynamic environment variables with relative fallbacks.
+- **Development & Design Phase**: Absolute paths (e.g., `/home/john/...`) and standard tool pathing are fully permitted.
+- **Appliance Deployment Tooling**: Code and scripts intended for deployment inside the Proxmox VM (VM 9212 / appliance runtime) should use dynamic resolution (`Path(__file__).resolve().parent`, `$(dirname "$0")`, or relative paths) to ensure portability across VM environments.
 <!-- END: RELATIVE_PATHS_RULE -->
