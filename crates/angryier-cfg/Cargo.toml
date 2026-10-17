@@ -7,6 +7,7 @@ description = "Intel 64 control-flow graph recovery over decoded instructions"
 
 [dependencies]
 angryier-arch = { path = "../angryier-arch" }
+angryier-expr = { path = "../angryier-expr" }
 angryier-semantics-intel64 = { path = "../angryier-semantics-intel64" }
 angryier-types = { path = "../angryier-types" }
 

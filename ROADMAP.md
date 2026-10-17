@@ -139,5 +139,9 @@
   - `load_mem` bulk memory loads, `memory_dump_out` emulated memory export, exit state telemetry (`rax_exit`, `exit_pc`, `exit_kind`), `JumpIndirect` ret-form ground truth recovery, and non-executable indirect call return-0 model with debt recording.
 - [x] **ANG-115**: XED Iform Metadata Preservation:
   - Preserved source-level XED iform metadata across the native bridge (`angryier-arch-xed-ffi`, `angryier-decode-xed`).
+- [x] **ANG-116**: Opaque Predicate & Overlapping Junk-Code Pruner (`angryier-cfg/opaque`):
+  - Invariant algebraic predicate detection: parity product $x \cdot (x \pm 1) \equiv 0 \pmod 2$, domain bounds $x^2 \ge 0$, bitwise ordering $(x \mid y) \ge (x \ \& \ y)$, identity comparisons ($x \oplus x = 0$, $cmp\ r, r$), MBA double-negation simplifications, and context register invariants (`[rsi + disp]`).
+  - Overlapping junk-code stripper: detects and neutralizes mid-instruction `0xE8` (call over junk) and `0xEB 0xFF` (overlapping jump to target + 1).
+  - Graph transformations: `EliminateDeadBranch`, `StraightenBlocks`, `NeutralizeJunkOverlap` with true-negative dynamic branch preservation (10 tests).
 
 

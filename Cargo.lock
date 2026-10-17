@@ -60,6 +60,7 @@ version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-arch-xed-ffi",
+ "angryier-expr",
  "angryier-loader",
  "angryier-runtime",
  "angryier-semantics-intel64",

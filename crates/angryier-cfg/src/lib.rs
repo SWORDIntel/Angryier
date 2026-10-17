@@ -16,10 +16,17 @@ use angryier_arch::{DecodedInstruction, Decoder, OperandKind};
 use angryier_semantics_intel64::forms;
 use angryier_types::Address;
 
+pub mod opaque;
 pub mod themida;
 pub mod vm;
 pub mod vpc;
 pub mod xrefs;
+
+pub type ControlFlowGraph = Cfg;
+pub use opaque::{
+    DetectedOpaquePredicate, OpaquePredicateDetector, OpaquePredicateKind, PruningAction,
+    PruningLimits, PruningReport, prune_opaque_predicates,
+};
 
 /// How control leaves a basic block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

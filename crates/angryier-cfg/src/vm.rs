@@ -257,7 +257,8 @@ impl VmAnalysisSession {
     /// Context-collapsed view for a downstream decompiler. This is a union of
     /// observed possibilities, not a complete CFG or an equivalence proof.
     pub fn projected_edges(&self) -> Vec<VmProjectedEdge> {
-        let mut edges: BTreeMap<((Address, Address), (Address, Address)), u64> = BTreeMap::new();
+        type VmLocationPair = (Address, Address);
+        let mut edges: BTreeMap<(VmLocationPair, VmLocationPair), u64> = BTreeMap::new();
         for ((from, to), evidence) in &self.edges {
             let location = ((from.native_pc, from.virtual_pc), (to.native_pc, to.virtual_pc));
             let count = edges.entry(location).or_default();
