@@ -349,5 +349,5 @@ Comprehensive guides are available in the [`docs/`](docs/) directory:
 
 ## License
 
-This project is licensed under the **SWORD Restricted Source Licence v1.0 (SRSL-1.0)**. Non-commercial use is permitted under its terms; commercial exploitation requires a separate written agreement. See [LICENSE](LICENSE).
+This project is licensed under the **SWORD Restricted Source Licence v1.1 (SRSL-1.1)**. Non-commercial use is permitted under its terms; commercial exploitation requires a separate written agreement. See [LICENSE](LICENSE) and [licensing notes](docs/SRSL_MIGRATION.md). Previously distributed SRSL-1.0 copies retain their prior valid permissions. Dependencies retain their own licences.
 
