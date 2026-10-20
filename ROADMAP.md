@@ -152,7 +152,7 @@
 
 ### Phase S12: Go Binary Metadata Recovery & Source-Backed Runtime Tracing
 
-**Trigger / user case (2026-10-20):** Tracing feature-flag routing inside a stripped Go language-server executable required an external `pclntab` parser despite Angryier already having ELF loading, bounded CFG recovery, and source-backed xrefs. Goal: make Go binaries first-class static-analysis targets, integrated with the existing native Rust pipeline rather than bolting on another tracer. **Status: planned, not implemented.**
+**Trigger / user case (2026-10-20):** Tracing feature-flag routing inside a stripped Go language-server executable required an external `pclntab` parser despite Angryier already having ELF loading, bounded CFG recovery, and source-backed xrefs. Goal: make Go binaries first-class static-analysis targets, integrated with the existing native Rust pipeline rather than bolting on another tracer. **Status: planned, not implemented. Execution deferred to the tail of the program (owner direction 2026-10-20): scheduled after the exploit-synthesis, multi-arch, and engine-integration lanes; see master ROADMAP §1 next-up order.**
 
 - [ ] **ANG-120 — Native Go image identification and versioned metadata discovery** (`angryier-loader`):
   - Detect Go binaries in ELF, PE and Mach-O when supported by the underlying image loader; report actual loader limitations instead of assuming all three formats work.
