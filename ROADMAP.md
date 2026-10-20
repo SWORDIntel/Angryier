@@ -150,4 +150,47 @@
   - Overlapping junk-code stripper: detects and neutralizes mid-instruction `0xE8` (call over junk) and `0xEB 0xFF` (overlapping jump to target + 1).
   - Graph transformations: `EliminateDeadBranch`, `StraightenBlocks`, `NeutralizeJunkOverlap` with true-negative dynamic branch preservation (10 tests).
 
+### Phase S12: Go Binary Metadata Recovery & Source-Backed Runtime Tracing
 
+**Trigger / user case (2026-10-20):** Tracing feature-flag routing inside a stripped Go language-server executable required an external \`pclntab\` parser despite Angryier already having ELF loading, bounded CFG recovery, and source-backed xrefs. Goal: make Go binaries first-class static-analysis targets, integrated with the existing native Rust pipeline rather than bolting on another tracer. **Status: planned, not implemented.**
+
+- [ ] **ANG-120 — Native Go image identification and versioned metadata discovery** (\`angryier-loader\`):
+  - Detect Go binaries in ELF, PE and Mach-O when supported by the underlying image loader; report actual loader limitations instead of assuming all three formats work.
+  - Extract and validate \`.go.buildinfo\` / Go build information, compiler version, module path, dependency/module versions, build settings and build IDs when present.
+  - Locate \`pclntab\` using section metadata and structurally validated, bounded fallbacks for stripped or sectionless images; locate/associate \`moduledata\` only when evidence permits. Handle PIE/image base/load-bias translation and file-offset-versus-VA conversions explicitly.
+  - Use version-specific schemas and tested magic/layout variants; unsupported Go versions and malformed structures return typed \`UnsupportedVersion\` / \`ParseError\` with partial evidence, never guessed names or addresses. No unbounded scans, allocations, offsets or pointer arithmetic.
+
+- [ ] **ANG-121 — Recover the Go function and source map** (\`angryier-loader\` with reusable metadata view):
+  - Parse function entry PCs, function names, packages, boundaries, \`pcfile\`/\`pcln\` source mappings and inline-call metadata where validated for the detected version; normalize recovered symbols into a typed function index **without treating them as ELF \`.symtab\` entries**.
+  - Detect Go ABI wrappers, methods, closures, compiler-generated functions and runtime functions; mark uncertain entries and overlapping/invalid ranges.
+  - Work on statically linked, stripped binaries with no \`.symtab\`; compare results against trusted Go toolchain outputs on unstripped fixtures, and verify stripped/unstripped entry-PC parity.
+
+- [ ] **ANG-122 — Go-aware whole-program call graph and xrefs** (\`angryier-cfg\` / \`xrefs\`):
+  - Seed bounded CFG recovery at recovered Go function starts; resolve direct calls and return caller/callee lists with instruction-address provenance.
+  - Add evidence-carrying references from strings, constant addresses and metadata to functions and source lines. Track package boundaries and link-time dead-code elimination without inventing missing callers.
+  - Represent interface/itab dispatch, function values, method wrappers, closures, reflection, plugin/dynamic loading, and goroutine creation as separately classified *possible* edges. Promote an indirect edge to *resolved* only after concrete, trace, or sound static evidence; preserve \`Unresolved\` for unknown dispatch.
+  - Keep existing \`XrefIndex\` semantics intact: metadata edges and inferred dynamic targets must **not** be misrepresented as source-backed direct calls.
+
+- [ ] **ANG-123 — Go runtime/ABI-aware analysis bridge** (\`angryier-runtime\` / \`angryier-execution\`):
+  - Recognize supported Go internal/cross-call ABI variants, register/stack parameter placement, compiler-generated stack-growth checks, goroutine scheduling, panic/defer/recover, and common runtime helpers.
+  - Model or summarize these constructs only when contracts are defensible. Mark unsupported runtime versions, architectures and indirect concurrency behavior as \`model_debt\` / \`AnalysisOutcome::Unknown\`; never infer execution reachability from static call-graph connectivity alone.
+  - First delivery is reliable x86-64 static tracing. AArch64 metadata parsing can be independent, but executable semantics remain gated on ANG-023 / ANG-090.
+
+- [ ] **ANG-124 — Generic library initialization, value-flow and feature-flag tracing**:
+  - Trace package \`init\` functions and call sites through client creation/configuration, flag reads and consumers, with bounded interprocedural backward/forward slicing across arguments, return values, globals, interfaces and wrapper functions.
+  - Provide library-neutral call/constant/name matching, with \`github.com/Unleash/unleash-client-go/v4\` as a regression fixture: identify initialization, flag evaluation, key/default/fallback flows and conditional consumers.
+  - Keep *distinct instances and trust domains* distinct (e.g. an extension stub/null client versus the language server's embedded Go client); do not conflate identical flag strings with shared runtime state or assume a flag was enabled.
+  - Produce an evidence chain of file offset/VA -> function/package -> call/data xref -> flag consumer/branch, with per-edge \`Direct | Inferred | Unresolved\` provenance and explicit trace gaps.
+
+- [ ] **ANG-125 — Native CLI and machine-readable results** (\`angryier-cli\`):
+  - Planned read-only commands: \`angryier go info <binary>\`, \`angryier go funcs <binary> [--match PATTERN]\`, \`angryier go callers <binary> <function>\`, and \`angryier go trace <binary> --match unleash [--format json]\`. Names are proposed API, not presently available commands.
+  - Emit deterministic JSONL/JSON records (schema \`angryier.go_trace.v1\`) with compiler/build provenance, module identity, function PC/name, exact xrefs, discovery method, confidence/evidence type, unsupported gaps and truncation/timeout bounds.
+  - Integrate stable artifacts with existing QIHSE content addressing and KEYSTONE indexing; retain original image hash and source-backed address evidence. No claim of proven feature-flag behavior without validated execution.
+
+- [ ] **ANG-126 — Differential fixtures, safety gates and acceptance tests**:
+  - Create hermetic x86-64 Go samples with pinned toolchain versions covering multiple supported metadata layouts, ELF stripped/unstripped and PIE/non-PIE; add PE/Mach-O only once loader support is verified. Include an interface-call negative control, inlined function, method wrapper, closure, goroutine, and feature-flag consumer.
+  - Compare function names/start PCs/source maps against \`go tool nm\` / \`go tool objdump\` where available and known symbols on stripped counterparts; diff direct-call evidence against decoded ground truth. Require zero invented direct edges on negative controls.
+  - Fuzz malformed/truncated \`pclntab\`, forged magic/version, corrupted varints/offsets, huge claimed counts and overlapping function ranges. Hard bounds on memory, scan time and recursion; no panics or unsafe parser code.
+  - **Delivery gate:** from a stripped Go language-server fixture, locate the embedded Unleash client, report its initialization and flag-evaluation call sites, return all statically supported consumer chains, and explicitly label every unresolved interface/data-flow gap. Reproducible output with identical hashes across runs.
+
+**Delivery order:** ANG-120 -> ANG-121 -> ANG-122 -> ANG-125 (useful static tracer) -> ANG-123/124 (runtime-aware slicing) -> ANG-126 final release gate. A minimal read-only tracing workflow should not block on full Go runtime symbolic modeling. Cross-reference: Phase S0/S3/S7 loader, CFG, source-backed xref, execution and knowledge-plane contracts.
