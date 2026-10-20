@@ -60,16 +60,18 @@
 - [x] **ANG-042**: BYOVD vulnerability checkers: detection of arbitrary physical memory mapping (`MmMapIoSpace`), physical section mapping (`ZwMapViewOfSection`), and arbitrary MSR read/write.
 - [x] **ANG-043**: Memory corruption bug detectors: Double Free (DF), Use-After-Free (UAF), and integer buffer overflow detection.
 - [ ] **ANG-044**: Minifilter and NDIS network driver environment simulation.
-- [ ] **ANG-045**: **Kernel Entry-Point Contracts & State Templates (`entry_context.py`)**:
+- [x] **ANG-045**: **Kernel Entry-Point Contracts & State Templates (`entry_context.py`)**:
   - Initial-state contracts for `dispatch` (IRP non-NULL, valid `IO_STACK_LOCATION`, `PASSIVE_LEVEL`, concretized GS base cookie).
   - `ioctl_handler` contract: symbolic `IoControlCode` with buffer length bounds ($\le 64\,\text{KiB}$) to avoid 64-bit solver path blowup.
   - `dpc` contract: `DISPATCH_LEVEL` IRQL constraint where paged memory access triggers simulated `IRQL_NOT_LESS_OR_EQUAL` bugchecks.
   - `work_item` and `completion_routine` contracts with explicit gap reporting (`IRP.RequestorMode`, unconstrained extension state) in findings metadata.
-- [ ] **ANG-046**: **Tier-1/2/3 Kernel API SimProcedure Models & Effect Contracts (`kernel_api_models.py`)**:
+  - **Delivered (2026-10-19)**: `bridge/entry_context.py` (schema `angryier.entry_context.v1`) — `dispatch` (incl. concretized GS base + kernel cookie), `ioctl_handler` (symbolic IoControlCode, both buffer lengths ≤ 0x10000 with declared false-negative gap), `dpc` (DISPATCH_LEVEL + bugcheck rule 0x0A), `work_item`, `completion_routine`; 16 explicit gaps surfaced as `model_debt`, fail-closed `EntryContract.validate()`. 53/53 tests in `tests/test_angryier_entry_context_kernel_models.py`. Engine-bridge wiring deferred to the ANG-072 integration pass.
+- [x] **ANG-046**: **Tier-1/2/3 Kernel API SimProcedure Models & Effect Contracts (`kernel_api_models.py`)**:
   - WDK-audited structure offset table (`KERNEL_OFFSETS_V1`) for x64 `IRP` and `IO_STACK_LOCATION`.
   - Tier-1 sound primitives: `ExAllocatePoolWithTag`/`ExAllocatePool2` with OOM `NULL` return modeling; `ExFreePool` pointer poisoning for double-free/UAF detection; `KeAcquireSpinLock`/`KeReleaseSpinLock` shadow IRQL modulation; `RtlCopyMemory` symbolic bounds checking.
   - Tier-2 NTSTATUS dichotomy approximations (`ZwOpenKey`, `ZwQueryValueKey` branching on `{STATUS_SUCCESS, STATUS_OBJECT_NAME_NOT_FOUND}`).
   - Tier-3 auditable NOPs (`DbgPrint`, `RtlInitUnicodeString`) recorded in `model_provenance` so abstractions are never silent.
+  - **Delivered (2026-10-19)**: `bridge/kernel_api_models.py` (schema `angryier.kernel_models.v1`) — `KERNEL_OFFSETS_V1` x64 `_IRP`/`_IO_STACK_LOCATION` layouts with per-field provenance; Tier-1 pool/spinlock/copy models (OOM `NULL`, byte-exact pointer poisoning for double-free/UAF flags, shadow IRQL modulation, symbolic `RtlCopyMemory` bounds); Tier-2 NTSTATUS dichotomies with missing-status debt; Tier-3 audited NOPs all present in `model_provenance`. Known divergence flagged for wiring-time reconciliation: native `KernelBuildIrpProcedure` writes `StackCount`/`CurrentLocation` at +0x53/+0x54 vs public WDK x64 +0x42/+0x43. 53/53 tests (shared suite above).
 
 ### Phase S5: Android JNI & Cross-Runtime Symbolic Solving
 - [x] **ANG-050**: JNI native environment stubbing (`JNIEnv*`, `jobject`, `jstring`, `jbyteArray`).
@@ -78,7 +80,8 @@
 
 ### Phase S6: Exploit Primitive Synthesis & Trigger Generation
 - [x] **ANG-060**: Concrete model extraction: extraction of satisfying assignments (`uint64_t` registers, memory buffer bytes).
-- [ ] **ANG-061**: Standalone C trigger generator (`poc.c`): emit ready-to-compile exploit harnesses targeting Windows `CreateFile` + `DeviceIoControl`.
+- [x] **ANG-061**: Standalone C trigger generator (`poc.c`): emit ready-to-compile exploit harnesses targeting Windows `CreateFile` + `DeviceIoControl`.
+  - **Delivered (2026-10-19)**: `bridge/trigger_generator.py` (schema `angryier.trigger.v1`) — self-contained deterministic `poc.c` emission with IOCTL/buffer-size defines, hex-dumped payloads, full error checking; ingestion adapters for solver models, legacy escalation results, ANG-073 verdict witnesses, and replay capsules; unrecovered payload bytes only emit behind `emit_unknown_payload=True` as labeled placeholders; advisory banner (trigger harness, not exploitability claim); live `gcc -fsyntax-only -Wall -Wextra` check passing. 48 tests in `tests/test_angryier_trigger_generator.py`.
 - [ ] **ANG-062**: Automated write-what-where exploit primitive synthesis: proving arbitrary pointer dereference write bounds.
 - [ ] **ANG-063**: ROP chain constraint validation: verifying stack pivot and gadget sequence constraints via SMT.
 
@@ -88,23 +91,26 @@
 - [x] **ANG-072**: Native Engine Bridge & Automated Pipeline Integration (Supersedes fragmented MCP approach):
   - Expose native controls for path exploration, sink reachability solving, crash primitive verification, and triage harness generation via `AngryierBridge` and `AutomatedIntakePipeline`.
   - Full headless programmatic execution via `bridge/engine_bridge.py` and `bin/kp15_intake.py`.
-- [ ] **ANG-073**: **Engine-Agnostic Escalation Contract & 6-Verdict Taxonomy (`escalation_contract.py`)**:
+- [x] **ANG-073**: **Engine-Agnostic Escalation Contract & 6-Verdict Taxonomy (`escalation_contract.py`)**:
   - Implement standardized `EscalationRequest` $\to$ `EscalationVerdict` JSONL protocol for automated escalation from static findings to symbolic reachability.
   - Strict 6-category verdict taxonomy: `FEASIBLE_VALIDATED` (witness confirmed by concrete replay), `INFEASIBLE_CLOSED` (provably closed within step/recursion bounds), `NO_WITNESS_FOUND` (budget exhausted, frontier open), `MODEL_LIMITED`, `DECODE_ERROR`, `TIMEOUT`.
   - Enforce the Never-Safe Invariant: `is_safe = False` on all non-feasible/unknown outcomes; timeouts never translate to safety.
+  - **Delivered (2026-10-19)**: `bridge/escalation_contract.py` (schema `angryier.escalation.v1`) — fail-closed `validate()` (FEASIBLE requires 3/3 clean-room replay witness + concrete model; INFEASIBLE_CLOSED stays `is_safe=False` as bounds-relative), JSONL stream pipeline, and `classify_legacy_escalation()` adapter that honestly downgrades legacy "SAT" to `NO_WITNESS_FOUND` with debt. 47 tests in `tests/test_angryier_escalation_contract.py`.
 
 ### Phase S8: angr-Grade OS Environment & SimProcedure Library
-- [ ] **ANG-080**: POSIX Libc SimProcedure Suite (250+ APIs):
+- [x] **ANG-080**: POSIX Libc SimProcedure Suite (250+ APIs):
   - Memory management: `malloc`, `calloc`, `realloc`, `free` with symbolic heap chunk tracking and double-free/UAF assertions.
   - String and memory routines: `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `memcpy`, `memmove`, `memset`, `sprintf`, `snprintf`.
   - File I/O & descriptors: `open`, `read`, `write`, `close`, `lseek`, `stat`, `fstat` with symbolic file content backing.
   - Network sockets: `socket`, `bind`, `connect`, `send`, `recv`, `select`, `poll`.
   - Concurrency: `pthread_create`, `pthread_mutex_lock`, `pthread_mutex_unlock`.
-- [ ] **ANG-081**: Win32 Userland API Environment Simulation:
+  - **Delivered (verified 2026-10-19)**: `crates/angryier-models/src/posix/` (`heap.rs` tracked symbolic heap with double-free/invalid-free/UAF assertions, `string.rs`, `io.rs` virtual descriptor table and socket models, `process.rs`, `mod.rs`). Cross-reference: master `ROADMAP.md` Phase 16, **KP15-150** (delivery claimed with these paths).
+- [x] **ANG-081**: Win32 Userland API Environment Simulation:
   - Memory & execution: `VirtualAlloc`, `VirtualProtect`, `HeapCreate`, `HeapAlloc`, `CreateThread`.
   - File & device: `CreateFileA/W`, `ReadFile`, `WriteFile`, `DeviceIoControl`.
   - Registry: `RegOpenKeyExA/W`, `RegQueryValueExA/W`.
   - Dynamic linking: `LoadLibraryA/W`, `GetProcAddress`.
+  - **Delivered (verified 2026-10-19)**: `crates/angryier-models/src/win32/` (`memory.rs` virtual memory/heap manager, `file.rs` handle table and file subsystem, `device.rs` `DeviceIoControl` IPC, `registry.rs` registry hive simulation, `module.rs` dynamic loading, `system.rs` system/thread/synchronization, `mod.rs`). Cross-reference: master `ROADMAP.md` Phase 16, **KP15-151** (delivery claimed with these paths).
 
 ### Phase S9: Multi-Architecture Symbolic Execution
 - [ ] **ANG-090**: AArch64 (ARM64) Symbolic Execution Engine:
