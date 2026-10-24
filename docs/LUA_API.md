@@ -161,7 +161,9 @@ When `entry` is overridden, `angry.run` monitors the exit state of the primary p
 - `report.exit_kind`: String classification:
   - `"sentinel_ret"`: Clean function return via the synthetic `[rsp]` sentinel frame (`0xDEADBEEF0000`).
   - `"other"`: Trapped, faulted, or stopped at an unmapped location.
+- `report.rax_exit_hex` / `report.exit_pc_hex`: exact 16-digit `_hex`-convention strings for the same values — kernel-mode exits live above `i64::MAX`, where the numeric forms are float-lossy; scripts must prefer these.
 - `report.entry_rsp` / `report.entry_rsp_hex`: Initial stack pointer after sentinel setup.
+- `report.elapsed_ms`: Wall-clock milliseconds for the exploration phase of this campaign (load time is not included — see `img:stats()` for load-vs-run cost).
 
 #### Traces & Solver Solutions
 - `report.trace`: Array of 64-bit integer addresses representing executed basic blocks.
@@ -182,6 +184,36 @@ Under-constrained relaxations are tracked honestly in the result table:
 - `report.unsupported_sites`: Array of `{ pc, form }`.
 
 ---
+
+### 4.3 Prepared Image: Load-Once Bulk Campaigns (`angry.prepare`)
+
+`angry.run` reads and parses the image on every call — for unpacked
+multi-hundred-MB kernels that is minutes per job. `angry.prepare` performs
+the load exactly once per process and hands back a `PreparedImage` whose
+per-job campaigns start from a pristine copy-on-write clone of the template
+(milliseconds, image pages `Arc`-shared and resident).
+
+```lua
+local img = angry.prepare("/path/driver.sys")  -- opts: dynamic, unsupported
+local r1 = img:run({ entry = 0x140001000, regs = { rcx_hex = "0xffff800000001000" }, steps = 400 })
+local r2 = img:run({ entry = 0x140002000, steps = 400 })  -- same image, fresh state
+local s = img:stats()  -- { load_ms, jobs, run_ms_total, last_run_ms, avg_run_ms, is_pe, image_regions }
+```
+
+* `img:run(opts) -> report` accepts the **complete** `angry.run` option
+  surface and returns the **same** report table shape. Isolation invariants:
+  each job gets its own entry sentinel frame, register seeds, symbolic
+  marks, kernel-pool tracker (alloc/free/double-free accounting never
+  crosses campaigns), UC-memory debt ledger, and unsupported-form
+  fallthrough debt. Nothing mutable survives between jobs.
+* `img:run_batch(jobs, [batch_opts]) -> { { ok, report?, error? }, ... }`
+  runs an array of per-job opts tables on a **native in-process worker
+  pool** (`batch_opts.threads`, default logical CPUs). One image load, N
+  worker threads, ordered results — the same isolation as sequential runs.
+  Per-job `unsupported` fallthrough is batch-level (pass it to `prepare` or
+  `batch_opts`); per-job debt then aggregates across the batch.
+* `img:stats()` exposes load-vs-run cost so drivers can see where the wall
+  clock goes (and measure the load-once win directly).
 
 ## 5. Interactive Session Controller (`angry.open` / `LuaSession`)
 
@@ -208,10 +240,23 @@ Under-constrained relaxations are tracked honestly in the result table:
 - `s:step_until(target_pc, [max_steps]) -> (string, number)`: Steps iteratively until the active state reaches `target_pc` or `max_steps` is exceeded. Returns `(outcome, steps_taken)`.
 
 ### 5.3 State Pool Management
+
+- `s:reset([opts])` — rebuilds the **whole symbolic session** from the
+  pristine post-load template (fresh states, constraints, ids, debt
+  ledgers) and re-applies options. One image load serves arbitrarily many
+  fresh campaigns per process; hook/breakpoint registrations persist, and
+  stale `LuaState` handles from the previous generation fail lookup
+  explicitly.
+- `s:spawn_state(opts)` — alias of `s:reset` with a mandatory opts table.
 - `s:states()` / `s:states_count() -> number`: Number of currently alive states.
 - `s:dead_count() -> number`: Number of terminated / dead states.
 - `s:active_index([new_idx]) -> number`: Gets or sets the 0-based index of the active state.
 - `s:select_state(idx) -> boolean`: Selects the state at index `idx` as active.
+- `s:spawn_state(opts) -> ()`: Rebuilds a fresh process + session from the retained image
+  bytes (one image load per process). Accepts the per-job options `entry`, `uc_memory`,
+  `uc_write_ro`, `uc_drop_exec_write`, `zero_low_pages`; an `entry` override also pushes
+  the `EXIT_HOOK` sentinel frame so a returning function terminates cleanly. Replaces all
+  live/dead states and resets the active index; hooks and breakpoints persist.
 - `s:state([idx]) -> LuaState`: Returns a `LuaState` handle for state `idx` (defaults to active state).
 - `s:dead_state(idx) -> LuaState`: Returns a `LuaState` handle for dead state `idx`.
 
@@ -263,7 +308,7 @@ The following read accessors query the state's register file, process memory, co
 
 ## 7. Architecture Guide: `angry.run` vs `angry.open`
 
-| Decision Axis | Use `angry.run` | Use `angry.open` |
+| Decision Axis | Use `angry.run` | Use `angry.prepare` / `img:run` | Use `angry.open` |
 |---|---|---|
 | **Primary Goal** | Find target reachability, exploit solving, fuzzing handoff | Step-by-step tracing, function behavioral profiling |
 | **Execution Control** | Automated exploration worklist (BFS/DFS) | Custom scheduling loop with manual `s:step()` |

@@ -30,9 +30,6 @@
 //! the `_hex` form. Documented for downstream hosts in `docs/DEPLOYMENT.md`.
 
 use angryier_expr::ExprArena;
-use angryier_loader::ImageLoader;
-use angryier_memory::{ByteValue, LayeredMemory};
-use crate::{PE_DRIVER_STUB_BASE, PE_DRIVER_STUB_SIZE};
 use mlua::{Lua, Table, Value};
 
 /// Default instruction-step budget for `angry.run` (`opts.steps`). Shared
@@ -318,6 +315,8 @@ pub const POOL_PREALLOC_CAP: usize = 64;
 #[cfg(feature = "xed")]
 pub mod session;
 #[cfg(feature = "xed")]
+pub mod prepared;
+#[cfg(feature = "xed")]
 pub mod state;
 pub mod utils;
 
@@ -340,460 +339,180 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
         "open",
         lua.create_function(|_, (path, opts): (String, Option<Table>)| open_session(&path, opts.as_ref()))?,
     )?;
+    #[cfg(feature = "xed")]
+    lib.set(
+        "prepare",
+        lua.create_function(|_, (path, opts): (String, Option<Table>)| {
+            prepared::PreparedImage::load(&path, opts.as_ref())
+        })?,
+    )?;
     lib.set("version", lua.create_function(|_, ()| Ok(env!("CARGO_PKG_VERSION")))?)?;
     lua.globals().set("angry", lib)?;
     Ok(())
 }
 
-fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
-    let bytes = std::fs::read(path).map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
-    let mut runtime =
-        crate::Runtime::with_native_xed(angryier_types::SemanticVersion(1), angryier_types::TargetProfileId(1));
-    // Opt-in unsupported-form fallback: `unsupported = "fallthrough"` trades
-    // exactness on unmodeled forms (privileged hints like CLI/STI, RDMSR,
-    // HLT — dense in kernel images) for reachability, with every fallback
-    // hit reported back in the result table as fidelity debt.
-    let unsupported_fallback = if opts.get::<String>("unsupported").ok().as_deref() == Some("fallthrough") {
-        let fallback = std::sync::Arc::new(angryier_semantics_intel64::UnsupportedFallthrough::new());
-        runtime.registry.set_unsupported_fallback(
-            std::sync::Arc::clone(&fallback) as std::sync::Arc<dyn angryier_semantics::SemanticProvider>
-        );
-        Some(fallback)
-    } else {
-        None
-    };
-    let use_dynamic = opts.get::<bool>("dynamic").unwrap_or(false);
-    // Format dispatch: an MZ magic means PE32+, which loads in driver mode
-    // (sections mapped, IAT resolved to import stubs, DriverEntry entry
-    // state) — the driver-campaign path. `dynamic` is an ELF-only option.
+/// Shared process preparation for both `angry.run` and `angry.open` respawns:
+/// load the image, apply the under-constrained memory policies, then apply
+/// the entry override WITH the `EXIT_HOOK` sentinel frame (an entered
+/// function has no caller — its `ret` lands on `0xDEADBEEF0000` and the
+/// session terminates cleanly instead of walking garbage).
+pub(crate) fn prep_process_for_session<D: crate::Decoder>(
+    runtime: &crate::Runtime<D>,
+    opts: Option<&Table>,
+    bytes: &[u8],
+) -> mlua::Result<crate::Process> {
     let is_pe = bytes.len() > 1 && bytes[0] == b'M' && bytes[1] == b'Z';
-    // Driver-mode PE loads get the kernel pool model: allocators hand out
-    // fresh pointers, frees are tracked with caller capture, and
-    // double-free events surface in `r.kernel`.
-    let kernel_pool = if is_pe {
-        Some(std::sync::Arc::new(angryier_models::KernelPoolTracker::new()))
-    } else {
-        None
-    };
-    let mut process = if is_pe {
+    let process = if is_pe {
         runtime
-            .load_pe_driver(&bytes)
-            .map_err(|e| mlua::Error::external(format!("load_pe_driver: {e:?}")))?
-    } else if use_dynamic {
-        runtime
-            .load_elf_dynamic(&bytes, &[])
-            .map_err(|e| mlua::Error::external(format!("load_elf_dynamic: {e:?}")))?
+            .load_pe_driver(bytes)
+            .or_else(|_| runtime.load_pe(bytes))
+            .map_err(|e| mlua::Error::external(format!("load_pe: {e:?}")))?
     } else {
         runtime
-            .load_elf(&bytes)
+            .load_elf(bytes)
             .map_err(|e| mlua::Error::external(format!("load_elf: {e:?}")))?
     };
-    // Exact addresses of `pool_prealloc` seeded blocks, hoisted so the
-    // result-table emission below can surface them after the run.
-    let mut pool_prealloc: Vec<u64> = Vec::new();
-    if let (Some(tracker), runtime_any) = (&kernel_pool, &runtime) {
-        // Bind INTERNAL pool routines before attach: a kernel image calls
-        // its own ExAllocatePool*/ExFreePool* exports via direct calls, not
-        // imports — resolve the export table and hand the addresses to the
-        // tracker so attach installs per-address hooks. Export VAs are
-        // preferred-base VAs; driver-mode PE loads map at the preferred
-        // base (no relocations applied).
-        if let Ok(image) = angryier_loader::Pe32Loader::new().load(&bytes) {
-            for name in crate::KERNEL_POOL_ALLOC_NAMES {
-                if let Some(va) = image.export_address(name) {
-                    tracker.bind_internal_address(va, angryier_models::PoolRoutine::Alloc);
-                }
-            }
-            for name in crate::KERNEL_POOL_FREE_NAMES {
-                if let Some(va) = image.export_address(name) {
-                    tracker.bind_internal_address(va, angryier_models::PoolRoutine::Free);
-                }
-            }
-        }
-        if let Err(e) = runtime_any.attach_kernel_pool_model(&mut process, tracker.clone()) {
-            return Err(mlua::Error::external(format!("attach_kernel_pool_model: {e:?}")));
-        }
-        // Pool pre-seeding (`pool_prealloc = n`): mint n tracked pool
-        // blocks through the SAME fresh-pointer path the allocator
-        // SimProcedure uses, BEFORE the run. A structured-entry probe can
-        // then pin a symbolic pointer argument to one of these exact
-        // addresses (`regs = { rcx_hex = ... }`), so the pool tracker sees
-        // a tracked allocation instead of a uc-fabricated zero page and a
-        // genuine double-free validates against a real block. Each seeded
-        // block is recorded as an allocation (honest `allocs` count) and
-        // the exact addresses surface in the result's `pool_prealloc`
-        // table as `_hex`-convention strings (the pool base is above
-        // i64::MAX — numeric forms would be float-lossy there).
-        if let Ok(n) = opts.get::<usize>("pool_prealloc") {
-            for _ in 0..n.min(POOL_PREALLOC_CAP) {
-                let ptr = tracker.fresh_pointer();
-                tracker.record_alloc();
-                pool_prealloc.push(ptr);
-            }
-        }
+    match opts {
+        Some(opts) => apply_process_opts(process, opts),
+        None => Ok(process),
     }
+}
 
-    // Entry override: start execution at an arbitrary address instead of
-    // the image entry (DriverEntry). Driver-campaign requests target
-    // dispatch routines, which DriverEntry never calls — analysis of those
-    // paths requires entering the handler directly (under-constrained
-    // execution; the caller seeds IRP-shaped symbolic arguments).
-    if let Ok(entry) = opts.get::<i64>("entry")
-        && entry > 0
+/// Applies the process-level options — under-constrained memory policies
+/// and the entry override with the `EXIT_HOOK` sentinel frame — to an
+/// already-loaded process. Shared by [`prep_process_for_session`] and
+/// `LuaSession:reset`, where the options re-apply to a fresh
+/// copy-on-write clone of the session's pristine template (milliseconds,
+/// no image re-parse).
+pub(crate) fn apply_process_opts(
+    mut process: crate::Process,
+    opts: &Table,
+) -> mlua::Result<crate::Process> {
     {
-        process
-            .write_pc(entry as u64)
-            .map_err(|e| mlua::Error::external(format!("entry override: {e:?}")))?;
-        // Push the exit sentinel: an entry-overridden function has no
-        // caller frame, so its `ret` (and a SimProcedure's pop) would
-        // otherwise read stale stack and land in unmapped padding.
-        let rsp = process
-            .read_register(crate::register_id::GPR_BASE + 4)
-            .map_err(|e| mlua::Error::external(format!("entry rsp: {e:?}")))?;
-        process.state.memory = process
-            .state
-            .memory
-            .load_concrete(rsp.wrapping_sub(8), &crate::EXIT_HOOK.to_le_bytes())
-            .map_err(|e| mlua::Error::external(format!("entry frame: {e:?}")))?;
-        process
-            .write_register(crate::register_id::GPR_BASE + 4, rsp.wrapping_sub(8))
-            .map_err(|e| mlua::Error::external(format!("entry rsp set: {e:?}")))?;
-        process.hook_simproc(crate::EXIT_HOOK, "exit");
-    }
-
-    // Function-entry RSP after the override (sentinel retaddr at [rsp]):
-    // stack-passed args live at [rsp+8], [rsp+0x10], ... — surfaced so
-    // structured-entry scripts can poke/symbolize exact argument slots.
-    let entry_rsp = process
-        .read_register(crate::register_id::GPR_BASE + 4)
-        .map_err(|e| mlua::Error::external(format!("entry rsp probe: {e:?}")))?;
-    // Under-constrained memory guard (opt-in, debt-recorded): map the low
-    // 64 KiB as zeroed RAM so reads/writes through NULL-adjacent garbage
-    // pointers behave as zero pages instead of faulting. Standard UC-SymEX
-    // relaxation — paths taken under zeroed guesses are candidates for
-    // review, and callers must surface the relaxation in verdict
-    // provenance. Never changes executable mappings.
-    if opts.get::<bool>("zero_low_pages").unwrap_or(false) {
-        let region = angryier_memory::MemoryRegion {
-            object: angryier_types::ObjectId(0),
-            base: 0,
-            size: 0x1_0000,
-            readable: true,
-            writable: true,
-            executable: false,
-        };
-        if let Ok(m) = process.state.memory.with_region(region) {
-            process.state.memory = m.load_concrete(0, &vec![0u8; 0x1_0000]).unwrap_or(m);
-        }
-    }
-
-    // Opt-in under-constrained memory (`uc_memory = true`, default OFF —
-    // exact current behavior): unmapped reads return zero bytes and unmapped
-    // writes allocate the page zero-backed on demand, so reads/writes
-    // through under-constrained pointers (uninitialized caller frames,
-    // garbage RBP chains) stop killing the state. Every relaxed hit is
-    // debt-recorded (capped + deduplicated, shared across all forks) and
-    // surfaced in the result as `unmapped_total` / `unmapped_sites`; both
-    // the concrete interpreter and the symbolic byte store honor the policy
-    // through the memory layer they share. Mirrors `zero_low_pages` /
-    // `unsupported = "fallthrough"`: relaxation is a deliberate, reported
-    // fidelity debt, never silent.
-    //
-    // `uc_write_ro = true` (default OFF, only meaningful together with
-    // `uc_memory`) additionally relaxes writes into mapped read-only DATA
-    // pages whose current bytes are concrete: the previous bytes land in the
-    // ledger's revert log, the hit is surfaced with `op = "write_ro"` in
-    // `unmapped_sites` and counted in the parallel `ro_write_total`, and
-    // executable pages are never relaxed.
-    let uc_memory_armed = opts.get::<bool>("uc_memory").unwrap_or(false);
-    let uc_write_ro = opts.get::<bool>("uc_write_ro").unwrap_or(false);
-    let uc_drop_exec = opts.get::<bool>("uc_drop_exec_write").unwrap_or(true);
-    if uc_memory_armed {
-        process.state.memory = process
-            .state
-            .memory
-            .with_uc_memory()
-            .with_uc_write_ro(uc_write_ro)
-            .with_uc_drop_exec_write(uc_drop_exec);
-    }
-    // Every clone/fork of the armed memory shares one debt ledger, so this
-    // probe — cloned before the process moves into the session — reports the
-    // whole run's debt even if every state dies.
-    let uc_memory_probe = uc_memory_armed.then(|| process.state.memory.clone());
-
-    // Bulk memory loads from files: `load_mem = { { addr = 0x..., path =
-    // "..." }, ... }` — writes the file's bytes at `addr` (PE virtual-tail
-    // sections, live globals, heap snapshots). Pre-session like `poke`.
-    if let Ok(tbl) = opts.get::<Table>("load_mem") {
-        for pair in tbl.pairs::<Value, Table>() {
-            let (_, entry) = pair?;
-            let addr = entry.get::<i64>("addr")? as u64;
-            let path: String = entry.get("path")?;
-            let bytes = std::fs::read(&path).map_err(|e| mlua::Error::external(format!("load_mem {path}: {e}")))?;
-            let mem = &process.state.memory;
-            process.state.memory = match mem.load_concrete(addr, &bytes) {
-                Ok(m) => m,
-                Err(angryier_memory::MemoryError::Unmapped(_)) if uc_memory_armed => {
-                    let page_base = addr & !0xfff;
-                    let size = ((addr + bytes.len() as u64 + 0xfff) & !0xfff) - page_base;
-                    let region = angryier_memory::MemoryRegion {
-                        object: angryier_types::ObjectId(0),
-                        base: page_base,
-                        size: size as u64,
-                        readable: true,
-                        writable: true,
-                        executable: true,
-                    };
-                    let m = mem.with_region(region).unwrap_or_else(|_| mem.clone());
-                    m.load_concrete(addr, &bytes)
-                        .map_err(|e| mlua::Error::external(format!("load_mem {path}: {e:?}")))?
-                }
-                Err(e) => return Err(mlua::Error::external(format!("load_mem {path}: {e:?}"))),
+        if opts.get::<bool>("zero_low_pages").unwrap_or(false) {
+            let region = angryier_memory::MemoryRegion {
+                object: angryier_types::ObjectId(0),
+                base: 0,
+                size: 0x1_0000,
+                readable: true,
+                writable: true,
+                executable: false,
             };
-        }
-    }
-
-    // The Z3 backend needs a shared arena reader — keep the arena in Arc.
-    let arena = std::sync::Arc::new(angryier_expr::ShardedExprArena::new(
-        angryier_types::ExpressionNormalizationVersion(1),
-    ));
-    let mut session = crate::SymbolicSession::new(&runtime, arena.as_ref(), process);
-    // UC pin fallback rides the same opt as the memory policy: an address
-    // the solver cannot concretize in budget pins to a fabricated page
-    // instead of failing the state.
-    if uc_memory_armed {
-        session = session.with_uc_pin_fallback();
-    }
-
-    // Symbolic register marks: `symbolic = { rdi = 64 }` or `{ "rdi" }`.
-    // The width value is validated — only 64-bit GPR symbols are
-    // supported (see [`SYMBOLIC_GPR_WIDTH`]) — and unknown register names
-    // error instead of being silently skipped.
-    if let Ok(sym) = opts.get::<Table>("symbolic") {
-        for pair in sym.pairs::<Value, Value>() {
-            let (k, v) = pair?;
-            let Some((name, width)) = symbolic_mark_from_pair(&k, &v)? else {
-                continue;
-            };
-            let reg = reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?;
-            session
-                .mark_symbolic(0, reg, angryier_ir::IrType::Bits(width))
-                .map_err(|e| mlua::Error::external(format!("mark_symbolic: {e:?}")))?;
-        }
-    }
-    // Concrete register seeds: `regs = { rcx = 0x..., rdx = 0x... }` —
-    // dispatch-entry drivers get IRP-shaped pointer arguments. Kernel
-    // pointers above i64::MAX travel in the `_hex` string form:
-    // `regs = { rcx_hex = "0xffff8000..." }` (see [`reg_seed_from_pair`]).
-    if let Ok(tbl) = opts.get::<Table>("regs") {
-        for pair in tbl.pairs::<Value, Value>() {
-            let (k, v) = pair?;
-            let Some((reg, value)) = reg_seed_from_pair(&k, &v)? else {
-                continue;
-            };
-            session.states[0]
-                .process
-                .write_register(reg, value)
-                .map_err(|e| mlua::Error::external(format!("regs seed: {e:?}")))?;
-            // The evaluator's execution shadow was seeded from the state's
-            // register file at session construction — a seed that only
-            // touches the process store is erased on the first step (the
-            // shadow re-derives the concrete value). `concrete_registers`
-            // is the seed surface the shadow consults; the session-level
-            // (`open_session`) regs path has always written it.
-            session.states[0].concrete_registers.insert(reg, value);
-        }
-    }
-
-    // Concrete memory pokes: `poke = { { addr = 0x..., value = 0x... }, ... }`
-    // — 8-byte little-endian writes (e.g. IRP.CurrentStackLocation pointing
-    // at a symbolic IO_STACK_LOCATION block).
-    if let Ok(tbl) = opts.get::<Table>("poke") {
-        for pair in tbl.pairs::<Value, Table>() {
-            let (_, entry) = pair?;
-            let addr = entry.get::<i64>("addr")? as u64;
-            let value = entry.get::<i64>("value")? as u64;
-            let bytes = value.to_le_bytes();
-            let mem = &session.states[0].process.state.memory;
-            session.states[0].process.state.memory = match mem.load_concrete(addr, &bytes) {
-                Ok(m) => m,
-                Err(angryier_memory::MemoryError::Unmapped(_)) if uc_memory_armed => {
-                    let page_base = addr & !0xfff;
-                    let region = angryier_memory::MemoryRegion {
-                        object: angryier_types::ObjectId(0),
-                        base: page_base,
-                        size: 0x1000,
-                        readable: true,
-                        writable: true,
-                        executable: true,
-                    };
-                    let m = mem.with_region(region).unwrap_or_else(|_| mem.clone());
-                    m.load_concrete(addr, &bytes)
-                        .map_err(|e| mlua::Error::external(format!("poke: {e:?}")))?
-                }
-                Err(e) => return Err(mlua::Error::external(format!("poke: {e:?}"))),
-            };
-        }
-        session.states[0].memory =
-            angryier_execution::SymbolicSessionMemory::new(session.states[0].process.state.memory.clone());
-    }
-
-    // Symbolic memory: `symbolic_memory = { { addr = 0x..., len = 48 }, ... }`
-    // — byte-granular input symbols (IRP/IO_STACK_LOCATION contents).
-    if let Ok(tbl) = opts.get::<Table>("symbolic_memory") {
-        for pair in tbl.pairs::<Value, Table>() {
-            let (_, entry) = pair?;
-            let addr = entry.get::<i64>("addr")? as u64;
-            let len = entry.get::<i64>("len")? as usize;
-            session
-                .mark_memory_symbolic(0, addr, len)
-                .map_err(|e| mlua::Error::external(format!("symbolic_memory: {e:?}")))?;
-        }
-    }
-
-    // Symbolic argv: `argv = 8` materializes 8 bytes (7 + NUL) into
-    // argv[0]'s stack string.
-    if let Ok(argv_len) = opts.get::<u64>("argv") {
-        session
-            .symbolize_argv0(0, argv_len)
-            .map_err(|e| mlua::Error::external(format!("symbolize_argv0: {e:?}")))?;
-    }
-    // Symbolic files: `files = { "flag.txt" = true }` — openat on those
-    // paths returns a fd whose reads materialize symbolic bytes.
-    if let Ok(files) = opts.get::<Table>("files") {
-        for pair in files.pairs::<Value, Value>() {
-            if let (Value::String(name), Value::Boolean(true)) = pair?
-                && let Ok(p) = name.to_str()
-            {
-                session.states[0].process.symbolic_files.insert(p.to_string());
+            if let Ok(m) = process.state.memory.with_region(region) {
+                process.state.memory = m.load_concrete(0, &vec![0u8; 0x1_0000]).unwrap_or(m);
             }
         }
-    }
-    // Concrete files: `contents = { "flag.txt" = "bytes" }`.
-    if let Ok(files) = opts.get::<Table>("contents") {
-        for pair in files.pairs::<String, String>() {
-            let (name, data) = pair?;
-            session.states[0].process.files.insert(name, data.into_bytes());
+        if opts.get::<bool>("uc_memory").unwrap_or(false) {
+            let uc_write_ro = opts.get::<bool>("uc_write_ro").unwrap_or(false);
+            let uc_drop_exec = opts.get::<bool>("uc_drop_exec_write").unwrap_or(true);
+            process.state.memory = process
+                .state
+                .memory
+                .with_uc_memory()
+                .with_uc_write_ro(uc_write_ro)
+                .with_uc_drop_exec_write(uc_drop_exec);
+        }
+        if let Ok(entry) = opts.get::<i64>("entry")
+            && entry > 0
+        {
+            process
+                .write_pc(entry as u64)
+                .map_err(|e| mlua::Error::external(format!("entry: {e:?}")))?;
+            let rsp = process
+                .read_register(crate::register_id::GPR_BASE + 4)
+                .map_err(|e| mlua::Error::external(format!("entry rsp: {e:?}")))?;
+            process.state.memory = process
+                .state
+                .memory
+                .load_concrete(rsp.wrapping_sub(8), &crate::EXIT_HOOK.to_le_bytes())
+                .map_err(|e| mlua::Error::external(format!("entry frame: {e:?}")))?;
+            process
+                .write_register(crate::register_id::GPR_BASE + 4, rsp.wrapping_sub(8))
+                .map_err(|e| mlua::Error::external(format!("entry rsp set: {e:?}")))?;
+            process.hook_simproc(crate::EXIT_HOOK, "exit");
         }
     }
+    Ok(process)
+}
 
-    if let Ok(tbl) = opts.get::<Table>("stubs") {
-        for pair in tbl.pairs::<Value, Value>() {
-            let (k, v) = pair?;
-            let ret_val = match &v {
-                Value::Table(entry) => entry
-                    .get::<Value>("ret")
-                    .or_else(|_| entry.get::<Value>("value"))
-                    .ok()
-                    .and_then(|v| utils::parse_lua_u64(&v))
-                    .unwrap_or(0),
-                _ => utils::parse_lua_u64(&v).unwrap_or(0),
-            };
+/// Everything one prepared job needs beyond the [`prepared::PreparedImage`]
+/// it was built from: the reused runtime and arena (borrowed), plus the
+/// fresh per-job symbolic session, kernel-pool tracker, and debt probes.
+///
+/// Building this context clones the prepared image's pristine template
+/// process (copy-on-write memory — image pages are `Arc`-shared, never
+/// copied), so per-job construction costs milliseconds even for
+/// multi-hundred-MB images. See `prepared.rs` for the split rationale.
+pub(crate) struct Campaign<'a> {
+    pub(crate) runtime: &'a crate::Runtime<crate::XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>>,
+    pub(crate) arena: std::sync::Arc<angryier_expr::ShardedExprArena>,
+    pub(crate) session: crate::SymbolicSession<'a, crate::XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>>,
+    /// Per-job kernel pool tracker (driver-mode PE loads): a naive clone of
+    /// a prepared process would share one tracker across every campaign and
+    /// merge their alloc/free accounting. Each job gets a fresh tracker
+    /// bound from the cached export map and attached to its own clone.
+    pub(crate) kernel_pool: Option<std::sync::Arc<angryier_models::KernelPoolTracker>>,
+    pub(crate) pool_prealloc: Vec<u64>,
+    /// Per-job unsupported-form fallback: the registry is shared, so the
+    /// fallthrough provider is (re)armed per campaign to keep each run's
+    /// `unsupported_total` / `unsupported_sites` debt snapshot honest.
+    pub(crate) unsupported_fallback: Option<std::sync::Arc<angryier_semantics_intel64::UnsupportedFallthrough>>,
+    pub(crate) uc_memory_probe: Option<angryier_memory::PersistentMemory>,
+    pub(crate) entry_rsp: u64,
+    /// Filled by [`campaign_execute`]: everything the report builder needs
+    /// that only exists after exploration. Produced on a worker thread in
+    /// batch mode and consumed by [`campaign_report`] on the Lua thread.
+    pub(crate) outcome: Option<CampaignOutcome>,
+}
 
-            let addrs = if let Some(addr) = utils::parse_lua_u64(&k) {
-                let mut list = vec![addr];
-                if let Ok(bytes) = session.states[0].process.state.memory.read(addr, 8) {
-                    let mut buf = [0u8; 8];
-                    for (i, b) in bytes.iter().enumerate() {
-                        if let ByteValue::Concrete(val) = b {
-                            buf[i] = *val;
-                        }
-                    }
-                    let ptr = u64::from_le_bytes(buf);
-                    if ptr >= PE_DRIVER_STUB_BASE && ptr < PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_SIZE {
-                        list.push(ptr);
-                    }
-                }
-                list
-            } else if let Value::String(s) = &k
-                && let Ok(name) = s.to_str()
-            {
-                let mut list = Vec::new();
-                for (stub_addr, (dll, export)) in &session.states[0].process.pe_import_stubs {
-                    if export.eq_ignore_ascii_case(name.as_ref()) || format!("{dll}!{export}").eq_ignore_ascii_case(name.as_ref()) {
-                        list.push(*stub_addr);
-                    }
-                }
-                list
-            } else if let Value::Table(entry) = &v
-                && let Ok(a) = entry.get::<Value>("addr")
-                && let Some(addr) = utils::parse_lua_u64(&a)
-            {
-                vec![addr]
-            } else {
-                continue;
-            };
+/// The post-execution half of a campaign: the run report, the policy it ran
+/// under, the solver backend (kept alive for post-run solving), any
+/// execution error (batch jobs capture instead of aborting), and the
+/// exploration wall time.
+pub(crate) struct CampaignOutcome {
+    pub(crate) report: crate::SymbolicRunReport,
+    pub(crate) policy: crate::ExplorationPolicy,
+    /// No solver backend here: Z3 contexts are not `Send`, so the worker
+    /// creates and drops its backend locally, and the report phase rebuilds
+    /// one (only when post-run solving is requested).
+    pub(crate) error: Option<String>,
+    pub(crate) elapsed_ms: u64,
+}
 
-            for a in addrs {
-                session.states[0].process.stub_function(a, ret_val);
-            }
-        }
-    }
-    if let Ok(tbl) = opts.get::<Table>("redirects") {
-        for pair in tbl.pairs::<Value, Value>() {
-            let (k, v) = pair?;
-            let (from_pc, to_pc) = if let Some(from) = utils::parse_lua_u64(&k) {
-                let to = match v {
-                    Value::Table(entry) => entry
-                        .get::<Value>("to")
-                        .or_else(|_| entry.get::<Value>("target"))
-                        .ok()
-                        .and_then(|v| utils::parse_lua_u64(&v)),
-                    _ => utils::parse_lua_u64(&v),
-                };
-                if let Some(target) = to {
-                    (from, target)
-                } else {
-                    continue;
-                }
-            } else if let Value::Table(entry) = v {
-                let from = entry
-                    .get::<Value>("from")
-                    .or_else(|_| entry.get::<Value>("addr"))
-                    .ok()
-                    .and_then(|v| utils::parse_lua_u64(&v));
-                let to = entry
-                    .get::<Value>("to")
-                    .or_else(|_| entry.get::<Value>("target"))
-                    .ok()
-                    .and_then(|v| utils::parse_lua_u64(&v));
-                if let (Some(f), Some(t)) = (from, to) {
-                    (f, t)
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            };
-            session.states[0].process.redirect_control_flow(from_pc, to_pc);
-        }
-    }
-    if let Ok(tbl) = opts.get::<Table>("patches") {
-        for pair in tbl.pairs::<Value, Value>() {
-            let (k, v) = pair?;
-            let (addr, data) = if let Some(addr) = utils::parse_lua_u64(&k) {
-                (addr, v)
-            } else if let Value::Table(entry) = &v {
-                let a = entry.get::<Value>("addr").ok().and_then(|v| utils::parse_lua_u64(&v));
-                let val = entry.get::<Value>("bytes").or_else(|_| entry.get::<Value>("data")).ok();
-                if let (Some(addr), Some(val)) = (a, val) {
-                    (addr, val)
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            };
-            let raw = utils::parse_patch_bytes(data)?;
-            session.states[0]
-                .process
-                .patch_bytes(addr, &raw)
-                .map_err(|e| mlua::Error::external(format!("patch_bytes: {e:?}")))?;
-            session.states[0].memory =
-                angryier_execution::SymbolicSessionMemory::new(session.states[0].process.state.memory.clone());
-        }
-    }
+/// One-shot `angry.run`: loads the image once into a fresh
+/// [`prepared::PreparedImage`] and runs one campaign through the exact same
+/// machinery as `img:run` — the two surfaces cannot drift.
+fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
+    let mut prepared = prepared::PreparedImage::load(path, Some(opts))?;
+    prepared.run(lua, opts)
+}
 
+/// Runs one campaign over a fresh per-job [`Campaign`] and builds the full
+/// Lua report table. Shared by `angry.run` (via [`run_driver`]) and
+/// `PreparedImage:run`; `opts` carries the complete per-campaign option
+/// surface.
+/// Worker-safe campaign plan parsed from an opts table on the Lua thread:
+/// everything a [`campaign_execute`] worker needs, with no Lua types.
+#[derive(Clone, Debug)]
+pub(crate) struct CampaignPlan {
+    pub(crate) find: Vec<u64>,
+    pub(crate) avoid: Vec<u64>,
+    pub(crate) steps: u64,
+    pub(crate) max_states: usize,
+    pub(crate) solve_models: bool,
+    pub(crate) branch_analysis: bool,
+    pub(crate) branch_timeout_ms: u64,
+    pub(crate) fork_on_symbolic: bool,
+    pub(crate) dfs: bool,
+    pub(crate) solver_off: bool,
+    pub(crate) timeout_secs: u64,
+}
+
+/// Parses one campaign's exploration options (`find`, `avoid`, `steps`,
+/// `states`, `solve`, `branch_analysis`, `branch_timeout_ms`,
+/// `exploration`, `search`, `solver`, `timeout_secs`) into a worker-safe
+/// plan. Must run on the Lua thread; the plan itself is thread-safe.
+pub(crate) fn parse_campaign_plan(opts: &Table) -> mlua::Result<CampaignPlan> {
     let find: Vec<u64> = opts
         .get::<Table>("find")
         .map(|t| t.sequence_values::<u64>().flatten().collect())
@@ -822,43 +541,145 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // dives instead of breadth-first.
     let fork_on_symbolic = opts.get::<String>("exploration").ok().as_deref() == Some("fork");
     let dfs = opts.get::<String>("search").ok().as_deref() == Some("dfs");
-    let policy = crate::ExplorationPolicy {
-        find,
-        avoid,
-        fork_on_symbolic,
-        dfs,
-        ..Default::default()
-    };
     // The solver ALWAYS gates forks (`step_state_checked` prunes
     // concretely-infeasible directions as UNSAT). Without it the explorer
     // follows phantom paths — e.g. a NULL-check's impossible side — and
     // crashes deep in driver code that real execution could never reach.
     // `solve = true` only controls model extraction of found states.
-    let mut backend = if opts.get::<String>("solver").ok().as_deref() == Some("off") {
+    let solver_off = opts.get::<String>("solver").ok().as_deref() == Some("off");
+    // Wall budget per run: `timeout_secs` (default 120) bounds the whole
+    // exploration; the report's `timed_out` flag says when it fired.
+    let timeout_secs = opts.get::<u64>("timeout_secs").unwrap_or(DEFAULT_TIMEOUT_SECS);
+    Ok(CampaignPlan {
+        find,
+        avoid,
+        steps,
+        max_states,
+        solve_models,
+        branch_analysis,
+        branch_timeout_ms,
+        fork_on_symbolic,
+        dfs,
+        solver_off,
+        timeout_secs,
+    })
+}
+
+/// Applies the parsed plan and runs the exploration. Lua-free and
+/// worker-thread-safe: batch mode executes one campaign per worker thread
+/// against the shared (Sync) runtime and arena.
+pub(crate) fn campaign_execute(campaign: &mut Campaign<'_>, plan: &CampaignPlan) {
+    let t0 = std::time::Instant::now();
+    let policy = crate::ExplorationPolicy {
+        find: plan.find.clone(),
+        avoid: plan.avoid.clone(),
+        fork_on_symbolic: plan.fork_on_symbolic,
+        dfs: plan.dfs,
+        ..Default::default()
+    };
+    // The backend is thread-local: Z3 contexts are not `Send`, so a worker
+    // creates its own for the exploration and drops it with the closure.
+    let backend = if plan.solver_off {
         // Diagnostic escape hatch: exploration without feasibility gates —
         // forks are not pruned and addresses fall back to zero-page pins.
         None
     } else {
         Some(
-            angryier_solver_z3::Z3Backend::native_ffi(arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>)
-                .map_err(|e| mlua::Error::external(format!("z3: {e:?}")))?,
+            angryier_solver_z3::Z3Backend::native_ffi(
+                campaign.arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>,
+            )
+            .map_err(|e| format!("z3: {e:?}")),
         )
     };
-    // Wall budget per run: `timeout_secs` (default 120) bounds the whole
-    // exploration; the report's `timed_out` flag says when it fired.
-    let timeout_secs = opts.get::<u64>("timeout_secs").unwrap_or(DEFAULT_TIMEOUT_SECS);
-    let report = session
-        .run_with_policy(
-            steps,
-            max_states,
-            backend.as_mut().map(|b| b as &mut dyn angryier_solver::SolverBackend),
-            std::time::Duration::from_secs(timeout_secs),
+    let (report, error) = match backend {
+        Some(Ok(mut backend)) => match campaign.session.run_with_policy(
+            plan.steps,
+            plan.max_states,
+            Some(&mut backend as &mut dyn angryier_solver::SolverBackend),
+            std::time::Duration::from_secs(plan.timeout_secs),
             true,
             &policy,
+        ) {
+            Ok(report) => (report, None),
+            Err(error) => (Default::default(), Some(format!("run: {error:?}"))),
+        },
+        Some(Err(error)) => (Default::default(), Some(error)),
+        None => match campaign.session.run_with_policy(
+            plan.steps,
+            plan.max_states,
+            None,
+            std::time::Duration::from_secs(plan.timeout_secs),
+            true,
+            &policy,
+        ) {
+            Ok(report) => (report, None),
+            Err(error) => (Default::default(), Some(format!("run: {error:?}"))),
+        },
+    };
+    campaign.outcome = Some(CampaignOutcome {
+        report,
+        policy,
+        error,
+        elapsed_ms: t0.elapsed().as_millis() as u64,
+    });
+}
+
+/// Runs one campaign over a fresh per-job [`Campaign`] and builds the full
+/// Lua report table. Shared by `angry.run` (via [`run_driver`]) and
+/// `PreparedImage:run`; `opts` carries the complete per-campaign option
+/// surface.
+pub(crate) fn run_campaign(lua: &Lua, campaign: &mut Campaign<'_>, opts: &Table) -> mlua::Result<Table> {
+    let plan = parse_campaign_plan(opts)?;
+    campaign_execute(campaign, &plan);
+    if let Some(error) = campaign.outcome.as_ref().and_then(|outcome| outcome.error.clone()) {
+        return Err(mlua::Error::external(error));
+    }
+    campaign_report(lua, campaign, &plan, opts)
+}
+
+/// Builds the full Lua report table from an executed [`Campaign`] — must
+/// run on the Lua thread; in batch mode the main thread serializes every
+/// worker's outcome through this in job order.
+pub(crate) fn campaign_report(
+    lua: &Lua,
+    campaign: &mut Campaign<'_>,
+    plan: &CampaignPlan,
+    opts: &Table,
+) -> mlua::Result<Table> {
+    let outcome = campaign
+        .outcome
+        .as_mut()
+        .ok_or_else(|| mlua::Error::external("campaign report requested before execution"))?;
+    let report = &outcome.report;
+    let policy = &outcome.policy;
+    let elapsed_ms = outcome.elapsed_ms;
+    // Post-run solving (branch_analysis / solve) needs a backend; Z3
+    // contexts are thread-local, so the worker's exploration backend died
+    // with the worker — rebuild one here, only when post-run work needs it.
+    let mut backend = if plan.solver_off || !(plan.branch_analysis || plan.solve_models) {
+        None
+    } else {
+        angryier_solver_z3::Z3Backend::native_ffi(
+            campaign.arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>,
         )
-        .map_err(|e| mlua::Error::external(format!("run: {e:?}")))?;
+        .ok()
+    };
+    // Binding shims: the historical single-call driver owned these values
+    // as locals; the reusable-campaign split shares them through the
+    // context. The report builder below is otherwise unchanged.
+    let runtime = campaign.runtime;
+    let arena = campaign.arena.clone();
+    let session = &mut campaign.session;
+    let kernel_pool = campaign.kernel_pool.as_ref();
+    let pool_prealloc = &campaign.pool_prealloc;
+    let entry_rsp = campaign.entry_rsp;
+    let solve_models = plan.solve_models;
+    let branch_analysis = plan.branch_analysis;
+    let branch_timeout_ms = plan.branch_timeout_ms;
+    let steps = plan.steps;
 
     let out = lua.create_table()?;
+    out.set("elapsed_ms", elapsed_ms)?;
     out.set("steps", report.steps)?;
     out.set("forks", report.forks)?;
     out.set("merges", report.merges)?;
@@ -1622,7 +1443,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // Unsupported-form fallback debt: only present when the run armed the
     // fallback — `unsupported_total` counts fall-through steps and
     // `unsupported_sites` lists the first-seen (pc, form) pairs.
-    if let Some(fallback) = &unsupported_fallback {
+    if let Some(fallback) = campaign.unsupported_fallback.as_ref() {
         let (total, sites) = fallback.snapshot();
         out.set("unsupported_total", total)?;
         let site_tbl = lua.create_table()?;
@@ -1643,7 +1464,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
     // relaxations in parallel, and `ro_write_reverts` lists the previous
     // bytes the relaxed writes overwrote (first-come, capped — the ledger
     // owns the cap).
-    if let Some(probe) = &uc_memory_probe {
+    if let Some(probe) = campaign.uc_memory_probe.as_ref() {
         out.set("unmapped_total", probe.uc_memory_total())?;
         let site_tbl = lua.create_table()?;
         for (index, site) in probe.uc_memory_sites().iter().enumerate() {
@@ -1732,6 +1553,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             match state.process.read_register(crate::register_id::GPR_BASE) {
                 Ok(v) => {
                     out.set("rax_exit", v)?;
+                    out.set("rax_exit_hex", hex64(v))?;
                 }
                 Err(_) => {
                     out.set("rax_exit_symbolic", true)?;
@@ -1739,6 +1561,7 @@ fn run_driver(lua: &Lua, path: &str, opts: &Table) -> mlua::Result<Table> {
             }
             if let Ok(pc) = state.process.pc() {
                 out.set("exit_pc", pc)?;
+                out.set("exit_pc_hex", hex64(pc))?;
                 out.set(
                     "exit_kind",
                     if pc == crate::EXIT_HOOK {

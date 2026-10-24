@@ -61,5 +61,9 @@ required-features = ["xed", "z3"]
 name = "lua_api"
 required-features = ["xed", "script"]
 
+[[test]]
+name = "prepared_api"
+required-features = ["xed", "script"]
+
 [lints]
 workspace = true

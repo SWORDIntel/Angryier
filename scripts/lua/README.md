@@ -22,6 +22,7 @@ All scripts adhere to Angryier API contracts (documented in [`docs/LUA_API.md`](
 | **`wait_site_prober.lua`** | Interactive singleton/wait prober | Hooks at singleton constructor, wait function (Windows x64 ABI), VM tail-transfer; real-time slot polling; dead-state post-mortem analysis. |
 | **`singleton_wait_solver.lua`** | 5-minute wait state synthesizer | Parameterizes 96 bytes of singleton object memory at `0x094464C0` as symbolic; solves state unblocking `0x140404E10` without waiting; emits C-ready pokes. |
 | **`gdi_success_steerer.lua`** | Post-GDI+ path steerer & solver | Stubs GdiplusStartup at `0x1405E1043`; steps post-GDI logic to `0x1405E3BBC` (`mov bl, 1`); traces diverging branches and emits patch recommendations. |
+| **`bulk_resolve.lua`** | Load-once bulk address-resolution driver | `angry.prepare` once per process, then per-job `img:run` campaigns on fresh copy-on-write clones (or a native in-process `img:run_batch` pool via `ANGRY_BATCH_THREADS`); tombstone-before-result JSONL records so dead shards leave visible gaps; exact `*_hex` exit fields. Paired with `tools/bulk_resolve_driver.py`. |
 
 ---
 
@@ -226,4 +227,33 @@ angryier run ./advisor_unpacked_state.exe --script scripts/lua/gdi_success_steer
 - **Divergence Detection**: Monitors branch execution to detect any deviation towards the failure block `0x1405E3B82` (`status 41`).
 - **Patch Candidate Guidance**: Identifies the exact predecessor branch responsible for deviating from the TRUE path and recommends NOP or branch-inversion patch bytes.
 
+---
 
+## 10. `bulk_resolve.lua` (Load-Once Bulk Address-Resolution Driver)
+
+Sharded bulk campaign driver: one image load per process, every job on a
+fresh copy-on-write clone of the prepared template.
+
+### Invocation (via the Python orchestrator)
+```bash
+# One shard process per core, each loading the image once:
+python3 tools/bulk_resolve_driver.py --binary advisor_unpacked.exe --jobs jobs.txt --shards 40
+
+# Or one process with an in-process native worker pool:
+python3 tools/bulk_resolve_driver.py --binary advisor_unpacked.exe --jobs jobs.txt --batch-threads 16
+```
+
+### Job line format
+```
+entry=0x1405e0ef0 steps=400 states=16 find=0xa,0xb avoid=0xc symbolic=rcx:64 reg=rcx:1a2b3c solve=1 uc=1
+```
+Only `entry` is mandatory. Hex values may use `0x` prefix or none.
+
+### Records
+- A `tombstone` line is written **before** each job executes; `done` carries
+  the result, `failed` the error. The merge pairs them — an unpaired
+  tombstone is a lost job (shard died mid-job), visible instead of silent.
+- `exit_pc` / `rax` use the exact `*_hex` report fields (kernel addresses
+  above 2^63 are float-lossy through Lua numbers).
+- Each shard prints `img:stats()` (load_ms vs run_ms_total) so the
+  load-once win is directly measurable.

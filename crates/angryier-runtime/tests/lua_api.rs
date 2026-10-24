@@ -207,6 +207,53 @@ fn test_lua_session_step_and_trace() {
 }
 
 #[test]
+fn test_lua_session_spawn_state_rebuilds_pool() {
+    const SRC: &str = r#"
+        .global _start
+        .text
+    _start:
+        mov $0x42, %rax
+        ret
+    "#;
+
+    let Some(bin_path) = assemble_and_link(SRC, "spawn_state") else {
+        eprintln!("skipping test_lua_session_spawn_state_rebuilds_pool: system assembler not found");
+        return;
+    };
+
+    let lua = init_lua();
+    let bin_str = bin_path.to_str().expect("valid path string");
+
+    let script = format!(
+        r#"
+        local s = angry.open("{bin_str}")
+        local before = s:states_count()
+        local status = "stepped"
+        for i = 1, 100 do
+            local ok, st = pcall(function() return s:step(1) end)
+            if not ok then break end
+            status = st
+            if status == "terminated" then break end
+        end
+        local dead1 = s:dead_count()
+        s:spawn_state({{}})
+        local after = s:states_count()
+        local dead2 = s:dead_count()
+        local pc = s:pc()
+        return before, dead1, after, dead2, pc
+        "#
+    );
+
+    let (before, dead1, after, dead2, pc): (usize, usize, usize, usize, u64) =
+        lua.load(&script).eval().expect("eval spawn_state");
+    assert_eq!(before, 1);
+    assert!(dead1 >= 1, "first run should terminate the initial state");
+    assert_eq!(after, 1, "spawn_state must rebuild exactly one live state");
+    assert_eq!(dead2, 0, "spawn_state must reset the dead pool");
+    assert!(pc > 0);
+}
+
+#[test]
 fn test_lua_state_handle_and_memory() {
     const SRC: &str = r#"
         .global _start
@@ -1273,6 +1320,7 @@ fn test_lua_scripts_syntax() {
         "../../scripts/lua/themida_dispatch_census.lua",
         "../../scripts/lua/singleton_wait_solver.lua",
         "../../scripts/lua/gdi_success_steerer.lua",
+        "../../scripts/lua/bulk_resolve.lua",
     ];
 
     for rel_path in script_paths {

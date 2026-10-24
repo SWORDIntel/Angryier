@@ -314,7 +314,7 @@ fn help_output() -> String {
            run        {run_desc}\n  \
            help       Print this help message"
     ) + if cfg!(feature = "inspect") {
-        "\n  doctor [--show-paths]         Report executable hash/build source identity\n  pe-address <PE> <VA> [length]   Strict VA/RVA/file-offset lookup\n  pe-imports <PE> [substring]   List exact IAT slot addresses and import names\n  dump-read <DMP> <VA> <length>   Read captured minidump bytes"
+        "\n  doctor [--show-paths]         Report executable hash/build source identity\n  pe-address <PE> <VA> [length]   Strict VA/RVA/file-offset lookup\n  pe-imports <PE> [substring]   List exact IAT slot addresses and import names\n  dump-read <DMP> <VA> <length>   Read captured minidump bytes\n  capture-coverage <DIR> [DMP]  Verify overlay captures and report dump gaps"
     } else {
         ""
     }
@@ -379,12 +379,13 @@ fn run(args: &[String]) -> i32 {
                 1
             }
         }
-        Some("pe-address") | Some("pe-imports") | Some("dump-read") => {
+        Some("pe-address") | Some("pe-imports") | Some("dump-read") | Some("capture-coverage") => {
             #[cfg(feature = "inspect")]
             {
                 let outcome = match args.get(1).map(String::as_str) {
                     Some("pe-address") => inspection::pe_address(&args[2..]),
                     Some("pe-imports") => inspection::pe_imports(&args[2..]),
+                    Some("capture-coverage") => inspection::capture_coverage(&args[2..]),
                     _ => inspection::minidump_read(&args[2..]),
                 };
                 match outcome {
@@ -2034,7 +2035,7 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 );
             }
 
-            if steps > 12 && steps % 1000 == 0 {
+            if steps > 12 && steps.is_multiple_of(1000) {
                 println!(
                     "[angryier][progress] steps={steps}/{budget}, pc={:#x}, simproc_dispatches={}",
                     process.pc().unwrap_or(0),

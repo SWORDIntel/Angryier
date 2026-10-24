@@ -1455,6 +1455,16 @@ impl Intel64CorpusRegistry {
         self.unsupported_fallback = Some(provider);
     }
 
+    /// Disarms the unsupported-form fallback (see
+    /// [`Self::set_unsupported_fallback`]). Reused-run drivers arm the
+    /// fallback per campaign and must be able to restore the exact
+    /// never-armed corpus behavior for the next one — a stale fallback
+    /// would otherwise silently leak fall-through semantics into jobs that
+    /// did not request it.
+    pub fn clear_unsupported_fallback(&mut self) {
+        self.unsupported_fallback = None;
+    }
+
     fn assert_unique_rule_ids(&self) {
         let mut seen = std::collections::BTreeMap::new();
         for (index, provider) in self.providers.iter().enumerate() {
