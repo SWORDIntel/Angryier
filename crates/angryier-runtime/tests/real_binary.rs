@@ -3325,7 +3325,6 @@ fn concolic_concrete_loop_records_no_path_constraints() -> Result<(), Box<dyn st
         .global _start
         .text
 _start:
-        xor %ecx, %ecx
 1:
         inc %ecx
         cmp $5, %ecx

@@ -1340,6 +1340,47 @@ pub fn recover_multi<D: Decoder>(
 
     'discovery: loop {
         while let Some(head) = worklist.pop() {
+            // A target may be discovered after its containing linear block was
+            // decoded. Split only at an instruction boundary; the existing
+            // edges from the original terminator remain attached to the tail.
+            let containing = blocks.range(..head).next_back().and_then(|(&start, block)| {
+                (head < block.end)
+                    .then(|| (start, block.instructions.iter().position(|i| i.address == head)))
+                    .and_then(|(start, position)| position.filter(|&p| p > 0).map(|p| (start, p)))
+            });
+            if let Some((start, split)) = containing
+                && let Some(mut block) = blocks.remove(&start)
+            {
+                if let Some(previous) = block
+                    .instructions
+                    .get(..split)
+                    .and_then(|prefix| prefix.last())
+                    .map(|instruction| instruction.address)
+                {
+                    let tail_instructions = block.instructions.split_off(split);
+                    let tail_terminator = block.terminator;
+                    let tail_end = block.end;
+                    block.end = head;
+                    block.terminator = EdgeKind::FallThrough;
+                    blocks.insert(start, block);
+                    blocks.insert(
+                        head,
+                        BasicBlock {
+                            start: head,
+                            end: tail_end,
+                            instructions: tail_instructions,
+                            terminator: tail_terminator,
+                        },
+                    );
+                    edges.push(CfgEdge {
+                        from: previous,
+                        to: Some(head),
+                        kind: EdgeKind::FallThrough,
+                    });
+                    continue;
+                }
+                blocks.insert(start, block);
+            }
             if !visited.insert(head) {
                 continue;
             }
@@ -2005,6 +2046,30 @@ mod tests {
         assert_eq!(loops.len(), 1);
         assert_eq!(loops[0].header, 0x1000);
         assert_eq!(loops[0].body, vec![0x1000]);
+        Ok(())
+    }
+
+    #[test]
+    fn backward_conditional_loop_splits_preheader_block() -> Result<(), String> {
+        // Preheader nop; loop header jnz exit; body nop; jmp header; ret.
+        let cfg = recover(
+            &TestDecoder,
+            0x1000,
+            &[0x90, 0x75, 0x02, 0x90, 0xeb, 0xfb, 0xc3],
+            0x1000,
+            |i| i.form_id,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+
+        let blocks: Vec<_> = cfg.blocks.values().collect();
+        for pair in blocks.windows(2) {
+            assert!(pair[0].end <= pair[1].start, "overlapping blocks: {pair:?}");
+        }
+        assert_eq!(cfg.blocks[&0x1000].end, 0x1001);
+        let loops = cfg.loops();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].header, 0x1001);
+        assert_eq!(loops[0].body, vec![0x1001, 0x1003]);
         Ok(())
     }
 

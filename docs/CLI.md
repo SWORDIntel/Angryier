@@ -60,7 +60,7 @@ Note: `help` always lists `run`. In builds without the feature its line reads `N
 ## `angryier run` — execute a binary symbolically
 
 ```
-usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver]
+usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver] [--no-ai-analysis] [--ai-min-steps N] [--ai-timeout-secs SECS] [--ai-model MODEL]...
 note: --reg is repeatable; VALUE accepts decimal or 0x-prefixed hexadecimal
 note: --find/--avoid ADDR are repeatable hexadecimal addresses, 0x prefix optional
 note: --fork enables fork-aggressive symbolic exploration; --dfs prioritizes the newest/deepest state
@@ -87,7 +87,11 @@ Loads an ELF64 or PE32+ image into the engine and runs it concretely/symbolicall
 | `--fork` | no | Fork-aggressive symbolic exploration: do not let concretization pins collapse a symbolic branch to one direction when both solver-checked directions are feasible. |
 | `--dfs` | no | Select the newest/deepest live state first instead of the default scheduler, favoring deep target dives over breadth. |
 | `--dynamic` | no | Load via the dynamic-linking path (`__libc_start_main` hook, `main(argc, argv)` entry) instead of static `_start`. |
+| `--no-ai-analysis` | no | Disable HAX-backed post-analysis. Enabled by default for the generated CLI driver, subject to the minimum-work threshold. |
 | `--driver` | no | Force direct PE32+ kernel-driver execution through the Rust runtime. Lua is bypassed; `--reg` seeds and `--steps` apply directly. Symbolic-search flags are parsed but not applied. |
+| `--ai-min-steps N` | no | Minimum executed work units before the generated driver requests HAX post-analysis. Must be > 0; default `1000`. |
+| `--ai-timeout-secs SECS` | no | Total timeout budget for trying the configured HAX models, in seconds. Range `1..=3600`; default `300`. |
+| `--ai-model MODEL` | yes | Restrict/override the HAX model candidates and try them in the supplied order. Each value must be in the built-in allowlist listed below. |
 
 `--symbolic`, `--reg`, `--find`, and `--avoid` are repeatable. Other option flags are single-use; duplicates fail explicitly instead of silently taking the last value.
 
@@ -116,6 +120,9 @@ local r = angry.run("<binary>", {
 ```
 
 `steps`, `states`, and timeout values come directly from the CLI flags and share the runtime's default constants. Z3 feasibility-gating remains enabled during normal exploration even without `--solve`; `--solve` controls the additional post-run extraction of concrete models for found states. Alternate-branch analysis is enabled by the generated driver by default.
+
+When a run reaches the configured minimum of **1,000 executed work units** (default), the generated driver submits a bounded metrics/frontier/trace-tail report to HAX for optional advisory analysis. Set `--ai-min-steps N` to change the positive-integer threshold. The total timeout for the model fallback sequence defaults to **300 seconds**; set `--ai-timeout-secs SECS` to a value from `1` through `3600`. Repeat `--ai-model MODEL` to select allowlisted candidates in the supplied order; without overrides, the allowlist and preference order are `orca/orcacyber-glm-5.3-flash-free`, `deepseek/deepseek-v4.1-flash-free`, `deepseek/deepseek-v4-flash-free`, `z-ai/glm-5.3-flash-free`, and `tencent/hy3-free`. The integration invokes `hax --raw --no-session` and uses credentials already saved for HAX, without requiring an interactive session. The bounded report contains selected run metrics/frontier data and a trace tail; it does not include the binary, arbitrary file contents, command-line arguments, credentials, or solved input models. The result is advisory only: it does not alter execution or solver results, and is not a proof or reachability verdict. `--no-ai-analysis` disables the request. With `--json`, only the AI output is routed to stderr; ordinary execution output may remain on stdout, so stdout is not guaranteed to contain only JSON. Custom Lua scripts can explicitly call the registered `angryier_ai_summary(steps, report)` function to request the same analysis; without that call, no automatic post-analysis is run.
+
 
 ### Operator-facing diagnostics
 

@@ -765,6 +765,23 @@ pub const KERNEL_POOL_ALLOC_NAMES: [&str; 5] = [
 /// Pool-free routines matched by exact export/import name.
 pub const KERNEL_POOL_FREE_NAMES: [&str; 3] = ["ExFreePool", "ExFreePoolWithTag", "ExFreePoolWithQuota"];
 
+fn place_image_below(segments: &[angryier_loader::Segment], cursor: u64) -> Option<(u64, u64)> {
+    const PAGE_SIZE: u64 = 0x1000;
+    let (low, high) = segments.iter().try_fold((u64::MAX, 0u64), |(low, high), segment| {
+        let size = u64::try_from(segment.bytes.len()).ok()?;
+        let end = segment.address.checked_add(size)?;
+        Some((low.min(segment.address), high.max(end)))
+    })?;
+    if low == u64::MAX {
+        return None;
+    }
+    // ELF load biases must preserve page alignment. Round down so the image's
+    // highest PT_LOAD byte remains below the cursor.
+    let bias = cursor.checked_sub(high)? & !(PAGE_SIZE - 1);
+    let next_base = bias.checked_add(low)?.checked_sub(PAGE_SIZE)?;
+    Some((bias, next_base))
+}
+
 impl<D: Decoder> Runtime<D> {
     /// Attaches the Windows kernel pool model to a PE-driver process:
     /// binds `ExAllocatePool*` imports to a fresh-pointer allocator and
@@ -1467,14 +1484,9 @@ impl<D: Decoder> Runtime<D> {
                     }
                 }
             }
-            let bias = lib_next;
-            let top = lib
-                .segments
-                .iter()
-                .map(|s| s.address + s.bytes.len() as u64)
-                .max()
-                .unwrap_or(0);
-            lib_next = lib_next.wrapping_sub(top + 0x1000);
+            let (bias, next_base) = place_image_below(&lib.segments, lib_next)
+                .ok_or(RuntimeError::Loader(angryier_loader::LoaderError::SegmentOutOfRange))?;
+            lib_next = next_base;
             images.push((lib, bias));
         }
         images.insert(0, (main, main_bias));
@@ -1554,8 +1566,8 @@ impl<D: Decoder> Runtime<D> {
                     }
                     _ => continue,
                 };
-                memory = memory
-                    .load_concrete(addr, &value.to_le_bytes())
+                memory
+                    .load_concrete_in_place(addr, &value.to_le_bytes())
                     .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
             }
         }
@@ -5083,6 +5095,36 @@ mod tests {
         AccessKind, DecodedInstruction, InstructionModifiers, MemoryBase, MemoryOperand, Operand, OperandKind,
         OperandVisibility, RegisterId, RegisterView,
     };
+
+    #[test]
+    fn dynamic_library_placement_uses_the_full_pt_load_span() {
+        let first = vec![angryier_loader::Segment {
+            address: 0x1_0000,
+            bytes: vec![0; 0x1_0000],
+            readable: true,
+            writable: false,
+            executable: false,
+        }];
+        let second = vec![angryier_loader::Segment {
+            address: 0x8_0000,
+            bytes: vec![0; 0x4_0000],
+            readable: true,
+            writable: false,
+            executable: false,
+        }];
+        let cursor = 0x7f00_0000_0000;
+        let (first_bias, next) = place_image_below(&first, cursor).expect("valid first image");
+        let (second_bias, _) = place_image_below(&second, next).expect("valid second image");
+        let first_start = first_bias + first[0].address;
+        let first_end = first_start + first[0].bytes.len() as u64;
+        let second_start = second_bias + second[0].address;
+        let second_end = second_start + second[0].bytes.len() as u64;
+
+        assert!(second_end + 0x1000 <= first_start);
+        assert!(first_end <= cursor);
+        assert_eq!(first_bias % 0x1000, 0);
+        assert_eq!(second_bias % 0x1000, 0);
+    }
 
     #[test]
     fn pci_config_read_model() {

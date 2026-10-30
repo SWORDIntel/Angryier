@@ -198,6 +198,10 @@ cargo build --release
 # was reproduced. This validates the branch flip, not the whole target path.
 ```
 
+For long CLI runs, the generated driver requests optional advisory analysis through HAX when executed work units meet the configured minimum (default **1,000**). Configure it with `--ai-min-steps N` (positive integer; default `1000`), `--ai-timeout-secs SECS` (total fallback budget, `1..=3600`; default `300` seconds), and repeatable `--ai-model MODEL` flags. Models must be in the built-in free-model allowlist; specifying models sets the ordered fallback list, while omitting them uses the default order shown below. `--no-ai-analysis` disables the request entirely.
+
+The CLI invokes `hax --raw --no-session`, reusing credentials already saved for HAX; it does not start or require a HAX interactive session. The request contains a bounded report (at most 12 KiB) of execution metrics, frontier details, and recent trace/branch addresses. It excludes binary contents and solved input models. Treat model output as untrusted, advisory commentary only: it is not evidence of reachability, a solver result, or a proof. Requests try these free OrcaRouter models in order, continuing after an unavailable, failed, or timed-out model until the total timeout is exhausted: `orca/orcacyber-glm-5.3-flash-free`, `deepseek/deepseek-v4.1-flash-free`, `deepseek/deepseek-v4-flash-free`, `z-ai/glm-5.3-flash-free`, then `tencent/hy3-free`. In `--json` mode only the AI response is redirected to stderr; normal run output may still appear on stdout.
+
 ### Embedded Lua Scripting
 
 Angryier includes an embedded Lua runtime for programmatic execution:

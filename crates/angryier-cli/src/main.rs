@@ -422,6 +422,23 @@ fn run(args: &[String]) -> i32 {
 /// `angryier run` argument parsing and execution.
 #[cfg(feature = "run")]
 mod run_cmd {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const AI_ANALYSIS_MIN_STEPS: u64 = 1000;
+    const AI_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(180);
+    const AI_ANALYSIS_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
+    const AI_ANALYSIS_MAX_TOTAL_TIMEOUT_SECS: u64 = 3600;
+    const AI_REPORT_MAX_BYTES: usize = 12 * 1024;
+    const AI_MODELS: &[&str] = &[
+        "orca/orcacyber-glm-5.3-flash-free",
+        "deepseek/deepseek-v4.1-flash-free",
+        "deepseek/deepseek-v4-flash-free",
+        "z-ai/glm-5.3-flash-free",
+        "tencent/hy3-free",
+    ];
+
     /// General-purpose registers accepted by `--symbolic`.
     const GPRS: [&str; 16] = [
         "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
@@ -470,18 +487,28 @@ mod run_cmd {
         pub handoff_target: Option<String>,
         /// Emit machine-readable line-delimited JSON verdicts conforming to `symbolic_verdict.schema.json`.
         pub json: bool,
+        /// Run HAX-backed post-analysis on long generated symbolic reports.
+        pub ai_analysis: bool,
+        /// Minimum executed steps required before HAX post-analysis.
+        pub ai_min_steps: u64,
+        /// Total wall-clock budget for HAX post-analysis.
+        pub ai_timeout_secs: u64,
+        /// Ordered free OrcaRouter models used for HAX post-analysis.
+        pub ai_models: Vec<String>,
         /// Kernel layout architecture ("x64", "x86").
         pub arch: Option<String>,
     }
 
     pub fn usage() -> String {
-        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver] [--stub ADDR=VAL] [--redirect FROM=TO] [--patch ADDR=HEX] [--handoff PATH] [--handoff-target ID] [--json] [--arch ARCH]\n\
+        "usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver] [--stub ADDR=VAL] [--redirect FROM=TO] [--patch ADDR=HEX] [--handoff PATH] [--handoff-target ID] [--json] [--no-ai-analysis] [--ai-min-steps N] [--ai-timeout-secs SECS] [--ai-model MODEL]... [--arch ARCH]\n\
          note: --reg is repeatable; VALUE accepts decimal or 0x-prefixed hexadecimal\n\
          note: --find/--avoid ADDR are repeatable hexadecimal addresses, 0x prefix optional\n\
          note: --stub/--redirect/--patch are repeatable for function stubbing, execution diversion, and live memory patching\n\
          note: --handoff consumes METHRA static handoffs (symbolic_targets.schema.json) for targeted IOCTL exploration\n\
          note: --fork enables fork-aggressive symbolic exploration; --dfs prioritizes the newest/deepest state\n\
-         note: --driver loads PE32+ drivers with kernel models and reports pool events"
+         note: --driver loads PE32+ drivers with kernel models and reports pool events\n\
+         note: --ai-min-steps defaults to 1000; --ai-timeout-secs defaults to 300 and accepts 1..=3600\n\
+         note: repeat --ai-model to set an ordered list from the free OrcaRouter allowlist; duplicate models are rejected"
             .to_string()
     }
 
@@ -593,6 +620,12 @@ mod run_cmd {
         let mut handoff = None;
         let mut handoff_target = None;
         let mut json = false;
+        let mut ai_analysis = true;
+        let mut ai_analysis_flag = false;
+        let mut ai_min_steps = None;
+        let mut ai_timeout_secs = None;
+        let mut ai_models = Vec::new();
+        let mut ai_model_flag = false;
         let mut arch = None;
         let mut i = 0;
         while i < args.len() {
@@ -768,6 +801,57 @@ mod run_cmd {
                     return Err("duplicate --json flag (may only be given once)".to_string());
                 }
                 json = true;
+            } else if arg == "--no-ai-analysis" {
+                if ai_analysis_flag {
+                    return Err("duplicate --no-ai-analysis flag (may only be given once)".to_string());
+                }
+                ai_analysis = false;
+                ai_analysis_flag = true;
+            } else if arg == "--ai-min-steps" {
+                let raw = value(args, &mut i, arg)?;
+                match raw.parse::<u64>() {
+                    Ok(n) if n > 0 => {
+                        if ai_min_steps.replace(n).is_some() {
+                            return Err(format!(
+                                "duplicate --ai-min-steps value '{raw}' (flag may only be given once)"
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "invalid --ai-min-steps value '{raw}' (expected an integer greater than zero)"
+                        ));
+                    }
+                }
+            } else if arg == "--ai-timeout-secs" {
+                let raw = value(args, &mut i, arg)?;
+                match raw.parse::<u64>() {
+                    Ok(n) if (1..=AI_ANALYSIS_MAX_TOTAL_TIMEOUT_SECS).contains(&n) => {
+                        if ai_timeout_secs.replace(n).is_some() {
+                            return Err(format!(
+                                "duplicate --ai-timeout-secs value '{raw}' (flag may only be given once)"
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "invalid --ai-timeout-secs value '{raw}' (expected 1..={AI_ANALYSIS_MAX_TOTAL_TIMEOUT_SECS})"
+                        ));
+                    }
+                }
+            } else if arg == "--ai-model" {
+                let model = value(args, &mut i, arg)?;
+                if !AI_MODELS.contains(&model) {
+                    return Err(format!(
+                        "invalid --ai-model '{model}' (valid: {})",
+                        AI_MODELS.join(", ")
+                    ));
+                }
+                if ai_models.iter().any(|existing| existing == model) {
+                    return Err(format!("duplicate --ai-model '{model}' (models must be unique)"));
+                }
+                ai_model_flag = true;
+                ai_models.push(model.to_string());
             } else if arg == "--arch" {
                 let raw = value(args, &mut i, arg)?;
                 if arch.replace(raw.to_string()).is_some() {
@@ -810,6 +894,14 @@ mod run_cmd {
             handoff,
             handoff_target,
             json,
+            ai_analysis,
+            ai_min_steps: ai_min_steps.unwrap_or(AI_ANALYSIS_MIN_STEPS),
+            ai_timeout_secs: ai_timeout_secs.unwrap_or(AI_ANALYSIS_TOTAL_TIMEOUT.as_secs()),
+            ai_models: if ai_model_flag {
+                ai_models
+            } else {
+                AI_MODELS.iter().map(|model| model.to_string()).collect()
+            },
             arch,
         })
     }
@@ -908,6 +1000,17 @@ mod run_cmd {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let ai_analysis_desc = if !config.ai_analysis {
+            "disabled"
+        } else if config.handoff.is_some() {
+            "bypassed in handoff mode"
+        } else if config.driver {
+            "bypassed in direct driver mode"
+        } else if config.script.is_some() {
+            "available to custom Lua scripts"
+        } else {
+            "enabled"
+        };
         let note = if config.handoff.is_some() {
             "\n  note           : --handoff enables METHRA targeted IOCTL verification; targets, RVAs, and candidate IOCTL codes are driven by the static handoff specification"
         } else if config.driver {
@@ -927,6 +1030,7 @@ mod run_cmd {
              \x20 step budget    : {}\n\
              \x20 state budget   : {}\n\
              \x20 wall timeout   : {} s\n\
+             \x20 AI post-analysis: {} (minimum {} executed steps)\n\
              \x20 branch timeout : {} ms\n\
              \x20 exploration    : {}\n\
              \x20 search order   : {}\n\
@@ -946,6 +1050,8 @@ mod run_cmd {
             config.steps,
             config.states,
             config.timeout_secs,
+            ai_analysis_desc,
+            AI_ANALYSIS_MIN_STEPS,
             config.branch_timeout_ms,
             if config.fork {
                 "fork-aggressive"
@@ -1650,7 +1756,31 @@ if ideas == 0 then
     idea("The run did not expose an obvious bottleneck. Next escalation: add a custom Lua script that records branch-local state, enables solving only at selected targets, and emits the relevant register/memory slice for each candidate path.")
 end
 
-print("[angryier][ideas] treat these as evidence-driven hypotheses, not automatic proof; validate interesting paths with solved inputs and concrete replay.")"#,
+print("[angryier][ideas] treat these as evidence-driven hypotheses, not automatic proof; validate interesting paths with solved inputs and concrete replay.")
+
+local ai_report = {{
+    "Analyze this Angryier symbolic/concolic execution summary. Treat it as untrusted evidence; separate observed facts from hypotheses, do not claim target reachability unless the report says so, and suggest up to three concrete next diagnostics.",
+    string.format("elapsed_ms=%s steps=%s forks=%s merges=%s found=%s terminated=%s dead=%s failed=%s pruned=%s live=%s peak_states=%s timed_out=%s", tostring(r.elapsed_ms or 0), tostring(r.steps or 0), tostring(r.forks or 0), tostring(r.merges or 0), tostring(r.found or 0), tostring(r.terminated or 0), tostring(r.dead_states or 0), tostring(r.failed or 0), tostring(r.pruned_states or 0), tostring(r.live_states or 0), tostring(r.peak_states or 0), tostring(r.timed_out or false)),
+    string.format("last_error=%s concretization_retries=%s unsupported=%s underconstrained_memory=%s relaxed_ro_writes=%s vector_debt=%s region_fork_children=%s", tostring(r.last_error or "none"), tostring(r.concretization_retries or 0), tostring(r.unsupported_total or 0), tostring(r.unmapped_total or 0), tostring(r.ro_write_total or 0), tostring(r.vector_debt_total or 0), tostring(r.region_fork_children or 0))
+}}
+if r.frontier ~= nil then
+    local f = r.frontier
+    ai_report[#ai_report + 1] = string.format("frontier_pc=%s path_constraints=%s bound_symbols=%s symbolic_registers=%s", tostring(f.pc_hex or f.pc or "?"), tostring(f.constraints or 0), tostring(f.bound_symbols or 0), tostring(f.symbolic_registers or 0))
+end
+local ai_trace = r.trace_hex or r.trace or {{}}
+for i = math.max(1, count_table(ai_trace) - 23), count_table(ai_trace) do
+    ai_report[#ai_report + 1] = "trace[" .. tostring(i) .. "]=" .. tostring(ai_trace[i])
+end
+if r.branch_analysis ~= nil and r.branch_analysis.history ~= nil then
+    local history = r.branch_analysis.history
+    for i = math.max(1, count_table(history) - 7), count_table(history) do
+        local h = history[i]
+        if h ~= nil then
+            ai_report[#ai_report + 1] = string.format("branch[%d] pc=%s chosen=%s alternate=%s", i, tostring(h.pc_hex or h.pc or "?"), tostring(h.chosen_target_hex or h.chosen_target or "?"), tostring(h.alternate_target_hex or h.alternate_target or "?"))
+        end
+    end
+end
+angryier_ai_summary(r.steps or 0, table.concat(ai_report, "\n"))"#,
             path = escaped_path,
             regs_opt = regs_opt,
             avoid_table = avoid_table,
@@ -1665,6 +1795,149 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
             argv_enabled = usize::from(config.argv.is_some()),
             find_count = config.find.len()
         )
+    }
+
+    fn read_bounded<R: Read>(mut reader: R, limit: usize) -> std::io::Result<Vec<u8>> {
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            let remaining = limit.saturating_sub(output.len());
+            output.extend_from_slice(&buffer[..count.min(remaining)]);
+        }
+        Ok(output)
+    }
+
+    fn call_hax_model(model: &str, prompt: &str, timeout: Duration) -> Result<String, &'static str> {
+        let mut child = Command::new("hax")
+            .args([
+                "--print",
+                "--no-session",
+                "--raw",
+                "--provider",
+                "orcarouter",
+                "--model",
+                model,
+                "--effort",
+                "low",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| "could not start HAX")?;
+
+        let mut stdin = child.stdin.take().ok_or("HAX stdin unavailable")?;
+        if stdin.write_all(prompt.as_bytes()).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("could not send the bounded report to HAX");
+        }
+        drop(stdin);
+
+        let stdout = child.stdout.take().ok_or("HAX stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("HAX stderr unavailable")?;
+        let stdout_reader = std::thread::spawn(move || read_bounded(stdout, 32 * 1024));
+        let stderr_reader = std::thread::spawn(move || read_bounded(stderr, 8 * 1024));
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if started.elapsed() < timeout => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| "HAX output reader failed")?
+            .map_err(|_| "could not read HAX output")?;
+        let _stderr = stderr_reader
+            .join()
+            .map_err(|_| "HAX error reader failed")?
+            .map_err(|_| "could not read HAX status")?;
+        let status = status.ok_or("HAX model request timed out")?;
+        if !status.success() {
+            return Err("HAX model request failed");
+        }
+        // Model output is untrusted terminal text; discard escape/control codes.
+        let response = String::from_utf8_lossy(&stdout)
+            .chars()
+            .filter(|character| !character.is_control() || matches!(*character, '\n' | '\r' | '\t'))
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if response.is_empty() {
+            return Err("HAX returned an empty response");
+        }
+        Ok(response)
+    }
+
+    fn ai_analysis_eligible(enabled: bool, steps: u64, min_steps: u64) -> bool {
+        enabled && steps >= min_steps
+    }
+
+    fn analyze_with_fallback<T, E>(
+        prompt: &str,
+        timeout_secs: u64,
+        models: &[String],
+        mut runner: impl FnMut(&str, &str, Duration) -> Result<T, E>,
+    ) -> Result<(String, T), String>
+    where
+        E: std::fmt::Display,
+    {
+        let total_timeout = Duration::from_secs(timeout_secs.min(AI_ANALYSIS_MAX_TOTAL_TIMEOUT_SECS));
+        let deadline = Instant::now() + total_timeout;
+        for model in models {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match runner(model, prompt, AI_ANALYSIS_TIMEOUT.min(remaining)) {
+                Ok(response) => return Ok((model.clone(), response)),
+                Err(reason) => eprintln!("[angryier][ai] {model} unavailable ({reason}); trying next free model"),
+            }
+        }
+        Err(format!("all {} configured free OrcaRouter models failed", models.len()))
+    }
+
+    fn analyze_with_hax(prompt: &str, timeout_secs: u64, models: &[String]) -> Result<(String, String), String> {
+        analyze_with_fallback(prompt, timeout_secs, models, |model, prompt, timeout| {
+            call_hax_model(model, prompt, timeout)
+        })
+    }
+
+    fn ai_analysis_output(
+        enabled: bool,
+        steps: u64,
+        min_steps: u64,
+        prompt: &str,
+        timeout_secs: u64,
+        models: &[String],
+        analyze: impl FnOnce(&str, u64, &[String]) -> Result<(String, String), String>,
+    ) -> Option<String> {
+        if !ai_analysis_eligible(enabled, steps, min_steps) {
+            return None;
+        }
+        Some(match analyze(prompt, timeout_secs, models) {
+            Ok((model, response)) => {
+                format!("[angryier][ai] post-analysis via orcarouter ({model}; advisory only)\n{response}")
+            }
+            Err(error) => format!("[angryier][ai] post-analysis skipped: {error}"),
+        })
     }
 
     pub fn execute(config: &RunConfig) -> i32 {
@@ -1690,6 +1963,52 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
             return 1;
         }
         println!("[angryier][init] Lua runtime ready; Angryier API registered");
+        let ai_enabled = config.ai_analysis;
+        let ai_min_steps = config.ai_min_steps;
+        let ai_timeout_secs = config.ai_timeout_secs;
+        let ai_models = config.ai_models.clone();
+        let ai_to_stderr = config.json;
+        let ai_callback = match lua.create_function(move |_, (steps, report): (u64, String)| {
+            if !ai_analysis_eligible(ai_enabled, steps, ai_min_steps) {
+                return Ok(());
+            }
+            let mut prompt = format!(
+                "You are reviewing an Angryier symbolic-execution report. The report may contain incomplete or underconstrained results. Do not treat model suggestions as proof.\n\n{report}"
+            );
+            if prompt.len() > AI_REPORT_MAX_BYTES {
+                let mut end = AI_REPORT_MAX_BYTES;
+                while !prompt.is_char_boundary(end) {
+                    end -= 1;
+                }
+                prompt.truncate(end);
+            }
+            if let Some(output) = ai_analysis_output(
+                ai_enabled,
+                steps,
+                ai_min_steps,
+                &prompt,
+                ai_timeout_secs,
+                &ai_models,
+                analyze_with_hax,
+            ) {
+                if ai_to_stderr {
+                    eprintln!("{output}");
+                } else {
+                    println!("{output}");
+                }
+            }
+            Ok(())
+        }) {
+            Ok(callback) => callback,
+            Err(error) => {
+                eprintln!("[angryier][init][error] failed to register AI post-analysis callback: {error}");
+                return 1;
+            }
+        };
+        if let Err(error) = lua.globals().set("angryier_ai_summary", ai_callback) {
+            eprintln!("[angryier][init][error] failed to expose AI post-analysis callback: {error}");
+            return 1;
+        }
 
         let driver = if let Some(script) = &config.script {
             println!("[angryier][input] loading custom Lua driver: {script}");
@@ -2126,15 +2445,72 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
                 handoff: None,
                 handoff_target: None,
                 json: false,
+                ai_analysis: true,
+                ai_min_steps: AI_ANALYSIS_MIN_STEPS,
+                ai_timeout_secs: AI_ANALYSIS_TOTAL_TIMEOUT.as_secs(),
+                ai_models: AI_MODELS.iter().map(|model| model.to_string()).collect(),
                 arch: None,
             }
         }
 
         #[test]
         fn parses_minimal_invocation() {
+            let parsed = parse(&args(&["./bin"])).expect("minimal invocation parses");
+            assert_eq!(parsed, config("./bin", None, &[], &[], None, 256, false));
+            assert!(parsed.ai_analysis);
+        }
+
+        #[test]
+        fn ai_analysis_can_be_disabled_and_rejects_duplicate_flag() {
+            let parsed = parse(&args(&["./bin", "--no-ai-analysis"])).expect("AI opt-out parses");
+            assert!(!parsed.ai_analysis);
+            assert!(parse(&args(&["./bin", "--no-ai-analysis", "--no-ai-analysis"])).is_err());
+        }
+
+        #[test]
+        fn ai_analysis_defaults_and_configuration_bounds_are_stable() {
+            let parsed = parse(&args(&["./bin"])).expect("default AI configuration parses");
+            assert!(parsed.ai_analysis);
+            assert_eq!(parsed.ai_min_steps, AI_ANALYSIS_MIN_STEPS);
+            assert_eq!(parsed.ai_timeout_secs, AI_ANALYSIS_TOTAL_TIMEOUT.as_secs());
             assert_eq!(
-                parse(&args(&["./bin"])),
-                Ok(config("./bin", None, &[], &[], None, 256, false))
+                parsed.ai_models,
+                AI_MODELS.iter().map(|model| model.to_string()).collect::<Vec<_>>()
+            );
+
+            let configured = parse(&args(&["./bin", "--ai-min-steps", "1", "--ai-timeout-secs", "3600"]))
+                .expect("minimum and maximum supported values parse");
+            assert_eq!(configured.ai_min_steps, 1);
+            assert_eq!(configured.ai_timeout_secs, 3600);
+            for invalid in ["0", "nope"] {
+                assert!(parse(&args(&["./bin", "--ai-min-steps", invalid])).is_err());
+            }
+            for invalid in ["0", "3601", "nope"] {
+                assert!(parse(&args(&["./bin", "--ai-timeout-secs", invalid])).is_err());
+            }
+        }
+
+        #[test]
+        fn ai_models_preserve_order_and_reject_unknown_or_duplicate_values() {
+            let parsed = parse(&args(&[
+                "./bin",
+                "--ai-model",
+                AI_MODELS[2],
+                "--ai-model",
+                AI_MODELS[0],
+            ]))
+            .expect("configured model order parses");
+            assert_eq!(parsed.ai_models, vec![AI_MODELS[2], AI_MODELS[0]]);
+            assert!(parse(&args(&["./bin", "--ai-model", "not/allowed"])).is_err());
+            assert!(
+                parse(&args(&[
+                    "./bin",
+                    "--ai-model",
+                    AI_MODELS[0],
+                    "--ai-model",
+                    AI_MODELS[0]
+                ]))
+                .is_err()
             );
         }
 
@@ -2272,6 +2648,18 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
             let lua = default_driver_lua(&cfg);
             assert!(lua.contains("rdi = 42"), "{lua}");
             assert!(lua.contains(r#"r15_hex = "0xffffffffffffffff""#), "{lua}");
+        }
+
+        #[test]
+        fn generated_driver_contains_syntactically_valid_ai_report_hook() {
+            let cfg = config("./bin", None, &[], &[], None, 1000, false);
+            let source = default_driver_lua(&cfg);
+            assert!(source.contains("angryier_ai_summary(r.steps or 0"));
+            assert!(source.contains("trace["));
+            mlua::Lua::new()
+                .load(&source)
+                .into_function()
+                .expect("generated Lua with AI report hook should parse");
         }
 
         #[test]
@@ -2614,6 +3002,42 @@ print("[angryier][ideas] treat these as evidence-driven hypotheses, not automati
             assert!(plan.contains("symbolic regs  : rdi, rsi"));
             assert!(plan.contains("find targets   : 0x401000, 0x402000"));
             assert!(plan.contains("8 symbolic byte(s) in argv[0]"));
+        }
+
+        #[test]
+        fn ai_analysis_threshold_is_inclusive() {
+            assert!(!ai_analysis_eligible(true, 999, 1000));
+            assert!(ai_analysis_eligible(true, 1000, 1000));
+            assert!(!ai_analysis_eligible(false, 1000, 1000));
+        }
+
+        #[test]
+        fn ai_fallback_tries_models_in_order_with_bounded_timeouts() {
+            let models = vec!["first".to_string(), "second".to_string()];
+            let mut attempted = Vec::new();
+            let result = analyze_with_fallback("prompt", 5, &models, |model, prompt, timeout| {
+                assert_eq!(prompt, "prompt");
+                assert!(!timeout.is_zero());
+                assert!(timeout <= Duration::from_secs(5));
+                attempted.push(model.to_string());
+                if model == "first" {
+                    Err("unavailable")
+                } else {
+                    Ok("response")
+                }
+            });
+            assert_eq!(attempted, models);
+            assert_eq!(result.unwrap(), ("second".to_string(), "response"));
+        }
+
+        #[test]
+        fn ai_failure_is_reported_as_advisory_output() {
+            let models = vec!["offline-model".to_string()];
+            let output = ai_analysis_output(true, 1000, 1000, "report", 1, &models, |_, _, _| {
+                Err("offline".to_string())
+            })
+            .expect("threshold is met");
+            assert!(output.contains("post-analysis skipped"));
         }
 
         #[test]
