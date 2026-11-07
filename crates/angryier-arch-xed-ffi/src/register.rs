@@ -47,6 +47,8 @@ const REG_AL: xed_reg_enum_t = 130; // AL .. R31B (low-byte views, 8b)
 const REG_AH: xed_reg_enum_t = 162; // AH .. BH   (high-byte views, 8b)
 
 const REG_RIP: xed_reg_enum_t = 167;
+/// `XED_REG_EIP` — the 32-bit instruction-pointer view (legacy modes).
+const REG_EIP: xed_reg_enum_t = 168;
 const REG_FLAGS: xed_reg_enum_t = 31;
 const REG_EFLAGS: xed_reg_enum_t = 32;
 const REG_RFLAGS: xed_reg_enum_t = 33;
@@ -123,7 +125,12 @@ pub(crate) fn map_register(reg: xed_reg_enum_t) -> Option<MappedRegister> {
         });
     }
 
-    if reg == REG_RIP {
+    // RIP (long mode) and EIP (legacy modes) both normalize to the same
+    // instruction-pointer reference. The suppressed EIP operand appears in
+    // every IA-32 decode of stack-returning forms (`call`/`enter`); without
+    // this arm it maps to `None` and the operand is silently dropped, which
+    // breaks the corpus-authored 3-operand semantic layouts.
+    if reg == REG_RIP || reg == REG_EIP {
         return Some(MappedRegister {
             reference: XedRegisterRef::InstructionPointer,
         });

@@ -351,6 +351,26 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+/// True when `bytes` is an `MZ` image whose optional header is PE32
+/// (0x10B, IA-32). Used by the Lua host and the CLI to pick the decode mode
+/// and the 32-bit user-mode entry-state constructor before any loader runs.
+pub fn is_pe32_image(bytes: &[u8]) -> bool {
+    if bytes.len() < 0x40 || bytes[0] != b'M' || bytes[1] != b'Z' {
+        return false;
+    }
+    let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap_or([0u8; 4])) as usize;
+    let Some(coff) = e_lfanew.checked_add(4) else {
+        return false;
+    };
+    let Some(opt) = coff.checked_add(20) else {
+        return false;
+    };
+    let Some(magic) = bytes.get(opt..opt.checked_add(2).unwrap_or(bytes.len())) else {
+        return false;
+    };
+    magic == [0x0B, 0x01] // PE32 magic 0x010B, little-endian
+}
+
 /// Shared process preparation for both `angry.run` and `angry.open` respawns:
 /// load the image, apply the under-constrained memory policies, then apply
 /// the entry override WITH the `EXIT_HOOK` sentinel frame (an entered
@@ -366,6 +386,7 @@ pub(crate) fn prep_process_for_session<D: crate::Decoder>(
         runtime
             .load_pe_driver(bytes)
             .or_else(|_| runtime.load_pe(bytes))
+            .or_else(|_| runtime.load_pe32_user(bytes))
             .map_err(|e| mlua::Error::external(format!("load_pe: {e:?}")))?
     } else {
         runtime
@@ -421,15 +442,37 @@ pub(crate) fn apply_process_opts(
             let rsp = process
                 .read_register(crate::register_id::GPR_BASE + 4)
                 .map_err(|e| mlua::Error::external(format!("entry rsp: {e:?}")))?;
+            // The sentinel frame width follows the image profile: a PE32
+            // (IA-32) `ret` pops 4 bytes, PE32+ pops 8.
+            let is_pe32 = process.target_profile == angryier_types::TargetProfileId(2);
+            let (sentinel_addr, sentinel_bytes) = if is_pe32 {
+                (
+                    rsp.wrapping_sub(4),
+                    crate::PE32_EXIT_HOOK.to_le_bytes().to_vec(),
+                )
+            } else {
+                (
+                    rsp.wrapping_sub(8),
+                    crate::EXIT_HOOK.to_le_bytes().to_vec(),
+                )
+            };
+            let hook = if is_pe32 {
+                crate::PE32_EXIT_HOOK
+            } else {
+                crate::EXIT_HOOK
+            };
             process.state.memory = process
                 .state
                 .memory
-                .load_concrete(rsp.wrapping_sub(8), &crate::EXIT_HOOK.to_le_bytes())
+                .load_concrete(sentinel_addr, &sentinel_bytes)
                 .map_err(|e| mlua::Error::external(format!("entry frame: {e:?}")))?;
             process
-                .write_register(crate::register_id::GPR_BASE + 4, rsp.wrapping_sub(8))
+                .write_register(
+                    crate::register_id::GPR_BASE + 4,
+                    sentinel_addr,
+                )
                 .map_err(|e| mlua::Error::external(format!("entry rsp set: {e:?}")))?;
-            process.hook_simproc(crate::EXIT_HOOK, "exit");
+            process.hook_simproc(hook, "exit");
         }
     }
     Ok(process)

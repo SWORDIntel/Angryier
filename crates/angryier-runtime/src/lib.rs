@@ -26,6 +26,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use angryier_arch::{AccessKind, DecodedInstruction, Decoder, MemoryBase, MemoryIndex, Operand, OperandKind};
+/// Re-exported so downstream hosts (CLI, Lua bindings) can construct
+/// legacy-32 runtimes without a direct decoder-crate dependency.
+#[cfg(feature = "xed")]
+pub use angryier_arch_xed_ffi::XedMachineMode;
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 pub use angryier_execution::SymbolicSessionMemory;
 use angryier_execution::{
@@ -157,6 +161,39 @@ const PE_DRIVER_SCRATCH_SIZE: u64 = 0x10000; // 64KB: DRIVER_OBJECT + GS segment
 /// driver entry lands on the shared `exit` SimProcedure hook and terminates
 /// cleanly — the same pattern `libc_start_main` uses.
 pub const EXIT_HOOK: u64 = 0xdead_beef_0000;
+
+// ---------------------------------------------------------------------------
+// PE32 (IA-32) user-mode image constants. Every pointer-sized value below
+// stays under 4 GiB so it round-trips through a 32-bit stack slot or IAT
+// entry.
+// ---------------------------------------------------------------------------
+
+/// Import-stub region for PE32 images: same 16-byte stride as the driver
+/// region, but based inside the first 4 GiB so a u32 IAT slot can hold it.
+/// Below the FS scratch; both sit below the PE32 stack block.
+pub const PE32_USER_STUB_BASE: u64 = 0x7EB0_0000;
+const PE32_USER_STUB_SIZE: u64 = 0x0001_0000;
+/// Sentinel return address for a 32-bit `ret` (pops 4 bytes).
+pub const PE32_EXIT_HOOK: u64 = 0xdead_beef;
+/// Writable scratch region modeling the TEB area for IA-32 images. The
+/// lower page hosts the SEH chain head the CRT writes below the segment
+/// base; the upper page (`PE32_TEB_BASE`) is the `fs` segment base with
+/// the TEB fields (`fs:[0x04]` StackBase, `fs:[0x08]` StackLimit,
+/// `fs:[0x18]` self, `fs:[0x30]` process-params) and the argv0 string.
+pub const PE32_FS_SCRATCH_BASE: u64 = 0x7EC0_0000;
+const PE32_FS_SCRATCH_SIZE: u64 = 0x0002_0000;
+pub const PE32_TEB_BASE: u64 = PE32_FS_SCRATCH_BASE + 0x0001_0000;
+/// Initial 32-bit user stack top (typical Win32 reserve region). The size
+/// matches the real Win32 1 MiB reserve: MSVC CRT startup performs large
+/// `_alloca`s (SEH frame + stack checks) that need the full reserve below
+/// the initial pointer. The 16 MiB block spans [0x7EC20000, 0x7FC20000)
+/// and does not overlap the stub/FS regions below it.
+pub const PE32_STACK_BASE: u64 = 0x7FC2_0000;
+const PE32_STACK_SIZE: u64 = 0x100_0000; // 16 MiB: covers large CRT `_alloca`s
+/// The MSVC linker's DEFAULT 32-bit `__security_cookie`.
+const PE32_DEFAULT_COOKIE: u32 = 0xBB40_E64E;
+/// Deterministic replacement for the 32-bit cookie at PE32 load time.
+const PE32_SECURITY_COOKIE: u32 = 0xB3D5_E1F2;
 
 /// The MSVC linker's DEFAULT `__security_cookie` value (`/GS` builds that
 /// never ran `__security_init_cookie` ship this in `.data`).
@@ -2361,6 +2398,239 @@ impl<D: Decoder> Runtime<D> {
         Ok(process)
     }
 
+    /// Loads a PE32 (IA-32) user-mode image with a Windows-process entry
+    /// state and 4-byte import stubs.
+    ///
+    /// Mirrors the x86-64 driver-load machinery where it transfers, and
+    /// deliberately omits what does not apply: no DRIVER_OBJECT/GS kernel
+    /// model (user-mode images never touch those), 4-byte IAT slot patching
+    /// against a sub-4-GiB stub region, a 4-byte security-cookie scan (the
+    /// 32-bit MSVC DEFAULT cookie), and a 32-bit entry stack image
+    /// `[argc][argv0][NULL]` with the [`PE32_EXIT_HOOK`] sentinel so an
+    /// image that returns from its entry terminates cleanly.
+    ///
+    /// The caller must construct this runtime in
+    /// [`XedMachineMode::Legacy32`](angryier_arch_xed_ffi::XedMachineMode::Legacy32)
+    /// with `TargetProfileId(2)`; `load_image_with_extra_regions` rejects
+    /// profile-mismatched images, so an x86-64 runtime cannot accidentally
+    /// load a PE32 image. Stack arguments wider than 32 bits, environment
+    /// blocks, and auxv are not modeled for PE32 entry — campaign results
+    /// depending on those carry that model debt.
+    pub fn load_pe32_user(&self, bytes: &[u8]) -> Result<Process, RuntimeError> {
+        let loader = angryier_loader::Pe32Loader::new();
+        let image = loader.load(bytes).map_err(RuntimeError::Loader)?;
+        let imports: Vec<angryier_loader::PeImport> = image
+            .pe_imports()
+            .map(<[angryier_loader::PeImport]>::to_vec)
+            .unwrap_or_default();
+
+        let extra_regions = vec![
+            MemoryRegion {
+                object: angryier_types::ObjectId(5),
+                base: PE32_USER_STUB_BASE,
+                size: PE32_USER_STUB_SIZE,
+                readable: true,
+                writable: false,
+                executable: true,
+            },
+            // TEB-model scratch: FS segment base points here; fs:[0x18]
+            // (self pointer) and fs:[0x30] (cookie-entropy pointer slot)
+            // resolve into this region. Also hosts the argv0 string.
+            MemoryRegion {
+                object: angryier_types::ObjectId(6),
+                base: PE32_FS_SCRATCH_BASE,
+                size: PE32_FS_SCRATCH_SIZE,
+                readable: true,
+                writable: true,
+                executable: false,
+            },
+            // Under-constrained memory guard: low 64 KiB as zeroed RAM
+            // (same UC-SymEX relaxation as the driver path).
+            MemoryRegion {
+                object: angryier_types::ObjectId(9),
+                base: 0,
+                size: 0x0001_0000,
+                readable: true,
+                writable: true,
+                executable: false,
+            },
+            // 32-bit user stack. The generic image loader still maps its
+            // 64-bit stack region; register init below re-points ESP.
+            MemoryRegion {
+                object: angryier_types::ObjectId(10),
+                base: PE32_STACK_BASE - PE32_STACK_SIZE,
+                size: PE32_STACK_SIZE,
+                readable: true,
+                writable: true,
+                executable: false,
+            },
+        ];
+        let mut process = self.load_image_with_extra_regions(image, extra_regions)?;
+
+        // Security-cookie randomization: same scan as the driver path but
+        // 4-byte slots and the 32-bit MSVC DEFAULT cookie (`/GS` builds that
+        // never ran `__security_init_cookie` ship it in `.data`).
+        let mapped_regions: Vec<MemoryRegion> = process.state.memory.regions().to_vec();
+        for region in mapped_regions {
+            if !region.readable || !region.writable {
+                continue;
+            }
+            let mut addr = region.base;
+            let end = region.base.saturating_add(region.size);
+            while addr + 4 <= end {
+                let Ok(slot) = process.state.memory.read(addr, 4) else {
+                    break;
+                };
+                let mut slot_bytes = [0u8; 4];
+                let mut is_cookie = true;
+                for (offset, byte) in slot.iter().enumerate() {
+                    match byte {
+                        ByteValue::Concrete(value) => slot_bytes[offset] = *value,
+                        ByteValue::Symbolic(_) => {
+                            is_cookie = false;
+                            break;
+                        }
+                    }
+                }
+                if !is_cookie {
+                    addr += 4;
+                    continue;
+                }
+                let value = u32::from_le_bytes(slot_bytes);
+                if value == PE32_DEFAULT_COOKIE {
+                    process.state.memory = process
+                        .state
+                        .memory
+                        .load_concrete(addr, &PE32_SECURITY_COOKIE.to_le_bytes())
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                } else if value == !PE32_DEFAULT_COOKIE {
+                    process.state.memory = process
+                        .state
+                        .memory
+                        .load_concrete(addr, &(!PE32_SECURITY_COOKIE).to_le_bytes())
+                        .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                }
+                addr += 4;
+            }
+        }
+
+        // IAT patching: stub i lives at PE32_USER_STUB_BASE + 16*i and holds
+        // a single `ret`; BOOL-returning APIs get `mov eax,1; ret` (the same
+        // bytes work in IA-32). The IAT slot itself is 4 bytes in a PE32.
+        if !imports.is_empty() {
+            let image_base = pe_image_base(bytes)?;
+            let capacity = usize::try_from(PE32_USER_STUB_SIZE / PE_DRIVER_STUB_STRIDE)
+                .map_err(|_| RuntimeError::Memory("import stub capacity overflow".into()))?;
+            if imports.len() > capacity {
+                return Err(RuntimeError::Memory(format!(
+                    "PE import stub region exhausted: {} imports, capacity {capacity}",
+                    imports.len()
+                )));
+            }
+            for (index, import) in imports.iter().enumerate() {
+                let export = match &import.kind {
+                    angryier_loader::PeImportKind::Name(name) => name.clone(),
+                    angryier_loader::PeImportKind::Ordinal(ordinal) => format!("#{ordinal}"),
+                };
+                let stub = PE32_USER_STUB_BASE + PE_DRIVER_STUB_STRIDE * index as u64;
+                let cell: &[u8] = {
+                    let is_bool_api = import.dll.eq_ignore_ascii_case("kernel32.dll")
+                        && matches!(
+                            &import.kind,
+                            angryier_loader::PeImportKind::Name(name)
+                                if name == "IsProcessorFeaturePresent"
+                                    || name == "CreateThread"
+                                    || name == "CloseHandle"
+                                    || name == "SetEvent"
+                                    || name == "ResetEvent"
+                        );
+                    if is_bool_api {
+                        &[0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3] // mov eax,1; ret
+                    } else {
+                        &[0xC3]
+                    }
+                };
+                process.state.memory = process
+                    .state
+                    .memory
+                    .load_concrete(stub, cell)
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                let slot = image_base.wrapping_add(u64::from(import.iat_rva));
+                let mapped = process.state.memory.regions().iter().any(|region| {
+                    slot >= region.base
+                        && slot
+                            .checked_add(4)
+                            .is_some_and(|end| end <= region.base.saturating_add(region.size))
+                        && (region.readable || region.writable)
+                });
+                if !mapped {
+                    return Err(RuntimeError::Memory(format!(
+                        "IAT slot {slot:#x} for import {}!{export} is outside a mapped writable-or-readable segment",
+                        import.dll
+                    )));
+                }
+                process.state.memory = process
+                    .state
+                    .memory
+                    .load_concrete(slot, &(stub as u32).to_le_bytes())
+                    .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+                process.pe_import_stubs.insert(stub, (import.dll.clone(), export));
+            }
+        }
+
+        // FS segment base for 32-bit user-mode: point it at the TEB-model
+        // scratch, seed the self pointer at fs:[0x18], the process-params
+        // pointer slot at fs:[0x30], and place an argv0 string there.
+        process.write_register(register_id::FS_BASE.0, PE32_TEB_BASE)?;
+        let write_u32 = |process: &mut Process, address: u64, value: u32| -> Result<(), RuntimeError> {
+            process.state.memory = process
+                .state
+                .memory
+                .load_concrete(address, &value.to_le_bytes())
+                .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+            Ok(())
+        };
+        write_u32(&mut process, PE32_TEB_BASE + 0x18, PE32_TEB_BASE as u32)?;
+        write_u32(&mut process, PE32_TEB_BASE + 0x30, (PE32_TEB_BASE + 0x40) as u32)?;
+        write_u32(&mut process, PE32_TEB_BASE + 0x40, 0x0065_2E61)?; // "a.e"
+        write_u32(&mut process, PE32_TEB_BASE + 0x44, 0x0000_6578)?; // "xe\0"
+        // TEB stack fields (fs:[0x04] StackBase top, fs:[0x08] StackLimit
+        // bottom): MSVC `__chkstk`/`_alloca` probe paths read these to size
+        // large frame allocations. Without them the alloca size is garbage
+        // and ESP leaves the reserve.
+        write_u32(&mut process, PE32_FS_SCRATCH_BASE, 0xFFFF_FFFF)?; // SEH chain head terminator
+        write_u32(&mut process, PE32_TEB_BASE + 0x04, PE32_STACK_BASE as u32)?;
+        write_u32(&mut process, PE32_TEB_BASE + 0x08, (PE32_STACK_BASE - PE32_STACK_SIZE) as u32)?;
+
+        // 32-bit user entry stack image: [argc=1][argv0][NULL] — 32-bit MSVC
+        // startup reads argc at [esp] and argv at [esp+4].
+        let esp = PE32_STACK_BASE - 0x40;
+        let mut stack_image = [0u8; 12];
+        stack_image[0..4].copy_from_slice(&1u32.to_le_bytes());
+        stack_image[4..8].copy_from_slice(&((PE32_FS_SCRATCH_BASE + 0x40) as u32).to_le_bytes());
+        stack_image[8..12].copy_from_slice(&0u32.to_le_bytes());
+        process.state.memory = process
+            .state
+            .memory
+            .load_concrete(esp, &stack_image)
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+
+        // Sentinel return address: a 32-bit image that returns from its
+        // entry pops 4 bytes and lands on the exit hook, terminating cleanly.
+        process.state.memory = process
+            .state
+            .memory
+            .load_concrete(esp - 4, &PE32_EXIT_HOOK.to_le_bytes())
+            .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        process.write_register(register_id::GPR_BASE + 4, esp - 4)?;
+        process.hook_simproc(PE32_EXIT_HOOK, "exit");
+
+        // The patches above are load-time state: keep restart-from-entry
+        // (`reset_to_entry`) meaningful for PE32 images too.
+        process.entry_state = process.state.clone();
+        Ok(process)
+    }
+
     /// Creates a Process from an already-loaded image.
     pub fn load_image(&self, image: LoadedImage) -> Result<Process, RuntimeError> {
         self.load_image_with_extra_regions(image, Vec::new())
@@ -3983,8 +4253,13 @@ fn pe_image_base(bytes: &[u8]) -> Result<u64, RuntimeError> {
         Some(end) if end <= bytes.len() => {}
         _ => return Err(invalid()),
     }
+    // PE32 (0x10B) keeps every pointer field 32-bit: the image base is a
+    // u32 at opt+28 instead of a u64 at opt+24.
+    if u16_at(opt)? == 0x010B {
+        return Ok(u64::from(u32_at(opt.checked_add(28).ok_or_else(invalid)?)?));
+    }
     if u16_at(opt)? != 0x020B {
-        return Err(invalid()); // PE32 (32-bit) unsupported — same as the loader
+        return Err(invalid()); // Neither PE32+ nor PE32 — same as the loader
     }
     u64_at(opt.checked_add(24).ok_or_else(invalid)?)
 }

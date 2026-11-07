@@ -38,6 +38,41 @@ pub(crate) fn const_u64(out: &mut dyn SemanticBuilder, value: u64) -> Result<Val
     out.constant(U64, &value.to_le_bytes())
 }
 
+/// Stack slot width for the image's execution profile: IA-32 images
+/// (profile 2) push 4-byte slots; x86-64 images push 8-byte slots. Values
+/// stored into stack slots carry this width. Register-file arithmetic on
+/// ESP/RSP stays in U64 (the register file is 64-bit; 32-bit ESP is a
+/// zero-extended view) — the stride below is the profile-dependent piece.
+pub(crate) fn stack_layout(context: &SemanticContext) -> (SemanticType, u64) {
+    if context.target_profile == angryier_types::TargetProfileId(2) {
+        (U32, 4)
+    } else {
+        (U64, 8)
+    }
+}
+
+/// A stack-width constant: `value` truncated to the profile's stack slot
+/// width (`stack_layout`). `SemanticBlockBuilder::constant` rejects byte
+/// slices whose length does not match the type width exactly.
+pub(crate) fn const_stack(
+    out: &mut dyn SemanticBuilder,
+    value: u64,
+    stack_ty: SemanticType,
+) -> Result<ValueId, SemanticError> {
+    let bytes = value.to_le_bytes();
+    let width_bytes = usize::try_from(stack_layout_bytes(stack_ty)).unwrap_or(8);
+    out.constant(stack_ty, &bytes[..width_bytes])
+}
+
+fn stack_layout_bytes(stack_ty: SemanticType) -> u64 {
+    if stack_ty == U32 {
+        4
+    } else {
+        8
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 // 16-bit integer arithmetic, IMUL, and MOVSXD
 // ---------------------------------------------------------------------------
@@ -2635,14 +2670,15 @@ impl SemanticProvider for PushF {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
+        let (stack_ty, stride) = stack_layout(context);
         let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
         // Operand 0 is the suppressed RFLAGS read; operand 1 is the
         // suppressed stack write. Unlike PUSH r64, XED reports the pushf
         // stack operand at [rsp+0] — writing RSP first makes the store's
-        // evaluated address land at [rsp-8].
-        let value = out.read_operand(0, U64)?;
-        let eight = const_u64(out, 8)?;
-        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
+        // evaluated address land at [rsp-stride].
+        let value = out.read_operand(0, stack_ty)?;
+        let delta = const_u64(out, stride)?;
+        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, delta])?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         out.write_operand(1, value)?;
         fall_through(out, insn)?;
@@ -2671,10 +2707,11 @@ impl SemanticProvider for PopF {
     ) -> Result<SemanticReceipt, SemanticError> {
         // Operand 1 is the suppressed stack read; operand 0 is the
         // suppressed RFLAGS destination (XED models it ReadWrite).
-        let value = out.read_operand(1, U64)?;
+        let (stack_ty, stride) = stack_layout(context);
+        let value = out.read_operand(1, stack_ty)?;
         let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
-        let eight = const_u64(out, 8)?;
-        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsp, eight])?;
+        let delta = const_u64(out, stride)?;
+        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsp, delta])?;
         out.write_operand(0, value)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         fall_through(out, insn)?;
@@ -4113,12 +4150,13 @@ impl SemanticProvider for PushImm8 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
+        let (stack_ty, stride) = stack_layout(context);
         let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
-        // Read the 8-bit immediate and sign-extend it to 64-bit.
+        // Read the 8-bit immediate and sign-extend it to the stack width.
         let imm8 = out.read_operand(0, U8)?;
-        let value = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[imm8])?;
-        let eight = const_u64(out, 8)?;
-        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
+        let value = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), stack_ty, &[imm8])?;
+        let delta = const_u64(out, stride)?;
+        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, delta])?;
         out.write_operand(1, value)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         fall_through(out, insn)?;
@@ -4149,12 +4187,13 @@ impl SemanticProvider for PushImm32 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
+        let (stack_ty, stride) = stack_layout(context);
         let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
-        // Read the 32-bit immediate and sign-extend it to 64-bit.
+        // Read the 32-bit immediate and sign-extend it to the stack width.
         let imm32 = out.read_operand(0, U32)?;
-        let value = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), U64, &[imm32])?;
-        let eight = const_u64(out, 8)?;
-        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
+        let value = out.emit(SemanticOp::Primitive(PrimitiveOp::SignExtend), stack_ty, &[imm32])?;
+        let delta = const_u64(out, stride)?;
+        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, delta])?;
         out.write_operand(1, value)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         fall_through(out, insn)?;
@@ -4185,13 +4224,18 @@ impl SemanticProvider for CallRel32 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
-        let eight = const_u64(out, 8)?;
-        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
+        // Stack slot width and return-address width follow the image
+        // profile: IA-32 pushes a 32-bit return address through ESP.
+        let (stack_ty, stride) = stack_layout(context);
+        let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), stack_ty)?;
+        let delta = const_stack(out, stride, stack_ty)?;
+        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), stack_ty, &[rsp, delta])?;
         // The return address is the instruction address + length.
-        let return_addr = const_u64(out, insn.address().wrapping_add(u64::from(insn.length())))?;
+        let return_addr = const_stack(out, insn.address().wrapping_add(u64::from(insn.length())), stack_ty)?;
         out.write_operand(2, return_addr)?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
+        // The relative-branch expression is engine-normalized to U64 in both
+        // modes; the pushed slot width stays profile-aware (U32 for IA-32).
         let target = out.read_operand(0, U64)?;
         out.jump(target)?;
         Ok(receipt(85, context))
@@ -4221,12 +4265,14 @@ impl SemanticProvider for Ret {
         _insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        // RIP = [RSP]; RSP += 8. The return address is a computed target, so
-        // the jump is indirect.
-        let target = out.read_operand(1, U64)?;
+        // EIP/RIP = [ESP/RSP]; ESP/RSP += stride. The return address is a
+        // computed target, so the jump is indirect. Widths follow the image
+        // profile (4-byte slots through ESP for IA-32).
+        let (stack_ty, stride) = stack_layout(context);
+        let target = out.read_operand(1, stack_ty)?;
         let rsp = out.read_register(RegisterId(register_id::GPR_BASE + 4), U64)?;
-        let eight = const_u64(out, 8)?;
-        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsp, eight])?;
+        let delta = const_u64(out, stride)?;
+        let new_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Add), U64, &[rsp, delta])?;
         out.write_register(RegisterId(register_id::GPR_BASE + 4), new_rsp)?;
         out.jump_indirect(target)?;
         Ok(receipt(86, context))
@@ -4463,8 +4509,11 @@ impl SemanticProvider for Leave {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
-        let frame_pointer = out.read_operand(1, U64)?;
-        let saved = out.read_operand(0, U64)?;
+        // The suppressed frame operands' widths follow the image profile
+        // (ESP/EBP are 32-bit in IA-32 images).
+        let (stack_ty, _stride) = stack_layout(context);
+        let frame_pointer = out.read_operand(1, stack_ty)?;
+        let saved = out.read_operand(0, stack_ty)?;
         out.write_operand(2, frame_pointer)?;
         out.write_operand(1, saved)?;
         fall_through(out, insn)?;
@@ -6539,25 +6588,29 @@ impl SemanticProvider for EnterImm16Imm8 {
         insn: &dyn DecodedInstructionView,
         out: &mut dyn SemanticBuilder,
     ) -> Result<SemanticReceipt, SemanticError> {
+        let (stack_ty, stride) = stack_layout(context);
         let rsp_reg = RegisterId(register_id::GPR_BASE + 4);
         let rbp_reg = RegisterId(register_id::GPR_BASE + 5);
-        let rsp = out.read_register(rsp_reg, U64)?;
-        let rbp = out.read_register(rbp_reg, U64)?;
-        let eight = const_u64(out, 8)?;
-        let pushed_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[rsp, eight])?;
+        let rsp = out.read_register(rsp_reg, stack_ty)?;
+        let rbp = out.read_register(rbp_reg, stack_ty)?;
+        let delta = const_stack(out, stride, stack_ty)?;
+        let pushed_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), stack_ty, &[rsp, delta])?;
         out.write_register(rsp_reg, pushed_rsp)?;
         let mem_idx = (0..insn.operand_count() as u8)
             .find(|&i| insn.operand(i).is_some_and(|op| op.class == OperandClass::Memory));
         if let Some(idx) = mem_idx {
-            out.write_operand(idx, rbp)?;
+            // The frame slot is profile-width; truncate the U64 saved base.
+            let zero = const_u64(out, 0)?;
+            let saved32 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), stack_ty, &[pushed_rsp, zero])?;
+            out.write_operand(idx, saved32)?;
         }
         out.write_register(rbp_reg, pushed_rsp)?;
         let imm_idx = (0..insn.operand_count() as u8)
             .find(|&i| insn.operand(i).is_some_and(|op| op.class == OperandClass::Immediate))
             .unwrap_or(0);
         let imm16 = out.read_operand(imm_idx, U16)?;
-        let imm16_64 = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[imm16])?;
-        let final_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[pushed_rsp, imm16_64])?;
+        let imm_extended = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[imm16])?;
+        let final_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[pushed_rsp, imm_extended])?;
         out.write_register(rsp_reg, final_rsp)?;
         fall_through(out, insn)?;
         Ok(receipt(0x0806, context))

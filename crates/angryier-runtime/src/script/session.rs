@@ -736,10 +736,20 @@ fn rebuild_from_template(inner: &mut SessionInner, opts: Option<&Table>) -> mlua
 #[cfg(feature = "xed")]
 pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession> {
     let bytes = std::fs::read(path).map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
-    let runtime: &'static XedRuntime = Box::leak(Box::new(crate::Runtime::with_native_xed(
-        angryier_types::SemanticVersion(1),
-        angryier_types::TargetProfileId(1),
-    )));
+    // PE32 (IA-32) images decode in legacy-32 mode against the IA-32
+    // execution profile; the loader tags them TargetProfileId(2).
+    let runtime: &'static XedRuntime = Box::leak(Box::new(if super::is_pe32_image(&bytes) {
+        crate::Runtime::with_native_xed_mode(
+            angryier_types::SemanticVersion(1),
+            angryier_types::TargetProfileId(2),
+            angryier_arch_xed_ffi::XedMachineMode::Legacy32,
+        )
+    } else {
+        crate::Runtime::with_native_xed(
+            angryier_types::SemanticVersion(1),
+            angryier_types::TargetProfileId(1),
+        )
+    }));
     let arena: &'static angryier_expr::ShardedExprArena = Box::leak(Box::new(angryier_expr::ShardedExprArena::new(
         angryier_types::ExpressionNormalizationVersion(1),
     )));

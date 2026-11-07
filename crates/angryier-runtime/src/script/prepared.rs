@@ -69,7 +69,18 @@ impl PreparedImage {
     pub fn load(path: &str, opts: Option<&Table>) -> mlua::Result<Self> {
         let t0 = std::time::Instant::now();
         let bytes = std::fs::read(path).map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
-        let mut runtime = crate::Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+        // PE32 (IA-32) images decode in legacy-32 mode against the IA-32
+        // execution profile; the loader tags them TargetProfileId(2).
+        let pe32_image = super::is_pe32_image(&bytes);
+        let mut runtime = if pe32_image {
+            crate::Runtime::with_native_xed_mode(
+                SemanticVersion(1),
+                TargetProfileId(2),
+                angryier_arch_xed_ffi::XedMachineMode::Legacy32,
+            )
+        } else {
+            crate::Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1))
+        };
         if opts
             .and_then(|o| o.get::<String>("unsupported").ok())
             .is_some_and(|v| v == "fallthrough")
@@ -84,9 +95,15 @@ impl PreparedImage {
             .unwrap_or(false);
         let is_pe = bytes.len() > 1 && bytes[0] == b'M' && bytes[1] == b'Z';
         let process = if is_pe {
-            runtime
-                .load_pe_driver(&bytes)
-                .map_err(|e| mlua::Error::external(format!("load_pe_driver: {e:?}")))?
+            if pe32_image {
+                runtime
+                    .load_pe32_user(&bytes)
+                    .map_err(|e| mlua::Error::external(format!("load_pe32_user: {e:?}")))?
+            } else {
+                runtime
+                    .load_pe_driver(&bytes)
+                    .map_err(|e| mlua::Error::external(format!("load_pe_driver: {e:?}")))?
+            }
         } else if use_dynamic {
             runtime
                 .load_elf_dynamic(&bytes, &[])
@@ -217,19 +234,35 @@ impl PreparedImage {
                 .map_err(|e| mlua::Error::external(format!("entry override: {e:?}")))?;
             // Push the exit sentinel: an entry-overridden function has no
             // caller frame, so its `ret` (and a SimProcedure's pop) would
-            // otherwise read stale stack and land in unmapped padding.
+            // otherwise read stale stack and land in unmapped padding. The
+            // frame width follows the image profile: a PE32 (IA-32) `ret`
+            // pops 4 bytes, PE32+ pops 8.
+            let is_pe32 = process.target_profile == angryier_types::TargetProfileId(2);
             let rsp = process
                 .read_register(crate::register_id::GPR_BASE + 4)
                 .map_err(|e| mlua::Error::external(format!("entry rsp: {e:?}")))?;
+            let (hook, sentinel_addr, sentinel_bytes) = if is_pe32 {
+                (
+                    crate::PE32_EXIT_HOOK,
+                    rsp.wrapping_sub(4),
+                    crate::PE32_EXIT_HOOK.to_le_bytes().to_vec(),
+                )
+            } else {
+                (
+                    crate::EXIT_HOOK,
+                    rsp.wrapping_sub(8),
+                    crate::EXIT_HOOK.to_le_bytes().to_vec(),
+                )
+            };
             process.state.memory = process
                 .state
                 .memory
-                .load_concrete(rsp.wrapping_sub(8), &crate::EXIT_HOOK.to_le_bytes())
+                .load_concrete(sentinel_addr, &sentinel_bytes)
                 .map_err(|e| mlua::Error::external(format!("entry frame: {e:?}")))?;
             process
-                .write_register(crate::register_id::GPR_BASE + 4, rsp.wrapping_sub(8))
+                .write_register(crate::register_id::GPR_BASE + 4, sentinel_addr)
                 .map_err(|e| mlua::Error::external(format!("entry rsp set: {e:?}")))?;
-            process.hook_simproc(crate::EXIT_HOOK, "exit");
+            process.hook_simproc(hook, "exit");
         }
 
         // Function-entry RSP after the override (sentinel retaddr at [rsp]):

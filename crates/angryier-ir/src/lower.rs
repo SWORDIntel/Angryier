@@ -351,7 +351,7 @@ fn lower_memory_address(
             });
             address = Some(base);
         }
-        Some(MemoryBase::InstructionPointer { .. }) => {
+        Some(MemoryBase::InstructionPointer { width_bits: 64 }) => {
             // RIP-relative addressing is relative to the next instruction.
             let next = decoded.address().wrapping_add(u64::from(decoded.length()));
             let base = emitter.produce(IrOp::Constant {
@@ -359,6 +359,12 @@ fn lower_memory_address(
                 bytes_le: next.to_le_bytes().to_vec(),
             });
             address = Some(base);
+        }
+        Some(MemoryBase::InstructionPointer { .. }) => {
+            // IA-32 absolute addressing (mod=0 rm=5 / moffs): XED reports
+            // base=EIP with the absolute address as the raw displacement
+            // (the memop address width may be uninformative there). No
+            // base — the displacement add below yields the absolute target.
         }
         None => {}
     }
@@ -545,7 +551,10 @@ fn lower_operand_read(
             Ok(OperandRead::Op(IrOp::Load { address, ty: ir_type }))
         }
         // `lea` reads the computed address, not the memory it points at.
-        OperandKind::AddressGeneration(memory) if bit_width == 64 => {
+        // IA-32 (profile 2) images compute 32-bit addresses: the AG operand
+        // carries address_width_bits 32 and its base/index register views
+        // are 32-bit, so the lowered address is 32-bit there too.
+        OperandKind::AddressGeneration(memory) if matches!(bit_width, 32 | 64) => {
             let address = lower_memory_address(decoded, &memory, emitter)?;
             Ok(OperandRead::Alias(address))
         }

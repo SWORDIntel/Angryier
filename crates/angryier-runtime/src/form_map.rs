@@ -1031,6 +1031,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Imm] => Some(forms::PUSH_IMM32),
             [Shape::Mem64] => Some(forms::PUSH_MEM64),
             [Shape::Mem16] => Some(forms::PUSH_MEM16),
+            // IA-32 (profile 2) memory push.
+            [Shape::Mem32] => Some(forms::PUSH_MEM32),
             _ => None,
         },
         iclass::XED_ICLASS_POP => match shapes {
@@ -3411,6 +3413,11 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
             [Shape::Rel] => Some(forms::CALL_REL32),
             [Shape::Reg64] => Some(forms::CALL_INDIRECT_R64),
             [Shape::Mem64] => Some(forms::CALL_INDIRECT_MEM64),
+            // IA-32 (profile 2) indirect calls carry 32-bit shapes; they
+            // reuse the same engine forms — the stack-form providers take
+            // their widths from the target profile.
+            [Shape::Reg32] => Some(forms::CALL_INDIRECT_R64),
+            [Shape::Mem32] => Some(forms::CALL_INDIRECT_MEM64),
             _ => None,
         },
         iclass::XED_ICLASS_RET_NEAR => match shapes {

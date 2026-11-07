@@ -6,6 +6,70 @@
 
 ---
 
+## 0a. Delivered — IA-32 (PE32) user-mode execution (2026-10-31)
+
+PE32/IA-32 images now load and execute end-to-end (previously
+`load_pe_driver: Loader(InvalidMachine)`):
+- Loader accepts `IMAGE_FILE_MACHINE_I386` + PE32 magic 0x10B (PE32
+  optional-header layout, u32 image base, 4-byte import thunks, ordinal
+  flag bit 31); mismatched machine/magic pairs rejected; PE32 images tagged
+  `TargetProfileId(2)`.
+- Runtime `load_pe32_user`: 4-byte IAT patching against the sub-4-GiB stub
+  region, 32-bit security-cookie scan, FS/TEB model (StackBase/StackLimit
+  seeded), 16 MiB stack, 32-bit entry stack image, `PE32_EXIT_HOOK`
+  sentinel. Decode constructed in `XedMachineMode::Legacy32`.
+- Stack-form providers width-parameterized by target profile (`stack_layout`):
+  PUSH/POP r32/imm/flags, CALL rel32/indirect, RET, LEAVE, ENTER, and the
+  new `PUSH_MEM32` form (0x3022).
+- IR lowering: width-32 instruction-pointer bases (IA-32 absolute
+  addressing) lower to the absolute displacement; width-64 stays
+  RIP-relative.
+- EIP operand fix: `XED_REG_EIP` maps to the instruction-pointer reference
+  (was silently dropped in legacy32, corrupting call-form operand layouts).
+- Tests: loader `pe32_i386_*` fixtures; runtime `tests/pe32_user.rs`
+  (IAT patching, TEB fields, entry-`ret` sentinel termination); full suite
+  936 passed / 0 failed across runtime, semantics-intel64, arch-xed-ffi,
+  ir, loader, memory.
+- Validated on MDSec Nighthawk `Implant.x86.exe`: 20000-step concolic run,
+  zero failed states, 4096-block trace. `Implant.x86.dll` is an unpatched
+  template (entry 0 / base 0xb000) — not standalone-executable by design.
+
+---
+
+## 0b. Known Defects — solver AST interning (recorded 2026-10-31)
+
+**Defect:** `ExprArenaError::SortMismatch(Concat)` aborts symbolic evaluation at
+an indexed-memory-load address expression: instruction
+`4b 8b 8c fe c0 74 01 00` (`mov rcx,[r14+rdi*8+0x174c0]`) at pc `0x140007463`
+(CRT helper `sub_7434`) inside MDSec Nighthawk `Implant.x64.exe`
+(`Samples/Original/PE/executables/`, sha256 `a3948755…`). Reproduces
+deterministically with concrete and symbolic registers on a freshly rebuilt
+binary from current source (`f1276a2`); not a stale-binary artifact
+(`angryier doctor` reported `mismatched-checkout-and-binary` before the
+rebuild — rebuild first when triaging engine behavior).
+
+**Behavior:** fail-closed — `angryier-expr` correctly rejects the malformed
+Concat (operand widths must sum to the node width, `lib.rs` validation) and
+the run reports `failed=1` with the exact pc; no unsound output, no crash.
+
+**Suspected layer:** the lift/evaluate site that builds the effective-address
+expression for SIB-indexed loads interns a `Concat` whose operand widths do
+not sum (width bookkeeping, not operand order). Fix requires a minimal repro
+test driving one instruction through the lift→evaluate path and auditing the
+address-expression construction for width mismatches.
+
+**Workaround (field, until fixed):** redirect the enclosing helper to a `ret`
+gadget via Lua `redirects` (applied in
+`Samples/Analysed/PE/executables/Implant.x64/angryier/exe_entry.lua`:
+`0x140007434 → 0x140016f00`), documented as model debt in the campaign
+script.
+
+- [ ] **Fix + regression test:** minimal repro (single indexed load,
+  `mov r64,[r64+r64*8+disp32]`) through lift→`SymbolicEvaluator`; assert
+  `intern(Concat)` receives width-consistent operands. Wire into CI.
+
+---
+
 ## 1. Architectural Philosophy & Delivery Rules
 
 1. **Honest Incompleteness (REA Paradigm)**:
@@ -194,3 +258,17 @@
   - **Delivery gate:** from a stripped Go language-server fixture, locate the embedded Unleash client, report its initialization and flag-evaluation call sites, return all statically supported consumer chains, and explicitly label every unresolved interface/data-flow gap. Reproducible output with identical hashes across runs.
 
 **Delivery order:** ANG-120 -> ANG-121 -> ANG-122 -> ANG-125 (useful static tracer) -> ANG-123/124 (runtime-aware slicing) -> ANG-126 final release gate. A minimal read-only tracing workflow should not block on full Go runtime symbolic modeling. Cross-reference: Phase S0/S3/S7 loader, CFG, source-backed xref, execution and knowledge-plane contracts.
+
+- [ ] **ANG-127 — Concolic routing pre-assessment for branch-free crypto targets**:
+  - Field lesson (2026-10-30, bla-crackme v5.1): the decisive targets were straight-line,
+    branch-free 32-bit sponge chains (48 rounds × 4 op calls, no data-dependent branches —
+    lane selection was arithmetic, not control flow). Concolic execution adds taint + formula
+    collection on such code but nothing else: the constraint system is identical to direct
+    SMT/bit-blast, and the solve difficulty is decided by the encoding, not the engine.
+    Routing rule: detect branch-free straight-line loops over arithmetic mixing → route to
+    SMT/bit-blast directly with the METHRA MTR-151 encoding playbook (constant-lane rewrite,
+    constant-rotation selects, no symbolic barrel shifters), and only invoke concolic when
+    genuine input-dependent control flow exists. Unconstrained preimage search on XOR/adder-
+    heavy unique-solution chains starves CDCL — report intractability instead of spinning
+    (field: >200 s to `unknown` on a 24-round chain, and a 5-min single-round encode with
+    symbolic rotations).

@@ -797,7 +797,13 @@ impl ImageLoader for Elf64Loader {
 // ---------------------------------------------------------------------------
 
 const PE_MACHINE_AMD64: u16 = 0x8664;
+/// `IMAGE_FILE_MACHINE_I386` — 32-bit x86 (IA-32) PE images.
+const PE_MACHINE_I386: u16 = 0x014C;
 const PE32PLUS_MAGIC: u16 = 0x20B;
+/// PE32 (32-bit) optional-header magic. The layouts share every field up to
+/// `SizeOfImage`; they diverge at the image base (u32 vs u64) and the stack/
+/// heap pointer widths.
+const PE32_MAGIC: u16 = 0x10B;
 const SECTION_EXEC: u32 = 0x2000_0000;
 const SECTION_READ: u32 = 0x4000_0000;
 const SECTION_WRITE: u32 = 0x8000_0000;
@@ -805,6 +811,12 @@ const SECTION_WRITE: u32 = 0x8000_0000;
 const PE32PLUS_NUM_RVA_AND_SIZES: usize = 108;
 /// PE32+ optional-header offset of the data-directory array.
 const PE32PLUS_DATA_DIRS: usize = 112;
+/// PE32 optional-header offset of the `NumberOfRvaAndSizes` field. The two
+/// layouts agree up to `BaseOfData`; PE32 keeps every pointer field 32-bit,
+/// so the tail fields sit 16 bytes lower than their PE32+ counterparts.
+const PE32_NUM_RVA_AND_SIZES: usize = 92;
+/// PE32 optional-header offset of the data-directory array.
+const PE32_DATA_DIRS: usize = 96;
 /// `IMAGE_DIRECTORY_ENTRY_IMPORT` — data-directory index of the import table.
 const IMAGE_DIRECTORY_ENTRY_IMPORT: u32 = 1;
 /// Size of one `IMAGE_IMPORT_DESCRIPTOR` (5 x u32) in bytes.
@@ -912,7 +924,8 @@ impl ImageLoader for Pe32Loader {
         }
         let coff = e_lfanew + 4;
         let machine = read_u16_le(bytes, coff)?;
-        if machine != PE_MACHINE_AMD64 {
+        let is_i386 = machine == PE_MACHINE_I386;
+        if machine != PE_MACHINE_AMD64 && !is_i386 {
             return Err(LoaderError::InvalidMachine);
         }
         let num_sections = read_u16_le(bytes, coff + 2)? as usize;
@@ -922,11 +935,22 @@ impl ImageLoader for Pe32Loader {
             return Err(LoaderError::TruncatedHeader);
         }
         let magic = read_u16_le(bytes, opt)?;
-        if magic != PE32PLUS_MAGIC {
-            return Err(LoaderError::InvalidFormat); // PE32 (32-bit) unsupported
+        let is_pe32plus = magic == PE32PLUS_MAGIC;
+        if magic != PE32PLUS_MAGIC && magic != PE32_MAGIC {
+            return Err(LoaderError::InvalidFormat); // Neither PE32+ nor PE32
+        }
+        // A PE32 image carries an IA-32 machine type; a PE32+ image carries
+        // AMD64. Mismatched pairings would decode with the wrong address
+        // model, so reject them instead of guessing from one field alone.
+        if is_pe32plus == is_i386 {
+            return Err(LoaderError::InvalidMachine);
         }
         let entry_rva = read_u32_le(bytes, opt + 16)? as u64;
-        let image_base = read_u64_le_at(bytes, opt + 24)?;
+        let image_base = if is_pe32plus {
+            read_u64_le_at(bytes, opt + 24)?
+        } else {
+            u64::from(read_u32_le(bytes, opt + 28)?)
+        };
 
         // Sections start right after the optional header.
         let sec_base = opt + opt_size;
@@ -966,8 +990,8 @@ impl ImageLoader for Pe32Loader {
             return Err(LoaderError::NoProgramHeaders);
         }
         let pe = Some(PeInfo {
-            imports: parse_pe_imports(bytes, opt, opt_size, &file_ranges)?,
-            exports: parse_pe_exports(bytes, opt, opt_size, &file_ranges)?,
+            imports: parse_pe_imports(bytes, opt, opt_size, &file_ranges, is_pe32plus)?,
+            exports: parse_pe_exports(bytes, opt, opt_size, &file_ranges, is_pe32plus)?,
             image_base,
         });
         Ok(LoadedImage {
@@ -978,7 +1002,9 @@ impl ImageLoader for Pe32Loader {
                 id
             },
             entry: image_base + entry_rva,
-            target_profile: TargetProfileId(1),
+            // Profile 2 selects the IA-32 execution profile (32-bit decode
+            // mode, 4-byte stack/IAT pointers); profile 1 stays x86-64.
+            target_profile: TargetProfileId(if is_i386 { 2 } else { 1 }),
             segments,
             symbols: Vec::new(),
             program_headers: None,
@@ -1030,17 +1056,20 @@ fn parse_pe_imports(
     opt: usize,
     opt_size: usize,
     file_ranges: &[(u32, u32, u32)],
+    is_pe32plus: bool,
 ) -> Result<Vec<PeImport>, LoaderError> {
-    if opt_size < PE32PLUS_DATA_DIRS {
+    let data_dirs_off = if is_pe32plus { PE32PLUS_DATA_DIRS } else { PE32_DATA_DIRS };
+    let num_rva_off = if is_pe32plus { PE32PLUS_NUM_RVA_AND_SIZES } else { PE32_NUM_RVA_AND_SIZES };
+    if opt_size < data_dirs_off {
         // Optional header too small to carry data directories: no imports.
         return Ok(Vec::new());
     }
-    let num_dirs = read_u32_le(bytes, opt + PE32PLUS_NUM_RVA_AND_SIZES)?;
+    let num_dirs = read_u32_le(bytes, opt + num_rva_off)?;
     if num_dirs <= IMAGE_DIRECTORY_ENTRY_IMPORT {
         // Import directory not declared: no imports.
         return Ok(Vec::new());
     }
-    let dir_va_field = PE32PLUS_DATA_DIRS + 8 * IMAGE_DIRECTORY_ENTRY_IMPORT as usize;
+    let dir_va_field = data_dirs_off + 8 * IMAGE_DIRECTORY_ENTRY_IMPORT as usize;
     if opt_size < dir_va_field + 4 {
         // Declared but the optional header is too small to hold it.
         return Err(LoaderError::TruncatedImportTable);
@@ -1085,24 +1114,34 @@ fn parse_pe_imports(
         } else {
             first_thunk
         };
+        // IA-32 PEs carry 4-byte thunks with the ordinal flag in bit 31;
+        // PE32+ carries 8-byte thunks with the flag in bit 63. Slot strides
+        // follow the same width split, both in the thunk array and in the
+        // IAT the runtime patches later.
+        let thunk_stride: u32 = if is_pe32plus { 8 } else { 4 };
+        let ordinal_flag: u64 = if is_pe32plus { PE_IMPORT_ORDINAL_FLAG } else { 0x8000_0000 };
         let mut index: u32 = 0;
         loop {
             let slot = thunk_rva
-                .checked_add(index.checked_mul(8).ok_or(LoaderError::TruncatedImportTable)?)
+                .checked_add(index.checked_mul(thunk_stride).ok_or(LoaderError::TruncatedImportTable)?)
                 .ok_or(LoaderError::TruncatedImportTable)?;
             let thunk_off = rva_to_file(slot).ok_or(LoaderError::TruncatedImportTable)?;
-            let thunk = read_u64_le_at(bytes, thunk_off).map_err(|_| LoaderError::TruncatedImportTable)?;
+            let thunk = if is_pe32plus {
+                read_u64_le_at(bytes, thunk_off).map_err(|_| LoaderError::TruncatedImportTable)?
+            } else {
+                u64::from(read_u32_le(bytes, thunk_off)?)
+            };
             if thunk == 0 {
                 break; // End of the thunk array.
             }
             let iat_rva = first_thunk
-                .checked_add(index.checked_mul(8).ok_or(LoaderError::TruncatedImportTable)?)
+                .checked_add(index.checked_mul(thunk_stride).ok_or(LoaderError::TruncatedImportTable)?)
                 .ok_or(LoaderError::TruncatedImportTable)?;
-            let kind = if thunk & PE_IMPORT_ORDINAL_FLAG != 0 {
+            let kind = if thunk & ordinal_flag != 0 {
                 PeImportKind::Ordinal((thunk & 0xFFFF) as u16)
             } else {
-                // PE32+ thunks carry a 32-bit RVA; the hint is a u16 at +0
-                // and the ASCIZ name starts at +2.
+                // Thunks carry a 32-bit RVA; the hint is a u16 at +0 and the
+                // ASCIZ name starts at +2.
                 let by_name_rva = (thunk & 0xFFFF_FFFF) as u32;
                 let by_name_off = rva_to_file(by_name_rva).ok_or(LoaderError::TruncatedImportTable)?;
                 let name_off = by_name_off.checked_add(2).ok_or(LoaderError::TruncatedImportTable)?;
@@ -1144,18 +1183,21 @@ fn parse_pe_exports(
     opt: usize,
     opt_size: usize,
     file_ranges: &[(u32, u32, u32)],
+    is_pe32plus: bool,
 ) -> Result<Vec<PeExport>, LoaderError> {
-    if opt_size < PE32PLUS_DATA_DIRS {
+    let data_dirs_off = if is_pe32plus { PE32PLUS_DATA_DIRS } else { PE32_DATA_DIRS };
+    let num_rva_off = if is_pe32plus { PE32PLUS_NUM_RVA_AND_SIZES } else { PE32_NUM_RVA_AND_SIZES };
+    if opt_size < data_dirs_off {
         // Optional header too small to carry data directories: no exports.
         return Ok(Vec::new());
     }
-    let num_dirs = read_u32_le(bytes, opt + PE32PLUS_NUM_RVA_AND_SIZES)?;
+    let num_dirs = read_u32_le(bytes, opt + num_rva_off)?;
     // Index 0 is the lowest directory, so "not declared" is exactly zero.
     if num_dirs == IMAGE_DIRECTORY_ENTRY_EXPORT {
         // Export directory not declared: no exports.
         return Ok(Vec::new());
     }
-    let dir_va_field = PE32PLUS_DATA_DIRS + 8 * IMAGE_DIRECTORY_ENTRY_EXPORT as usize;
+    let dir_va_field = data_dirs_off + 8 * IMAGE_DIRECTORY_ENTRY_EXPORT as usize;
     if opt_size < dir_va_field + 8 {
         // Declared but the optional header is too small to hold it.
         return Err(LoaderError::TruncatedExportTable);
@@ -1879,14 +1921,135 @@ mod pe32_tests {
     }
 
     #[test]
-    fn pe32_rejects_pe32_and_non_amd64() {
+    fn pe32_mismatched_machine_and_magic_rejected() {
         let loader = Pe32Loader::new();
+        // i386 machine with a PE32+ optional header: mismatched pair.
         let mut bad = fixture();
-        bad[0x98..0x9A].copy_from_slice(&0x10Bu16.to_le_bytes()); // PE32 magic
-        assert!(loader.load(&bad).is_err());
+        bad[0x84..0x86].copy_from_slice(&0x14Cu16.to_le_bytes());
+        assert_eq!(loader.load(&bad).err(), Some(LoaderError::InvalidMachine));
+        // AMD64 machine with a PE32 optional header: mismatched pair.
         let mut bad2 = fixture();
-        bad2[0x84..0x86].copy_from_slice(&0x14Cu16.to_le_bytes()); // i386
-        assert!(loader.load(&bad2).is_err());
+        bad2[0x98..0x9A].copy_from_slice(&0x10Bu16.to_le_bytes());
+        assert_eq!(loader.load(&bad2).err(), Some(LoaderError::InvalidMachine));
+    }
+
+    /// Hand-build a minimal PE32 (IA-32) image with one `.text` section
+    /// containing `mov eax, 0x2a; ret` — same body as [`fixture`], with the
+    /// 32-bit machine type, the PE32 optional-header magic, and the u32
+    /// image base at its PE32 offset (opt+28).
+    fn fixture32() -> Vec<u8> {
+        let mut pe = fixture();
+        pe[0x84..0x86].copy_from_slice(&PE_MACHINE_I386.to_le_bytes());
+        pe[0x98..0x9A].copy_from_slice(&PE32_MAGIC.to_le_bytes());
+        pe[0xB0..0xB8].copy_from_slice(&[0u8; 8]); // clear the PE32+ u64 base
+        pe[0xB4..0xB8].copy_from_slice(&0x400000u32.to_le_bytes());
+        // Import fixtures attach a second (.rdata) section header.
+        pe[0x86..0x88].copy_from_slice(&2u16.to_le_bytes());
+        pe
+    }
+
+    #[test]
+    fn pe32_i386_loads_profile2_entry_and_base() {
+        let loader = Pe32Loader::new();
+        let image = match loader.load(&fixture32()) {
+            Ok(img) => img,
+            Err(e) => return assert_eq!(format!("{e:?}"), ""),
+        };
+        assert_eq!(image.entry, 0x400000 + 0x1000);
+        assert_eq!(image.target_profile, TargetProfileId(2));
+        // .text plus the .rdata section header the import fixtures attach.
+        assert_eq!(image.segments.len(), 2);
+        let text = &image.segments[0];
+        assert_eq!(text.address, 0x400000 + 0x1000);
+        assert!(text.executable);
+        assert_eq!(&text.bytes[..6], &[0xB8, 0x2A, 0, 0, 0, 0xC3]);
+    }
+
+    /// 32-bit variant of [`make_pe_with_imports`]: IA-32 thunks are 4 bytes
+    /// wide and the ordinal flag lives in bit 31.
+    fn make_pe32_with_imports(dll: &str, funcs: &[ImportFunc]) -> Vec<u8> {
+        const RDATA_FILE: usize = 0x400;
+        const RDATA_VA: u32 = 0x2000;
+
+        let mut rdata = Vec::new();
+        let desc_off = rdata.len();
+        rdata.extend_from_slice(&[0u8; 2 * 20]);
+        let dll_off = rdata.len();
+        rdata.extend_from_slice(dll.as_bytes());
+        rdata.push(0);
+        while rdata.len() % 4 != 0 {
+            rdata.push(0);
+        }
+        let int_off = rdata.len();
+        rdata.extend_from_slice(&vec![0u8; 4 * (funcs.len() + 1)]);
+        let iat_off = rdata.len();
+        rdata.extend_from_slice(&vec![0u8; 4 * (funcs.len() + 1)]);
+        while rdata.len() % 2 != 0 {
+            rdata.push(0);
+        }
+        let rva = |off: usize| RDATA_VA + off as u32;
+
+        for (index, func) in funcs.iter().enumerate() {
+            let thunk = match func {
+                ImportFunc::Name(func_name, hint) => {
+                    let by_name_off = rdata.len();
+                    rdata.extend_from_slice(&hint.to_le_bytes());
+                    rdata.extend_from_slice(func_name.as_bytes());
+                    rdata.push(0);
+                    if rdata.len() % 2 != 0 {
+                        rdata.push(0);
+                    }
+                    rva(by_name_off)
+                }
+                ImportFunc::Ordinal(ordinal) => 0x8000_0000 | u32::from(*ordinal),
+            };
+            rdata[int_off + index * 4..int_off + index * 4 + 4].copy_from_slice(&thunk.to_le_bytes());
+            rdata[iat_off + index * 4..iat_off + index * 4 + 4].copy_from_slice(&thunk.to_le_bytes());
+        }
+        rdata[desc_off..desc_off + 4].copy_from_slice(&rva(int_off).to_le_bytes());
+        rdata[desc_off + 12..desc_off + 16].copy_from_slice(&rva(dll_off).to_le_bytes());
+        rdata[desc_off + 16..desc_off + 20].copy_from_slice(&rva(iat_off).to_le_bytes());
+
+        let mut pe = fixture32();
+        // .rdata section at 0x200 file / 0x2000 RVA (second section header
+        // directly after the .text header at 0x188+40 = 0x1B0).
+        pe[0x1B0..0x1B8].copy_from_slice(b".rdata\0\0");
+        pe[0x1B8..0x1BC].copy_from_slice(&(rdata.len() as u32).to_le_bytes()); // virtual size
+        pe[0x1BC..0x1C0].copy_from_slice(&RDATA_VA.to_le_bytes()); // va
+        pe[0x1C0..0x1C4].copy_from_slice(&(rdata.len() as u32).to_le_bytes()); // raw size
+        pe[0x1C4..0x1C8].copy_from_slice(&(RDATA_FILE as u32).to_le_bytes()); // raw ptr
+        pe[0x1CC..0x1D0].copy_from_slice(&SECTION_READ.to_le_bytes());
+        // Import directory (data-dir index 1) at PE32 opt+96+8 = 0xF8+8.
+        // NumberOfRvaAndSizes at opt+92 = 0xF4: declare 2 directories.
+        pe[0xF4..0xF8].copy_from_slice(&2u32.to_le_bytes());
+        pe[0xFC..0x100].copy_from_slice(&RDATA_VA.to_le_bytes()); // dir 0 (export): none
+        pe[0x100..0x104].copy_from_slice(&RDATA_VA.to_le_bytes()); // dir 1 (import)
+        pe.resize(RDATA_FILE + rdata.len(), 0);
+        pe[RDATA_FILE..RDATA_FILE + rdata.len()].copy_from_slice(&rdata);
+        pe
+    }
+
+    #[test]
+    fn pe32_i386_parses_4byte_thunk_imports() {
+        let loader = Pe32Loader::new();
+        let pe = make_pe32_with_imports(
+            "KERNEL32.dll",
+            &[ImportFunc::Name("ExitProcess", 0), ImportFunc::Ordinal(7)],
+        );
+        let image = match loader.load(&pe) {
+            Ok(img) => img,
+            Err(e) => return assert_eq!(format!("{e:?}"), ""),
+        };
+        let imports = image.pe_imports().expect("import directory").to_vec();
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0].dll, "KERNEL32.dll");
+        assert_eq!(
+            imports[0].kind,
+            PeImportKind::Name("ExitProcess".to_string())
+        );
+        assert_eq!(imports[1].kind, PeImportKind::Ordinal(7));
+        // The IAT slot RVA must advance by the 4-byte IA-32 thunk stride.
+        assert_eq!(imports[1].iat_rva - imports[0].iat_rva, 4);
     }
 
     /// One import the [`make_pe_with_imports`] builder emits.

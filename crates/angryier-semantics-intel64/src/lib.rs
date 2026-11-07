@@ -1278,6 +1278,8 @@ pub mod forms {
     // push/pop memory operand
     pub const PUSH_MEM64: u32 = 0x0257;
     pub const PUSH_MEM16: u32 = 0x0258;
+    /// `push m32` (IA-32): decrement ESP by 4, store the 32-bit operand.
+    pub const PUSH_MEM32: u32 = 0x3022;
     pub const POP_MEM64: u32 = 0x0259;
 
     // pushf/popf (64-bit operand size in 64-bit mode)

@@ -206,7 +206,12 @@ fn normalize_memory(memory: XedMemoryOperand) -> Result<MemoryOperand, XedAdapte
         None => None,
         Some(XedMemoryBase::Register(register)) => Some(MemoryBase::Register(normalize_address_register(register)?)),
         Some(XedMemoryBase::InstructionPointer { width_bits }) => {
-            if memory.address_width_bits != 64 || width_bits != 64 {
+            // Long mode: RIP-relative with a 64-bit instruction pointer.
+            // Legacy modes: IA-32 absolute addressing (mod=0 rm=5 / moffs)
+            // is reported with base=EIP and a 32-bit pointer width; the
+            // displacement IS the absolute address. Both carry the pointer
+            // width matching the address width.
+            if memory.address_width_bits != width_bits || !matches!(width_bits, 32 | 64) {
                 return Err(XedAdapterError::InvalidMemoryAddressWidth(width_bits));
             }
             Some(MemoryBase::InstructionPointer { width_bits })

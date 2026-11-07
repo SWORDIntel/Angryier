@@ -2217,16 +2217,40 @@ angryier_ai_summary(r.steps or 0, table.concat(ai_report, "\n"))"#,
         };
         println!("[angryier][load] input read successfully: {} byte(s)", bytes.len());
 
-        println!("[angryier][init] constructing native-XED runtime (semantic_version=1, target_profile=1)");
-        let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
-        let mut process = match runtime.load_pe_driver(&bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("[angryier][load][error] PE driver mapping/initialization failed: {e}");
-                eprintln!(
-                    "[angryier][hint] confirm the file is a supported PE32+ driver and inspect the loader error for the rejected structure or mapping"
-                );
-                return 1;
+        println!("[angryier][init] constructing native-XED runtime (semantic_version=1)");
+        // PE32 (IA-32) images decode in legacy-32 mode against the IA-32
+        // execution profile; the loader tags them TargetProfileId(2).
+        let pe32_image = angryier_runtime::script::is_pe32_image(&bytes);
+        let runtime = if pe32_image {
+            Runtime::with_native_xed_mode(
+                SemanticVersion(1),
+                TargetProfileId(2),
+                angryier_runtime::XedMachineMode::Legacy32,
+            )
+        } else {
+            Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1))
+        };
+        let mut process = if pe32_image {
+            match runtime.load_pe32_user(&bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[angryier][load][error] PE32 user-mode mapping/initialization failed: {e}");
+                    eprintln!(
+                        "[angryier][hint] confirm the file is a supported PE32 image and inspect the loader error for the rejected structure or mapping"
+                    );
+                    return 1;
+                }
+            }
+        } else {
+            match runtime.load_pe_driver(&bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[angryier][load][error] PE driver mapping/initialization failed: {e}");
+                    eprintln!(
+                        "[angryier][hint] confirm the file is a supported PE32+ driver and inspect the loader error for the rejected structure or mapping"
+                    );
+                    return 1;
+                }
             }
         };
 
