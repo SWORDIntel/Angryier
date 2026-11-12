@@ -162,6 +162,12 @@ const PE_DRIVER_SCRATCH_SIZE: u64 = 0x10000; // 64KB: DRIVER_OBJECT + GS segment
 /// cleanly — the same pattern `libc_start_main` uses.
 pub const EXIT_HOOK: u64 = 0xdead_beef_0000;
 
+/// Load bias applied to the main image by [`Runtime::load_elf_dynamic`] when
+/// it is an `ET_DYN` (a shared object or PIE). Callers that supply an
+/// image-relative entry address (the VA a disassembler prints) are rebased by
+/// this amount when — and only when — the unbiassed address is unmapped.
+pub const DYNAMIC_MAIN_BASE: u64 = 0x400000;
+
 // ---------------------------------------------------------------------------
 // PE32 (IA-32) user-mode image constants. Every pointer-sized value below
 // stays under 4 GiB so it round-trips through a 32-bit stack slot or IAT
@@ -1488,7 +1494,7 @@ impl<D: Decoder> Runtime<D> {
     pub fn load_elf_dynamic(&self, bytes: &[u8], lib_dirs: &[&str]) -> Result<Process, RuntimeError> {
         let loader = Elf64Loader::new();
         let main = loader.load(bytes).map_err(RuntimeError::Loader)?;
-        const DYN_BASE: u64 = 0x400000;
+        const DYN_BASE: u64 = DYNAMIC_MAIN_BASE;
         const LIB_BASE: u64 = 0x7f00_0000_0000;
         // Main image bias: ET_EXEC keeps its VAs; ET_DYN slides to DYN_BASE.
         let is_dyn = main.dynamic.is_some();

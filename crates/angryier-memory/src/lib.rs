@@ -522,6 +522,16 @@ pub struct PersistentMemory {
 }
 
 impl PersistentMemory {
+    /// Read-only view of the mapped regions, ordered by base address.
+    ///
+    /// Loader-side policy (for example rebasing a caller-supplied entry
+    /// address onto a slid `ET_DYN` image) needs to ask whether an address is
+    /// mapped without performing a load that would allocate an
+    /// under-constrained page. This accessor exposes exactly that.
+    pub fn regions(&self) -> &[MemoryRegion] {
+        &self.regions
+    }
+
     /// Whether the mapped region containing `address` is executable.
     /// Unmapped addresses return false — the unmapped arm owns those.
     fn exec_region_contains(&self, address: Address) -> Result<bool, MemoryError> {

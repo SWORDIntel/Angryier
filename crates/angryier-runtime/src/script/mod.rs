@@ -382,12 +382,37 @@ pub(crate) fn prep_process_for_session<D: crate::Decoder>(
     bytes: &[u8],
 ) -> mlua::Result<crate::Process> {
     let is_pe = bytes.len() > 1 && bytes[0] == b'M' && bytes[1] == b'Z';
+    let use_dynamic = opts
+        .and_then(|o| o.get::<bool>("dynamic").ok())
+        .unwrap_or(false);
     let process = if is_pe {
         runtime
             .load_pe_driver(bytes)
             .or_else(|_| runtime.load_pe(bytes))
             .or_else(|_| runtime.load_pe32_user(bytes))
             .map_err(|e| mlua::Error::external(format!("load_pe: {e:?}")))?
+    } else if use_dynamic {
+        // A shared object has no interpreter, so a static `load_elf` leaves
+        // every `GLOB_DAT`/`JUMP_SLOT` slot zero: the first `call qword [GOT]`
+        // jumps to 0. Honour `dynamic` here exactly as `prepare` does, so a
+        // session over a `.so` resolves `DT_NEEDED` images and imports.
+        //
+        // `lib_dirs` widens the search beyond the default system paths, which
+        // matters when a `DT_NEEDED` entry is satisfied on the host by a
+        // library the loader will not find on its own (for example a
+        // compiler-runtime `.so` reachable only through a build prefix).
+        let lib_dirs: Vec<String> = opts
+            .and_then(|o| o.get::<Table>("lib_dirs").ok())
+            .map(|t| {
+                t.sequence_values::<String>()
+                    .filter_map(|v| v.ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let lib_dir_refs: Vec<&str> = lib_dirs.iter().map(String::as_str).collect();
+        runtime
+            .load_elf_dynamic(bytes, &lib_dir_refs)
+            .map_err(|e| mlua::Error::external(format!("load_elf_dynamic: {e:?}")))?
     } else {
         runtime
             .load_elf(bytes)
@@ -436,8 +461,29 @@ pub(crate) fn apply_process_opts(
         if let Ok(entry) = opts.get::<i64>("entry")
             && entry > 0
         {
+            // A dynamically loaded `ET_DYN` is slid to its own base, so a
+            // caller supplying an image VA (what a disassembler shows) would
+            // land in unmapped memory and quietly execute zeros. Rebase only
+            // when the requested address is *not* executable and the slid one
+            // *is* — a mapped address is never silently redirected.
+            let requested = entry as u64;
+            let mut target = requested;
+            {
+                let regions = process.state.memory.regions();
+                let executable = |addr: u64| {
+                    regions
+                        .iter()
+                        .any(|region| region.executable && region.contains(addr))
+                };
+                if !executable(requested) {
+                    let slid = requested.wrapping_add(crate::DYNAMIC_MAIN_BASE);
+                    if executable(slid) {
+                        target = slid;
+                    }
+                }
+            }
             process
-                .write_pc(entry as u64)
+                .write_pc(target)
                 .map_err(|e| mlua::Error::external(format!("entry: {e:?}")))?;
             let rsp = process
                 .read_register(crate::register_id::GPR_BASE + 4)
