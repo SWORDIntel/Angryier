@@ -1325,7 +1325,7 @@ impl LayeredMemory for PersistentMemory {
                 if let Some(mut ledger) = self.uc_ledger() {
                     ledger.record_hit(UcMemoryOp::WriteExec, denied, Self::page_base(denied));
                 }
-                return Ok(());
+                Ok(())
             }
             Err(MemoryError::PermissionDenied {
                 address: denied,
@@ -1338,7 +1338,7 @@ impl LayeredMemory for PersistentMemory {
                 if let Some(mut ledger) = self.uc_ledger() {
                     ledger.record_hit(UcMemoryOp::Write, address, 0);
                 }
-                return Ok(());
+                Ok(())
             }
             Err(error) => Err(error),
         }

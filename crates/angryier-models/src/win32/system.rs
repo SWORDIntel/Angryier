@@ -474,11 +474,10 @@ impl SimProcedure for WaitForMultipleObjectsProcedure {
             return SimResult::Unsupported("WaitForMultipleObjects handle array not captured");
         };
         let handles: Vec<u64> = bytes
-            .chunks_exact(8)
-            .filter_map(|chunk| {
-                let raw: [u8; 8] = chunk.try_into().ok()?;
-                Some(u64::from_le_bytes(raw))
-            })
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
             .collect();
         if handles.len() != count as usize {
             return SimResult::Unsupported("incomplete HANDLE array");

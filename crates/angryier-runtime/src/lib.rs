@@ -14,6 +14,9 @@
 //!
 //! The runtime is generic over the decoder backend so it works with both
 //! native XED (behind feature gates) and synthetic decoders for testing.
+// Tests assert by panicking on the unexpected value; the workspace lints deny
+// unwrap/expect/panic for production code, so relax them for test builds only.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod call_audit;
 pub mod capture;

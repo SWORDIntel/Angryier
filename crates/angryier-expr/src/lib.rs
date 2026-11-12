@@ -697,83 +697,82 @@ impl ExprArena for ShardedExprArena {
         let node = self.fold_constants(node)?;
 
         // Algebraic identity reductions:
-        if node.operands.len() == 2 && node.operands[0] == node.operands[1] {
-            if matches!(node.op, ExprOp::And | ExprOp::Or) {
-                if let Ok(rec) = self.record(node.operands[0]) {
-                    if rec.node.sort == node.sort {
-                        self.hits.fetch_add(1, Ordering::Relaxed);
-                        return Ok(node.operands[0]);
-                    }
-                }
-            }
+        if node.operands.len() == 2
+            && node.operands[0] == node.operands[1]
+            && matches!(node.op, ExprOp::And | ExprOp::Or)
+            && let Ok(rec) = self.record(node.operands[0])
+            && rec.node.sort == node.sort
+        {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(node.operands[0]);
         } else if node.op == ExprOp::Ite && node.operands.len() == 3 {
             if node.operands[1] == node.operands[2] {
-                if let Ok(rec) = self.record(node.operands[1]) {
-                    if rec.node.sort == node.sort {
-                        self.hits.fetch_add(1, Ordering::Relaxed);
-                        return Ok(node.operands[1]);
-                    }
+                if let Ok(rec) = self.record(node.operands[1])
+                    && rec.node.sort == node.sort
+                {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(node.operands[1]);
                 }
-            } else if let Ok(rec0) = self.record(node.operands[0]) {
-                if rec0.node.op == ExprOp::Constant {
-                    let cond = rec0.node.immediate.first().copied().unwrap_or(0);
-                    let target = if cond != 0 { node.operands[1] } else { node.operands[2] };
-                    if let Ok(rec_t) = self.record(target) {
-                        if rec_t.node.sort == node.sort {
-                            self.hits.fetch_add(1, Ordering::Relaxed);
-                            return Ok(target);
-                        }
-                    }
+            } else if let Ok(rec0) = self.record(node.operands[0])
+                && rec0.node.op == ExprOp::Constant
+            {
+                let cond = rec0.node.immediate.first().copied().unwrap_or(0);
+                let target = if cond != 0 { node.operands[1] } else { node.operands[2] };
+                if let Ok(rec_t) = self.record(target)
+                    && rec_t.node.sort == node.sort
+                {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(target);
                 }
             }
-        } else if node.operands.len() == 2 {
-            if let (Ok(rec0), Ok(rec1)) = (self.record(node.operands[0]), self.record(node.operands[1])) {
-                if rec0.node.sort == node.sort && rec1.node.sort == node.sort {
-                    if rec0.node.op == ExprOp::Constant && rec1.node.op != ExprOp::Constant {
-                        let val0 = constant_u128(&rec0.node.immediate);
-                        if val0 == 0 {
-                            match node.op {
-                                ExprOp::Add | ExprOp::Or | ExprOp::Xor => {
-                                    self.hits.fetch_add(1, Ordering::Relaxed);
-                                    return Ok(node.operands[1]);
-                                }
-                                ExprOp::And | ExprOp::Mul => {
-                                    self.hits.fetch_add(1, Ordering::Relaxed);
-                                    return Ok(node.operands[0]);
-                                }
-                                _ => {}
-                            }
-                        } else if val0 == 1 && node.op == ExprOp::Mul {
+        } else if node.operands.len() == 2
+            && let (Ok(rec0), Ok(rec1)) = (self.record(node.operands[0]), self.record(node.operands[1]))
+            && rec0.node.sort == node.sort
+            && rec1.node.sort == node.sort
+        {
+            if rec0.node.op == ExprOp::Constant && rec1.node.op != ExprOp::Constant {
+                let val0 = constant_u128(&rec0.node.immediate);
+                if val0 == 0 {
+                    match node.op {
+                        ExprOp::Add | ExprOp::Or | ExprOp::Xor => {
                             self.hits.fetch_add(1, Ordering::Relaxed);
                             return Ok(node.operands[1]);
                         }
-                    } else if rec1.node.op == ExprOp::Constant && rec0.node.op != ExprOp::Constant {
-                        let val1 = constant_u128(&rec1.node.immediate);
-                        if val1 == 0 {
-                            match node.op {
-                                ExprOp::Add | ExprOp::Sub | ExprOp::Or | ExprOp::Xor => {
-                                    self.hits.fetch_add(1, Ordering::Relaxed);
-                                    return Ok(node.operands[0]);
-                                }
-                                ExprOp::And | ExprOp::Mul => {
-                                    self.hits.fetch_add(1, Ordering::Relaxed);
-                                    return Ok(node.operands[1]);
-                                }
-                                _ => {}
-                            }
-                        } else if val1 == 1 && node.op == ExprOp::Mul {
+                        ExprOp::And | ExprOp::Mul => {
                             self.hits.fetch_add(1, Ordering::Relaxed);
                             return Ok(node.operands[0]);
                         }
-                    } else if node.operands[0] == node.operands[1] {
-                        match node.op {
-                            ExprOp::And | ExprOp::Or => {
-                                self.hits.fetch_add(1, Ordering::Relaxed);
-                                return Ok(node.operands[0]);
-                            }
-                            _ => {}
-                        }
+                        _ => {}
                     }
+                } else if val0 == 1 && node.op == ExprOp::Mul {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(node.operands[1]);
+                }
+            } else if rec1.node.op == ExprOp::Constant && rec0.node.op != ExprOp::Constant {
+                let val1 = constant_u128(&rec1.node.immediate);
+                if val1 == 0 {
+                    match node.op {
+                        ExprOp::Add | ExprOp::Sub | ExprOp::Or | ExprOp::Xor => {
+                            self.hits.fetch_add(1, Ordering::Relaxed);
+                            return Ok(node.operands[0]);
+                        }
+                        ExprOp::And | ExprOp::Mul => {
+                            self.hits.fetch_add(1, Ordering::Relaxed);
+                            return Ok(node.operands[1]);
+                        }
+                        _ => {}
+                    }
+                } else if val1 == 1 && node.op == ExprOp::Mul {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(node.operands[0]);
+                }
+            } else if node.operands[0] == node.operands[1] {
+                match node.op {
+                    ExprOp::And | ExprOp::Or => {
+                        self.hits.fetch_add(1, Ordering::Relaxed);
+                        return Ok(node.operands[0]);
+                    }
+                    _ => {}
                 }
             }
         }

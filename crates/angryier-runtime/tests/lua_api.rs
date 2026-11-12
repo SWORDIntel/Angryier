@@ -6,6 +6,8 @@
 //! SMT constraint solving via Z3.
 
 #![cfg(all(feature = "xed", feature = "script"))]
+// Test failure is expressed by panic/expect; these are assertions, not error handling.
+#![allow(clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -356,6 +358,23 @@ fn test_lua_session_breakpoints_and_hooks() {
     assert_eq!(outcome, "breakpoint");
 }
 
+/// Decoded `branch_analysis` result: the 13 values the Lua driver returns.
+type BranchAnalysisRow = (
+    String,
+    String,
+    usize,
+    usize,
+    usize,
+    String,
+    String,
+    String,
+    String,
+    bool,
+    usize,
+    String,
+    String,
+);
+
 #[test]
 fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() {
     const SRC: &str = r#"
@@ -421,21 +440,7 @@ fn test_angry_run_branch_analysis_solves_opposite_edge_from_pre_branch_prefix() 
         replay_registers,
         replay_target,
         replay_detail,
-    ): (
-        String,
-        String,
-        usize,
-        usize,
-        usize,
-        String,
-        String,
-        String,
-        String,
-        bool,
-        usize,
-        String,
-        String,
-    ) = lua.load(&script).eval().expect("branch analysis");
+    ): BranchAnalysisRow = lua.load(&script).eval().expect("branch analysis");
 
     assert_eq!(status, "recorded");
     // There is only one branch. The selected state already contains its

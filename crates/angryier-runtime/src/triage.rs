@@ -37,21 +37,34 @@ pub struct PrimitiveProof {
     pub remediation_guidance: String,
 }
 
+/// One observed memory write, as reconstructed from a faulting instruction.
+pub struct WritePrimitive<'a> {
+    pub fault_addr: u64,
+    pub mnemonic: &'a str,
+    pub dest_symbolic: bool,
+    pub val_symbolic: bool,
+    pub min_addr: u64,
+    pub max_addr: u64,
+    pub where_desc: &'a str,
+    pub what_desc: &'a str,
+}
+
 pub struct TriageEngine;
 
 impl TriageEngine {
     /// Formally verifies a memory write operation and classifies whether it constitutes
     /// an arbitrary or constrained write-what-where primitive.
-    pub fn verify_write_primitive(
-        fault_addr: u64,
-        mnemonic: &str,
-        dest_symbolic: bool,
-        val_symbolic: bool,
-        min_addr: u64,
-        max_addr: u64,
-        where_desc: &str,
-        what_desc: &str,
-    ) -> PrimitiveProof {
+    pub fn verify_write_primitive(op: WritePrimitive<'_>) -> PrimitiveProof {
+        let WritePrimitive {
+            fault_addr,
+            mnemonic,
+            dest_symbolic,
+            val_symbolic,
+            min_addr,
+            max_addr,
+            where_desc,
+            what_desc,
+        } = op;
         let kind = if dest_symbolic && val_symbolic && min_addr == 0 && max_addr >= 0xFFFF_0000_0000_0000 {
             PrimitiveKind::ArbitraryWrite
         } else if dest_symbolic {

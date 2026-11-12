@@ -6592,7 +6592,6 @@ impl SemanticProvider for EnterImm16Imm8 {
         let rsp_reg = RegisterId(register_id::GPR_BASE + 4);
         let rbp_reg = RegisterId(register_id::GPR_BASE + 5);
         let rsp = out.read_register(rsp_reg, stack_ty)?;
-        let rbp = out.read_register(rbp_reg, stack_ty)?;
         let delta = const_stack(out, stride, stack_ty)?;
         let pushed_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), stack_ty, &[rsp, delta])?;
         out.write_register(rsp_reg, pushed_rsp)?;

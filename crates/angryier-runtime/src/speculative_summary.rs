@@ -536,6 +536,8 @@ impl SpeculativeSummaryApplier {
 // ── Unit tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+// Test failures need diagnostics; panicking with the unexpected outcome is the point.
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use angryier_arch::{

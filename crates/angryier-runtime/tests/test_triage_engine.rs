@@ -1,18 +1,21 @@
-use angryier_runtime::triage::{PrimitiveKind, TriageEngine};
+// Tests assert by panicking on the unexpected value; the workspace lints deny
+// unwrap/expect/panic for production code, so relax them for test builds only.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+use angryier_runtime::triage::{PrimitiveKind, TriageEngine, WritePrimitive};
 use std::process::Command;
 
 #[test]
 fn test_arbitrary_write_verification() {
-    let proof = TriageEngine::verify_write_primitive(
-        0x140001050,
-        "mov qword ptr [rcx], rdx",
-        true, // dest_symbolic
-        true, // val_symbolic
-        0x0,
-        0xFFFF_FFFF_FFFF_FFFF,
-        "[rcx] derived from user buffer offset 0x18",
-        "rdx derived from user buffer offset 0x20",
-    );
+    let proof = TriageEngine::verify_write_primitive(WritePrimitive {
+        fault_addr: 0x140001050,
+        mnemonic: "mov qword ptr [rcx], rdx",
+        dest_symbolic: true,
+        val_symbolic: true,
+        min_addr: 0x0,
+        max_addr: 0xFFFF_FFFF_FFFF_FFFF,
+        where_desc: "[rcx] derived from user buffer offset 0x18",
+        what_desc: "rdx derived from user buffer offset 0x20",
+    });
 
     assert_eq!(proof.kind, PrimitiveKind::ArbitraryWrite);
     assert!(proof.root_cause_explanation.contains("user-controlled pointer"));

@@ -102,8 +102,7 @@ impl<D: Decoder> Runtime<D> {
             window.identity.capture_digest,
             window.identity.initial_state_digest,
         ]
-        .iter()
-        .any(|digest| *digest == [0; 32])
+        .contains(&[0; 32])
         {
             return Err(RuntimeError::Environment(
                 "VM handler observation lacks executable/capture/initial-state identity".into(),
@@ -268,7 +267,7 @@ mod tests {
         })?;
         assert_eq!(capture.steps.len(), 2);
         assert_eq!(capture.footprint.edges.len(), 2);
-        assert_eq!(capture.footprint.total_instructions > 0, true);
+        assert!(capture.footprint.total_instructions > 0);
         assert_eq!(capture.steps[0].before, start);
         assert_eq!(capture.steps[1].after, end);
         assert_eq!(process.pc()?, 0x1002);

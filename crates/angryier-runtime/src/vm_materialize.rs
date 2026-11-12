@@ -188,7 +188,7 @@ pub fn materialize_vm_handler(
     // Seed RSP so the evaluator uses the actual stack even when the static
     // footprint doesn't contain an explicit RSP read (e.g. a callee model).
     const RSP: u32 = register_id::GPR_BASE + 4;
-    if !seeded_registers.contains_key(&RSP) {
+    if let std::collections::btree_map::Entry::Vacant(slot) = seeded_registers.entry(RSP) {
         let bytes = capture
             .initial_state
             .registers
@@ -202,7 +202,7 @@ pub fn materialize_vm_handler(
         }
         let mut raw = [0u8; 8];
         raw.copy_from_slice(&bytes);
-        seeded_registers.insert(RSP, u64::from_le_bytes(raw));
+        slot.insert(u64::from_le_bytes(raw));
     }
 
     let mut evaluator = SymbolicEvaluator::new(arena);

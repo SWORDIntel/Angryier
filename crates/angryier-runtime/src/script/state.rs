@@ -33,7 +33,7 @@ impl LuaState {
     }
 
     /// Resolves a reference to this state whether alive or dead.
-    pub(crate) fn state_ref<'a>(inner: &'a SessionInner, state_id: u64) -> Option<&'a crate::SymbolicState> {
+    pub(crate) fn state_ref(inner: &SessionInner, state_id: u64) -> Option<&crate::SymbolicState> {
         inner
             .session
             .states

@@ -178,8 +178,7 @@ pub fn collect_observed_vm_trace(
         identity.capture_digest,
         identity.initial_state_digest,
     ]
-    .iter()
-    .any(|digest| *digest == [0; 32])
+    .contains(&[0; 32])
     {
         return Err(VmTraceError::MissingCaptureIdentity);
     }
@@ -602,8 +601,11 @@ mod tests {
         let a = block_a(1);
         let b = block_b(1);
         let steps = observed(&a, &b, 0);
-        let mut limits = VmTraceLimits::default();
-        limits.max_steps = 1;
+        // `mut` stays: the same binding is reused for each budget below.
+        let mut limits = VmTraceLimits {
+            max_steps: 1,
+            ..Default::default()
+        };
         assert!(matches!(
             collect_observed_vm_trace(identity(), steps[0].before, steps[1].after, &steps, limits),
             Err(VmTraceError::StepLimitExceeded { .. })

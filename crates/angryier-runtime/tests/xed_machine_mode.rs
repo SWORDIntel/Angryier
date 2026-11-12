@@ -8,6 +8,8 @@
 //! `runtime.decoder.decode` — not execution semantics, which stay Intel 64
 //! regardless of decode mode.
 #![cfg(feature = "xed")]
+// Test failure is expressed by panic; these are assertions, not error handling.
+#![allow(clippy::panic)]
 
 use angryier_arch::{DecodedInstruction, Decoder, OperandKind};
 use angryier_arch_intel64::register_id;

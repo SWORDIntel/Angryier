@@ -232,8 +232,8 @@ impl SimProcedure for CreateFileWProcedure {
 
         // Decode UTF-16LE characters up to null terminator
         let mut u16_chars = Vec::new();
-        for chunk in bytes.chunks_exact(2) {
-            let ch = u16::from_le_bytes([chunk[0], chunk[1]]);
+        for chunk in bytes.as_chunks::<2>().0 {
+            let ch = u16::from_le_bytes(*chunk);
             if ch == 0 {
                 break;
             }

@@ -53,7 +53,6 @@ use angryier_arch_intel64::register_id;
 use angryier_execution::{SymbolicEvaluator, SymbolicSessionMemory, SymbolicStateSnapshot};
 use angryier_expr::{ExprNode, ExprOp, ExprSort};
 use angryier_ir::{IrOp, IrType, RegisterWriteKind};
-use angryier_memory::LayeredMemory as _;
 use angryier_types::fx::FxHashMap;
 use angryier_types::{Address, ExprId};
 

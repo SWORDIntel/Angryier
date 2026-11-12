@@ -108,6 +108,8 @@ pub fn unsupported_identities() -> &'static [UnsupportedUimm8ModrmIdentity] {
 }
 
 #[cfg(test)]
+// Test failures need diagnostics; panicking on an unexpected fixture shape is the point.
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

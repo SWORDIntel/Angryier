@@ -3840,6 +3840,8 @@ pub fn map_form(decoded: &DecodedInstruction) -> Option<u32> {
 }
 
 #[cfg(test)]
+// Test failures need diagnostics; panicking with the unexpected value is the point.
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use angryier_arch_xed_ffi::XedDecoder;

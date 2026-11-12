@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+// Tests assert by panicking on the unexpected value; the workspace lints deny
+// unwrap/expect/panic for production code, so relax them for test builds only.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod addresses;
 pub mod minidump;

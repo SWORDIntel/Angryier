@@ -12,6 +12,8 @@
 //! failed) when the toolchain is unavailable.
 
 #![cfg(all(feature = "xed", feature = "z3"))]
+// Test failure is expressed by expect; these are assertions, not error handling.
+#![allow(clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -86,8 +88,7 @@ fn symbolic_session<'a>(
     elf: &[u8],
 ) -> angryier_runtime::SymbolicSession<'a, angryier_runtime::XedFormTranslator<angryier_arch_xed_ffi::XedDecoder>> {
     let process = runtime.load_elf(elf).expect("load elf");
-    let session = angryier_runtime::SymbolicSession::new(runtime, arena, process);
-    session
+    angryier_runtime::SymbolicSession::new(runtime, arena, process)
 }
 
 #[test]

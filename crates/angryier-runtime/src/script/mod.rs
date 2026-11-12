@@ -1681,12 +1681,11 @@ pub(crate) fn campaign_report(
                 if let Ok(expr) = state
                     .memory
                     .read(arena.as_ref(), dump_addr + off as u64, (n * 8) as u16)
+                    && let Some(node) = arena.get(expr)
+                    && node.op == angryier_expr::ExprOp::Constant
+                    && node.immediate.len() >= n
                 {
-                    if let Some(node) = arena.get(expr) {
-                        if node.op == angryier_expr::ExprOp::Constant && node.immediate.len() >= n {
-                            outbytes[off..off + n].copy_from_slice(&node.immediate[..n]);
-                        }
-                    }
+                    outbytes[off..off + n].copy_from_slice(&node.immediate[..n]);
                 }
             }
             std::fs::write(&dump_path, &outbytes)

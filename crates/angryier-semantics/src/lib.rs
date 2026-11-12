@@ -549,8 +549,11 @@ mod tests {
                 }],
                 modifiers: InstructionModifiers::default(),
             };
-            let descriptor = DecodedInstructionView::operand(&decoded, 0).expect("operand");
-            assert_eq!((descriptor.read, descriptor.written), (read, written), "{access:?}");
+            assert_eq!(
+                DecodedInstructionView::operand(&decoded, 0).map(|descriptor| (descriptor.read, descriptor.written)),
+                Some((read, written)),
+                "{access:?}"
+            );
         }
     }
 }

@@ -13,6 +13,8 @@
 //!   without re-loading the image.
 
 #![cfg(all(feature = "xed", feature = "script"))]
+// Test failure is expressed by panic/expect; these are assertions, not error handling.
+#![allow(clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
 use std::process::Command;

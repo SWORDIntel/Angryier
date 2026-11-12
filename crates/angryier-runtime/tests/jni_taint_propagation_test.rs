@@ -10,6 +10,9 @@
 //! - Reverse taint propagation from native memory into Java strings/arrays.
 //! - Process memory mapping, JNIEnv* vtable layout, and instance SimProcedure dispatch.
 
+// Test failure is expressed by panic/unwrap/expect; these are assertions, not error handling.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::sync::Arc;
 
 use angryier_arch::{DecodedInstruction, Decoder};
@@ -87,7 +90,11 @@ fn test_jni_environment_modeling_and_types() {
     let b: jbyte = -1;
     let bool_val: jboolean = JNI_TRUE;
     let s: jsize = 100;
+    // Values chosen to exercise float/double marshalling, not mathematical
+    // constants: keep the literals so the comparison below is not tautological.
+    #[allow(clippy::approx_constant)]
     let f: jfloat = 3.14159;
+    #[allow(clippy::approx_constant)]
     let d: jdouble = 2.71828;
 
     assert_eq!(i, 42);
@@ -95,8 +102,12 @@ fn test_jni_environment_modeling_and_types() {
     assert_eq!(b, -1);
     assert_eq!(bool_val, 1);
     assert_eq!(s, 100);
-    assert!((f - 3.14159).abs() < 1e-4);
-    assert!((d - 2.71828).abs() < 1e-4);
+    #[allow(clippy::approx_constant)]
+    let pi: f32 = 3.14159;
+    #[allow(clippy::approx_constant)]
+    let e: f64 = 2.71828;
+    assert!((f - pi).abs() < 1e-4);
+    assert!((d - e).abs() < 1e-4);
 
     // Verify Java reference handle allocation & objects
     let str_handle: jstring = env.create_string("HelloWorld");

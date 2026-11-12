@@ -9,6 +9,9 @@
 //! decode and form mapping as the execution engines.
 
 #![forbid(unsafe_code)]
+// Tests assert by panicking on the unexpected value; the workspace lints deny
+// unwrap/expect/panic for production code, so relax them for test builds only.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -2588,14 +2591,14 @@ mod tests {
         let a = 0x1000u64;
         code.extend([0xf2, 0x00, 0x02]); // cmp rax,2
         code.extend([0x75, 0x3B]); // jnz -> clean landing pad 0x1040
-        let b = (a + 5) as u64; // 0x1005
+        let b = a + 5; // 0x1005
         let lea_at = (b - a) as usize; // file index of the lea (VA 0x1005)
         code.extend([0xf5, 0x01, 0, 0, 0, 0, 0x00]); // lea rbx,[rip+disp] (disp patched below)
         code.extend([0xf6, 0x00, 0x01, 0x00, 0x04, 0, 0, 0, 0, 0]); // mov rax,[rbx+rax*4]
         code.extend([0xf7, 0x00, 0x01]); // add rax,rbx
         code.extend([0xf3, 0x00]); // jmp rax
         let table = 0x1020u64;
-        let lea_end = (a + 5 + 7) as u64;
+        let lea_end = a + 5 + 7;
         let disp = (table as i64 - lea_end as i64) as i32;
         code[lea_at + 2..lea_at + 6].copy_from_slice(&disp.to_le_bytes());
         while (code.len() as u64) < table - a {

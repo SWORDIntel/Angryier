@@ -2610,6 +2610,8 @@ fn test_evex128_256_packed_minmax_register_and_memory_oracle() -> Result<(), Box
 
 #[test]
 fn test_evex_packed_double_bounded_differential_against_rust_oracle() -> Result<(), BoxError> {
+    type F64Case = (u8, &'static dyn SemanticProvider, fn(f64, f64) -> f64);
+
     let mut old = [0u8; 64];
     let mut left = [0u8; 64];
     let mut right = [0u8; 64];
@@ -2622,7 +2624,7 @@ fn test_evex_packed_double_bounded_differential_against_rust_oracle() -> Result<
     // Bounded engine-vs-Rust differential: each lane's independently computed
     // host f64 result is the oracle, while mask and upper-lane state are also
     // checked. This is intentionally not a native-hardware claim.
-    let cases: [(u8, &dyn SemanticProvider, fn(f64, f64) -> f64); 4] = [
+    let cases: [F64Case; 4] = [
         (0x58, &avx512::VaddpdEvexXmmXmmXmm, |a, b| a + b),
         (0x5C, &avx512::VsubpdEvexXmmXmmXmm, |a, b| a - b),
         (0x59, &avx512::VmulpdEvexXmmXmmXmm, |a, b| a * b),
@@ -2652,7 +2654,7 @@ fn test_evex_packed_double_bounded_differential_against_rust_oracle() -> Result<
         );
     }
 
-    let cases: [(u8, &dyn SemanticProvider, fn(f64, f64) -> f64); 4] = [
+    let cases: [F64Case; 4] = [
         (0x58, &avx512::VaddpdEvexYmmYmmYmm, |a, b| a + b),
         (0x5C, &avx512::VsubpdEvexYmmYmmYmm, |a, b| a - b),
         (0x59, &avx512::VmulpdEvexYmmYmmYmm, |a, b| a * b),
@@ -2673,14 +2675,11 @@ fn test_evex_packed_double_bounded_differential_against_rust_oracle() -> Result<
             mem_data: None,
         })?;
         let lanes = read_f64_lanes(&read_zmm_bytes(&state, ZMM0)?)?;
-        for lane in 0..4 {
+        for (lane, value) in lanes.iter().enumerate().take(4) {
             if lane == 0 || lane == 2 {
-                assert_eq!(
-                    lanes[lane],
-                    operation((lane as f64 + 1.0) * 6.0, (lane as f64 + 1.0) * 2.0)
-                );
+                assert_eq!(*value, operation((lane as f64 + 1.0) * 6.0, (lane as f64 + 1.0) * 2.0));
             } else {
-                assert_eq!(lanes[lane], 0.0, "EVEX.256 masked-off zero lane {lane}");
+                assert_eq!(*value, 0.0, "EVEX.256 masked-off zero lane {lane}");
             }
         }
         assert!(
@@ -2689,7 +2688,7 @@ fn test_evex_packed_double_bounded_differential_against_rust_oracle() -> Result<
         );
     }
 
-    let xmm_memory_cases: [(u8, &dyn SemanticProvider, fn(f64, f64) -> f64); 4] = [
+    let xmm_memory_cases: [F64Case; 4] = [
         (0x58, &avx512::VaddpdEvexXmmXmmMem128, |a, b| a + b),
         (0x5C, &avx512::VsubpdEvexXmmXmmMem128, |a, b| a - b),
         (0x59, &avx512::VmulpdEvexXmmXmmMem128, |a, b| a * b),
@@ -2708,10 +2707,10 @@ fn test_evex_packed_double_bounded_differential_against_rust_oracle() -> Result<
             mem_data: Some(&right),
         })?;
         let lanes = read_f64_lanes(&read_zmm_bytes(&state, ZMM0)?)?;
-        for lane in 0..2 {
+        for (lane, value) in lanes.iter().enumerate().take(2) {
             let a = (lane as f64 + 1.0) * 6.0;
             let b = (lane as f64 + 1.0) * 2.0;
-            assert_eq!(lanes[lane], operation(a, b), "EVEX.128 k0 memory lane {lane}");
+            assert_eq!(*value, operation(a, b), "EVEX.128 k0 memory lane {lane}");
         }
         assert!(
             lanes[2..].iter().all(|lane| *lane == 0.0),
@@ -2719,7 +2718,7 @@ fn test_evex_packed_double_bounded_differential_against_rust_oracle() -> Result<
         );
     }
 
-    let ymm_memory_cases: [(u8, &dyn SemanticProvider, fn(f64, f64) -> f64); 4] = [
+    let ymm_memory_cases: [F64Case; 4] = [
         (0x58, &avx512::VaddpdEvexYmmYmmMem, |a, b| a + b),
         (0x5C, &avx512::VsubpdEvexYmmYmmMem, |a, b| a - b),
         (0x59, &avx512::VmulpdEvexYmmYmmMem, |a, b| a * b),
@@ -2738,10 +2737,10 @@ fn test_evex_packed_double_bounded_differential_against_rust_oracle() -> Result<
             mem_data: Some(&right),
         })?;
         let lanes = read_f64_lanes(&read_zmm_bytes(&state, ZMM0)?)?;
-        for lane in 0..4 {
+        for (lane, value) in lanes.iter().enumerate().take(4) {
             let a = (lane as f64 + 1.0) * 6.0;
             let b = (lane as f64 + 1.0) * 2.0;
-            assert_eq!(lanes[lane], operation(a, b), "EVEX.256 k0 memory lane {lane}");
+            assert_eq!(*value, operation(a, b), "EVEX.256 k0 memory lane {lane}");
         }
         assert!(
             lanes[4..].iter().all(|lane| *lane == 0.0),

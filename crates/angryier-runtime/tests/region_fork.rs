@@ -14,6 +14,8 @@
 //! failed) when the toolchain is unavailable.
 
 #![cfg(all(feature = "xed", feature = "z3"))]
+// Test failure is expressed by expect; these are assertions, not error handling.
+#![allow(clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,7 +23,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use angryier_expr::ShardedExprArena;
-use angryier_memory::LayeredMemory;
 use angryier_runtime::{
     ExplorationPolicy, Runtime, SymbolicSession, region_fork_cap_from_env_value, region_fork_representative_address,
 };
@@ -432,7 +433,7 @@ fn region_fork_parent_keeps_uc_pin_fallback() -> Result<(), Box<dyn std::error::
     // loaded `eax` is immediately overwritten), so count merges alongside
     // terminations. `failed == 0` above already proves nobody died.
     assert!(
-        report.terminated + report.merges >= expected as u64 + 1,
+        report.terminated + report.merges > expected as u64,
         "parent and children all complete (terminated={}, merges={})",
         report.terminated,
         report.merges

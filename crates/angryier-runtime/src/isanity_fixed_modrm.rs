@@ -97,6 +97,8 @@ pub fn resolve_decoded(
 }
 
 #[cfg(test)]
+// Test fixtures are pinned and must be present; unwrapping them is the point.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -222,7 +224,9 @@ mod tests {
 
     fn hex_bytes(hex: &str) -> Vec<u8> {
         hex.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| u8::from_str_radix(std::str::from_utf8(chunk).expect("ASCII hex"), 16).expect("valid hex"))
             .collect()
     }

@@ -609,7 +609,7 @@ fn apply_session_opts(
                         }
                     }
                     let ptr = u64::from_le_bytes(buf);
-                    if ptr >= PE_DRIVER_STUB_BASE && ptr < PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_SIZE {
+                    if (PE_DRIVER_STUB_BASE..PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_SIZE).contains(&ptr) {
                         list.push(ptr);
                     }
                 }

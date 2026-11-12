@@ -181,6 +181,8 @@ pub fn excluded_iforms() -> &'static [(&'static str, &'static str)] {
 }
 
 #[cfg(test)]
+// Test failures need diagnostics; panicking on an unexpected fixture shape is the point.
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

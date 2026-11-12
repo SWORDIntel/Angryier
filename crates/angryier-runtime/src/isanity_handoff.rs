@@ -187,6 +187,8 @@ fn parse_register_direct(bytes: &[u8]) -> Option<(u8, bool, u8)> {
 }
 
 #[cfg(test)]
+// Test failures need diagnostics; panicking on an unexpected fixture shape is the point.
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 

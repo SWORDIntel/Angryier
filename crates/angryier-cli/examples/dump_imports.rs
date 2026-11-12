@@ -1,4 +1,8 @@
 //! Print the PE import list of an image in loader order (stub index order).
+// Developer example: argument/IO failures are reported by panic here, so the
+// workspace's deny-by-default unwrap/expect/panic lints are relaxed for this
+// example target only (it is not part of any shipped crate).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use angryier_loader::ImageLoader;
 
 fn main() {

@@ -291,7 +291,19 @@ fn expected_suppressed_provider_operands(iform: &str) -> Option<usize> {
     })
 }
 
+impl From<InstructionMode> for DirectExecutionMode {
+    fn from(mode: InstructionMode) -> Self {
+        match mode {
+            InstructionMode::Long64 => Self::Long64,
+            InstructionMode::Legacy32 => Self::Legacy32,
+            InstructionMode::Legacy16 => Self::Legacy16,
+        }
+    }
+}
+
 #[cfg(test)]
+// Test fixtures are pinned and must be present; unwrapping them is the point.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -584,16 +596,6 @@ mod tests {
             features: Vec::new(),
             operands: Vec::new(),
             modifiers: Default::default(),
-        }
-    }
-}
-
-impl From<InstructionMode> for DirectExecutionMode {
-    fn from(mode: InstructionMode) -> Self {
-        match mode {
-            InstructionMode::Long64 => Self::Long64,
-            InstructionMode::Legacy32 => Self::Legacy32,
-            InstructionMode::Legacy16 => Self::Legacy16,
         }
     }
 }

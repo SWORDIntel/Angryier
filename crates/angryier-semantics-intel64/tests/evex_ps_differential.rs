@@ -15,6 +15,7 @@
 //! against a Rust oracle, so regressions are caught everywhere; native
 //! execution additionally requires AVX512F (and AVX512VL for EVEX.128/256)
 //! and is skipped cleanly otherwise.
+#![allow(clippy::unwrap_used)] // lane slices are fixed 4-byte fixtures; `try_into()` cannot fail
 
 use angryier_arch::{OperandKind, OperandVisibility};
 use angryier_arch_intel64::{Intel64RegisterFile, register_id};
@@ -415,7 +416,7 @@ fn oracle(op: char, vl_lanes: usize, mask: Option<u64>, zeroing: bool, seeds: &S
         let result: [u8; 4] = if i >= vl_lanes {
             0.0f32.to_le_bytes()
         } else {
-            let enabled = mask.map_or(true, |m| (m >> i) & 1 == 1);
+            let enabled = mask.is_none_or(|m| (m >> i) & 1 == 1);
             if enabled {
                 let l = f32::from_le_bytes(seeds.left[i * 4..i * 4 + 4].try_into().unwrap());
                 let r = f32::from_le_bytes(seeds.right[i * 4..i * 4 + 4].try_into().unwrap());

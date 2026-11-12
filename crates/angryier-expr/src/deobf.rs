@@ -1238,13 +1238,7 @@ mod tests {
                 let shift = evaluate(arena, node.operands[1], env)?;
                 let value = if shift >= u128::from(bits) {
                     match node.op {
-                        ExprOp::AShr => {
-                            if signed(left, bits) < 0 {
-                                bit_mask(bits)
-                            } else {
-                                0
-                            }
-                        }
+                        ExprOp::AShr if signed(left, bits) < 0 => bit_mask(bits),
                         _ => 0,
                     }
                 } else {

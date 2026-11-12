@@ -268,6 +268,8 @@ fn register_source(insn: &DecodedInstruction) -> Option<RegisterId> {
 }
 
 #[cfg(test)]
+// Test failures need diagnostics; panicking with the unexpected value is the point.
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
     use angryier_arch::{

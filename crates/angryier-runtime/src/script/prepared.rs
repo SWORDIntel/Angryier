@@ -501,7 +501,7 @@ impl PreparedImage {
                             }
                         }
                         let ptr = u64::from_le_bytes(buf);
-                        if ptr >= PE_DRIVER_STUB_BASE && ptr < PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_SIZE {
+                        if (PE_DRIVER_STUB_BASE..PE_DRIVER_STUB_BASE + PE_DRIVER_STUB_SIZE).contains(&ptr) {
                             list.push(ptr);
                         }
                     }
@@ -628,7 +628,7 @@ impl PreparedImage {
         let t0 = std::time::Instant::now();
         let job_tables: Vec<Table> = jobs.sequence_values().collect::<mlua::Result<_>>()?;
         if job_tables.is_empty() {
-            return Ok(lua.create_table()?);
+            return lua.create_table();
         }
         let threads = batch_opts
             .and_then(|t| t.get::<usize>("threads").ok())
@@ -697,11 +697,10 @@ impl PreparedImage {
         t.set("jobs", self.stats_jobs)?;
         t.set("run_ms_total", self.stats_run_ms_total)?;
         t.set("last_run_ms", self.stats_last_run_ms)?;
-        t.set("avg_run_ms", if self.stats_jobs > 0 {
-            self.stats_run_ms_total / self.stats_jobs
-        } else {
-            0
-        })?;
+        t.set(
+            "avg_run_ms",
+            self.stats_run_ms_total.checked_div(self.stats_jobs).unwrap_or(0),
+        )?;
         t.set("is_pe", self.is_pe)?;
         t.set("image_regions", self.template.state.memory.regions().len())?;
         Ok(t)
