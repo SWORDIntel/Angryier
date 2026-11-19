@@ -326,6 +326,29 @@ usage: angryier-campaign coordinator --binary PATH --build-id TOKEN --ledger PAT
 | `--ledger PATH` | coordinator | Required durable campaign ledger (single writer; checkpoint + WAL sidecar). |
 | `--progress-jsonl PATH` | coordinator | Live accepted-event projection; defaults to `<ledger>.progress.jsonl`. Not a second ledger. |
 
+The worker can alternatively consume a generated v2 AEAD-encrypted TOML envelope. Generate it **on the coordinator using the same compiled `angryier-campaign` executable** that the worker will run:
+
+```sh
+angryier-campaign worker-config --binary /srv/angryier/image.elf \
+  --worker-binary /remote/absolute/image.elf --build-id release-v1 \
+  --worker-id worker-a --sign-key /LOCAL/coordinator/worker-a.key \
+  --key-file /remote/key/worker-a.key \
+  --listen 127.0.0.1:30031 --connections 0 --output /staging/worker-a.toml
+```
+
+| Flag / form | Role | Meaning |
+|---|---|---|
+| `worker-config` with `--binary`, `--build-id`, `--worker-id`, `--sign-key`, `--key-file`, `--listen`, `--output` | generator | Required fields; `--binary` must be an existing image on the generator and is hashed there. `--output` creates a new private TOML file (does not overwrite). |
+| `--sign-key PATH` | generator | Required existing validated 32-byte pairwise key file on the coordinator; encrypts and authenticates the payload with XChaCha20-Poly1305. The coordinator-local key pathname and key bytes are never serialized. |
+| `--key-file PATH` | generator | Worker-side pairwise key pathname visible in the envelope as bootstrap metadata (needed to locate the decryption key), not the coordinator-local key path; provision matching contents separately on the worker. The version and key path are authenticated AAD. |
+| `--worker-binary PATH` | generator | Optional normalized absolute image pathname on the worker; it need not exist on the generator but must be a canonical regular file of identical SHA-256 on the worker. Without it, the generator's canonical image pathname is used. |
+| `--image-mode`, `--entry`, `--symbolic-reg`, all ten `--max-*` flags, `--connections` | generator | Same worker settings and sealed limits as the original CLI; match the coordinator's campaign settings. `--connections 0` keeps serving. `--listen` must be loopback. |
+| `worker --config FILE` | worker | Exactly this form, without additional flags. Loads and decrypts the private envelope, checks pins, then serves; legacy `worker --binary ...` remains supported. |
+
+Copy the TOML to `~/.config/angryier/worker.toml` in a mode-`0700` directory, owned by the worker account with file mode `0600`; provision the distinct 32-byte raw pairwise key at its listed worker-side path separately, also mode `0600`. The envelope contains visible v2 version, worker-side key path and a fresh random 24-byte nonce alongside ciphertext; all pinned campaign settings, including executable and image digests, worker identity, listener, limits and connection cap, are encrypted and authenticated. No raw key bytes, coordinator-local key pathname, or compiled static embedded secret are included. Stage identical executable bytes (compare SHA-256) and runtime dependencies, and an identical image (compare SHA-256). Run `angryier-campaign worker --config ~/.config/angryier/worker.toml`. Config load fails closed on unknown version/fields, noncanonical image path or alias, changed executable/image pins, nonprivate or symlink config, and nonloopback listener; it does not deploy the worker or add TLS. The coordinator still uses `--peer worker-a@127.0.0.1:31031@LOCAL_KEY`, where `LOCAL_KEY` denotes its own key-file path, across an independently authenticated confidential loopback tunnel. See the [deployment procedure](guides/distributed-campaigns.md#pinned-worker-config-handoff).
+
+Transfer the TOML through an authenticated confidential channel; the worker must have the matching, separately provisioned key before loading it. The worker locates its separately provisioned key via the visible pathname, then authenticates/decrypts the ciphertext and AAD before honoring pinned settings or printing `READY`; tampering or a wrong key fails closed. The envelope does not protect against possession of that key or worker-account control, and the executable SHA-256 pin does not eliminate binary-hash time-of-check/time-of-use risk. The coordinator's `--peer` key must use its local copy of this worker's key. Connect hosts only via an independently authenticated confidential loopback tunnel: transport HMAC authenticates frames but does not encrypt them. This handoff procedure has not been verified across hosts.
+
 Validation is strict: a worker rejects `--peer`; the pool form rejects `--connect`/`--key-file`/`--worker-id`; an unknown option is an error; a coordinator exits nonzero (`campaign partial`) when unresolved owned work remains and `complete_within_declared_bounds` is false.
 
 Campaign identity and evidence: the manifest seals the executable SHA-256 (the running executable is hashed, so worker and coordinator must run the same compiled bytes), the image digest, architecture, resolved entry, the `campaign-root-v2/...` policy marker, solver policy, and all ten limits. A worker result is only a claim: the coordinator independently replays each fenced subtree from a fresh local root before admission, and witness-bearing terminals are concretely replayed before their evidence is committed. `CampaignOutcome` exposes the committed report plus the latest accepted disposition per path identity — superseded attempts and transient worker claims are not evidence.

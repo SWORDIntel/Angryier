@@ -12,6 +12,13 @@ angryier-expr = { path = "../angryier-expr" }
 angryier-ledger = { path = "../angryier-ledger" }
 angryier-runtime = { path = "../angryier-runtime" }
 sha2 = "0.10"
+chacha20poly1305 = "=0.10.1"
+getrandom = "=0.2.17"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 angryier-runtime = { path = "../angryier-runtime", features = ["xed", "z3"] }

@@ -1,4 +1,5 @@
 use angryier_campaign::local::LocalRegister;
+use angryier_campaign::worker_config::WorkerConfig;
 use angryier_campaign::{Config, ImageMode, LocalCampaign, LocalConfig, LocalPolicy, Peer, Result, SymbolicRegister};
 use angryier_ledger::evidence::{PathDisposition, ReplayVerification};
 use angryier_ledger::sustained::Status;
@@ -12,6 +13,9 @@ use std::{
 struct Cli {
     role: String,
     config: Config,
+    output: Option<PathBuf>,
+    worker_binary: Option<PathBuf>,
+    sign_key: Option<PathBuf>,
     ledger: Option<PathBuf>,
     addr: Option<SocketAddr>,
     connections: u64,
@@ -33,6 +37,19 @@ fn pc(value: &str) -> Result<u64> {
     Ok(parsed.map_err(|_| "PC requires an absolute u64 address (decimal or 0x hexadecimal)")?)
 }
 
+fn worker_config_path(args: &[String]) -> Result<Option<PathBuf>> {
+    if args.first().is_some_and(|role| role == "worker") && args.get(1).is_some_and(|flag| flag == "--config") {
+        if args.len() != 3 || args[2].is_empty() || args[2].starts_with("--") {
+            return Err("worker --config requires exactly one FILE and no other flags".into());
+        }
+        return Ok(Some(PathBuf::from(&args[2])));
+    }
+    if args.iter().any(|arg| arg == "--config") {
+        return Err("--config is only valid as worker --config FILE".into());
+    }
+    Ok(None)
+}
+
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
     let mut args = args.into_iter();
     let role = args.next().ok_or("expected worker, coordinator, or local-* command")?;
@@ -40,9 +57,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
         role.as_str(),
         "local-start" | "local-resume" | "local-status" | "local-advance" | "local-retry" | "local-run"
     );
-    if !local && role != "worker" && role != "coordinator" {
-        return Err("expected worker, coordinator, or local-* command".into());
+    if !local && role != "worker" && role != "coordinator" && role != "worker-config" {
+        return Err("expected worker, worker-config, coordinator, or local-* command".into());
     }
+    let mut output = None;
+    let mut worker_binary = None;
+    let mut sign_key = None;
     let mut binary = None;
     let mut key_file = None;
     let mut build_id = None;
@@ -100,7 +120,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
             "--entry" if !local => entry = Some(pc(&value)?),
             "--key-file" if !local => key_file = Some(PathBuf::from(value)),
             "--worker-id" if !local => worker_id = Some(value),
-            "--peer" if !local => {
+            "--peer" if !local && role != "worker-config" => {
                 let mut fields = value.splitn(3, '@');
                 let id = fields.next().ok_or("expected --peer ID@LOOPBACK_ADDR@KEY_FILE")?;
                 let address = fields.next().ok_or("expected --peer ID@LOOPBACK_ADDR@KEY_FILE")?;
@@ -112,9 +132,13 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
                 });
             }
             "--build-id" => build_id = Some(value),
-            "--listen" | "--connect" if !local => addr = Some(value.parse::<SocketAddr>()?),
-            "--ledger" => ledger = Some(PathBuf::from(value)),
-            "--progress-jsonl" if !local => progress_jsonl = Some(PathBuf::from(value)),
+            "--listen" if !local => addr = Some(value.parse::<SocketAddr>()?),
+            "--connect" if role == "coordinator" || role == "worker" => addr = Some(value.parse::<SocketAddr>()?),
+            "--ledger" if role != "worker-config" => ledger = Some(PathBuf::from(value)),
+            "--progress-jsonl" if !local && role != "worker-config" => progress_jsonl = Some(PathBuf::from(value)),
+            "--output" if role == "worker-config" => output = Some(PathBuf::from(value)),
+            "--worker-binary" if role == "worker-config" => worker_binary = Some(PathBuf::from(value)),
+            "--sign-key" if role == "worker-config" => sign_key = Some(PathBuf::from(value)),
             "--connections" if !local => connections = value.parse::<u64>()?,
             "--policy" if local => {
                 policy = match value.as_str() {
@@ -156,6 +180,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
             LocalPolicy::ForkAll => return Err("--exclude-avoid requires --policy rank-targets".into()),
         };
     }
+    if role == "worker-config" && (worker_id.is_none() || key_file.is_none() || sign_key.is_none()) {
+        return Err("worker-config requires --worker-id, --key-file, and --sign-key".into());
+    }
     if role == "worker" && !peers.is_empty() {
         return Err("worker cannot specify coordinator --peer entries".into());
     }
@@ -188,9 +215,20 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
                 .ok_or("--listen (worker), --connect (legacy), or --peer (pool) required")?,
         )
     };
+    if role == "worker-config" {
+        if output.is_none() {
+            return Err("worker-config requires --output".into());
+        }
+        if !addr.ok_or("--listen is required")?.ip().is_loopback() {
+            return Err("worker listener must be loopback".into());
+        }
+    }
     Ok(Cli {
         role,
         config,
+        output,
+        worker_binary,
+        sign_key,
         ledger,
         addr,
         connections,
@@ -354,9 +392,24 @@ fn run_local_campaign(mut campaign: LocalCampaign, batch_ms: u64, run_ms: u64) -
 }
 
 fn run() -> Result<RunExit> {
+    let args: Vec<_> = env::args().skip(1).collect();
+    if let Some(path) = worker_config_path(&args)? {
+        let (config, addr, connections, expected_image_sha256) = WorkerConfig::load(&path)?;
+        #[cfg(target_arch = "x86_64")]
+        angryier_campaign::serve_pinned(&config, addr, connections, &expected_image_sha256)?;
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (config, addr, connections, expected_image_sha256);
+            angryier_campaign::unsupported_architecture()?;
+        }
+        return Ok(RunExit::Complete);
+    }
     let Cli {
         role,
         config,
+        output,
+        worker_binary,
+        sign_key,
         ledger,
         addr,
         connections,
@@ -367,9 +420,20 @@ fn run() -> Result<RunExit> {
         regs,
         batch_ms,
         run_ms,
-    } = parse(env::args().skip(1))?;
+    } = parse(args)?;
     #[cfg(target_arch = "x86_64")]
     match role.as_str() {
+        "worker-config" => {
+            let mut handoff = WorkerConfig::from_worker(&config, addr.ok_or("--listen is required")?, connections)?;
+            if let Some(path) = worker_binary {
+                handoff.set_worker_binary_path(path)?;
+            }
+            handoff.write_new(
+                &output.ok_or("--output is required")?,
+                &sign_key.ok_or("--sign-key is required")?,
+            )?;
+            Ok(RunExit::Complete)
+        }
         "worker" => {
             angryier_campaign::serve(&config, addr.ok_or("distributed address required")?, connections)?;
             Ok(RunExit::Complete)
@@ -439,6 +503,9 @@ fn run() -> Result<RunExit> {
             role,
             config,
             addr,
+            output,
+            worker_binary,
+            sign_key,
             ledger,
             connections,
             policy,
@@ -606,6 +673,7 @@ mod tests {
             "--connect",
             "--peer",
             "--key-file",
+            "--sign-key",
             "--worker-id",
             "--connections",
             "--progress-jsonl",
@@ -654,6 +722,169 @@ mod tests {
             .is_err()
         );
         assert!(parse_test(&["worker", "--binary", "a.elf", "--build-id", "v1"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn worker_config_generator_accepts_worker_fields_and_sealed_limits() -> Result<()> {
+        let cli = parse_test(&[
+            "worker-config",
+            "--binary",
+            "a.elf",
+            "--worker-id",
+            "w1",
+            "--key-file",
+            "remote.key",
+            "--sign-key",
+            "local.key",
+            "--build-id",
+            "v1",
+            "--listen",
+            "127.0.0.1:9001",
+            "--connections",
+            "4",
+            "--image-mode",
+            "elf",
+            "--entry",
+            "0x1234",
+            "--symbolic-reg",
+            "rcx",
+            "--max-steps",
+            "1",
+            "--max-path-steps",
+            "2",
+            "--max-active-states",
+            "3",
+            "--max-path-depth",
+            "4",
+            "--max-loop-visits",
+            "5",
+            "--max-solver-ms",
+            "6",
+            "--max-wall-ms",
+            "7",
+            "--max-ram-bytes",
+            "8",
+            "--max-disk-bytes",
+            "9",
+            "--max-trace-bytes",
+            "10",
+            "--worker-binary",
+            "/remote/image.elf",
+            "--output",
+            "worker.toml",
+        ])?;
+        assert_eq!(cli.role, "worker-config");
+        assert_eq!(cli.output, Some(PathBuf::from("worker.toml")));
+        assert_eq!(cli.worker_binary, Some(PathBuf::from("/remote/image.elf")));
+        assert_eq!(cli.sign_key, Some(PathBuf::from("local.key")));
+        assert_eq!(cli.addr, Some("127.0.0.1:9001".parse()?));
+        assert_eq!(cli.connections, 4);
+        assert_eq!(cli.config.binary, PathBuf::from("a.elf"));
+        assert_eq!(cli.config.key_file, PathBuf::from("remote.key"));
+        assert_eq!(cli.config.worker_id, "w1");
+        assert_eq!(cli.config.build_id, "v1");
+        assert_eq!(cli.config.entry, Some(0x1234));
+        assert_eq!(cli.config.symbolic_reg, SymbolicRegister::Rcx);
+        let limits = cli.config.limits;
+        assert_eq!(limits.max_steps, 1);
+        assert_eq!(limits.max_path_steps, 2);
+        assert_eq!(limits.max_active_states, 3);
+        assert_eq!(limits.max_path_depth, 4);
+        assert_eq!(limits.max_loop_visits, 5);
+        assert_eq!(limits.max_solver_millis, 6);
+        assert_eq!(limits.max_wall_millis, 7);
+        assert_eq!(limits.max_ram_bytes, angryier_campaign::RamCap::Bytes(8));
+        assert_eq!(limits.max_disk_bytes, 9);
+        assert_eq!(limits.max_trace_bytes, 10);
+        Ok(())
+    }
+
+    #[test]
+    fn worker_config_rejects_missing_fields_foreign_flags_and_nonloopback() -> Result<()> {
+        let base = [
+            "worker-config",
+            "--binary",
+            "a.elf",
+            "--worker-id",
+            "w1",
+            "--key-file",
+            "remote.key",
+            "--sign-key",
+            "local.key",
+            "--build-id",
+            "v1",
+            "--listen",
+            "127.0.0.1:9001",
+            "--output",
+            "worker.toml",
+        ];
+        for missing in [
+            "--binary",
+            "--worker-id",
+            "--key-file",
+            "--sign-key",
+            "--build-id",
+            "--listen",
+            "--output",
+        ] {
+            let mut args = base.to_vec();
+            let index = args.iter().position(|arg| *arg == missing).ok_or("missing test flag")?;
+            args.drain(index..index + 2);
+            assert!(parse_test(&args).is_err(), "accepted missing {missing}");
+        }
+        for flag in ["--ledger", "--peer", "--progress-jsonl", "--connect"] {
+            let mut args = base.to_vec();
+            args.extend([flag, "value"]);
+            assert!(parse_test(&args).is_err(), "accepted {flag}");
+        }
+        for listener in ["0.0.0.0:9001", "192.0.2.1:9001", "[::]:9001"] {
+            let mut args = base.to_vec();
+            let index = args
+                .iter()
+                .position(|arg| *arg == "--listen")
+                .ok_or("missing listener")?;
+            args[index + 1] = listener;
+            assert!(parse_test(&args).is_err(), "accepted {listener}");
+        }
+        for role in ["worker", "coordinator", "local-start", "local-run"] {
+            let mut args = base.to_vec();
+            args[0] = role;
+            assert!(parse_test(&args).is_err(), "accepted --output for {role}");
+            let mut without_output = base[..base.len() - 2].to_vec();
+            without_output[0] = role;
+            without_output.extend(["--worker-binary", "/remote/image.elf"]);
+            assert!(
+                parse_test(&without_output).is_err(),
+                "accepted --worker-binary for {role}"
+            );
+            let mut without_output = base[..base.len() - 2].to_vec();
+            without_output[0] = role;
+            without_output.extend(["--sign-key", "local.key"]);
+            assert!(parse_test(&without_output).is_err(), "accepted --sign-key for {role}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn worker_config_load_dispatch_requires_exact_worker_form() -> Result<()> {
+        let valid = ["worker", "--config", "worker.toml"].map(str::to_owned);
+        assert_eq!(worker_config_path(&valid)?, Some(PathBuf::from("worker.toml")));
+        for args in [
+            vec!["worker", "--config"],
+            vec!["worker", "--config", "--connections"],
+            vec!["worker", "--config", "worker.toml", "--connections", "1"],
+            vec!["worker", "--binary", "a.elf", "--config", "worker.toml"],
+            vec!["coordinator", "--config", "worker.toml"],
+            vec!["worker-config", "--config", "worker.toml"],
+            vec!["local-run", "--config", "worker.toml"],
+        ] {
+            assert!(
+                worker_config_path(&args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>()).is_err(),
+                "accepted {args:?}"
+            );
+        }
+        assert!(worker_config_path(&["worker".into(), "--binary".into(), "a.elf".into()])?.is_none());
         Ok(())
     }
 }

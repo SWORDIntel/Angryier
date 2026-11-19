@@ -3,6 +3,7 @@
 //! independently pinned encrypted tunnel for connections between hosts.
 pub mod local;
 mod progress;
+pub mod worker_config;
 use angryier_distribution::{
     contracts::{CampaignArtifacts, CampaignManifest, CampaignSpec, Digest, ExplorationLimits},
     transport::{Message, TcpServer, TcpSession, Transport},
@@ -540,7 +541,26 @@ fn verify(
 /// one leased subtree and returns one typed outcome; failures close the session.
 #[cfg(target_arch = "x86_64")]
 pub fn serve(config: &Config, addr: SocketAddr, max_connections: u64) -> Result<()> {
+    serve_with_image(config, addr, max_connections, read_image(config)?)
+}
+
+/// Serve only the image bytes matching the digest returned by `WorkerConfig::load`.
+#[cfg(target_arch = "x86_64")]
+pub fn serve_pinned(
+    config: &Config,
+    addr: SocketAddr,
+    max_connections: u64,
+    expected_image_sha256: &str,
+) -> Result<()> {
     let image = read_image(config)?;
+    if format!("{:x}", Sha256::digest(&image)) != expected_image_sha256 {
+        return Err("worker image SHA256 mismatch".into());
+    }
+    serve_with_image(config, addr, max_connections, image)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn serve_with_image(config: &Config, addr: SocketAddr, max_connections: u64, image: Vec<u8>) -> Result<()> {
     let (entry, initial_digest) = initial(config, &image)?;
     let profile = build_profile()?;
     let policy = config.policy(entry);

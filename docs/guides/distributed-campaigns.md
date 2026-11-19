@@ -62,6 +62,32 @@ In terminal two, use the same values and the single-worker legacy connection for
 
 For a repeated campaign, choose `--connections 0` so the worker serves until stopped. A finite cap counts accepted worker sessions; there is no hidden reconnect/retry. Pool workers require `--worker-id`; legacy single-worker mode defaults to `worker` if omitted. Stop the coordinator before stopping the workers.
 
+## Pinned worker-config handoff
+
+To prepare a remote worker without manually reproducing worker flags, use the **same compiled `angryier-campaign` executable** on the coordinator to generate a v2 AEAD-encrypted TOML envelope. `/srv/angryier/image.elf` must exist on the generator; `/remote/absolute/image.elf` is a normalized absolute image path on the worker and need not exist on the generator. Use an image already suitable for the campaign and match its image mode, entry, symbolic register and all ten sealed limits on the coordinator:
+
+```sh
+angryier-campaign worker-config --binary /srv/angryier/image.elf \
+  --worker-binary /remote/absolute/image.elf --build-id release-v1 \
+  --worker-id worker-a --sign-key /LOCAL/coordinator/worker-a.key \
+  --key-file /remote/key/worker-a.key \
+  --listen 127.0.0.1:30031 --connections 0 --output /staging/worker-a.toml
+```
+
+For non-default campaigns, append the **same** `--image-mode`, `--entry`, `--symbolic-reg` and `--max-steps`, `--max-path-steps`, `--max-active-states`, `--max-path-depth`, `--max-loop-visits`, `--max-solver-ms`, `--max-wall-ms`, `--max-ram-bytes`, `--max-disk-bytes`, `--max-trace-bytes` values that the coordinator will use. The generator creates a private mode-0600 TOML and refuses to overwrite the output path. The XChaCha20-Poly1305 ciphertext encrypts/authenticates all pinned campaign settings, including executable and image digests, worker-side image path, ID, listener, connection cap, and resolved numeric limits, using a fresh random 24-byte nonce. The v2 version, nonce and worker-side bootstrap key-file **path** remain visible in TOML; the version and key path are authenticated associated data (AAD). Raw key bytes and the coordinator-local `--sign-key` path are never placed in TOML, and no compiled static embedded secret is used. The worker-side pathname need not exist on the generator, but the coordinator-local signing key must.
+
+Stage the **identical compiled executable bytes** on the worker and compare SHA-256 on both hosts; also stage matching native runtime dependencies (not covered by that hash). Copy the target image to `/remote/absolute/image.elf` and compare its SHA-256 against `/srv/angryier/image.elf`; the worker path must be canonical, not a symlink or `.`/`..` alias. Transfer the TOML using an authenticated confidential deployment channel, then, as the worker account, install it as a regular file owned by that account:
+
+```sh
+install -d -m 0700 "$HOME/.config/angryier"
+install -m 0600 /staging/worker-a.toml "$HOME/.config/angryier/worker.toml"
+angryier-campaign worker --config ~/.config/angryier/worker.toml
+```
+
+Before running the generator, provision the distinct raw 32-byte pairwise secret **separately** at `/LOCAL/coordinator/worker-a.key` with mode `0600`, and a matching copy at `/remote/key/worker-a.key` on the worker, also mode `0600`. The required `--sign-key` names the existing validated coordinator-local key used to encrypt/authenticate the payload; `--key-file` exposes the worker-side key pathname so the worker can locate its separately provisioned decryption key. Neither the coordinator-local key path nor the key bytes are serialized. Reuse the coordinator-local copy for its `--peer` entry. The worker authenticates/decrypts the envelope before honoring pinned settings or printing `READY`; tampering or a mismatched key fails closed. This does not protect against possession of the worker key or worker-account control, and the executable-hash pin does not eliminate binary-hash time-of-check/time-of-use risk. The worker's `--config` form accepts no extra flags. It fails closed on unknown TOML versions/fields, nonprivate or symlink TOML, noncanonical/aliased image paths, nonloopback listeners, and executable/image SHA-256 mismatches (including image changes before bind). The old direct `worker --binary ... --key-file ...` CLI remains supported. Generation does not deploy the worker, provide TLS, or encrypt application frames.
+
+Set up the [authenticated confidential loopback tunnel](#remote-hosts-tunnel-only-never-plaintext) before connecting the coordinator. Its `--peer worker-a@127.0.0.1:31031@LOCAL_KEY` still refers to the **coordinator-side** local key file (`LOCAL_KEY` is a placeholder), while `127.0.0.1:31031` forwards to worker `127.0.0.1:30031`; use the same build ID, image and limits. This is a deployment procedure, not a claim that the current checkout has undergone a new cross-host test. See also the [CLI option reference](../CLI.md#distributed-workercoordinator-roles).
+
 ## Two and four workers
 
 For two workers, run one worker command per host (or process), with unique IDs, loopback listen ports, and their corresponding key files:
