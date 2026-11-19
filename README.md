@@ -241,7 +241,7 @@ Run via CLI:
 angryier run ./tests/fixtures/symbolic_branch --script script.lua
 ```
 
-For bounded 1/2/4-worker campaigns, live `--progress-jsonl` monitoring, WAL capacity/restore requirements, and a finite illustrative 48-hour ELF budget, see the [distributed campaign operator guide](docs/guides/distributed-campaigns.md). This is separate from the embedded Lua/script interface; raw Advisor GUI PE remains deferred at `fork lacks complementary solver proof`, not fixed by raising caps alone.
+For local sustained campaigns on a single host, the typed Rust campaign API and `angryier-campaign` CLI support repeatable `--symbolic REG` (64-bit GPR marks) and `--reg NAME=VALUE` (concrete u64 GPR seeds); see the [local campaign operator guide](docs/guides/local-campaigns.md) for a `local-run --batch-ms 5000 --run-ms N` pinned-spec command, bounded post-batch progress, and the [typed Rust script](crates/angryier-campaign/examples/local_campaign.rs) (`cargo run -p angryier-campaign --example local_campaign -- ...`). The example pins its own executable SHA-256; neither the CLI nor a recompiled example can resume its ledger. For bounded 1/2/4-worker campaigns, live `--progress-jsonl` monitoring, WAL capacity/restore requirements, and a finite illustrative 48-hour ELF budget, see the [distributed campaign operator guide](docs/guides/distributed-campaigns.md). The embedded Lua `angry.sustained` v1/v2 interface remains exported as a deprecated compatibility surface; existing Lua ledgers cannot be reopened by the Rust API/CLI without migration, so resume them through Lua (see [Lua API §9](docs/LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script)). Raw Advisor GUI PE remains deferred at `fork lacks complementary solver proof`, not fixed by raising caps alone.
 
 ### Rust Engine API
 
@@ -348,8 +348,9 @@ Comprehensive guides are available in the [`docs/`](docs/) directory:
 - [**Architecture Overview**](docs/architecture/overview.md)
 - [**Crate Hierarchy & Boundaries**](docs/architecture/crates.md)
 - [**CLI & Scripting Reference**](docs/CLI.md)
-- [**Local sustained exploration (Lua API §9)**](docs/LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script)
-- [**Distributed campaign operator guide**](docs/guides/distributed-campaigns.md)
+- [**Local sustained campaign guide (typed Rust + CLI local operation)**](docs/guides/local-campaigns.md)
+- [**Local sustained exploration (Lua API §9, compatibility surface)**](docs/LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script)
+- [**Distributed campaign operator guide (worker/coordinator roles)**](docs/guides/distributed-campaigns.md)
 - [**ARM64 runtime status and loader limits**](ROADMAP.md#sustained-exploration-and-arm64-status)
 - [**Intel 64 Semantic Pipeline**](docs/semantics/intel64.md)
 - [**Benchmarking Contract**](docs/BENCHMARKING.md)

@@ -7535,6 +7535,27 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Some(SymbolicStepOutcome::Stepped { next_pc: summary.exit })
     }
 
+    fn next_input_symbol(arena: &SymbolicArena, state: &SymbolicState) -> Result<u64, RuntimeError> {
+        state.symbols.iter().try_fold(0u64, |next, binding| {
+            let node = arena
+                .get(binding.expression)
+                .ok_or_else(|| RuntimeError::Symbolic("missing input symbol expression".into()))?;
+            if node.op != ExprOp::Symbol {
+                return Err(RuntimeError::Symbolic("input binding is not a symbol".into()));
+            }
+            let id = u64::from_le_bytes(
+                node.immediate
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| RuntimeError::Symbolic("invalid input symbol id".into()))?,
+            );
+            Ok(next.max(
+                id.checked_add(1)
+                    .ok_or_else(|| RuntimeError::Symbolic("symbol id overflow".into()))?,
+            ))
+        })
+    }
+
     /// Marks `register` symbolic with `ty` in state `index` — the input
     /// binding entry point.
     pub fn mark_symbolic(&mut self, index: usize, register: u32, ty: angryier_ir::IrType) -> Result<(), RuntimeError> {
@@ -7542,7 +7563,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .states
             .get_mut(index)
             .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
-        let mut evaluator = SymbolicEvaluator::new(self.arena);
+        if state.symbols.iter().any(|binding| {
+            binding.register == register && !state.replay_memory_symbols.contains_key(&binding.expression)
+        }) {
+            return Err(RuntimeError::Symbolic("register already marked symbolic".into()));
+        }
+        let next_symbol = Self::next_input_symbol(self.arena, state)?;
+        let mut evaluator = SymbolicEvaluator::new(self.arena).with_next_symbol(next_symbol);
         let expr = evaluator
             .mark_register(register, ty)
             .map_err(|e| RuntimeError::Execution(format!("{e:?}")))?;
@@ -7560,21 +7587,13 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .states
             .get_mut(index)
             .ok_or_else(|| RuntimeError::Execution("no such state".into()))?;
-        let next_symbol = state
-            .symbols
-            .iter()
-            .filter_map(|s| {
-                self.arena.get(s.expression).and_then(|n| {
-                    n.immediate
-                        .get(..8)
-                        .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
-                })
-            })
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0);
+        let next_symbol = Self::next_input_symbol(self.arena, state)?;
+        let length_u64 = u64::try_from(length).map_err(|_| RuntimeError::Symbolic("symbol id overflow".into()))?;
+        next_symbol
+            .checked_add(length_u64)
+            .ok_or_else(|| RuntimeError::Symbolic("symbol id overflow".into()))?;
         let mut bytes = Vec::with_capacity(length);
-        for i in 0..length as u64 {
+        for i in 0..length_u64 {
             let expr = self
                 .arena
                 .intern(angryier_expr::ExprNode {
@@ -7618,19 +7637,10 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             .process
             .argv0_addr
             .ok_or_else(|| RuntimeError::Execution("no argv0 address".into()))?;
-        let next_symbol = state
-            .symbols
-            .iter()
-            .filter_map(|s| {
-                self.arena.get(s.expression).and_then(|n| {
-                    n.immediate
-                        .get(..8)
-                        .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
-                })
-            })
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0);
+        let next_symbol = Self::next_input_symbol(self.arena, state)?;
+        next_symbol
+            .checked_add(len.saturating_sub(1))
+            .ok_or_else(|| RuntimeError::Symbolic("symbol id overflow".into()))?;
         let mut bytes = Vec::with_capacity(len as usize);
         for i in 0..len {
             let byte = if i + 1 == len {

@@ -1,9 +1,48 @@
-use angryier_campaign::{Config, ImageMode, Peer, Result, SymbolicRegister};
-use std::{env, net::SocketAddr, path::PathBuf};
+use angryier_campaign::local::LocalRegister;
+use angryier_campaign::{Config, ImageMode, LocalCampaign, LocalConfig, LocalPolicy, Peer, Result, SymbolicRegister};
+use angryier_ledger::evidence::{PathDisposition, ReplayVerification};
+use angryier_ledger::sustained::Status;
+use std::{
+    env,
+    net::SocketAddr,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
-fn run() -> Result<()> {
-    let mut args = env::args().skip(1);
-    let role = args.next().ok_or("expected worker or coordinator")?;
+struct Cli {
+    role: String,
+    config: Config,
+    ledger: Option<PathBuf>,
+    addr: Option<SocketAddr>,
+    connections: u64,
+    policy: LocalPolicy,
+    find: Vec<u64>,
+    avoid: Vec<u64>,
+    symbolic: Option<Vec<(LocalRegister, u16)>>,
+    regs: Vec<(LocalRegister, u64)>,
+    batch_ms: Option<u64>,
+    run_ms: Option<u64>,
+}
+
+fn pc(value: &str) -> Result<u64> {
+    let parsed = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
+    } else {
+        value.parse::<u64>()
+    };
+    Ok(parsed.map_err(|_| "PC requires an absolute u64 address (decimal or 0x hexadecimal)")?)
+}
+
+fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
+    let mut args = args.into_iter();
+    let role = args.next().ok_or("expected worker, coordinator, or local-* command")?;
+    let local = matches!(
+        role.as_str(),
+        "local-start" | "local-resume" | "local-status" | "local-advance" | "local-retry" | "local-run"
+    );
+    if !local && role != "worker" && role != "coordinator" {
+        return Err("expected worker, coordinator, or local-* command".into());
+    }
     let mut binary = None;
     let mut key_file = None;
     let mut build_id = None;
@@ -16,24 +55,52 @@ fn run() -> Result<()> {
     let mut image_mode = ImageMode::Elf;
     let mut entry = None;
     let mut symbolic_reg = SymbolicRegister::Rbx;
+    let mut legacy_symbolic = false;
+    let mut symbolic: Option<Vec<(LocalRegister, u16)>> = None;
+    let mut regs = Vec::new();
     let mut limits = Config::defaults(PathBuf::new(), PathBuf::new(), String::new()).limits;
+    let mut policy = LocalPolicy::ForkAll;
+    let mut find = Vec::new();
+    let mut avoid = Vec::new();
+    let mut exclude_avoid = false;
+    let mut batch_ms = None;
+    let mut run_ms = None;
     while let Some(flag) = args.next() {
+        if flag == "--exclude-avoid" {
+            if !local {
+                return Err("--exclude-avoid is local-only".into());
+            }
+            exclude_avoid = true;
+            continue;
+        }
         let value = args.next().ok_or("each option requires a value")?;
         match flag.as_str() {
             "--binary" => binary = Some(PathBuf::from(value)),
-            "--image-mode" => image_mode = value.parse()?,
-            "--symbolic-reg" => symbolic_reg = value.parse()?,
-            "--entry" => {
-                let pc = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
-                    u64::from_str_radix(hex, 16)
-                } else {
-                    value.parse::<u64>()
-                };
-                entry = Some(pc.map_err(|_| "--entry requires an absolute u64 PC (decimal or 0x hexadecimal)")?);
+            "--image-mode" if !local => image_mode = value.parse()?,
+            "--symbolic-reg" => {
+                if local && symbolic.is_some() {
+                    return Err("--symbolic-reg cannot be mixed with --symbolic".into());
+                }
+                symbolic_reg = value.parse()?;
+                legacy_symbolic = true;
             }
-            "--key-file" => key_file = Some(PathBuf::from(value)),
-            "--worker-id" => worker_id = Some(value),
-            "--peer" => {
+            "--symbolic" if local => {
+                if legacy_symbolic {
+                    return Err("--symbolic cannot be mixed with --symbolic-reg".into());
+                }
+                symbolic.get_or_insert_with(Vec::new).push((value.parse()?, 64));
+            }
+            "--reg" if local => {
+                let (name, seed) = value.split_once('=').ok_or("--reg requires NAME=VALUE")?;
+                regs.push((
+                    name.parse()?,
+                    pc(seed).map_err(|_| "--reg requires a u64 value (decimal or 0x hexadecimal)")?,
+                ));
+            }
+            "--entry" if !local => entry = Some(pc(&value)?),
+            "--key-file" if !local => key_file = Some(PathBuf::from(value)),
+            "--worker-id" if !local => worker_id = Some(value),
+            "--peer" if !local => {
                 let mut fields = value.splitn(3, '@');
                 let id = fields.next().ok_or("expected --peer ID@LOOPBACK_ADDR@KEY_FILE")?;
                 let address = fields.next().ok_or("expected --peer ID@LOOPBACK_ADDR@KEY_FILE")?;
@@ -45,10 +112,21 @@ fn run() -> Result<()> {
                 });
             }
             "--build-id" => build_id = Some(value),
-            "--listen" | "--connect" => addr = Some(value.parse::<SocketAddr>()?),
+            "--listen" | "--connect" if !local => addr = Some(value.parse::<SocketAddr>()?),
             "--ledger" => ledger = Some(PathBuf::from(value)),
-            "--progress-jsonl" => progress_jsonl = Some(PathBuf::from(value)),
-            "--connections" => connections = value.parse::<u64>()?,
+            "--progress-jsonl" if !local => progress_jsonl = Some(PathBuf::from(value)),
+            "--connections" if !local => connections = value.parse::<u64>()?,
+            "--policy" if local => {
+                policy = match value.as_str() {
+                    "fork-all" => LocalPolicy::ForkAll,
+                    "rank-targets" => LocalPolicy::RankTargets { exclude_avoid: false },
+                    _ => return Err("--policy requires fork-all or rank-targets".into()),
+                }
+            }
+            "--find" if local => find.push(pc(&value)?),
+            "--avoid" if local => avoid.push(pc(&value)?),
+            "--batch-ms" if role == "local-run" => batch_ms = Some(value.parse()?),
+            "--run-ms" if role == "local-run" => run_ms = Some(value.parse()?),
             "--max-steps" => limits.max_steps = value.parse()?,
             "--max-path-steps" => limits.max_path_steps = value.parse()?,
             "--max-active-states" => limits.max_active_states = value.parse()?,
@@ -61,6 +139,22 @@ fn run() -> Result<()> {
             "--max-trace-bytes" => limits.max_trace_bytes = value.parse()?,
             _ => return Err(format!("unsupported option {flag}").into()),
         }
+    }
+    if role == "local-run" {
+        let wall = limits.max_wall_millis;
+        let batch = batch_ms.unwrap_or(5_000).min(wall);
+        let run = run_ms.unwrap_or(wall);
+        if batch == 0 || run == 0 || batch_ms.is_some_and(|value| value > wall) || run > wall {
+            return Err("--batch-ms and --run-ms must be positive and at most --max-wall-ms".into());
+        }
+        batch_ms = Some(batch);
+        run_ms = Some(run);
+    }
+    if exclude_avoid {
+        policy = match policy {
+            LocalPolicy::RankTargets { .. } => LocalPolicy::RankTargets { exclude_avoid: true },
+            LocalPolicy::ForkAll => return Err("--exclude-avoid requires --policy rank-targets".into()),
+        };
     }
     if role == "worker" && !peers.is_empty() {
         return Err("worker cannot specify coordinator --peer entries".into());
@@ -83,32 +177,483 @@ fn run() -> Result<()> {
     config.peers = peers;
     config.limits = limits;
     config.progress_jsonl = progress_jsonl;
-    let addr = addr
-        .or(pool_addr)
-        .ok_or("--listen (worker), --connect (legacy), or --peer (pool) required")?;
+    if local && ledger.is_none() {
+        return Err("--ledger is required".into());
+    }
+    let addr = if local {
+        None
+    } else {
+        Some(
+            addr.or(pool_addr)
+                .ok_or("--listen (worker), --connect (legacy), or --peer (pool) required")?,
+        )
+    };
+    Ok(Cli {
+        role,
+        config,
+        ledger,
+        addr,
+        connections,
+        policy,
+        find,
+        avoid,
+        symbolic,
+        regs,
+        batch_ms,
+        run_ms,
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn hex(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(target_arch = "x86_64")]
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c <= '\u{1f}' => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{:04x}", c as u32);
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+#[cfg(target_arch = "x86_64")]
+fn print_local_evidence(campaign: &LocalCampaign, find: &[u64], avoid: &[u64]) {
+    let latest: Vec<_> = campaign.cumulative_evidence().collect();
+    for (kind, event) in latest
+        .iter()
+        .copied()
+        .map(|event| ("evidence_latest", event))
+        .chain(campaign.accepted_events().iter().map(|event| ("evidence_event", event)))
+    {
+        let path = &event.delta.path;
+        let witness = path.witness.as_ref().and_then(|witness| {
+            if let ReplayVerification::Verified { trace_digest } = witness.replay {
+                Some(hex(&trace_digest))
+            } else {
+                None
+            }
+        });
+        let witness = witness.map_or_else(|| "null".to_owned(), |digest| format!("\"{digest}\""));
+        println!(
+            "{{\"type\":\"{kind}\",\"path_id\":\"{}\",\"provenance_digest\":\"{}\",\"work_index\":{},\"attempt\":{},\"sequence\":{},\"replay_digest\":\"{}\",\"status\":\"{}\",\"disposition\":\"{}\",\"verified_trace_digest\":{witness}}}",
+            hex(&path.path_id),
+            hex(&path.provenance_digest),
+            event.work_index,
+            event.attempt,
+            event.delta.sequence,
+            hex(&event.replay_digest.0),
+            json_escape(&format!("{:?}", event.status)),
+            json_escape(&format!("{:?}", path.disposition)),
+        );
+    }
+    for (kind, targets) in [("find", find), ("avoid", avoid)] {
+        let mut targets = targets.to_vec();
+        targets.sort_unstable();
+        for target in targets {
+            let observed = latest.iter().find(|event| {
+                let path = &event.delta.path;
+                matches!(event.status, Status::Completed)
+                    && matches!(path.disposition, PathDisposition::Terminal)
+                    && path.witness.as_ref().is_some_and(|witness| {
+                        matches!(witness.replay, ReplayVerification::Verified { .. })
+                            && witness.replay_trace.iter().any(|block| block.pc == target)
+                    })
+            });
+            let path_id = observed.map_or_else(
+                || "null".to_owned(),
+                |event| format!("\"{}\"", hex(&event.delta.path.path_id)),
+            );
+            println!(
+                "{{\"type\":\"target\",\"kind\":\"{kind}\",\"pc\":{target},\"observed\":{},\"path_id\":{path_id}}}",
+                observed.is_some(),
+            );
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RunExit {
+    Complete,
+    Partial,
+}
+
+#[cfg(target_arch = "x86_64")]
+fn run_local_campaign(mut campaign: LocalCampaign, batch_ms: u64, run_ms: u64) -> Result<RunExit> {
+    use std::io::Write as _;
+
+    let deadline = Duration::from_millis(run_ms);
+    let started = Instant::now();
+    let mut previous = campaign.checked_report()?;
+    let mut emitted = 0;
+    for event in campaign.accepted_events() {
+        println!(
+            "{{\"type\":\"replayed_event_id\",\"work_index\":{},\"attempt\":{},\"sequence\":{},\"path_id\":\"{}\",\"replay_digest\":\"{}\"}}",
+            event.work_index,
+            event.attempt,
+            event.delta.sequence,
+            hex(&event.delta.path.path_id),
+            hex(&event.replay_digest.0),
+        );
+        emitted += 1;
+    }
+    std::io::stdout().flush()?;
+    if previous.complete_within_declared_bounds || previous.queued == 0 && previous.active == 0 {
+        println!("{previous:?}");
+        std::io::stdout().flush()?;
+        return Ok(if previous.complete_within_declared_bounds {
+            RunExit::Complete
+        } else {
+            RunExit::Partial
+        });
+    }
+    loop {
+        let remaining_ms = deadline.saturating_sub(started.elapsed()).as_millis();
+        if remaining_ms == 0 {
+            println!("{previous:?}");
+            std::io::stdout().flush()?;
+            return Ok(RunExit::Partial);
+        }
+        let timeout = Duration::from_millis(u128::from(batch_ms).min(remaining_ms) as u64);
+        let outcome = campaign.advance(timeout)?;
+        println!("{:?}", outcome.report);
+        let events = campaign.accepted_events();
+        for event in &events[emitted..] {
+            println!(
+                "{{\"type\":\"accepted_event_id\",\"work_index\":{},\"attempt\":{},\"sequence\":{},\"path_id\":\"{}\",\"replay_digest\":\"{}\"}}",
+                event.work_index,
+                event.attempt,
+                event.delta.sequence,
+                hex(&event.delta.path.path_id),
+                hex(&event.replay_digest.0),
+            );
+        }
+        let unchanged = outcome.steps == 0 && previous == outcome.report && emitted == events.len();
+        emitted = events.len();
+        std::io::stdout().flush()?;
+        if outcome.report.complete_within_declared_bounds {
+            return Ok(RunExit::Complete);
+        }
+        if outcome.report.queued == 0 && outcome.report.active == 0 || unchanged {
+            return Ok(RunExit::Partial);
+        }
+        previous = outcome.report;
+    }
+}
+
+fn run() -> Result<RunExit> {
+    let Cli {
+        role,
+        config,
+        ledger,
+        addr,
+        connections,
+        policy,
+        find,
+        avoid,
+        symbolic,
+        regs,
+        batch_ms,
+        run_ms,
+    } = parse(env::args().skip(1))?;
     #[cfg(target_arch = "x86_64")]
     match role.as_str() {
-        "worker" => angryier_campaign::serve(&config, addr, connections),
+        "worker" => {
+            angryier_campaign::serve(&config, addr.ok_or("distributed address required")?, connections)?;
+            Ok(RunExit::Complete)
+        }
         "coordinator" => {
-            let report = angryier_campaign::coordinate(&config, addr, ledger.ok_or("--ledger is required")?)?;
+            let report = angryier_campaign::coordinate(
+                &config,
+                addr.ok_or("distributed address required")?,
+                ledger.ok_or("--ledger is required")?,
+            )?;
             println!("{report:?}");
             if !report.complete_within_declared_bounds {
                 return Err("campaign partial: unresolved owned work remains".into());
             }
-            Ok(())
+            Ok(RunExit::Complete)
         }
-        _ => Err("expected worker or coordinator".into()),
+        "local-start" | "local-resume" | "local-status" | "local-advance" | "local-retry" | "local-run" => {
+            let timeout = Duration::from_millis(config.limits.max_wall_millis);
+            let targets = (find.clone(), avoid.clone());
+            let local_config = LocalConfig {
+                campaign: config,
+                ledger: ledger.ok_or("--ledger is required")?,
+                policy,
+                find,
+                avoid,
+                symbolic,
+                regs,
+            };
+            let mut campaign = if role == "local-start" || role == "local-run" && !local_config.ledger.exists() {
+                LocalCampaign::start(local_config)?
+            } else {
+                LocalCampaign::resume(local_config)?
+            };
+            if role == "local-run" {
+                return run_local_campaign(
+                    campaign,
+                    batch_ms.ok_or("missing batch bound")?,
+                    run_ms.ok_or("missing run bound")?,
+                );
+            }
+            match role.as_str() {
+                "local-advance" => {
+                    let outcome = campaign.advance(timeout)?;
+                    println!("{:?}", outcome.report);
+                    print_local_evidence(&campaign, &targets.0, &targets.1);
+                    if !outcome.report.complete_within_declared_bounds {
+                        return Err("campaign partial: unresolved owned work remains".into());
+                    }
+                }
+                "local-retry" => {
+                    campaign.retry_deferred()?;
+                    println!("{:?}", campaign.checked_report()?);
+                    print_local_evidence(&campaign, &targets.0, &targets.1);
+                }
+                _ => {
+                    println!("{:?}", campaign.checked_report()?);
+                    print_local_evidence(&campaign, &targets.0, &targets.1);
+                }
+            }
+            Ok(RunExit::Complete)
+        }
+        _ => unreachable!(),
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
-        let _ = (role, config, addr, ledger, connections);
-        angryier_campaign::unsupported_architecture()
+        let _ = (
+            role,
+            config,
+            addr,
+            ledger,
+            connections,
+            policy,
+            find,
+            avoid,
+            symbolic,
+            regs,
+            batch_ms,
+            run_ms,
+        );
+        angryier_campaign::unsupported_architecture()?;
+        Ok(RunExit::Complete)
     }
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("campaign: {error}");
-        std::process::exit(1);
+    match run() {
+        Ok(RunExit::Complete) => {}
+        Ok(RunExit::Partial) => std::process::exit(2),
+        Err(error) => {
+            eprintln!("campaign: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn local_evidence_escapes_disposition_reason() {
+        let reason = "Pending(Unknown(\"quote\\slash\nline\rreturn\ttab\u{0001}\"))";
+        assert_eq!(
+            format!(
+                "{{\"status\":\"{}\",\"disposition\":\"{}\"}}",
+                json_escape("Deferred"),
+                json_escape(reason)
+            ),
+            "{\"status\":\"Deferred\",\"disposition\":\"Pending(Unknown(\\\"quote\\\\slash\\nline\\rreturn\\ttab\\u0001\\\"))\"}"
+        );
+    }
+
+    fn parse_test(args: &[&str]) -> Result<Cli> {
+        parse(args.iter().map(|arg| (*arg).to_owned()))
+    }
+
+    #[test]
+    fn local_run_bounds_are_cli_only_and_order_independent() -> Result<()> {
+        let base = [
+            "local-run",
+            "--binary",
+            "a.elf",
+            "--ledger",
+            "a.ledger",
+            "--build-id",
+            "v1",
+        ];
+        let defaults = parse_test(&base)?;
+        assert_eq!(defaults.batch_ms, Some(5_000));
+        assert_eq!(defaults.run_ms, Some(defaults.config.limits.max_wall_millis));
+        let mut args = base.to_vec();
+        args.extend(["--batch-ms", "100", "--run-ms", "400", "--max-wall-ms", "400"]);
+        let cli = parse_test(&args)?;
+        assert_eq!(cli.batch_ms, Some(100));
+        assert_eq!(cli.run_ms, Some(400));
+        assert_eq!(cli.config.limits.max_wall_millis, 400);
+        let mut args = base.to_vec();
+        args.extend(["--max-wall-ms", "200"]);
+        let capped = parse_test(&args)?;
+        assert_eq!(capped.batch_ms, Some(200));
+        assert_eq!(capped.run_ms, Some(200));
+        for extra in [
+            ["--batch-ms", "0"],
+            ["--run-ms", "0"],
+            ["--batch-ms", "401"],
+            ["--run-ms", "401"],
+            ["--run-ms", "invalid"],
+        ] {
+            let mut args = base.to_vec();
+            args.extend(["--max-wall-ms", "400"]);
+            args.extend(extra);
+            assert!(parse_test(&args).is_err(), "accepted {extra:?}");
+        }
+        for role in [
+            "worker",
+            "coordinator",
+            "local-start",
+            "local-resume",
+            "local-advance",
+            "local-status",
+            "local-retry",
+        ] {
+            for flag in ["--batch-ms", "--run-ms"] {
+                let mut args = base.to_vec();
+                args[0] = role;
+                args.extend([flag, "100"]);
+                assert!(parse_test(&args).is_err(), "accepted {flag} for {role}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_spec_and_limits_are_shared_across_controls() -> Result<()> {
+        for role in [
+            "local-start",
+            "local-resume",
+            "local-status",
+            "local-advance",
+            "local-retry",
+            "local-run",
+        ] {
+            let cli = parse_test(&[
+                role,
+                "--binary",
+                "a.elf",
+                "--ledger",
+                "a.ledger",
+                "--build-id",
+                "v1",
+                "--policy",
+                "rank-targets",
+                "--find",
+                "0x4010",
+                "--find",
+                "42",
+                "--avoid",
+                "0X4020",
+                "--exclude-avoid",
+                "--symbolic-reg",
+                "rcx",
+                "--max-steps",
+                "17",
+                "--max-wall-ms",
+                "999",
+            ])?;
+            assert_eq!(cli.role, role);
+            assert_eq!(cli.ledger, Some(PathBuf::from("a.ledger")));
+            assert_eq!(cli.config.limits.max_steps, 17);
+            assert_eq!(cli.config.limits.max_wall_millis, 999);
+            assert_eq!(cli.config.symbolic_reg, SymbolicRegister::Rcx);
+            assert_eq!(cli.policy, LocalPolicy::RankTargets { exclude_avoid: true });
+            assert_eq!(cli.find, vec![0x4010, 42]);
+            assert_eq!(cli.avoid, vec![0x4020]);
+            assert!(cli.addr.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_rejects_worker_flags_and_invalid_policy() {
+        let base = [
+            "local-start",
+            "--binary",
+            "a.elf",
+            "--ledger",
+            "a.ledger",
+            "--build-id",
+            "v1",
+        ];
+        for flag in [
+            "--listen",
+            "--connect",
+            "--peer",
+            "--key-file",
+            "--worker-id",
+            "--connections",
+            "--progress-jsonl",
+            "--entry",
+            "--image-mode",
+        ] {
+            let mut args = base.to_vec();
+            args.extend([flag, "value"]);
+            assert!(parse_test(&args).is_err(), "{flag} accepted for local command");
+        }
+        for args in [
+            vec!["--exclude-avoid"],
+            vec!["--policy", "unknown"],
+            vec!["--find", "not-a-pc"],
+        ] {
+            let mut full = base.to_vec();
+            full.extend(args);
+            assert!(parse_test(&full).is_err());
+        }
+    }
+
+    #[test]
+    fn distributed_roles_still_require_network_and_reject_local_flags() -> Result<()> {
+        let worker = parse_test(&[
+            "worker",
+            "--binary",
+            "a.elf",
+            "--build-id",
+            "v1",
+            "--listen",
+            "127.0.0.1:1234",
+        ])?;
+        assert_eq!(worker.addr, Some("127.0.0.1:1234".parse()?));
+        assert!(
+            parse_test(&[
+                "coordinator",
+                "--binary",
+                "a.elf",
+                "--build-id",
+                "v1",
+                "--connect",
+                "127.0.0.1:1234",
+                "--policy",
+                "fork-all"
+            ])
+            .is_err()
+        );
+        assert!(parse_test(&["worker", "--binary", "a.elf", "--build-id", "v1"]).is_err());
+        Ok(())
     }
 }

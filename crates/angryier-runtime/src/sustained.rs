@@ -77,16 +77,36 @@ impl SustainedCampaign {
         artifacts: &CampaignArtifacts<'_>,
         initial_state_digest: Digest,
     ) -> Result<Self, SustainedError> {
-        manifest.validate_artifacts(artifacts)?;
-        if initial_state_digest == Digest::default() {
-            return Err(SustainedError::InitialStateMismatch);
-        }
+        Self::validate(&manifest, artifacts, initial_state_digest)?;
         let path = path.as_ref();
-        let ledger = if path.exists() {
-            SustainedLedger::open(path, manifest)?
+        if path.exists() {
+            Self::resume_existing(path, manifest, artifacts, initial_state_digest)
         } else {
-            SustainedLedger::initialize(path, manifest, 1, ReplayDescriptor { initial_state_digest })?
-        };
+            Self::start_new(path, manifest, artifacts, initial_state_digest)
+        }
+    }
+
+    /// Create only a new ledger; initialization refuses existing snapshots under lock.
+    pub fn start_new(
+        path: impl AsRef<Path>,
+        manifest: CampaignManifest,
+        artifacts: &CampaignArtifacts<'_>,
+        initial_state_digest: Digest,
+    ) -> Result<Self, SustainedError> {
+        Self::validate(&manifest, artifacts, initial_state_digest)?;
+        let ledger = SustainedLedger::initialize(path, manifest, 1, ReplayDescriptor { initial_state_digest })?;
+        Ok(Self { ledger })
+    }
+
+    /// Open only an existing ledger with matching sealed artifacts and root.
+    pub fn resume_existing(
+        path: impl AsRef<Path>,
+        manifest: CampaignManifest,
+        artifacts: &CampaignArtifacts<'_>,
+        initial_state_digest: Digest,
+    ) -> Result<Self, SustainedError> {
+        Self::validate(&manifest, artifacts, initial_state_digest)?;
+        let ledger = SustainedLedger::open(path, manifest)?;
         if ledger
             .records()
             .iter()
@@ -96,8 +116,41 @@ impl SustainedCampaign {
         }
         Ok(Self { ledger })
     }
+
+    fn validate(
+        manifest: &CampaignManifest,
+        artifacts: &CampaignArtifacts<'_>,
+        initial_state_digest: Digest,
+    ) -> Result<(), SustainedError> {
+        manifest.validate_artifacts(artifacts)?;
+        if initial_state_digest == Digest::default() {
+            return Err(SustainedError::InitialStateMismatch);
+        }
+        Ok(())
+    }
     pub fn report(&self) -> LedgerReport {
         self.ledger.report()
+    }
+
+    /// Validate exclusion claims only when the ledger is complete. An
+    /// unproven avoid address rejects the report without changing the ledger.
+    pub fn checked_report(&self, avoid: &[u64]) -> Result<LedgerReport, SustainedError> {
+        let report = self.report();
+        if report.complete_within_declared_bounds
+            && avoid.iter().any(|target| {
+                !self.ledger.records().iter().any(|record| {
+                    matches!(record.status, Status::Excluded | Status::Infeasible)
+                        && record
+                            .unit
+                            .prefix
+                            .last()
+                            .is_some_and(|decision| decision.target() == *target)
+                })
+            })
+        {
+            return Err(SustainedError::ExclusionUnproven);
+        }
+        Ok(report)
     }
     /// Latest accepted disposition for each path, in ledger order. Distinct
     /// from the historical event stream retained in the ledger snapshot: only
@@ -1680,6 +1733,24 @@ mod cumulative_evidence_tests {
         assert_eq!(cumulative.len(), 1);
         assert_eq!(cumulative[0].status, Status::Completed);
         assert_eq!(cumulative[0].attempt, second.attempt);
+        Ok(())
+    }
+
+    #[test]
+    fn start_new_never_reopens_existing_ledger() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = Fixture::new()?;
+        let initial = Digest::of(b"seed");
+        let first = SustainedCampaign::start_new(&fixture.path, manifest(), &artifacts(), initial)?;
+        assert!(matches!(
+            SustainedCampaign::start_new(&fixture.path, manifest(), &artifacts(), initial),
+            Err(SustainedError::Ledger(_))
+        ));
+        drop(first);
+        assert!(matches!(
+            SustainedCampaign::start_new(&fixture.path, manifest(), &artifacts(), initial),
+            Err(SustainedError::Ledger(LedgerError::AlreadyExists)) | Err(SustainedError::Ledger(LedgerError::Io(_)))
+        ));
+        assert!(SustainedCampaign::resume_existing(&fixture.path, manifest(), &artifacts(), initial).is_ok());
         Ok(())
     }
 }

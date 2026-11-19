@@ -1,6 +1,7 @@
 //! Host-native, single-writer sustained campaign over authenticated loopback.
 //! Raw TCP is plaintext and must never be exposed outside loopback; use an
 //! independently pinned encrypted tunnel for connections between hosts.
+pub mod local;
 mod progress;
 use angryier_distribution::{
     contracts::{CampaignArtifacts, CampaignManifest, CampaignSpec, Digest, ExplorationLimits},
@@ -9,6 +10,7 @@ use angryier_distribution::{
 use angryier_expr::{ExprReader, ShardedExprArena};
 use angryier_ledger::{evidence::AcceptedEvidence, sustained::Report};
 use angryier_types::{ExpressionNormalizationVersion, FidelityProfile, SemanticVersion, TargetProfileId};
+pub use local::{LocalCampaign, LocalConfig, LocalOutcome, LocalPolicy};
 use sha2::{Digest as _, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -144,6 +146,9 @@ impl CampaignLimits {
     }
 }
 
+/// Cloneable so a typed local specification can keep its campaign config for
+/// a later resume; all fields are value types.
+#[derive(Clone)]
 pub struct Config {
     pub binary: PathBuf,
     pub image_mode: ImageMode,

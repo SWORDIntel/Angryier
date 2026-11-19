@@ -1,6 +1,6 @@
 # Distributed sustained campaigns: operator guide
 
-`angryier-campaign` is a bounded x86_64 Linux coordinator/worker for replaying a pinned image across 1, 2, or 4 worker processes. It is a loopback-only transport milestone—not a general cluster runtime. This guide is operational; see [deployment design](../design/sustained-hpc-deployment.md) for implementation and validation details, and [transport security](../design/sustained-transport-security.md) for protocol boundaries.
+`angryier-campaign` is a bounded x86_64 Linux coordinator/worker for replaying a pinned image across 1, 2, or 4 worker processes. It is a loopback-only transport milestone—not a general cluster runtime. The same executable also provides an independent **local** campaign mode that uses no network at all (no listener, no peers, no worker transport); see [local-campaigns.md](local-campaigns.md). This guide is operational; see [deployment design](../design/sustained-hpc-deployment.md) for implementation and validation details, and [transport security](../design/sustained-transport-security.md) for protocol boundaries.
 
 ## Prerequisites and build identity
 
@@ -11,7 +11,7 @@
   cargo build -p angryier-campaign --release --locked
   ```
 
-  For a source tree whose dependencies are already cached, `cargo build -p angryier-campaign --offline` is also supported by the deployment procedure. The executable is `target/release/angryier-campaign` (or `target/debug/angryier-campaign` for an unoptimized build).
+  For a source tree whose dependencies are already cached, `cargo build -p angryier-campaign --offline` is also supported by the deployment procedure. The executable is `target/release/angryier-campaign` (or `target/debug/angryier-campaign` for an unoptimized build). One compiled executable provides **both roles**: `worker` and `coordinator` are invocation-time roles of the same binary, not separate programs, so the byte comparison below covers both roles by construction.
 - Select one build procedure and environment for the entire run. Compare the **actual executable bytes** on every host, for example:
 
   ```sh

@@ -424,6 +424,13 @@ impl<'a> SymbolicEvaluator<'a> {
         }
     }
 
+    /// Starts fresh input symbols at the first unused id in an existing state.
+    /// The caller must account for all existing symbol bindings.
+    pub fn with_next_symbol(mut self, next_symbol: u64) -> Self {
+        self.next_symbol = next_symbol;
+        self
+    }
+
     /// Opts into block-local fresh-symbol ids (see the field's docs). The
     /// first evaluation of a block is unaffected — a fresh evaluator starts
     /// at 0 regardless — so this only changes re-evaluation behavior, which

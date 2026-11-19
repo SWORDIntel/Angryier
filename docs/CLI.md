@@ -2,6 +2,8 @@
 
 > Binary: `angryier` (crate `angryier-cli`). The default build includes the `run` subcommand (symbolic/concolic execution, optionally driven by an embedded Lua script, plus PE driver mode) with native decoding (Intel XED) and solver (Z3) dependencies. A dependency-free metadata-only build (`version`, `status`, `crates`, `help`) is available via `--no-default-features` and works anywhere Rust compiles.
 >
+> This reference also covers the separate sustained-campaign binary `angryier-campaign` (crate `angryier-campaign`): the typed Rust campaign API, the local sustained-campaign controls, and the distributed worker/coordinator roles. Source of truth: `crates/angryier-campaign/src/main.rs` and `crates/angryier-campaign/src/lib.rs`.
+>
 > Source of truth: `crates/angryier-cli/src/main.rs` (argument parsing) and `crates/angryier-runtime/src/script/mod.rs` (the Lua surface).
 
 ---
@@ -80,7 +82,7 @@ From the checkout, run the fixtures with:
 cargo test -p angryier-runtime --features z3 --test arm64_concrete --test arm64_shifts --test arm64_fp --test arm64_simd --test arm64_symbolic
 ```
 
-For persistent x86-64 campaigns, use the [local Lua API](LUA_API.md) or the separate [distributed coordinator and worker](guides/distributed-campaigns.md), not an `angryier run` subcommand.
+For persistent x86-64 campaigns, use the sustained-campaign binary [`angryier-campaign`](#sustained-campaigns-angryier-campaign) or the [local Lua API](LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script), not an `angryier run` subcommand. The [local campaign guide](guides/local-campaigns.md) covers the local sustained controls; the [distributed guide](guides/distributed-campaigns.md) covers the worker/coordinator roles.
 
 ### Flags
 
@@ -273,6 +275,60 @@ Concrete branch replay uses **three-part dynamic identity**: branch PC, 1-based 
 | 1 | Invalid/duplicate CLI arguments (including malformed `--reg`, find/avoid addresses, state/time budgets, or repeated single-use switches); unreadable script/binary; Lua/runtime/loader/model initialization error; or a build without the `run` feature. |
 
 Argument errors are prefixed `error:` and followed by usage plus a corrective hint. Runtime diagnostics use structured prefixes such as `[angryier][plan]`, `[angryier][load]`, `[angryier][exec]`, `[angryier][trace]`, `[angryier][progress]`, `[angryier][result]`, `[angryier][verdict]`, and `[angryier][hint]` so logs remain readable and grep-friendly.
+
+---
+
+## Sustained campaigns: `angryier-campaign`
+
+`angryier-campaign` (crate `angryier-campaign`) is a separate x86_64 Linux binary for durable, replay-verified sustained exploration of a pinned image. One compiled executable exposes two independent surfaces: the **local** sustained controls (one process, one durable frontier ledger, no network) and the distributed **worker/coordinator** roles (authenticated loopback TCP; 1, 2, or 4 workers). The same machinery is available as a typed Rust library API — `Config::defaults`, `serve`, `coordinate`, `coordinate_with_evidence`, `CampaignOutcome` (see [`examples/rust_api.rs`](../crates/angryier-campaign/examples/rust_api.rs)).
+
+The [local campaign operator guide](guides/local-campaigns.md) is the operational reference for the local controls (`local-start`, `local-resume`, `local-status`, `local-advance`, `local-retry`, `local-run`) and the [typed Rust example](../crates/angryier-campaign/examples/local_campaign.rs); the [distributed campaign guide](guides/distributed-campaigns.md) covers the roles, keys, tunnels, WAL backup/restore, and resume semantics. This section records only what the committed parser enforces; exact local subcommand/flag spellings are pinned by `crates/angryier-campaign/src/main.rs`.
+
+### Shared campaign options
+
+Campaign options are accepted as indicated below; local controls reject distributed-only image-mode and entry overrides. Supported values are sealed into the campaign manifest:
+
+| Flag | Repeatable | Meaning |
+|---|---|---|
+| `--binary PATH` | no | Target image to pin. Required. Its digest is sealed into the manifest; the actual bytes are re-checked before work. |
+| `--build-id TOKEN` | no | Required operator label, 1–128 bytes of `[A-Za-z0-9._-]`. Labeling only — it does **not** replace byte identity. |
+| `--image-mode MODE` | no | Distributed-only: `elf` (default) or `pe-driver`. Local controls reject this flag and use static ELF. `pe-driver` is a loader model, not Windows execution or Windows-fidelity evidence. |
+| `--entry PC` | no | Distributed-only absolute mapped entry PC (decimal or `0x` hexadecimal). Default: the image header entry; local controls reject overrides. |
+| `--symbolic-reg REG` | no | Legacy root selector: `rbx` (default) or `rcx`. Accepted by local and distributed roles; local controls cannot combine it with `--symbolic`. |
+| `--max-steps N` | no | Exploration limits sealed into the manifest; all ten are required to be positive, zero is never an implicit ceiling. Defaults: 128, 64, 2, 64, 64, 10000 ms, 30000 ms, mode-default RAM (64 MiB ELF / 576 MiB `pe-driver`), 1 MiB disk, 1 MiB trace, in the order below. |
+| `--max-path-steps N` / `--max-active-states N` / `--max-path-depth N` / `--max-loop-visits N` / `--max-solver-ms N` / `--max-wall-ms N` / `--max-ram-bytes N` / `--max-disk-bytes N` / `--max-trace-bytes N` | no | See defaults above; changing any limit changes the campaign digest, so a changed limit is a new campaign with a new ledger. |
+
+Local root inputs: repeat `--symbolic REG` for one or more 64-bit symbolic GPRs and `--reg NAME=VALUE` for distinct concrete GPR seeds (decimal or `0x` hexadecimal u64). Both flags are **local-only**; the canonical lowercase names are `rax rcx rdx rbx rsp rbp rsi rdi r8`–`r15`. Duplicate marks or seeds, symbolic/seed overlap, and mixing `--symbolic` with `--symbolic-reg` are rejected. Without `--symbolic`, the root keeps the default single `rbx` (or the legacy `--symbolic-reg rcx`) and `--reg` must not seed that register. All root inputs are sealed into the ledger's identity and must match on resume; old Lua v1/v2 ledgers cannot be reopened by this Rust API/CLI without migration. The Lua compatibility API remains exported.
+
+Static-image limit: local campaigns execute a **static ELF64 x86-64 executable at its image entry** under the `prove` fidelity profile with the native `z3-default` solver policy only. Unsupported options (entry override, mutable files/streams, hooks, under-constrained memory, fallthrough, dynamic loading, patches) fail closed rather than escaping the replay pin.
+
+### Local controls (single process, no network)
+
+The local controls run one process against one durable frontier ledger on this host: no loopback listener, no peers, no key files, no HMAC framing. For example, `angryier-campaign local-start --binary ./branch.elf --ledger ./branch.ledger --build-id local-v1 --symbolic rdi --symbolic rsi --reg rax=0x2a --policy rank-targets --find 0x401020` pins two symbolic inputs and one concrete seed; repeat those options unchanged for `local-resume`, `local-status`, `local-advance`, and `local-retry`. `local-start` creates the ledger from a complete explicit spec (fails on an existing ledger); `local-resume` reopens an existing ledger and validates the presented manifest and artifacts against the sealed campaign digest; `local-advance` reserves queued work, replays the pinned root, and commits one bounded transition; `local-status` reads counters without advancing; `local-retry` explicitly requeues `Deferred`/`Unknown`/`Failed` records (never automatic, never silent completion). Evidence is accepted only after concrete witness replay where a witness exists, and every report carries `complete_within_declared_bounds`. `local-run` starts if the ledger is absent, otherwise resumes it; with those same sealed options, run `angryier-campaign local-run --binary ./branch.elf --ledger ./branch.ledger --build-id local-v1 --symbolic rdi --symbolic rsi --reg rax=0x2a --policy rank-targets --find 0x401020 --max-wall-ms 30000 --batch-ms 5000 --run-ms 15000` (repeat unchanged to continue). The unsealed, positive `--batch-ms` defaults to 5000 ms, capped to the sealed wall limit; `--run-ms` defaults to that limit, and both must be at most `--max-wall-ms`. `--run-ms` bounds one process invocation, not an OS-wide cumulative budget; `--max-wall-ms` and all other sealed limits remain pinned. A report and newly accepted event IDs print **after each batch**, not as per-event streaming within it. `local-run` exits 0 for complete within declared bounds, 2 for partial, and 1 for hard errors. `local-status` takes the same single-writer lock and cannot observe a concurrent `local-run`. Run the independent typed Rust script with `cargo run -p angryier-campaign --example local_campaign -- --binary ./branch.elf --ledger ./example.ledger --build-id local-v1 --policy fork-all`; it pins its **own executable SHA-256**, so neither the CLI nor a recompiled example can reopen its ledger. Old Lua scripts and their archived ledgers remain available via the Lua compatibility interface, not the Rust CLI/API. See the [local campaign guide](guides/local-campaigns.md) for full pinned limits, walkthrough, backup/restore pairing, and capacity ceilings; bounded work does not prove exhaustive routes.
+
+### Distributed worker/coordinator roles
+
+```
+usage: angryier-campaign worker --binary PATH --build-id TOKEN --key-file KEY
+                                --listen ADDR [options]
+usage: angryier-campaign coordinator --binary PATH --build-id TOKEN --ledger PATH
+                                     [(--peer ID@ADDR@KEY)... | --connect ADDR] [options]
+```
+
+| Flag | Role | Meaning |
+|---|---|---|
+| `--listen ADDR` | worker | Loopback address to serve. Required for workers; only a coordinator may instead take the address from its first `--peer` entry. |
+| `--connect ADDR` | coordinator | Legacy single-worker connection form. Cannot be mixed with the `--peer` pool. |
+| `--peer ID@ADDR@KEY` | coordinator | Repeatable pool form; exactly 1, 2, or 4 entries. IDs, addresses, and key files must be distinct; worker `--worker-id` must exactly match its peer ID. Cannot be mixed with `--connect`/`--key-file`/`--worker-id`. |
+| `--key-file KEY` | worker / legacy coordinator | Pairwise 32-byte raw key file (mode `0600`); a different key per coordinator/worker pair. |
+| `--worker-id ID` | worker / legacy coordinator | Worker identity token; pool workers require it, legacy single-worker mode defaults to `worker`. |
+| `--connections N` | worker | Finite cap on accepted worker sessions; `0` serves until stopped. There is no hidden reconnect/retry. |
+| `--ledger PATH` | coordinator | Required durable campaign ledger (single writer; checkpoint + WAL sidecar). |
+| `--progress-jsonl PATH` | coordinator | Live accepted-event projection; defaults to `<ledger>.progress.jsonl`. Not a second ledger. |
+
+Validation is strict: a worker rejects `--peer`; the pool form rejects `--connect`/`--key-file`/`--worker-id`; an unknown option is an error; a coordinator exits nonzero (`campaign partial`) when unresolved owned work remains and `complete_within_declared_bounds` is false.
+
+Campaign identity and evidence: the manifest seals the executable SHA-256 (the running executable is hashed, so worker and coordinator must run the same compiled bytes), the image digest, architecture, resolved entry, the `campaign-root-v2/...` policy marker, solver policy, and all ten limits. A worker result is only a claim: the coordinator independently replays each fenced subtree from a fresh local root before admission, and witness-bearing terminals are concretely replayed before their evidence is committed. `CampaignOutcome` exposes the committed report plus the latest accepted disposition per path identity — superseded attempts and transient worker claims are not evidence.
 
 ---
 

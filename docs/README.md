@@ -22,8 +22,9 @@
 
 ### Sustained exploration and ARM64
 
-- [Local Lua API (§9)](LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script): start, resume, inspect, and advance a durable frontier.
-- [Distributed campaign operator guide](guides/distributed-campaigns.md): worker counts, progress reporting, and WAL recovery for bounded runs.
+- [Local campaign operator guide](guides/local-campaigns.md): typed Rust [example script](../crates/angryier-campaign/examples/local_campaign.rs) and `angryier-campaign local-run` on one host — pinned root inputs/limits, `--batch-ms 5000 --run-ms N` progress after each batch, exit 0/2/1, executable-byte identity, static ELF64 limits, and exact evidence semantics.
+- [Local Lua API (§9)](LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script): start, resume, inspect, and advance a durable frontier. `angry.sustained` v1/v2 remain exported as a deprecated compatibility surface, not removed. Old Lua ledgers remain archived and available to the Lua compatibility interface; neither the Rust example nor CLI can resume them without migration. The example also pins its own executable SHA-256 and cannot exchange ledgers with the CLI or a recompiled example.
+- [Distributed campaign operator guide](guides/distributed-campaigns.md): the existing worker/coordinator roles, worker counts, progress reporting, and WAL recovery for bounded runs.
 - [ARM64 runtime status](../ROADMAP.md#sustained-exploration-and-arm64-status): tested execution subset versus static decode coverage.
 
 ### Architecture (design contracts; status superseded by ROADMAP)
@@ -75,7 +76,7 @@ Intel 64 semantic architecture and identity contracts.
 | Document | Description |
 |---|---|
 | [BENCHMARKING](BENCHMARKING.md) | Performance, semantic correctness, provenance, cumulative reuse, and retrieval benchmark contract |
-| [CLI](CLI.md) | `angryier` binary reference: subcommands, the `run` flag set and build matrix, and the embedded Lua (`angry.run`/`angry.open`) API |
+| [CLI](CLI.md) | `angryier` binary reference: subcommands, the `run` flag set and build matrix, the embedded Lua (`angry.run`/`angry.open`) API, and the separate `angryier-campaign` sustained-campaign binary (local operation plus worker/coordinator roles) |
 
 ### Root
 

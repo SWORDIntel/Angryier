@@ -405,3 +405,84 @@ fn lua_observational_targets_are_canonical_and_never_prune() -> Result<(), Box<d
     }
     Ok(())
 }
+
+#[test]
+fn lua_local_v1_v2_ledgers_reopen_with_seeded_registers() -> Result<(), Box<dyn std::error::Error>> {
+    for version in [1, 2] {
+        let f = fixture()?;
+        let seeded_options = |lua: &Lua| {
+            let opts = options(lua, &f, 1);
+            let regs = lua.create_table().expect("concrete register seeds");
+            regs.set("rax", 5).expect("seed rax");
+            opts.set("regs", regs).expect("regs");
+            if version == 2 {
+                let artifacts: Table = opts.get("artifacts").expect("artifacts");
+                artifacts.set("script", "angry.sustained/v2").expect("v2 script");
+                artifacts.set("policy", "rank-targets/v1").expect("v2 policy");
+            }
+            opts
+        };
+        let (campaign_id, deferred) = {
+            let lua = lua();
+            let handle = invoke(&lua, "start", &f, seeded_options(&lua)).expect("start Lua local ledger");
+            let report: Table = handle.call_method("advance", ()).expect("persist seeded frontier");
+            assert_eq!(report.get::<usize>("retired_splits").expect("split"), 1);
+            (
+                report.get::<String>("campaign_digest").expect("campaign identity"),
+                report.get::<usize>("deferred").expect("deferred frontier"),
+            )
+        };
+        assert_eq!(deferred, 2, "v{version} must persist both fork children");
+        let ledger_before = std::fs::read(&f.ledger)?;
+        let lua = lua();
+        for changed_seed in ["cap", "concrete", "symbolic"] {
+            let changed = seeded_options(&lua);
+            match changed_seed {
+                "cap" => changed
+                    .get::<Table>("limits")
+                    .expect("limits")
+                    .set("max_active_states", 2)
+                    .expect("changed cap"),
+                "concrete" => changed
+                    .get::<Table>("regs")
+                    .expect("regs")
+                    .set("rax", 6)
+                    .expect("changed concrete seed"),
+                "symbolic" => changed
+                    .get::<Table>("symbolic")
+                    .expect("symbolic")
+                    .set("rdi", 64)
+                    .expect("changed symbolic seed"),
+                _ => unreachable!(),
+            }
+            let error = invoke(&lua, "resume", &f, changed).expect_err("changed manifest rejected");
+            assert!(
+                format!("{error:?}").contains("MismatchedCampaign"),
+                "v{version} {changed_seed}: {error:?}"
+            );
+            assert_eq!(
+                std::fs::read(&f.ledger)?,
+                ledger_before,
+                "rejection must not mutate v{version} ledger"
+            );
+        }
+        let reopened = invoke(&lua, "resume", &f, seeded_options(&lua)).expect("reopen with same Lua API");
+        let report: Table = reopened.call_method("report", ()).expect("persisted Lua report");
+        assert_eq!(
+            report.get::<String>("campaign_digest").expect("campaign identity"),
+            campaign_id
+        );
+        assert_eq!(report.get::<usize>("deferred").expect("deferred frontier"), deferred);
+        assert!(
+            report
+                .get::<Table>("evidence")
+                .expect("persisted evidence")
+                .get::<Table>("paths")
+                .expect("accepted paths")
+                .raw_len()
+                > 0,
+            "v{version} must retain accepted path evidence"
+        );
+    }
+    Ok(())
+}
