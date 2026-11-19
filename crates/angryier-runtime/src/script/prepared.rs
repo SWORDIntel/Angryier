@@ -31,7 +31,7 @@ use angryier_semantics_intel64::UnsupportedFallthrough;
 use angryier_types::{ExpressionNormalizationVersion, SemanticVersion, TargetProfileId};
 
 use super::utils::{parse_lua_u64, parse_patch_bytes, reg_by_name};
-use super::{reg_seed_from_pair, symbolic_mark_from_pair, Campaign};
+use super::{Campaign, reg_seed_from_pair, symbolic_mark_from_pair};
 use crate::{PE_DRIVER_STUB_BASE, PE_DRIVER_STUB_SIZE};
 
 /// The concrete runtime flavor backing prepared images and campaigns.
@@ -86,13 +86,11 @@ impl PreparedImage {
             .is_some_and(|v| v == "fallthrough")
         {
             let fallback = Arc::new(UnsupportedFallthrough::new());
-            runtime.registry.set_unsupported_fallback(
-                Arc::clone(&fallback) as Arc<dyn angryier_semantics::SemanticProvider>
-            );
+            runtime
+                .registry
+                .set_unsupported_fallback(Arc::clone(&fallback) as Arc<dyn angryier_semantics::SemanticProvider>);
         }
-        let use_dynamic = opts
-            .and_then(|o| o.get::<bool>("dynamic").ok())
-            .unwrap_or(false);
+        let use_dynamic = opts.and_then(|o| o.get::<bool>("dynamic").ok()).unwrap_or(false);
         let is_pe = bytes.len() > 1 && bytes[0] == b'M' && bytes[1] == b'Z';
         let process = if is_pe {
             if pe32_image {
@@ -175,9 +173,9 @@ impl PreparedImage {
     fn arm_registry_fallback(&mut self, opts: &Table) -> Option<Arc<UnsupportedFallthrough>> {
         if opts.get::<String>("unsupported").ok().as_deref() == Some("fallthrough") {
             let fallback = Arc::new(UnsupportedFallthrough::new());
-            self.runtime.registry.set_unsupported_fallback(
-                Arc::clone(&fallback) as Arc<dyn angryier_semantics::SemanticProvider>
-            );
+            self.runtime
+                .registry
+                .set_unsupported_fallback(Arc::clone(&fallback) as Arc<dyn angryier_semantics::SemanticProvider>);
             Some(fallback)
         } else {
             self.runtime.registry.clear_unsupported_fallback();
@@ -511,7 +509,9 @@ impl PreparedImage {
                 {
                     let mut list = Vec::new();
                     for (stub_addr, (dll, export)) in &session.states[0].process.pe_import_stubs {
-                        if export.eq_ignore_ascii_case(name.as_ref()) || format!("{dll}!{export}").eq_ignore_ascii_case(name.as_ref()) {
+                        if export.eq_ignore_ascii_case(name.as_ref())
+                            || format!("{dll}!{export}").eq_ignore_ascii_case(name.as_ref())
+                        {
                             list.push(*stub_addr);
                         }
                     }
@@ -575,10 +575,7 @@ impl PreparedImage {
                 let (addr, data) = if let Some(addr) = parse_lua_u64(&k) {
                     (addr, v)
                 } else if let Value::Table(entry) = &v {
-                    let a = entry
-                        .get::<Value>("addr")
-                        .ok()
-                        .and_then(|v| parse_lua_u64(&v));
+                    let a = entry.get::<Value>("addr").ok().and_then(|v| parse_lua_u64(&v));
                     let val = entry.get::<Value>("bytes").or_else(|_| entry.get::<Value>("data")).ok();
                     if let (Some(addr), Some(val)) = (a, val) {
                         (addr, val)
@@ -748,5 +745,809 @@ impl UserData for PreparedImage {
         // img:stats() -> { load_ms, jobs, run_ms_total, last_run_ms,
         // avg_run_ms, is_pe, image_regions } — load-vs-run cost evidence.
         methods.add_method("stats", |lua, this, ()| this.stats_table(lua));
+    }
+}
+
+/// Canonical, applied root seed options. The root snapshot digest also pins the
+/// loaded image and effective state; these bytes bind the accepted Lua options
+/// themselves to the manifest rather than trusting caller-supplied labels.
+fn sustained_seed_bytes(opts: &Table) -> mlua::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for key in ["symbolic", "regs"] {
+        let mut seeds = std::collections::BTreeMap::new();
+        if let Some(table) = opts.get::<Option<Table>>(key)? {
+            for pair in table.pairs::<Value, Value>() {
+                let (name, value) = pair?;
+                let (reg, seed) = if key == "symbolic" {
+                    let (name, width) = symbolic_mark_from_pair(&name, &value)?
+                        .ok_or_else(|| mlua::Error::external("sustained: invalid symbolic seed"))?;
+                    (
+                        reg_by_name(&name).ok_or_else(|| mlua::Error::external(format!("bad reg {name}")))?,
+                        u64::from(width),
+                    )
+                } else {
+                    reg_seed_from_pair(&name, &value)?
+                        .ok_or_else(|| mlua::Error::external("sustained: invalid regs seed"))?
+                };
+                if seeds.insert(reg, seed).is_some() {
+                    return Err(mlua::Error::external(format!(
+                        "sustained: duplicate {key} register seed"
+                    )));
+                }
+            }
+        }
+        bytes.extend_from_slice(&(seeds.len() as u64).to_le_bytes());
+        for (reg, seed) in seeds {
+            bytes.extend_from_slice(&reg.to_le_bytes());
+            bytes.extend_from_slice(&seed.to_le_bytes());
+        }
+    }
+    Ok(bytes)
+}
+
+fn sustained_digest_hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn sustained_targets(opts: &Table) -> mlua::Result<(Vec<u64>, Vec<u64>)> {
+    let Some(targets) = opts.get::<Option<Table>>("targets")? else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    if targets.metatable().is_some() {
+        return Err(mlua::Error::external("sustained: targets metatables are unsupported"));
+    }
+    for pair in targets.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let Value::String(key) = key else {
+            return Err(mlua::Error::external("sustained: target keys must be find or avoid"));
+        };
+        if !matches!(key.to_str()?.as_ref(), "find" | "avoid") {
+            return Err(mlua::Error::external("sustained: unknown targets field"));
+        }
+    }
+    let parse = |name: &str| -> mlua::Result<Vec<u64>> {
+        let Some(list) = targets.get::<Option<Table>>(name)? else {
+            return Ok(Vec::new());
+        };
+        if list.metatable().is_some() {
+            return Err(mlua::Error::external(format!(
+                "sustained: targets.{name} metatables are unsupported"
+            )));
+        }
+        let mut addresses = Vec::new();
+        for pair in list.clone().pairs::<Value, Value>() {
+            let (key, value) = pair?;
+            if !matches!(key, Value::Integer(n) if (1..=4096).contains(&n)) {
+                return Err(mlua::Error::external(format!(
+                    "sustained: targets.{name} must be a dense array of at most 4096 addresses"
+                )));
+            }
+            let addr = match value {
+                Value::Integer(_) | Value::String(_) => parse_lua_u64(&value),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                mlua::Error::external(format!(
+                    "sustained: invalid targets.{name} address (use an integer or exact hex string)"
+                ))
+            })?;
+            addresses.push(addr);
+        }
+        if addresses.len() != list.raw_len() || addresses.len() > 4096 {
+            return Err(mlua::Error::external(format!(
+                "sustained: targets.{name} must be a dense array of at most 4096 addresses"
+            )));
+        }
+        addresses.sort_unstable();
+        if addresses.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(mlua::Error::external(format!(
+                "sustained: duplicate targets.{name} address"
+            )));
+        }
+        Ok(addresses)
+    };
+    Ok((parse("find")?, parse("avoid")?))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SustainedPolicy {
+    ForkAll,
+    RankTargets { exclude_avoid: bool },
+}
+
+fn sustained_policy(opts: &Table) -> mlua::Result<SustainedPolicy> {
+    let artifacts: Table = opts.get("artifacts")?;
+    let script: mlua::LuaString = artifacts.get("script")?;
+    let label: mlua::LuaString = artifacts.get("policy")?;
+    let policy = match (script.as_bytes().as_ref(), label.as_bytes().as_ref()) {
+        (b"angry.sustained/v1", b"fork-all/v1") => SustainedPolicy::ForkAll,
+        (b"angry.sustained/v2", b"rank-targets/v1") => {
+            let table = opts.get::<Option<Table>>("policy")?;
+            let mut exclude_avoid = false;
+            if let Some(table) = table {
+                if table.metatable().is_some() {
+                    return Err(mlua::Error::external("sustained: policy metatables are unsupported"));
+                }
+                for pair in table.pairs::<Value, Value>() {
+                    let (key, value) = pair?;
+                    let Value::String(key) = key else {
+                        return Err(mlua::Error::external("sustained: policy keys must be strings"));
+                    };
+                    if key.to_str()?.as_ref() != "exclude_avoid" {
+                        return Err(mlua::Error::external("sustained: unsupported policy field"));
+                    }
+                    let Value::Boolean(value) = value else {
+                        return Err(mlua::Error::external("sustained: policy.exclude_avoid must be boolean"));
+                    };
+                    exclude_avoid = value;
+                }
+            }
+            SustainedPolicy::RankTargets { exclude_avoid }
+        }
+        (b"angry.sustained/v1", _) | (b"angry.sustained/v2", _) => {
+            return Err(mlua::Error::external(
+                "sustained: custom exploration policy is unsupported",
+            ));
+        }
+        _ => {
+            return Err(mlua::Error::external(
+                "sustained: analyst script execution is unsupported",
+            ));
+        }
+    };
+    if policy == SustainedPolicy::ForkAll && opts.contains_key("policy")? {
+        return Err(mlua::Error::external(
+            "sustained: policy options require angry.sustained/v2",
+        ));
+    }
+    Ok(policy)
+}
+
+/// Snapshot the effective, parsed options rather than retaining mutable Lua tables.
+fn sustained_options_digest(opts: &Table) -> mlua::Result<angryier_distribution::contracts::Digest> {
+    use angryier_distribution::contracts::Digest;
+    let mut bytes = b"angry.sustained/options/v2\0".to_vec();
+    let path: String = opts.get("ledger")?;
+    bytes.extend_from_slice(path.as_bytes());
+    bytes.push(0);
+    for pair in opts.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let Value::String(key) = key else {
+            return Err(mlua::Error::external("sustained: option keys must be strings"));
+        };
+        if !matches!(
+            key.to_str()?.as_ref(),
+            "ledger" | "artifacts" | "limits" | "fidelity" | "symbolic" | "regs" | "targets" | "policy"
+        ) {
+            return Err(mlua::Error::external(format!(
+                "sustained: unsupported option {}",
+                key.to_str()?
+            )));
+        }
+    }
+    for (name, table) in [
+        ("options", opts.clone()),
+        ("artifacts", opts.get::<Table>("artifacts")?),
+        ("limits", opts.get::<Table>("limits")?),
+    ] {
+        if table.metatable().is_some() {
+            return Err(mlua::Error::external(format!(
+                "sustained: {name} metatables are unsupported"
+            )));
+        }
+    }
+    for name in ["symbolic", "regs", "targets"] {
+        if let Some(table) = opts.get::<Option<Table>>(name)?
+            && table.metatable().is_some()
+        {
+            return Err(mlua::Error::external(format!(
+                "sustained: {name} metatables are unsupported"
+            )));
+        }
+    }
+    let artifacts: Table = opts.get("artifacts")?;
+    for pair in artifacts.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let Value::String(key) = key else {
+            return Err(mlua::Error::external("sustained: artifact keys must be strings"));
+        };
+        if !matches!(
+            key.to_str()?.as_ref(),
+            "script" | "policy" | "solver_policy" | "inputs" | "stubs"
+        ) {
+            return Err(mlua::Error::external(format!(
+                "sustained: unsupported artifact {}",
+                key.to_str()?
+            )));
+        }
+    }
+    for name in ["script", "policy", "solver_policy"] {
+        let value: mlua::LuaString = artifacts.get(name)?;
+        bytes.extend_from_slice(&(value.as_bytes().len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&value.as_bytes());
+    }
+    for name in ["inputs", "stubs"] {
+        if let Some(table) = artifacts.get::<Option<Table>>(name)?
+            && (table.metatable().is_some() || table.pairs::<Value, Value>().next().is_some())
+        {
+            return Err(mlua::Error::external(format!(
+                "sustained: {name} artifacts are not applied or replay-validated"
+            )));
+        }
+    }
+    bytes.extend_from_slice(&sustained_seed_bytes(opts)?);
+    let (find, avoid) = sustained_targets(opts)?;
+    bytes.push(match sustained_policy(opts)? {
+        SustainedPolicy::ForkAll => 0,
+        SustainedPolicy::RankTargets { exclude_avoid: false } => 1,
+        SustainedPolicy::RankTargets { exclude_avoid: true } => 2,
+    });
+    for addresses in [find, avoid] {
+        bytes.extend_from_slice(&(addresses.len() as u64).to_le_bytes());
+        for address in addresses {
+            bytes.extend_from_slice(&address.to_le_bytes());
+        }
+    }
+    let limits: Table = opts.get("limits")?;
+    for pair in limits.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let Value::String(key) = key else {
+            return Err(mlua::Error::external("sustained: limit keys must be strings"));
+        };
+        if !matches!(
+            key.to_str()?.as_ref(),
+            "max_steps"
+                | "max_path_steps"
+                | "max_active_states"
+                | "max_path_depth"
+                | "max_loop_visits"
+                | "max_solver_millis"
+                | "max_wall_millis"
+                | "max_ram_bytes"
+                | "max_disk_bytes"
+                | "max_trace_bytes"
+        ) {
+            return Err(mlua::Error::external(format!(
+                "sustained: unsupported limit {}",
+                key.to_str()?
+            )));
+        }
+    }
+    for name in [
+        "max_steps",
+        "max_path_steps",
+        "max_active_states",
+        "max_path_depth",
+        "max_loop_visits",
+        "max_solver_millis",
+        "max_wall_millis",
+        "max_ram_bytes",
+        "max_disk_bytes",
+        "max_trace_bytes",
+    ] {
+        let n: u64 = limits.get(name)?;
+        bytes.extend_from_slice(&n.to_le_bytes());
+    }
+    let fidelity: String = opts.get("fidelity")?;
+    bytes.extend_from_slice(fidelity.as_bytes());
+    Ok(Digest::of(&bytes))
+}
+fn sustained_evidence_table(
+    lua: &Lua,
+    report: angryier_provenance::sustained::EvidenceReport<'_>,
+) -> mlua::Result<Table> {
+    use angryier_provenance::sustained::{EdgeBasis, PathDisposition, ReplayVerification};
+    let summary = report.summary;
+    let evidence = lua.create_table()?;
+    evidence.set("schema_version", summary.schema_version)?;
+    evidence.set("completion", format!("{:?}", summary.completion))?;
+    evidence.set("campaign_digest", sustained_digest_hex(&summary.scope.campaign_digest))?;
+    evidence.set("bounds_digest", sustained_digest_hex(&summary.scope.bounds_digest))?;
+    evidence.set("contract_epoch", summary.scope.contract_epoch)?;
+    evidence.set("fidelity", format!("{:?}", summary.scope.fidelity))?;
+    evidence.set("closure_attested", summary.closure.is_some())?;
+    for (key, count) in [
+        ("terminal_paths", summary.terminal_paths),
+        ("excluded_paths", summary.excluded_paths),
+        ("infeasible_paths", summary.infeasible_paths),
+        ("pending_paths", summary.pending_paths),
+        ("failed_paths", summary.failed_paths),
+        ("retained_frontier", summary.retained_frontier),
+        ("observed_edges", summary.observed_edges),
+        ("inferred_edges", summary.inferred_edges),
+        ("infeasible_edges", summary.infeasible_edges),
+        ("dynamic_blocks", summary.dynamic_blocks),
+        ("replay_verified_witnesses", summary.replay_verified_witnesses),
+        ("semantic_debt_records", summary.semantic_debt_records),
+        ("storage_rejections", summary.storage_rejections),
+    ] {
+        evidence.set(key, count)?;
+    }
+    let paths = lua.create_table()?;
+    for (index, path) in report.paths.iter().enumerate() {
+        let item = lua.create_table()?;
+        item.set("path_id", sustained_digest_hex(&path.path_id))?;
+        item.set("provenance_digest", sustained_digest_hex(&path.provenance_digest))?;
+        item.set("fidelity", format!("{:?}", path.fidelity))?;
+        item.set("disposition", format!("{:?}", path.disposition))?;
+        if let PathDisposition::Pending(reason) = path.disposition {
+            item.set("pending_reason", format!("{reason:?}"))?;
+        }
+        let blocks = lua.create_table()?;
+        for (i, block) in path.blocks.iter().enumerate() {
+            let t = lua.create_table()?;
+            t.set("pc", block.pc)?;
+            t.set("pc_hex", super::hex64(block.pc))?;
+            t.set("visit_index", block.visit_index)?;
+            blocks.set(i + 1, t)?;
+        }
+        item.set("blocks", blocks)?;
+        let edges = lua.create_table()?;
+        for (i, edge) in path.edges.iter().enumerate() {
+            let t = lua.create_table()?;
+            t.set("from_pc", edge.from_pc)?;
+            t.set("from_pc_hex", super::hex64(edge.from_pc))?;
+            t.set("to_pc", edge.to_pc)?;
+            t.set("to_pc_hex", super::hex64(edge.to_pc))?;
+            match edge.basis {
+                EdgeBasis::Observed { trace_digest } => {
+                    t.set("basis", "observed")?;
+                    t.set("trace_digest", sustained_digest_hex(&trace_digest))?;
+                }
+                EdgeBasis::StaticInference { analysis_digest } => {
+                    t.set("basis", "static_inference")?;
+                    t.set("analysis_digest", sustained_digest_hex(&analysis_digest))?;
+                }
+                EdgeBasis::SolverInfeasible {
+                    predicate_digest,
+                    query_digest,
+                    result_digest,
+                } => {
+                    t.set("basis", "solver_infeasible")?;
+                    t.set("predicate_digest", sustained_digest_hex(&predicate_digest))?;
+                    t.set("query_digest", sustained_digest_hex(&query_digest))?;
+                    t.set("result_digest", sustained_digest_hex(&result_digest))?;
+                }
+            }
+            edges.set(i + 1, t)?;
+        }
+        item.set("edges", edges)?;
+        let branches = lua.create_table()?;
+        for (i, branch) in path.branches.iter().enumerate() {
+            let t = lua.create_table()?;
+            t.set("pc", branch.pc)?;
+            t.set("pc_hex", super::hex64(branch.pc))?;
+            t.set("visit_index", branch.visit_index)?;
+            t.set("predicate_digest", sustained_digest_hex(&branch.predicate_digest))?;
+            t.set("query_digest", sustained_digest_hex(&branch.query_digest))?;
+            t.set("result_digest", branch.result_digest.map(|d| sustained_digest_hex(&d)))?;
+            t.set("tested_target", branch.tested_target)?;
+            t.set("tested_target_hex", branch.tested_target.map(super::hex64))?;
+            t.set("solver_status", format!("{:?}", branch.disposition))?;
+            branches.set(i + 1, t)?;
+        }
+        item.set("branches", branches)?;
+        item.set("witness_present", path.witness.is_some())?;
+        item.set(
+            "replay_verified",
+            path.witness
+                .as_ref()
+                .is_some_and(|w| matches!(w.replay, ReplayVerification::Verified { .. })),
+        )?;
+        if let Some(witness) = path.witness.as_ref() {
+            let t = lua.create_table()?;
+            t.set("input_digest", sustained_digest_hex(&witness.input_digest))?;
+            t.set("replay_status", format!("{:?}", witness.replay))?;
+            if let ReplayVerification::Verified { trace_digest } = witness.replay {
+                t.set("trace_digest", sustained_digest_hex(&trace_digest))?;
+            }
+            item.set("witness", t)?;
+        }
+        let debt = lua.create_table()?;
+        for (i, record) in path.semantic_debt.iter().enumerate() {
+            let t = lua.create_table()?;
+            t.set("pc", record.pc)?;
+            t.set("pc_hex", super::hex64(record.pc))?;
+            t.set("kind", format!("{:?}", record.kind))?;
+            debt.set(i + 1, t)?;
+        }
+        item.set("semantic_debt", debt)?;
+        paths.set(index + 1, item)?;
+    }
+    evidence.set("paths", paths)?;
+    let frontier = lua.create_table()?;
+    for (i, work) in report.frontier.iter().enumerate() {
+        let t = lua.create_table()?;
+        t.set("path_id", sustained_digest_hex(&work.path_id))?;
+        t.set("reason", format!("{:?}", work.reason))?;
+        frontier.set(i + 1, t)?;
+    }
+    evidence.set("frontier", frontier)?;
+    Ok(evidence)
+}
+
+/// Opt-in durable campaign: every advance reconstructs a fresh pinned root.
+pub struct LuaSustained {
+    image: PreparedImage,
+    image_path: String,
+    opts: Table,
+    options_digest: angryier_distribution::contracts::Digest,
+    manifest: angryier_distribution::contracts::CampaignManifest,
+    campaign: crate::sustained::SustainedCampaign,
+    find: Vec<u64>,
+    avoid: Vec<u64>,
+    policy_mode: SustainedPolicy,
+    last_steps: u64,
+    last_reason: Option<String>,
+}
+
+impl LuaSustained {
+    pub fn open(image_path: String, opts: Table, resume: bool) -> mlua::Result<Self> {
+        use angryier_distribution::contracts::{
+            CampaignArtifacts, CampaignManifest, CampaignSpec, Digest, ExplorationLimits,
+        };
+        use angryier_types::FidelityProfile;
+        for pair in opts.clone().pairs::<Value, Value>() {
+            let (key, _) = pair?;
+            let Value::String(key) = key else {
+                return Err(mlua::Error::external("sustained: option keys must be strings"));
+            };
+            if !matches!(
+                key.to_str()?.as_ref(),
+                "ledger" | "artifacts" | "limits" | "fidelity" | "symbolic" | "regs" | "targets" | "policy"
+            ) {
+                return Err(mlua::Error::external(format!(
+                    "sustained: unsupported option {}",
+                    key.to_str()?
+                )));
+            }
+        }
+        let path: String = opts.get("ledger")?;
+        if path.is_empty() {
+            return Err(mlua::Error::external("sustained: empty ledger path"));
+        }
+        if std::path::Path::new(&path).exists() != resume {
+            return Err(mlua::Error::external(if resume {
+                "sustained: ledger does not exist"
+            } else {
+                "sustained: ledger exists (use resume)"
+            }));
+        }
+        let artifacts: Table = opts.get("artifacts")?;
+        let required = |key: &str| -> mlua::Result<Vec<u8>> {
+            let bytes: mlua::LuaString = artifacts.get(key)?;
+            if bytes.as_bytes().is_empty() {
+                return Err(mlua::Error::external(format!("sustained: empty {key} artifact")));
+            }
+            Ok(bytes.as_bytes().to_vec())
+        };
+        let script = required("script")?;
+        let policy_label = required("policy")?;
+        let policy_mode = sustained_policy(&opts)?;
+        let solver_policy = required("solver_policy")?;
+        if solver_policy != b"z3-default" {
+            return Err(mlua::Error::external(
+                "sustained: only native z3-default solver policy is supported",
+            ));
+        }
+        for pair in artifacts.clone().pairs::<Value, Value>() {
+            let (key, _) = pair?;
+            let Value::String(key) = key else {
+                return Err(mlua::Error::external("sustained: artifact keys must be strings"));
+            };
+            if !matches!(
+                key.to_str()?.as_ref(),
+                "script" | "policy" | "solver_policy" | "inputs" | "stubs"
+            ) {
+                return Err(mlua::Error::external(format!(
+                    "sustained: unsupported artifact {}",
+                    key.to_str()?
+                )));
+            }
+        }
+        for key in ["inputs", "stubs"] {
+            if let Some(table) = artifacts.get::<Option<Table>>(key)?
+                && table.clone().pairs::<Value, Value>().next().is_some()
+            {
+                return Err(mlua::Error::external(format!(
+                    "sustained: {key} artifacts are not applied or replay-validated"
+                )));
+            }
+        }
+        let seeds = sustained_seed_bytes(&opts)?;
+        let (find, avoid) = sustained_targets(&opts)?;
+        let limits: Table = opts.get("limits")?;
+        let limits = ExplorationLimits {
+            max_steps: limits.get("max_steps")?,
+            max_path_steps: limits.get("max_path_steps")?,
+            max_active_states: limits.get("max_active_states")?,
+            max_path_depth: limits.get("max_path_depth")?,
+            max_loop_visits: limits.get("max_loop_visits")?,
+            max_solver_millis: limits.get("max_solver_millis")?,
+            max_wall_millis: limits.get("max_wall_millis")?,
+            max_ram_bytes: limits.get("max_ram_bytes")?,
+            max_disk_bytes: limits.get("max_disk_bytes")?,
+            max_trace_bytes: limits.get("max_trace_bytes")?,
+        };
+        let fidelity = match opts.get::<String>("fidelity")?.as_str() {
+            "prove" => FidelityProfile::Prove,
+            _ => return Err(mlua::Error::external("sustained: only prove fidelity is supported")),
+        };
+        let binary =
+            std::fs::read(&image_path).map_err(|e| mlua::Error::external(format!("sustained: read image: {e}")))?;
+        if binary.get(..5) != Some(&b"\x7fELF\x02"[..]) || binary.get(16..20) != Some(&[2, 0, 62, 0][..]) {
+            return Err(mlua::Error::external(
+                "sustained: only static ELF64 x86-64 images are supported",
+            ));
+        }
+        let image = PreparedImage::load(&image_path, None)?;
+        let loaded_bytes = std::fs::read(&image_path).map_err(mlua::Error::external)?;
+        if loaded_bytes != binary {
+            return Err(mlua::Error::external("sustained: binary changed while loading"));
+        }
+        if image.template.target_profile != TargetProfileId(1) {
+            return Err(mlua::Error::external(
+                "sustained: only static ELF64 x86-64 images are supported",
+            ));
+        }
+        let root = image.build_campaign(&opts, None)?;
+        let entry = root.session.states[0].process.pc().map_err(mlua::Error::external)?;
+        let initial = root.session.sustained_initial_digest().map_err(mlua::Error::external)?;
+        if matches!(policy_mode, SustainedPolicy::RankTargets { exclude_avoid: true })
+            && avoid.binary_search(&entry).is_ok()
+        {
+            return Err(mlua::Error::external(
+                "sustained: avoid=exclude requires an exact dynamic branch target, not entry",
+            ));
+        }
+        drop(root);
+        let options_digest = sustained_options_digest(&opts)?;
+        let mut policy = policy_label;
+        policy.extend_from_slice(&initial.0);
+        policy.extend_from_slice(&seeds);
+        if policy_mode != SustainedPolicy::ForkAll || !find.is_empty() || !avoid.is_empty() {
+            policy.extend_from_slice(match policy_mode {
+                SustainedPolicy::ForkAll => b"\0observational-targets/v1",
+                SustainedPolicy::RankTargets { .. } => b"\0rank-targets/v1",
+            });
+            for list in [&find, &avoid] {
+                policy.extend_from_slice(&(list.len() as u64).to_le_bytes());
+                for address in list {
+                    policy.extend_from_slice(&address.to_le_bytes());
+                }
+            }
+            if let SustainedPolicy::RankTargets { exclude_avoid } = policy_mode {
+                policy.push(u8::from(exclude_avoid));
+                policy.extend_from_slice(&options_digest.0);
+            }
+        }
+        let semantic_profile = b"native-xed-v1";
+        let manifest = CampaignManifest::seal(CampaignSpec {
+            binary_digest: Digest::of(&binary),
+            architecture: "x86_64".into(),
+            entry_pc: entry,
+            semantic_version: "1".into(),
+            semantic_profile_digest: Digest::of(semantic_profile),
+            script_digest: Digest::of(&script),
+            policy_digest: Digest::of(&policy),
+            inputs: Vec::new(),
+            stubs: Vec::new(),
+            solver_version: "z3".into(),
+            solver_policy_digest: Digest::of(&solver_policy),
+            fidelity,
+            limits,
+        })
+        .map_err(mlua::Error::external)?;
+        let artifact_bytes = CampaignArtifacts {
+            binary: &binary,
+            semantic_profile,
+            script: &script,
+            policy: &policy,
+            solver_policy: &solver_policy,
+            inputs: Vec::new(),
+            stubs: Vec::new(),
+        };
+        let campaign = crate::sustained::SustainedCampaign::open(&path, manifest.clone(), &artifact_bytes, initial)
+            .map_err(mlua::Error::external)?;
+        Ok(Self {
+            image,
+            image_path,
+            opts,
+            options_digest,
+            manifest,
+            campaign,
+            find,
+            avoid,
+            policy_mode,
+            last_steps: 0,
+            last_reason: None,
+        })
+    }
+
+    fn check_options(&self) -> mlua::Result<()> {
+        if sustained_options_digest(&self.opts)? != self.options_digest {
+            return Err(mlua::Error::external("sustained: options changed after start/resume"));
+        }
+        Ok(())
+    }
+
+    fn report(&self, lua: &Lua) -> mlua::Result<Table> {
+        self.check_options()?;
+        let ledger = self.campaign.report();
+        if matches!(self.policy_mode, SustainedPolicy::RankTargets { exclude_avoid: true })
+            && ledger.complete_within_declared_bounds
+            && self.avoid.iter().any(|target| {
+                !self.campaign.ledger.records().iter().any(|record| {
+                    matches!(
+                        record.status,
+                        angryier_ledger::sustained::Status::Excluded | angryier_ledger::sustained::Status::Infeasible
+                    ) && record
+                        .unit
+                        .prefix
+                        .last()
+                        .is_some_and(|decision| decision.target() == *target)
+                })
+            })
+        {
+            return Err(mlua::Error::external(
+                "sustained: avoid=exclude requires an exact validated dynamic branch target",
+            ));
+        }
+        let accepted: Vec<_> = self.campaign.ledger.cumulative_evidence().collect();
+        let mut evidence = angryier_provenance::sustained::EvidenceBuilder::new(
+            crate::sustained::scope(&self.manifest, self.campaign.ledger.epoch()),
+            angryier_provenance::sustained::EvidenceLimits {
+                max_paths: angryier_ledger::evidence::MAX_EVENTS,
+                max_frontier: 1,
+                max_items_per_path: angryier_ledger::evidence::MAX_ITEMS,
+                max_bytes: angryier_ledger::evidence::MAX_EVENTS * angryier_ledger::evidence::MAX_EVENT_BYTES,
+            },
+        )
+        .map_err(|error| mlua::Error::external(format!("sustained: evidence scope: {error:?}")))?;
+        for event in accepted {
+            evidence
+                .add_path(event.delta.path.clone())
+                .map_err(|error| mlua::Error::external(format!("sustained: persisted evidence: {error:?}")))?;
+        }
+        let observations = evidence.report();
+        let observed: std::collections::BTreeSet<u64> = observations
+            .paths
+            .iter()
+            .filter(|path| {
+                !matches!(
+                    path.disposition,
+                    angryier_provenance::sustained::PathDisposition::SolverInfeasible
+                )
+            })
+            .flat_map(|path| path.blocks.iter().map(|block| block.pc))
+            .collect();
+        let t = lua.create_table()?;
+        t.set(
+            "campaign_digest",
+            self.manifest
+                .campaign_digest
+                .0
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        )?;
+        t.set("entry", self.manifest.spec.entry_pc)?;
+        t.set("entry_hex", super::hex64(self.manifest.spec.entry_pc))?;
+        for (key, count) in [
+            ("queued", ledger.queued),
+            ("active", ledger.active),
+            ("deferred", ledger.deferred),
+            ("completed", ledger.completed),
+            ("infeasible", ledger.infeasible),
+            ("unknown", ledger.unknown),
+            ("excluded", ledger.excluded),
+            ("failed", ledger.failed),
+            ("retired_splits", ledger.retired_splits),
+        ] {
+            t.set(key, count)?;
+        }
+        t.set(
+            "complete_within_declared_bounds",
+            ledger.complete_within_declared_bounds,
+        )?;
+        t.set("steps", self.last_steps)?;
+        t.set("reason", self.last_reason.clone())?;
+        let targets = lua.create_table()?;
+        for (name, addresses) in [("find", &self.find), ("avoid", &self.avoid)] {
+            let list = lua.create_table()?;
+            for (index, &pc) in addresses.iter().enumerate() {
+                let item = lua.create_table()?;
+                item.set("pc", pc)?;
+                item.set("pc_hex", super::hex64(pc))?;
+                item.set("observed", observed.contains(&pc))?;
+                list.set(index + 1, item)?;
+            }
+            targets.set(name, list)?;
+        }
+        t.set("targets", targets.clone())?;
+        t.set("cumulative_targets", targets)?;
+        let persisted = sustained_evidence_table(lua, observations)?;
+        t.set("evidence", persisted.clone())?;
+        t.set("cumulative_evidence", persisted)?;
+        Ok(t)
+    }
+
+    fn advance(&mut self, lua: &Lua, timeout_ms: Option<u64>) -> mlua::Result<Table> {
+        self.check_options()?;
+        use angryier_distribution::contracts::Digest;
+        let bytes = std::fs::read(&self.image_path)
+            .map_err(|e| mlua::Error::external(format!("sustained: read image: {e}")))?;
+        if Digest::of(&bytes) != self.manifest.spec.binary_digest {
+            return Err(mlua::Error::external("sustained: binary artifact mismatch"));
+        }
+        let timeout = timeout_ms.unwrap_or(self.manifest.spec.limits.max_wall_millis);
+        if timeout == 0 {
+            return Err(mlua::Error::external("sustained: timeout_ms must be positive"));
+        }
+        let mut root = self.image.build_campaign(&self.opts, None)?;
+        let arena = root.arena.clone();
+        let mut backend = angryier_solver_z3::Z3Backend::native_ffi(arena as Arc<dyn angryier_expr::ExprReader>)
+            .map_err(mlua::Error::external)?;
+        let ranking = match self.policy_mode {
+            SustainedPolicy::ForkAll => None,
+            SustainedPolicy::RankTargets { exclude_avoid } => Some(crate::sustained::SustainedRanking {
+                find: &self.find,
+                avoid: &self.avoid,
+                exclude_avoid,
+            }),
+        };
+        let run = root
+            .session
+            .run_sustained_ranked(
+                &mut self.campaign,
+                &mut backend,
+                std::time::Duration::from_millis(timeout),
+                ranking,
+            )
+            .map_err(mlua::Error::external)?;
+        self.last_steps = run.steps;
+        self.last_reason = run.reason;
+        let report = self.report(lua)?;
+        let observations = run.evidence.report();
+        let observed: std::collections::BTreeSet<u64> = observations
+            .paths
+            .iter()
+            .filter(|path| {
+                !matches!(
+                    path.disposition,
+                    angryier_provenance::sustained::PathDisposition::SolverInfeasible
+                )
+            })
+            .flat_map(|path| path.blocks.iter().map(|block| block.pc))
+            .collect();
+        let targets = lua.create_table()?;
+        for (name, addresses) in [("find", &self.find), ("avoid", &self.avoid)] {
+            let list = lua.create_table()?;
+            for (index, &pc) in addresses.iter().enumerate() {
+                let item = lua.create_table()?;
+                item.set("pc", pc)?;
+                item.set("pc_hex", super::hex64(pc))?;
+                item.set("observed", observed.contains(&pc))?;
+                list.set(index + 1, item)?;
+            }
+            targets.set(name, list)?;
+        }
+        report.set("targets", targets)?;
+        report.set("evidence", sustained_evidence_table(lua, observations)?)?;
+        Ok(report)
+    }
+}
+
+impl UserData for LuaSustained {
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_method("report", |lua, this, ()| this.report(lua));
+        methods.add_method_mut("advance", |lua, this, timeout_ms: Option<u64>| {
+            this.advance(lua, timeout_ms)
+        });
+        methods.add_method_mut("retry_deferred", |lua, this, ()| {
+            this.check_options()?;
+            this.campaign.retry_deferred().map_err(mlua::Error::external)?;
+            this.report(lua)
+        });
     }
 }

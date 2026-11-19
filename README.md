@@ -241,6 +241,8 @@ Run via CLI:
 angryier run ./tests/fixtures/symbolic_branch --script script.lua
 ```
 
+For bounded 1/2/4-worker campaigns, live `--progress-jsonl` monitoring, WAL capacity/restore requirements, and a finite illustrative 48-hour ELF budget, see the [distributed campaign operator guide](docs/guides/distributed-campaigns.md). This is separate from the embedded Lua/script interface; raw Advisor GUI PE remains deferred at `fork lacks complementary solver proof`, not fixed by raising caps alone.
+
 ### Rust Engine API
 
 ```rust
@@ -346,6 +348,9 @@ Comprehensive guides are available in the [`docs/`](docs/) directory:
 - [**Architecture Overview**](docs/architecture/overview.md)
 - [**Crate Hierarchy & Boundaries**](docs/architecture/crates.md)
 - [**CLI & Scripting Reference**](docs/CLI.md)
+- [**Local sustained exploration (Lua API §9)**](docs/LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script)
+- [**Distributed campaign operator guide**](docs/guides/distributed-campaigns.md)
+- [**ARM64 runtime status and loader limits**](ROADMAP.md#sustained-exploration-and-arm64-status)
 - [**Intel 64 Semantic Pipeline**](docs/semantics/intel64.md)
 - [**Benchmarking Contract**](docs/BENCHMARKING.md)
 

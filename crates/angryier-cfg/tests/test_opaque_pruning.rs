@@ -16,13 +16,10 @@
 use std::collections::BTreeMap;
 
 use angryier_arch::{
-    AccessKind, DecodedInstruction, ImmediateOperand, InstructionModifiers, MemoryBase, MemoryOperand,
-    Operand, OperandKind, OperandVisibility, RegisterId, RegisterView, RelativeBranchOperand,
+    AccessKind, DecodedInstruction, ImmediateOperand, InstructionModifiers, MemoryBase, MemoryOperand, Operand,
+    OperandKind, OperandVisibility, RegisterId, RegisterView, RelativeBranchOperand,
 };
-use angryier_cfg::opaque::{
-    OpaquePredicateDetector, OpaquePredicateKind, PruningLimits,
-    prune_opaque_predicates,
-};
+use angryier_cfg::opaque::{OpaquePredicateDetector, OpaquePredicateKind, PruningLimits, prune_opaque_predicates};
 use angryier_cfg::{BasicBlock, Cfg, CfgEdge, EdgeKind};
 use angryier_semantics_intel64::forms;
 use angryier_types::Address;
@@ -127,10 +124,25 @@ fn test_algebraic_parity_tautology_always_true() {
     let fallthrough = addr(0x1015);
 
     let b1_insns = vec![
-        insn(addr(0x1000), 3, forms::MOV_R64_R64, vec![r64_write(1, 0), r64_read(0, 1)]),
+        insn(
+            addr(0x1000),
+            3,
+            forms::MOV_R64_R64,
+            vec![r64_write(1, 0), r64_read(0, 1)],
+        ),
         insn(addr(0x1003), 3, forms::INC_R64, vec![r64_write(1, 0)]),
-        insn(addr(0x1006), 3, forms::IMUL_R64_R64, vec![r64_write(1, 0), r64_read(0, 1)]),
-        insn(addr(0x1009), 6, forms::TEST_R64_IMM32, vec![r64_read(1, 0), imm_op(1, 32, 1)]),
+        insn(
+            addr(0x1006),
+            3,
+            forms::IMUL_R64_R64,
+            vec![r64_write(1, 0), r64_read(0, 1)],
+        ),
+        insn(
+            addr(0x1009),
+            6,
+            forms::TEST_R64_IMM32,
+            vec![r64_read(1, 0), imm_op(1, 32, 1)],
+        ),
         // jz 0x2000 (displacement = 0x2000 - 0x1015 = 0x0FEB)
         insn(addr(0x100F), 6, forms::JZ_REL32, vec![rel_branch_op(0x0FEB, 0)]),
     ];
@@ -145,14 +157,24 @@ fn test_algebraic_parity_tautology_always_true() {
     let b_target = BasicBlock {
         start: target,
         end: addr(0x2005),
-        instructions: vec![insn(target, 5, forms::MOV_R64_IMM64, vec![r64_write(0, 0), imm_op(42, 64, 1)])],
+        instructions: vec![insn(
+            target,
+            5,
+            forms::MOV_R64_IMM64,
+            vec![r64_write(0, 0), imm_op(42, 64, 1)],
+        )],
         terminator: EdgeKind::Return,
     };
 
     let b_fallthrough = BasicBlock {
         start: fallthrough,
         end: addr(0x1020),
-        instructions: vec![insn(fallthrough, 5, forms::MOV_R64_IMM64, vec![r64_write(0, 0), imm_op(99, 64, 1)])],
+        instructions: vec![insn(
+            fallthrough,
+            5,
+            forms::MOV_R64_IMM64,
+            vec![r64_write(0, 0), imm_op(99, 64, 1)],
+        )],
         terminator: EdgeKind::Return,
     };
 
@@ -185,7 +207,10 @@ fn test_algebraic_parity_tautology_always_true() {
     // Prune the CFG
     let report = prune_opaque_predicates(&mut cfg, PruningLimits::default());
     assert_eq!(report.eliminated_branches, 1);
-    assert_eq!(report.straightened_blocks, 1, "Should straighten block 0x1000 and target 0x2000");
+    assert_eq!(
+        report.straightened_blocks, 1,
+        "Should straighten block 0x1000 and target 0x2000"
+    );
 
     // The pruned block should have taken branch retained and fallthrough dead
     let merged_block = cfg.blocks.get(&entry).unwrap();
@@ -204,10 +229,25 @@ fn test_algebraic_parity_tautology_always_false() {
     let fallthrough = addr(0x1015);
 
     let b1_insns = vec![
-        insn(addr(0x1000), 3, forms::MOV_R64_R64, vec![r64_write(1, 0), r64_read(0, 1)]),
+        insn(
+            addr(0x1000),
+            3,
+            forms::MOV_R64_R64,
+            vec![r64_write(1, 0), r64_read(0, 1)],
+        ),
         insn(addr(0x1003), 3, forms::INC_R64, vec![r64_write(1, 0)]),
-        insn(addr(0x1006), 3, forms::IMUL_R64_R64, vec![r64_write(1, 0), r64_read(0, 1)]),
-        insn(addr(0x1009), 6, forms::TEST_R64_IMM32, vec![r64_read(1, 0), imm_op(1, 32, 1)]),
+        insn(
+            addr(0x1006),
+            3,
+            forms::IMUL_R64_R64,
+            vec![r64_write(1, 0), r64_read(0, 1)],
+        ),
+        insn(
+            addr(0x1009),
+            6,
+            forms::TEST_R64_IMM32,
+            vec![r64_read(1, 0), imm_op(1, 32, 1)],
+        ),
         insn(addr(0x100F), 6, forms::JNZ_REL32, vec![rel_branch_op(0x0FEB, 0)]),
     ];
 
@@ -228,7 +268,12 @@ fn test_algebraic_parity_tautology_always_false() {
     let b_fallthrough = BasicBlock {
         start: fallthrough,
         end: addr(0x1020),
-        instructions: vec![insn(fallthrough, 5, forms::MOV_R64_IMM64, vec![r64_write(0, 0), imm_op(7, 64, 1)])],
+        instructions: vec![insn(
+            fallthrough,
+            5,
+            forms::MOV_R64_IMM64,
+            vec![r64_write(0, 0), imm_op(7, 64, 1)],
+        )],
         terminator: EdgeKind::Return,
     };
 
@@ -259,7 +304,10 @@ fn test_algebraic_parity_tautology_always_false() {
 
     let report = prune_opaque_predicates(&mut cfg, PruningLimits::default());
     assert_eq!(report.eliminated_branches, 1);
-    assert_eq!(report.straightened_blocks, 1, "Should straighten block 0x1000 and fallthrough");
+    assert_eq!(
+        report.straightened_blocks, 1,
+        "Should straighten block 0x1000 and fallthrough"
+    );
 
     let merged_block = cfg.blocks.get(&entry).unwrap();
     assert_eq!(merged_block.terminator, EdgeKind::Return);
@@ -277,11 +325,36 @@ fn test_bitwise_or_ge_and_invariant() {
 
     // Compute (x | y) in r8, (x & y) in r9, compare, jump if above-or-equal (always true!)
     let b1_insns = vec![
-        insn(addr(0x1000), 3, forms::MOV_R64_R64, vec![r64_write(8, 0), r64_read(0, 1)]),
-        insn(addr(0x1003), 3, forms::OR_R64_R64, vec![r64_write(8, 0), r64_read(1, 1)]),
-        insn(addr(0x1006), 3, forms::MOV_R64_R64, vec![r64_write(9, 0), r64_read(0, 1)]),
-        insn(addr(0x1009), 3, forms::AND_R64_R64, vec![r64_write(9, 0), r64_read(1, 1)]),
-        insn(addr(0x100C), 3, forms::CMP_R64_R64, vec![r64_read(8, 0), r64_read(9, 1)]),
+        insn(
+            addr(0x1000),
+            3,
+            forms::MOV_R64_R64,
+            vec![r64_write(8, 0), r64_read(0, 1)],
+        ),
+        insn(
+            addr(0x1003),
+            3,
+            forms::OR_R64_R64,
+            vec![r64_write(8, 0), r64_read(1, 1)],
+        ),
+        insn(
+            addr(0x1006),
+            3,
+            forms::MOV_R64_R64,
+            vec![r64_write(9, 0), r64_read(0, 1)],
+        ),
+        insn(
+            addr(0x1009),
+            3,
+            forms::AND_R64_R64,
+            vec![r64_write(9, 0), r64_read(1, 1)],
+        ),
+        insn(
+            addr(0x100C),
+            3,
+            forms::CMP_R64_R64,
+            vec![r64_read(8, 0), r64_read(9, 1)],
+        ),
         insn(addr(0x100F), 6, forms::JAE_REL32, vec![rel_branch_op(0x1FEB, 0)]),
     ];
 
@@ -346,9 +419,7 @@ fn test_mid_instruction_0xe8_junk_overlap_neutralization() {
     let target = addr(0x1003); // jmp $+3 skips 1 junk byte (0xE8) at 0x1002
 
     // Block 1 ends with short jump over 1 junk byte
-    let b1_insns = vec![
-        insn(junk_addr, 2, forms::JMP_REL32, vec![rel_branch_op(1, 0)]),
-    ];
+    let b1_insns = vec![insn(junk_addr, 2, forms::JMP_REL32, vec![rel_branch_op(1, 0)])];
 
     let b1 = BasicBlock {
         start: entry,
@@ -374,13 +445,11 @@ fn test_mid_instruction_0xe8_junk_overlap_neutralization() {
     blocks.insert(b1.start, b1);
     blocks.insert(b2.start, b2);
 
-    let edges = vec![
-        CfgEdge {
-            from: junk_addr,
-            to: Some(target),
-            kind: EdgeKind::Unconditional,
-        },
-    ];
+    let edges = vec![CfgEdge {
+        from: junk_addr,
+        to: Some(target),
+        kind: EdgeKind::Unconditional,
+    }];
 
     let mut cfg = Cfg { entry, blocks, edges };
 
@@ -391,10 +460,17 @@ fn test_mid_instruction_0xe8_junk_overlap_neutralization() {
 
     let report = prune_opaque_predicates(&mut cfg, PruningLimits::default());
     assert_eq!(report.neutralized_junk, 1);
-    assert_eq!(report.straightened_blocks, 1, "Blocks must be straightened after junk neutralization");
+    assert_eq!(
+        report.straightened_blocks, 1,
+        "Blocks must be straightened after junk neutralization"
+    );
 
     let merged = cfg.blocks.get(&entry).unwrap();
-    assert_eq!(merged.instructions.first().unwrap().form_id, forms::NOP, "Junk prefix neutralized to NOP");
+    assert_eq!(
+        merged.instructions.first().unwrap().form_id,
+        forms::NOP,
+        "Junk prefix neutralized to NOP"
+    );
     assert_eq!(merged.terminator, EdgeKind::Return);
 }
 
@@ -404,9 +480,7 @@ fn test_mid_instruction_eb_ff_junk_overlap_neutralization() {
     let junk_addr = addr(0x1000);
     let target = addr(0x1001); // 0xEB 0xFF lands at pc + 1
 
-    let b1_insns = vec![
-        insn(junk_addr, 2, forms::JMP_REL32, vec![rel_branch_op(-1, 0)]),
-    ];
+    let b1_insns = vec![insn(junk_addr, 2, forms::JMP_REL32, vec![rel_branch_op(-1, 0)])];
 
     let b1 = BasicBlock {
         start: entry,
@@ -426,13 +500,11 @@ fn test_mid_instruction_eb_ff_junk_overlap_neutralization() {
     blocks.insert(b1.start, b1);
     blocks.insert(b2.start, b2);
 
-    let edges = vec![
-        CfgEdge {
-            from: junk_addr,
-            to: Some(target),
-            kind: EdgeKind::Unconditional,
-        },
-    ];
+    let edges = vec![CfgEdge {
+        from: junk_addr,
+        to: Some(target),
+        kind: EdgeKind::Unconditional,
+    }];
 
     let mut cfg = Cfg { entry, blocks, edges };
 
@@ -455,7 +527,12 @@ fn test_genuine_non_opaque_conditional_branch_preserved() {
     let fallthrough = addr(0x100B);
 
     let b1_insns = vec![
-        insn(addr(0x1000), 5, forms::CMP_R64_IMM32, vec![r64_read(0, 0), imm_op(42, 32, 1)]),
+        insn(
+            addr(0x1000),
+            5,
+            forms::CMP_R64_IMM32,
+            vec![r64_read(0, 0), imm_op(42, 32, 1)],
+        ),
         insn(addr(0x1005), 6, forms::JG_REL32, vec![rel_branch_op(0x0FF5, 0)]),
     ];
 
@@ -502,7 +579,10 @@ fn test_genuine_non_opaque_conditional_branch_preserved() {
 
     let detector = OpaquePredicateDetector::new();
     let detected = detector.detect_block(cfg.blocks.get(&entry).unwrap());
-    assert!(detected.is_none(), "Genuine dynamic branch must NOT be flagged as opaque");
+    assert!(
+        detected.is_none(),
+        "Genuine dynamic branch must NOT be flagged as opaque"
+    );
 
     let report = prune_opaque_predicates(&mut cfg, PruningLimits::default());
     assert_eq!(report.eliminated_branches, 0, "No branches should be eliminated");
@@ -510,8 +590,16 @@ fn test_genuine_non_opaque_conditional_branch_preserved() {
     assert_eq!(report.straightened_blocks, 0);
 
     // Both edges must be preserved untouched
-    assert!(cfg.edges.iter().any(|e| e.to == Some(target) && e.kind == EdgeKind::ConditionalTaken));
-    assert!(cfg.edges.iter().any(|e| e.to == Some(fallthrough) && e.kind == EdgeKind::FallThrough));
+    assert!(
+        cfg.edges
+            .iter()
+            .any(|e| e.to == Some(target) && e.kind == EdgeKind::ConditionalTaken)
+    );
+    assert!(
+        cfg.edges
+            .iter()
+            .any(|e| e.to == Some(fallthrough) && e.kind == EdgeKind::FallThrough)
+    );
 }
 
 // ── Test 5: Identity Invariant (cmp reg, reg) ─────────────────────────────────
@@ -523,7 +611,12 @@ fn test_identity_invariant_cmp_reg_self() {
     let fallthrough = addr(0x1009);
 
     let b1_insns = vec![
-        insn(addr(0x1000), 3, forms::CMP_R64_R64, vec![r64_read(3, 0), r64_read(3, 1)]),
+        insn(
+            addr(0x1000),
+            3,
+            forms::CMP_R64_R64,
+            vec![r64_read(3, 0), r64_read(3, 1)],
+        ),
         insn(addr(0x1003), 6, forms::JZ_REL32, vec![rel_branch_op(0x0FF7, 0)]),
     ];
 
@@ -587,8 +680,18 @@ fn test_domain_square_invariant() {
     let fallthrough = addr(0x100C);
 
     let b1_insns = vec![
-        insn(addr(0x1000), 3, forms::IMUL_R64_R64, vec![r64_write(5, 0), r64_read(5, 1)]),
-        insn(addr(0x1003), 3, forms::CMP_R64_IMM32, vec![r64_read(5, 0), imm_op(0, 32, 1)]),
+        insn(
+            addr(0x1000),
+            3,
+            forms::IMUL_R64_R64,
+            vec![r64_write(5, 0), r64_read(5, 1)],
+        ),
+        insn(
+            addr(0x1003),
+            3,
+            forms::CMP_R64_IMM32,
+            vec![r64_read(5, 0), imm_op(0, 32, 1)],
+        ),
         insn(addr(0x1006), 6, forms::JGE_REL32, vec![rel_branch_op(0x0FF4, 0)]),
     ];
 
@@ -653,9 +756,24 @@ fn test_context_invariant_identical_loads() {
 
     // Two registers loaded from same context offset [rsi + 0x20]
     let b1_insns = vec![
-        insn(addr(0x1000), 4, forms::MOV_R64_MEM64, vec![r64_write(1, 0), mem_load_op(6, 0x20, 1)]),
-        insn(addr(0x1004), 4, forms::MOV_R64_MEM64, vec![r64_write(2, 0), mem_load_op(6, 0x20, 1)]),
-        insn(addr(0x1008), 3, forms::CMP_R64_R64, vec![r64_read(1, 0), r64_read(2, 1)]),
+        insn(
+            addr(0x1000),
+            4,
+            forms::MOV_R64_MEM64,
+            vec![r64_write(1, 0), mem_load_op(6, 0x20, 1)],
+        ),
+        insn(
+            addr(0x1004),
+            4,
+            forms::MOV_R64_MEM64,
+            vec![r64_write(2, 0), mem_load_op(6, 0x20, 1)],
+        ),
+        insn(
+            addr(0x1008),
+            3,
+            forms::CMP_R64_R64,
+            vec![r64_read(1, 0), r64_read(2, 1)],
+        ),
         insn(addr(0x100B), 5, forms::JZ_REL32, vec![rel_branch_op(0x0FF0, 0)]),
     ];
 
@@ -720,10 +838,20 @@ fn test_mba_double_negation_simplification() {
 
     // Double negation: rbx = not(not(rax)) => rbx == rax
     let b1_insns = vec![
-        insn(addr(0x1000), 3, forms::MOV_R64_R64, vec![r64_write(1, 0), r64_read(0, 1)]),
+        insn(
+            addr(0x1000),
+            3,
+            forms::MOV_R64_R64,
+            vec![r64_write(1, 0), r64_read(0, 1)],
+        ),
         insn(addr(0x1003), 3, forms::NOT_R64, vec![r64_write(1, 0)]),
         insn(addr(0x1006), 3, forms::NOT_R64, vec![r64_write(1, 0)]),
-        insn(addr(0x1009), 3, forms::CMP_R64_R64, vec![r64_read(1, 0), r64_read(0, 1)]),
+        insn(
+            addr(0x1009),
+            3,
+            forms::CMP_R64_R64,
+            vec![r64_read(1, 0), r64_read(0, 1)],
+        ),
         insn(addr(0x100C), 4, forms::JZ_REL32, vec![rel_branch_op(0x0FF0, 0)]),
     ];
 
@@ -798,10 +926,25 @@ fn test_opaque_diamond_de_spaghettification() {
         start: entry,
         end: real_succ,
         instructions: vec![
-            insn(addr(0x1000), 3, forms::MOV_R64_R64, vec![r64_write(1, 0), r64_read(0, 1)]),
+            insn(
+                addr(0x1000),
+                3,
+                forms::MOV_R64_R64,
+                vec![r64_write(1, 0), r64_read(0, 1)],
+            ),
             insn(addr(0x1003), 3, forms::INC_R64, vec![r64_write(1, 0)]),
-            insn(addr(0x1006), 3, forms::IMUL_R64_R64, vec![r64_write(1, 0), r64_read(0, 1)]),
-            insn(addr(0x1009), 6, forms::TEST_R64_IMM32, vec![r64_read(1, 0), imm_op(1, 32, 1)]),
+            insn(
+                addr(0x1006),
+                3,
+                forms::IMUL_R64_R64,
+                vec![r64_write(1, 0), r64_read(0, 1)],
+            ),
+            insn(
+                addr(0x1009),
+                6,
+                forms::TEST_R64_IMM32,
+                vec![r64_read(1, 0), imm_op(1, 32, 1)],
+            ),
             insn(addr(0x100F), 6, forms::JNZ_REL32, vec![rel_branch_op(0x0FEB, 0)]),
         ],
         terminator: EdgeKind::ConditionalTaken,
@@ -811,7 +954,12 @@ fn test_opaque_diamond_de_spaghettification() {
         start: dead_addr,
         end: addr(0x200B),
         instructions: vec![
-            insn(dead_addr, 5, forms::MOV_R64_IMM64, vec![r64_write(0, 0), imm_op(0xDEAD, 64, 1)]),
+            insn(
+                dead_addr,
+                5,
+                forms::MOV_R64_IMM64,
+                vec![r64_write(0, 0), imm_op(0xDEAD, 64, 1)],
+            ),
             insn(addr(0x2005), 6, forms::JMP_REL32, vec![rel_branch_op(-0x0FF6, 0)]),
         ],
         terminator: EdgeKind::Unconditional,
@@ -821,7 +969,12 @@ fn test_opaque_diamond_de_spaghettification() {
         start: real_succ,
         end: addr(0x101B),
         instructions: vec![
-            insn(real_succ, 5, forms::MOV_R64_IMM64, vec![r64_write(0, 0), imm_op(1, 64, 1)]),
+            insn(
+                real_succ,
+                5,
+                forms::MOV_R64_IMM64,
+                vec![r64_write(0, 0), imm_op(1, 64, 1)],
+            ),
             insn(addr(0x101A), 1, forms::RET, vec![]),
         ],
         terminator: EdgeKind::Return,
@@ -856,9 +1009,18 @@ fn test_opaque_diamond_de_spaghettification() {
     assert_eq!(report.initial_blocks, 3);
     assert_eq!(report.eliminated_branches, 1);
     assert_eq!(report.purged_dead_blocks, 1, "Dead diamond branch block must be purged");
-    assert_eq!(report.purged_dead_edges, 1, "Reconverging edge Dead -> S must be purged");
-    assert_eq!(report.straightened_blocks, 1, "P and S must straighten once Dead -> S is purged");
-    assert_eq!(report.final_blocks, 1, "Entire 3-block diamond must collapse into 1 block");
+    assert_eq!(
+        report.purged_dead_edges, 1,
+        "Reconverging edge Dead -> S must be purged"
+    );
+    assert_eq!(
+        report.straightened_blocks, 1,
+        "P and S must straighten once Dead -> S is purged"
+    );
+    assert_eq!(
+        report.final_blocks, 1,
+        "Entire 3-block diamond must collapse into 1 block"
+    );
     assert_eq!(report.final_edges, 0);
     assert!(!cfg.blocks.contains_key(&dead_addr));
 }
@@ -879,9 +1041,12 @@ fn test_opaque_bogus_loop_destruction() {
     let b_header = BasicBlock {
         start: header,
         end: body,
-        instructions: vec![
-            insn(header, 5, forms::MOV_R64_IMM64, vec![r64_write(2, 0), imm_op(10, 64, 1)]),
-        ],
+        instructions: vec![insn(
+            header,
+            5,
+            forms::MOV_R64_IMM64,
+            vec![r64_write(2, 0), imm_op(10, 64, 1)],
+        )],
         terminator: EdgeKind::FallThrough,
     };
 
@@ -889,7 +1054,12 @@ fn test_opaque_bogus_loop_destruction() {
         start: body,
         end: exit,
         instructions: vec![
-            insn(addr(0x1010), 3, forms::CMP_R64_R64, vec![r64_read(0, 0), r64_read(0, 1)]),
+            insn(
+                addr(0x1010),
+                3,
+                forms::CMP_R64_R64,
+                vec![r64_read(0, 0), r64_read(0, 1)],
+            ),
             insn(addr(0x1013), 6, forms::JNZ_REL32, vec![rel_branch_op(0x1FE7, 0)]),
         ],
         terminator: EdgeKind::ConditionalTaken,
@@ -898,9 +1068,7 @@ fn test_opaque_bogus_loop_destruction() {
     let b_latch = BasicBlock {
         start: bogus_latch,
         end: addr(0x3006),
-        instructions: vec![
-            insn(bogus_latch, 6, forms::JMP_REL32, vec![rel_branch_op(-0x2006, 0)]),
-        ],
+        instructions: vec![insn(bogus_latch, 6, forms::JMP_REL32, vec![rel_branch_op(-0x2006, 0)])],
         terminator: EdgeKind::Unconditional,
     };
 
@@ -946,13 +1114,23 @@ fn test_opaque_bogus_loop_destruction() {
         edges,
     };
 
-    assert_eq!(cfg.loops().len(), 1, "Before pruning, CFG contains 1 bogus natural loop");
+    assert_eq!(
+        cfg.loops().len(),
+        1,
+        "Before pruning, CFG contains 1 bogus natural loop"
+    );
 
     let report = cfg.de_spaghettify(PruningLimits::default());
     assert_eq!(report.initial_loops, 1);
-    assert_eq!(report.final_loops, 0, "Bogus natural loop must be completely eliminated");
+    assert_eq!(
+        report.final_loops, 0,
+        "Bogus natural loop must be completely eliminated"
+    );
     assert_eq!(report.purged_dead_blocks, 1);
-    assert_eq!(report.final_blocks, 1, "Header, Body, and Exit must collapse into 1 linear block");
+    assert_eq!(
+        report.final_blocks, 1,
+        "Header, Body, and Exit must collapse into 1 linear block"
+    );
     assert!(cfg.loops().is_empty());
 }
 
@@ -971,7 +1149,12 @@ fn test_cyclic_dead_subgraph_cascade_purge() {
         start: entry,
         end: addr(0x1010),
         instructions: vec![
-            insn(addr(0x1000), 3, forms::CMP_R64_R64, vec![r64_read(3, 0), r64_read(3, 1)]),
+            insn(
+                addr(0x1000),
+                3,
+                forms::CMP_R64_R64,
+                vec![r64_read(3, 0), r64_read(3, 1)],
+            ),
             insn(addr(0x1003), 6, forms::JZ_REL32, vec![rel_branch_op(0x17, 0)]),
         ],
         terminator: EdgeKind::ConditionalTaken,
@@ -1035,9 +1218,18 @@ fn test_cyclic_dead_subgraph_cascade_purge() {
     let mut cfg = Cfg { entry, blocks, edges };
     let report = cfg.de_spaghettify(PruningLimits::default());
 
-    assert_eq!(report.purged_dead_blocks, 2, "Both blocks in the dead cycle must be purged");
-    assert_eq!(report.purged_dead_edges, 3, "All 3 edges in the dead subgraph must be purged");
-    assert_eq!(report.final_blocks, 1, "Entry and RealExit must straighten into 1 block");
+    assert_eq!(
+        report.purged_dead_blocks, 2,
+        "Both blocks in the dead cycle must be purged"
+    );
+    assert_eq!(
+        report.purged_dead_edges, 3,
+        "All 3 edges in the dead subgraph must be purged"
+    );
+    assert_eq!(
+        report.final_blocks, 1,
+        "Entry and RealExit must straighten into 1 block"
+    );
     let merged = cfg.blocks.get(&entry).unwrap();
     assert!(
         !merged.instructions.iter().any(|i| i.form_id == forms::JMP_REL32),
@@ -1062,10 +1254,25 @@ fn test_cross_block_chained_opaque_predicates() {
         start: b1_addr,
         end: b2_addr,
         instructions: vec![
-            insn(addr(0x1000), 3, forms::MOV_R64_R64, vec![r64_write(1, 0), r64_read(0, 1)]),
+            insn(
+                addr(0x1000),
+                3,
+                forms::MOV_R64_R64,
+                vec![r64_write(1, 0), r64_read(0, 1)],
+            ),
             insn(addr(0x1003), 3, forms::INC_R64, vec![r64_write(1, 0)]),
-            insn(addr(0x1006), 3, forms::IMUL_R64_R64, vec![r64_write(1, 0), r64_read(0, 1)]),
-            insn(addr(0x1009), 3, forms::CMP_R64_R64, vec![r64_read(2, 0), r64_read(2, 1)]),
+            insn(
+                addr(0x1006),
+                3,
+                forms::IMUL_R64_R64,
+                vec![r64_write(1, 0), r64_read(0, 1)],
+            ),
+            insn(
+                addr(0x1009),
+                3,
+                forms::CMP_R64_R64,
+                vec![r64_read(2, 0), r64_read(2, 1)],
+            ),
             insn(addr(0x100C), 6, forms::JZ_REL32, vec![rel_branch_op(0x0E, 0)]),
         ],
         terminator: EdgeKind::ConditionalTaken,
@@ -1075,7 +1282,12 @@ fn test_cross_block_chained_opaque_predicates() {
         start: b2_addr,
         end: b3_addr,
         instructions: vec![
-            insn(addr(0x1020), 6, forms::TEST_R64_IMM32, vec![r64_read(1, 0), imm_op(1, 32, 1)]),
+            insn(
+                addr(0x1020),
+                6,
+                forms::TEST_R64_IMM32,
+                vec![r64_read(1, 0), imm_op(1, 32, 1)],
+            ),
             insn(addr(0x1026), 6, forms::JNZ_REL32, vec![rel_branch_op(0x1FD4, 0)]),
         ],
         terminator: EdgeKind::ConditionalTaken,
@@ -1140,9 +1352,11 @@ fn test_cross_block_chained_opaque_predicates() {
 
     let report = cfg.de_spaghettify(PruningLimits::default());
     assert_eq!(report.initial_blocks, 5);
-    assert_eq!(report.eliminated_branches, 2, "Both B1 and cross-block B2 opaque branches must be eliminated");
+    assert_eq!(
+        report.eliminated_branches, 2,
+        "Both B1 and cross-block B2 opaque branches must be eliminated"
+    );
     assert_eq!(report.purged_dead_blocks, 2, "Both dead1 and dead2 must be purged");
     assert_eq!(report.straightened_blocks, 2, "B1+B2+B3 must straighten into 1 block");
     assert_eq!(report.final_blocks, 1);
 }
-

@@ -1266,8 +1266,7 @@ mod tests {
     // OsWorkerPool: steal-counter tests
     // -----------------------------------------------------------------------
 
-    /// Force a same-NUMA steal by pre-loading a peer in the same group and
-    /// draining the stealing worker's own queue.
+    /// Force a same-NUMA steal before the donor can drain its queue.
     #[test]
     fn same_numa_steal_counter_increments() {
         // 2 workers, both in group 0 — same NUMA.
@@ -1282,7 +1281,12 @@ mod tests {
         pool.push(1, 101u32);
         pool.push(1, 102u32);
 
-        // Worker 0 has an empty local queue -> will steal from worker 1 (same group).
+        // Steal before run spawns the donor; account for the popped unit as a completed callback.
+        assert_eq!(pool.next(0), Some(100u32));
+        assert_eq!(pool.steal_counts().0, 1);
+        pool.per_worker[0].fetch_add(1, Ordering::Relaxed);
+        pool.completed.fetch_add(1, Ordering::Relaxed);
+        pool.inflight.fetch_sub(1, Ordering::Relaxed);
         let stats = pool.run(|_worker, _item, _push| {});
 
         assert!(

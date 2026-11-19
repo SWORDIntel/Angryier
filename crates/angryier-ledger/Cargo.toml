@@ -7,6 +7,9 @@ description = "Atomic execution ledger contracts"
 
 [dependencies]
 angryier-types = { path = "../angryier-types" }
+angryier-distribution = { path = "../angryier-distribution" }
+angryier-provenance = { path = "../angryier-provenance" }
+sha2 = "0.10"
 
 [lints]
 workspace = true

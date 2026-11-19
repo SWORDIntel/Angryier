@@ -65,13 +65,8 @@ pub(crate) fn const_stack(
 }
 
 fn stack_layout_bytes(stack_ty: SemanticType) -> u64 {
-    if stack_ty == U32 {
-        4
-    } else {
-        8
-    }
+    if stack_ty == U32 { 4 } else { 8 }
 }
-
 
 // ---------------------------------------------------------------------------
 // 16-bit integer arithmetic, IMUL, and MOVSXD
@@ -6600,7 +6595,11 @@ impl SemanticProvider for EnterImm16Imm8 {
         if let Some(idx) = mem_idx {
             // The frame slot is profile-width; truncate the U64 saved base.
             let zero = const_u64(out, 0)?;
-            let saved32 = out.emit(SemanticOp::Primitive(PrimitiveOp::Extract), stack_ty, &[pushed_rsp, zero])?;
+            let saved32 = out.emit(
+                SemanticOp::Primitive(PrimitiveOp::Extract),
+                stack_ty,
+                &[pushed_rsp, zero],
+            )?;
             out.write_operand(idx, saved32)?;
         }
         out.write_register(rbp_reg, pushed_rsp)?;
@@ -6609,7 +6608,11 @@ impl SemanticProvider for EnterImm16Imm8 {
             .unwrap_or(0);
         let imm16 = out.read_operand(imm_idx, U16)?;
         let imm_extended = out.emit(SemanticOp::Primitive(PrimitiveOp::ZeroExtend), U64, &[imm16])?;
-        let final_rsp = out.emit(SemanticOp::Primitive(PrimitiveOp::Sub), U64, &[pushed_rsp, imm_extended])?;
+        let final_rsp = out.emit(
+            SemanticOp::Primitive(PrimitiveOp::Sub),
+            U64,
+            &[pushed_rsp, imm_extended],
+        )?;
         out.write_register(rsp_reg, final_rsp)?;
         fall_through(out, insn)?;
         Ok(receipt(0x0806, context))

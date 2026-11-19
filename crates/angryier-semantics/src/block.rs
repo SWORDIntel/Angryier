@@ -634,6 +634,11 @@ fn float_tag(op: FloatingOp) -> u8 {
         FloatingOp::Mul => 2,
         FloatingOp::Div => 3,
         FloatingOp::Sqrt => 4,
+        FloatingOp::Neg => 15,
+        FloatingOp::Abs => 16,
+        FloatingOp::ToIntSigned => 17,
+        FloatingOp::ToIntUnsigned => 18,
+        FloatingOp::FromIntSigned => 19,
         FloatingOp::Compare => 5,
         FloatingOp::Convert => 6,
         FloatingOp::Round => 7,
@@ -669,6 +674,18 @@ fn encode_side_effect(out: &mut CanonicalWriter, effect: SideEffect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_integer_float_conversion_uses_a_new_stable_tag() {
+        assert_eq!(float_tag(FloatingOp::Scale), 14);
+        assert_eq!(float_tag(FloatingOp::Convert), 6);
+        assert_eq!(float_tag(FloatingOp::Round), 7);
+        assert_eq!(float_tag(FloatingOp::Neg), 15);
+        assert_eq!(float_tag(FloatingOp::Abs), 16);
+        assert_eq!(float_tag(FloatingOp::ToIntSigned), 17);
+        assert_eq!(float_tag(FloatingOp::ToIntUnsigned), 18);
+        assert_eq!(float_tag(FloatingOp::FromIntSigned), 19);
+    }
     use crate::{PrimitiveOp, ScalarType};
 
     fn build(version: u64, operation: PrimitiveOp) -> Result<SealedRichSemanticBlock, SemanticError> {

@@ -128,7 +128,7 @@ impl DispatchWindow<'_> {
                 _ => return None,
             };
             let kind = match mem.index {
-                Some(MemoryIndex::Register(_idx)) => DispatchKind::Indexed {
+                Some(MemoryIndex::Register(_) | MemoryIndex::ExtendedRegister { .. }) => DispatchKind::Indexed {
                     scale: mem.scale,
                     has_disp: mem.displacement != 0,
                 },

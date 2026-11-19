@@ -1,0 +1,8 @@
+# Explicit half-open virtual-address byte ranges for the saved Titan listing.
+# Sample SHA-256: 7a4b2d1ba7ca612bc98ef8cb1135010547cbd00ad60e6776d5ca13c00a40b4d0
+# Manually byte-verified 2026-11-15; not inferred from decoding or FDE absence.
+# .text VA 0x62a000 maps to file offset 0x629000 (VA - 0x1000).
+# At file offset 0xfe7360: ASCII "Montgomery Multiplication for ARMv8, CRYPTOGAMS by <appro@openssl.org>"
+# followed by its NUL and one zero padding byte. The next word at VA 0xfe83a8 is NOP.
+# START END EVIDENCE (hexadecimal; no automatic sample/hash validation by a64_census).
+0xfe8360 0xfe83a8 byte-verified ASCII attribution string, terminator and zero padding

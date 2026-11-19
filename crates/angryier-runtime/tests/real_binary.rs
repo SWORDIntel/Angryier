@@ -1218,8 +1218,9 @@ fn runtime_stdout_with_registry(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
     if let Some(providers) = generated {
-        runtime.registry =
-            angryier_semantics_intel64::Intel64CorpusRegistry::with_generated(SemanticVersion(1), providers);
+        runtime.registry = angryier_runtime::CorpusRegistry::Intel64(
+            angryier_semantics_intel64::Intel64CorpusRegistry::with_generated(SemanticVersion(1), providers),
+        );
     }
     let mut process = runtime.load_elf(elf_bytes)?;
     let _ = runtime.run(&mut process, 256).map_err(|e| {

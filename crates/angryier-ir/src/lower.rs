@@ -369,11 +369,36 @@ fn lower_memory_address(
         None => {}
     }
 
-    if let Some(MemoryIndex::Register(view)) = memory.index {
-        let index = emitter.produce(IrOp::ReadRegister {
+    let index = match memory.index {
+        Some(MemoryIndex::Register(view)) => Some(emitter.produce(IrOp::ReadRegister {
             register: view.parent.0,
             ty: pointer_type,
-        });
+        })),
+        Some(MemoryIndex::ExtendedRegister { register, extension }) => {
+            let (index_type, extension_op) = match extension {
+                angryier_semantics::MemoryIndexExtension::Uxtw => (IrType::Bits(32), Some(IrPrimitive::ZExt)),
+                angryier_semantics::MemoryIndexExtension::Sxtw => (IrType::Bits(32), Some(IrPrimitive::SExt)),
+                angryier_semantics::MemoryIndexExtension::Uxtx | angryier_semantics::MemoryIndexExtension::Sxtx => {
+                    (pointer_type, None)
+                }
+            };
+            let index = emitter.produce(IrOp::ReadRegister {
+                register: register.parent.0,
+                ty: index_type,
+            });
+            Some(match extension_op {
+                Some(op) => emitter.produce(IrOp::Primitive {
+                    op,
+                    ty: pointer_type,
+                    inputs: vec![index],
+                }),
+                None => index,
+            })
+        }
+        Some(MemoryIndex::Vsib { .. }) => None,
+        None => None,
+    };
+    if let Some(index) = index {
         let scaled = if memory.scale > 1 {
             let scale = emitter.produce(IrOp::Constant {
                 ty: pointer_type,
@@ -785,6 +810,28 @@ fn semantic_vector_bits(ty: SemanticType) -> Result<u16, IrLoweringError> {
 
 fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
     match op {
+        SemanticOp::Float(op) => Ok(match op {
+            FloatingOp::Add => IrPrimitive::FAdd,
+            FloatingOp::Sub => IrPrimitive::FSub,
+            FloatingOp::Mul => IrPrimitive::FMul,
+            FloatingOp::Div => IrPrimitive::FDiv,
+            FloatingOp::Sqrt => IrPrimitive::FSqrt,
+            FloatingOp::Neg => IrPrimitive::FNeg,
+            FloatingOp::Abs => IrPrimitive::FAbs,
+            FloatingOp::ToIntSigned => IrPrimitive::FToIntSigned,
+            FloatingOp::ToIntUnsigned => IrPrimitive::FToIntUnsigned,
+            FloatingOp::FromIntSigned => IrPrimitive::FFromIntSigned,
+            FloatingOp::Convert => IrPrimitive::FConvert,
+            FloatingOp::Compare => IrPrimitive::FCompareFlags,
+            FloatingOp::Round => IrPrimitive::FRound,
+            FloatingOp::Sin => IrPrimitive::FSin,
+            FloatingOp::Cos => IrPrimitive::FCos,
+            FloatingOp::Tan => IrPrimitive::FTan,
+            FloatingOp::Atan2 => IrPrimitive::FAtan2,
+            FloatingOp::Exp2 => IrPrimitive::FExp2,
+            FloatingOp::Log2 => IrPrimitive::FLog2,
+            FloatingOp::Scale => IrPrimitive::FScale,
+        }),
         SemanticOp::Primitive(op) => Ok(match op {
             PrimitiveOp::Add => IrPrimitive::Add,
             PrimitiveOp::Sub => IrPrimitive::Sub,
@@ -841,23 +888,6 @@ fn lower_op(op: SemanticOp) -> Result<IrPrimitive, IrLoweringError> {
                     "value-producing load must be lowered directly to IrOp::Load",
                 ));
             }
-        }),
-        SemanticOp::Float(op) => Ok(match op {
-            FloatingOp::Add => IrPrimitive::FAdd,
-            FloatingOp::Sub => IrPrimitive::FSub,
-            FloatingOp::Mul => IrPrimitive::FMul,
-            FloatingOp::Div => IrPrimitive::FDiv,
-            FloatingOp::Sqrt => IrPrimitive::FSqrt,
-            FloatingOp::Convert => IrPrimitive::FConvert,
-            FloatingOp::Compare => IrPrimitive::FCompareFlags,
-            FloatingOp::Round => IrPrimitive::FRound,
-            FloatingOp::Sin => IrPrimitive::FSin,
-            FloatingOp::Cos => IrPrimitive::FCos,
-            FloatingOp::Tan => IrPrimitive::FTan,
-            FloatingOp::Atan2 => IrPrimitive::FAtan2,
-            FloatingOp::Exp2 => IrPrimitive::FExp2,
-            FloatingOp::Log2 => IrPrimitive::FLog2,
-            FloatingOp::Scale => IrPrimitive::FScale,
         }),
         SemanticOp::Vector(op) => match op {
             VectorOp::LaneWise(scalar) => Ok(match scalar {
@@ -1145,6 +1175,88 @@ mod tests {
                 ref inputs,
             } if inputs == &[IrValueId(0), IrValueId(1)]
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn lowers_float_to_integer_with_distinct_source_and_result_types() -> Result<(), String> {
+        for format in [FloatFormat::F32, FloatFormat::F64] {
+            for bits in [32, 64] {
+                for (op, expected) in [
+                    (FloatingOp::ToIntSigned, IrPrimitive::FToIntSigned),
+                    (FloatingOp::ToIntUnsigned, IrPrimitive::FToIntUnsigned),
+                ] {
+                    let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
+                    let source_ty = SemanticType::Scalar(ScalarType::Float(format));
+                    let result_ty = SemanticType::Scalar(ScalarType::BitVec(bits));
+                    let source = builder
+                        .read_register(RegisterId(36), source_ty)
+                        .map_err(|error| format!("{error:?}"))?;
+                    let result = builder
+                        .emit(SemanticOp::Float(op), result_ty, &[source])
+                        .map_err(|error| format!("{error:?}"))?;
+                    builder
+                        .write_register(RegisterId(0), result)
+                        .map_err(|error| format!("{error:?}"))?;
+                    let rich = builder
+                        .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+                        .map_err(|error| format!("{error:?}"))?;
+                    let block = BasicSemanticLowerer
+                        .lower(&rich, &validity(1))
+                        .map_err(|error| error.to_string())?;
+                    assert_eq!(
+                        block.instructions[0].op,
+                        IrOp::ReadRegister {
+                            register: 36,
+                            ty: lower_type(source_ty).map_err(|error| error.to_string())?,
+                        }
+                    );
+                    assert!(matches!(
+                        &block.instructions[1].op,
+                        IrOp::Primitive { op, ty: IrType::Bits(width), inputs }
+                            if *op == expected && *width == bits && inputs == &[IrValueId(0)]
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lowers_signed_integer_to_float_with_source_width_preserved() -> Result<(), String> {
+        for bits in [32, 64] {
+            for format in [FloatFormat::F32, FloatFormat::F64] {
+                let mut builder = SemanticBlockBuilder::new(SemanticVersion(1));
+                let source_ty = SemanticType::Scalar(ScalarType::BitVec(bits));
+                let destination_ty = SemanticType::Scalar(ScalarType::Float(format));
+                let input = builder
+                    .read_register(RegisterId(0), source_ty)
+                    .map_err(|e| format!("{e:?}"))?;
+                let result = builder
+                    .emit(SemanticOp::Float(FloatingOp::FromIntSigned), destination_ty, &[input])
+                    .map_err(|e| format!("{e:?}"))?;
+                builder
+                    .write_register(RegisterId(36), result)
+                    .map_err(|e| format!("{e:?}"))?;
+                let rich = builder
+                    .seal(ContentIdentitySchemaVersion(1), SemanticFingerprintSchemaVersion(1))
+                    .map_err(|e| format!("{e:?}"))?;
+                let block = BasicSemanticLowerer
+                    .lower(&rich, &validity(1))
+                    .map_err(|e| e.to_string())?;
+                assert!(
+                    matches!(block.instructions[0].op, IrOp::ReadRegister { ty: IrType::Bits(width), .. } if width == bits)
+                );
+                assert_eq!(
+                    block.instructions[1].op,
+                    IrOp::Primitive {
+                        op: IrPrimitive::FFromIntSigned,
+                        ty: lower_type(destination_ty).map_err(|e| e.to_string())?,
+                        inputs: vec![IrValueId(0)],
+                    }
+                );
+            }
+        }
         Ok(())
     }
 

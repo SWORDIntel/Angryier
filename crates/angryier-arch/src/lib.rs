@@ -100,8 +100,20 @@ pub enum MemoryBase {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemoryIndexExtension {
+    Uxtw,
+    Sxtw,
+    Uxtx,
+    Sxtx,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MemoryIndex {
     Register(RegisterView),
+    ExtendedRegister {
+        register: RegisterView,
+        extension: MemoryIndexExtension,
+    },
     Vsib {
         register: RegisterView,
         element_width_bits: u16,

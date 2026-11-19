@@ -9,8 +9,67 @@ use angryier_memory::{ByteValue, LayeredMemory};
 use angryier_runtime::{Runtime, StepOutcome};
 use angryier_types::{SemanticVersion, TargetProfileId};
 
+const LIVE_DIAGNOSTIC_FLAG: &str = "ANGRYIER_CAMPAIGN_DIAGNOSTIC_LIVE";
+
+fn live_amd_selected(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+fn live_amd_enabled() -> bool {
+    live_amd_selected(std::env::var(LIVE_DIAGNOSTIC_FLAG).ok().as_deref())
+}
+
+// Minimal PE32+ DriverEntry fixture, following the one-section layout in pe_driver.rs.
+fn fixture_driver_image() -> Vec<u8> {
+    let mut pe = vec![0u8; 0x400];
+    pe[0..2].copy_from_slice(b"MZ");
+    pe[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+    pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+    pe[0x86..0x88].copy_from_slice(&1u16.to_le_bytes());
+    pe[0x94..0x96].copy_from_slice(&0xf0u16.to_le_bytes());
+    pe[0x98..0x9a].copy_from_slice(&0x20bu16.to_le_bytes());
+    pe[0xa8..0xac].copy_from_slice(&0x1000u32.to_le_bytes());
+    pe[0xb0..0xb8].copy_from_slice(&0x1_4000_0000u64.to_le_bytes());
+    pe[0xd4..0xd8].copy_from_slice(&0x200u32.to_le_bytes());
+    pe[0x188..0x190].copy_from_slice(b".text\0\0\0");
+    pe[0x190..0x194].copy_from_slice(&0x100u32.to_le_bytes());
+    pe[0x194..0x198].copy_from_slice(&0x1000u32.to_le_bytes());
+    pe[0x198..0x19c].copy_from_slice(&6u32.to_le_bytes());
+    pe[0x19c..0x1a0].copy_from_slice(&0x200u32.to_le_bytes());
+    pe[0x1ac..0x1b0].copy_from_slice(&0x6000_0000u32.to_le_bytes());
+    pe[0x200..0x206].copy_from_slice(&[0xb8, 0x2a, 0, 0, 0, 0xc3]); // mov eax, 42; ret
+    pe
+}
+
+#[test]
+fn bounded_pe_driver_fixture() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = Runtime::with_native_xed(SemanticVersion(1), TargetProfileId(1));
+    let mut process = runtime.load_pe_driver(&fixture_driver_image())?;
+    assert_eq!(process.pc()?, 0x1_4000_1000);
+    let summary = runtime.run(&mut process, 16)?;
+    assert!(summary.terminated);
+    assert!(process.terminated);
+    assert!(process.step_count <= 16);
+    assert_eq!(process.read_register(angryier_arch_intel64::register_id::GPR_BASE)?, 42);
+    Ok(())
+}
+
+#[test]
+fn live_amd_selector_requires_exact_opt_in() {
+    assert!(!live_amd_selected(None));
+    assert!(!live_amd_selected(Some("")));
+    assert!(!live_amd_selected(Some("true")));
+    assert!(!live_amd_selected(Some("0")));
+    assert!(live_amd_selected(Some("1")));
+}
+
 #[test]
 fn trace_amd_probe_loop() -> Result<(), Box<dyn std::error::Error>> {
+    if !live_amd_enabled() {
+        eprintln!("SKIP: trace_amd_probe_loop requires {LIVE_DIAGNOSTIC_FLAG}=1");
+        return Ok(());
+    }
     let path =
         "/home/john/Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic/AMDRyzenMasterDriver.sys";
     let image = std::fs::read(path)?;
@@ -142,6 +201,10 @@ fn trace_amd_probe_loop() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn run_amd_to_completion() -> Result<(), Box<dyn std::error::Error>> {
+    if !live_amd_enabled() {
+        eprintln!("SKIP: run_amd_to_completion requires {LIVE_DIAGNOSTIC_FLAG}=1");
+        return Ok(());
+    }
     let path =
         "/home/john/Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic/AMDRyzenMasterDriver.sys";
     let image = std::fs::read(path)?;
@@ -179,6 +242,10 @@ fn run_amd_to_completion() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn run_amd_with_old_write_only_cf8_model() -> Result<(), Box<dyn std::error::Error>> {
+    if !live_amd_enabled() {
+        eprintln!("SKIP: run_amd_with_old_write_only_cf8_model requires {LIVE_DIAGNOSTIC_FLAG}=1");
+        return Ok(());
+    }
     let path =
         "/home/john/Documents/driver_analysis/drivers/sources/caledonia-drivers/bin-elastic/AMDRyzenMasterDriver.sys";
     let image = std::fs::read(path)?;
@@ -356,7 +423,7 @@ fn trace_tbt_indirect_target() -> Result<(), Box<dyn std::error::Error>> {
                     .read_register(view.parent.0)
                     .ok()
                     .map(|v| v.wrapping_mul(u64::from(mem.scale))),
-                Some(MemoryIndex::Vsib { .. }) => None,
+                Some(MemoryIndex::ExtendedRegister { .. } | MemoryIndex::Vsib { .. }) => None,
                 None => Some(0),
             };
             if let (Some(base), Some(index)) = (base, index) {

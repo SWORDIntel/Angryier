@@ -192,21 +192,18 @@ fn load_overlay(dir: &std::path::Path, label: String) -> Result<Overlay, String>
         .and_then(number)?;
     let length = json_value(&manifest, "length")
         .ok_or_else(|| format!("{}: missing length", manifest_path.display()))
-        .and_then(|raw| {
-            usize::try_from(number(raw)?).map_err(|_| "declared length overflows usize".to_string())
-        })?;
+        .and_then(|raw| usize::try_from(number(raw)?).map_err(|_| "declared length overflows usize".to_string()))?;
     if length == 0 || length > MAX_OVERLAY_BYTES {
         return Err(format!(
             "{}: declared length {length} outside 1..={MAX_OVERLAY_BYTES}",
             manifest_path.display()
         ));
     }
-    let expected = json_value(&manifest, "sha384")
-        .ok_or_else(|| format!("{}: missing sha384", manifest_path.display()))?;
+    let expected =
+        json_value(&manifest, "sha384").ok_or_else(|| format!("{}: missing sha384", manifest_path.display()))?;
     let data_file = json_value(&manifest, "data_file").unwrap_or("bytes.bin");
     let bytes_path = dir.join(data_file);
-    let bytes = std::fs::read(&bytes_path)
-        .map_err(|error| format!("cannot read {}: {error}", bytes_path.display()))?;
+    let bytes = std::fs::read(&bytes_path).map_err(|error| format!("cannot read {}: {error}", bytes_path.display()))?;
     if bytes.len() != length {
         return Err(format!(
             "{}: {} bytes on disk but manifest declares {length}",
@@ -237,24 +234,20 @@ fn load_overlay(dir: &std::path::Path, label: String) -> Result<Overlay, String>
 /// Compare two captured ranges. Returns `(overlap_length, first_divergence)`.
 fn overlap(left: &Overlay, right: &Overlay) -> Option<(usize, Option<usize>)> {
     let start = left.address.max(right.address);
-    let end = (left.address + left.bytes.len() as u64)
-        .min(right.address + right.bytes.len() as u64);
+    let end = (left.address + left.bytes.len() as u64).min(right.address + right.bytes.len() as u64);
     if start >= end {
         return None;
     }
     let offset = (start - left.address) as usize;
     let other = (start - right.address) as usize;
     let span = (end - start) as usize;
-    let divergence = (0..span)
-        .find(|index| left.bytes[offset + index] != right.bytes[other + index]);
+    let divergence = (0..span).find(|index| left.bytes[offset + index] != right.bytes[other + index]);
     Some((span, divergence))
 }
 
 pub fn capture_coverage(args: &[String]) -> Result<String, String> {
     if args.is_empty() || args.len() > 2 {
-        return Err(
-            "usage: angryier capture-coverage <overlays-dir> [capture.dmp]".to_string(),
-        );
+        return Err("usage: angryier capture-coverage <overlays-dir> [capture.dmp]".to_string());
     }
     let root = std::path::Path::new(&args[0]);
     if !root.is_dir() {
@@ -264,8 +257,7 @@ pub fn capture_coverage(args: &[String]) -> Result<String, String> {
     if root.join("manifest.json").is_file() {
         directories.push(root.to_path_buf());
     } else {
-        let entries = std::fs::read_dir(root)
-            .map_err(|error| format!("cannot list {}: {error}", root.display()))?;
+        let entries = std::fs::read_dir(root).map_err(|error| format!("cannot list {}: {error}", root.display()))?;
         for entry in entries {
             let entry = entry.map_err(|error| format!("cannot list overlay entry: {error}"))?;
             let path = entry.path();
@@ -276,10 +268,7 @@ pub fn capture_coverage(args: &[String]) -> Result<String, String> {
         directories.sort();
     }
     if directories.is_empty() {
-        return Err(format!(
-            "no overlay manifest.json found under {}",
-            root.display()
-        ));
+        return Err(format!("no overlay manifest.json found under {}", root.display()));
     }
     if directories.len() > MAX_OVERLAYS {
         return Err(format!(
@@ -308,9 +297,7 @@ pub fn capture_coverage(args: &[String]) -> Result<String, String> {
             overlay.label,
             describe_range(overlay.address, overlay.bytes.len()),
             overlay.module.as_deref().unwrap_or("-"),
-            overlay
-                .pid
-                .map_or_else(|| "-".to_string(), |pid| pid.to_string()),
+            overlay.pid.map_or_else(|| "-".to_string(), |pid| pid.to_string()),
             overlay
                 .creation
                 .map_or_else(|| "-".to_string(), |ticks| ticks.to_string()),
@@ -341,8 +328,7 @@ pub fn capture_coverage(args: &[String]) -> Result<String, String> {
 
     let mut with_gap = 0_usize;
     if args.len() == 2 {
-        let mut dump = MiniDumpFile::open(&args[1])
-            .map_err(|error| format!("cannot inspect dump: {error:?}"))?;
+        let mut dump = MiniDumpFile::open(&args[1]).map_err(|error| format!("cannot inspect dump: {error:?}"))?;
         for (index, overlay) in overlays.iter().enumerate() {
             let mut identical = 0_usize;
             let mut differing: Option<u64> = None;
@@ -376,13 +362,8 @@ pub fn capture_coverage(args: &[String]) -> Result<String, String> {
                 "ovl[{index}] dump=covered:{captured}/{} identical={identical} divergent={} \
                  first_divergence={}\n",
                 overlay.bytes.len(),
-                if differing.is_some() {
-                    captured - identical
-                } else {
-                    0
-                },
-                differing
-                    .map_or_else(|| "-".to_string(), |address| format!("0x{address:x}")),
+                if differing.is_some() { captured - identical } else { 0 },
+                differing.map_or_else(|| "-".to_string(), |address| format!("0x{address:x}")),
             ));
         }
         out.push_str(&format!(
@@ -391,7 +372,10 @@ pub fn capture_coverage(args: &[String]) -> Result<String, String> {
             dump.file_size(),
         ));
     }
-    out.push_str(&format!("summary overlays={} divergent_overlaps={divergent}", overlays.len()));
+    out.push_str(&format!(
+        "summary overlays={} divergent_overlaps={divergent}",
+        overlays.len()
+    ));
     Ok(out)
 }
 
@@ -452,7 +436,10 @@ mod tests {
         let report = capture_coverage(&[root.display().to_string()]).unwrap();
         assert!(report.contains("overlays=2 total_bytes=13 sha384=verified"), "{report}");
         assert!(report.contains("len=8 module=unit.dll pid=42"), "{report}");
-        assert!(report.contains("overlap ovl[0]~ovl[1] va=0x1004 len=4 agree=true"), "{report}");
+        assert!(
+            report.contains("overlap ovl[0]~ovl[1] va=0x1004 len=4 agree=true"),
+            "{report}"
+        );
         assert!(report.ends_with("summary overlays=2 divergent_overlaps=0"));
     }
 

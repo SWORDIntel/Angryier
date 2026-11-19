@@ -1,8 +1,25 @@
 # Deployment Contract
 
-What a downstream host needs to know to run the Angryier benchmark and
-scripting surfaces. Two constraints, both learned the hard way on the
-730xd buildout (2026-10-01).
+## Distributed Rust campaigns
+
+`angryier-campaign` runs a coordinator and 1, 2, or 4 worker processes.
+The [Lua sustained API](LUA_API.md) runs locally; it does not launch or
+connect to these workers. The Rust executable does not need Lua or the
+`script` feature.
+
+- **Build:** On x86_64 Linux, use `cargo build --locked --release -p angryier-campaign`.
+  The package selects native XED and Z3 automatically. Build hosts need the
+  Rust and C/C++ toolchains, Python for XED generation, and Z3 development
+  libraries. Before launch, compare the SHA-256 of the actual executable and
+  target image across hosts; a matching `--build-id` label is not sufficient.
+- **Transport:** Both ends use loopback TCP. Provision a distinct random
+  32-byte key for each coordinator/worker pair (key files mode `0600`).
+  HMAC authenticates frames but does not encrypt them. For remote workers,
+  forward loopback to loopback over SSH with verified host keys; do not
+  expose the worker listener through a plaintext proxy.
+
+See the [campaign operator guide](guides/distributed-campaigns.md) for
+worker identities, tunnel setup, and launch examples.
 
 ## 1. Corpus locations: `CORPUS_DIR` / `FIXTURE_DIR`
 
@@ -34,6 +51,19 @@ Behavior when a root is missing — never silent:
   (an absent corpus is not a failure, but it is never a measurement).
 - `gate_j_corpus.py` warns per missing root (path + env var), and exits 1
   listing every path looked for when no root exists.
+
+### AMD PE-driver diagnostics
+
+`cargo test -p angryier-runtime --features xed --test campaign_diagnostic`
+(and the workspace test run with `xed` enabled) runs a bounded, deterministic
+in-memory PE32+ DriverEntry fixture by default. The three AMD diagnostics
+(including both 12-million-step loops) skip without reading the real driver.
+To run those live diagnostics explicitly, use
+`ANGRYIER_CAMPAIGN_DIAGNOSTIC_LIVE=1 cargo test -p angryier-runtime --features xed --test campaign_diagnostic -- --nocapture`.
+They require the AMD driver at the host-specific path in the test source and
+can be expensive; the fixture does not replace real-driver coverage. Angryier
+PE diagnostic tests model port I/O internally; they do not invoke `ipmitool`,
+poll BMC sensors, or control external fan daemons.
 
 ## 2. Lua `u64` convention: `_hex` fields
 

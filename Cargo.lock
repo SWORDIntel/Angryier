@@ -29,6 +29,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "angryier-arch-arm64"
+version = "1.0.0"
+dependencies = [
+ "angryier-arch",
+ "angryier-types",
+]
+
+[[package]]
 name = "angryier-arch-intel64"
 version = "1.0.0"
 dependencies = [
@@ -55,6 +63,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "angryier-campaign"
+version = "1.0.0"
+dependencies = [
+ "angryier-arch-intel64",
+ "angryier-distribution",
+ "angryier-expr",
+ "angryier-ir",
+ "angryier-ledger",
+ "angryier-runtime",
+ "angryier-solver-z3",
+ "angryier-types",
+ "sha2",
+]
+
+[[package]]
 name = "angryier-cfg"
 version = "1.0.0"
 dependencies = [
@@ -72,6 +95,7 @@ name = "angryier-cli"
 version = "1.0.0"
 dependencies = [
  "angryier",
+ "angryier-arch-arm64",
  "angryier-loader",
  "angryier-models",
  "angryier-runtime",
@@ -101,6 +125,7 @@ name = "angryier-distribution"
 version = "1.0.0"
 dependencies = [
  "angryier-types",
+ "sha2",
 ]
 
 [[package]]
@@ -174,7 +199,10 @@ dependencies = [
 name = "angryier-ledger"
 version = "1.0.0"
 dependencies = [
+ "angryier-distribution",
+ "angryier-provenance",
  "angryier-types",
+ "sha2",
 ]
 
 [[package]]
@@ -229,12 +257,15 @@ name = "angryier-runtime"
 version = "1.0.0"
 dependencies = [
  "angryier-arch",
+ "angryier-arch-arm64",
  "angryier-arch-intel64",
  "angryier-arch-xed-ffi",
  "angryier-cfg",
+ "angryier-distribution",
  "angryier-execution",
  "angryier-expr",
  "angryier-ir",
+ "angryier-ledger",
  "angryier-loader",
  "angryier-memory",
  "angryier-models",
@@ -242,6 +273,7 @@ dependencies = [
  "angryier-replay",
  "angryier-scheduler",
  "angryier-semantics",
+ "angryier-semantics-arm64",
  "angryier-semantics-gen",
  "angryier-semantics-intel64",
  "angryier-solver",
@@ -251,6 +283,7 @@ dependencies = [
  "angryier-taint",
  "angryier-types",
  "mlua",
+ "sha2",
 ]
 
 [[package]]
@@ -273,6 +306,16 @@ version = "1.0.0"
 dependencies = [
  "angryier-arch",
  "angryier-semantic-contracts",
+ "angryier-types",
+]
+
+[[package]]
+name = "angryier-semantics-arm64"
+version = "1.0.0"
+dependencies = [
+ "angryier-arch",
+ "angryier-arch-arm64",
+ "angryier-semantics",
  "angryier-types",
 ]
 

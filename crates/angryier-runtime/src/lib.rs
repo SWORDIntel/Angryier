@@ -20,20 +20,25 @@
 
 pub mod call_audit;
 pub mod capture;
+mod corpus_registry;
 pub mod import_audit;
+pub mod sustained;
+pub mod sustained_pool;
 pub mod vm_materialize;
 pub mod vm_observe;
 pub mod vm_replay;
+pub use corpus_registry::CorpusRegistry;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use angryier_arch::{AccessKind, DecodedInstruction, Decoder, MemoryBase, MemoryIndex, Operand, OperandKind};
+use angryier_arch_arm64::{Arm64Decoder, regs::Arm64RegisterFile};
+use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 /// Re-exported so downstream hosts (CLI, Lua bindings) can construct
 /// legacy-32 runtimes without a direct decoder-crate dependency.
 #[cfg(feature = "xed")]
 pub use angryier_arch_xed_ffi::XedMachineMode;
-use angryier_arch_intel64::{Intel64RegisterFile, register_id};
 pub use angryier_execution::SymbolicSessionMemory;
 use angryier_execution::{
     ConcolicEvaluator, ConcolicImage, ConcolicSource, ConcreteInterpreter, ExecutionEngine, ExecutionMode,
@@ -52,6 +57,7 @@ use angryier_semantics::{
     BlockValidityKey, FloatingPointPolicy, SemanticBlockBuilder, SemanticContext, SemanticRegistry, TileRepresentation,
     VectorRepresentation,
 };
+use angryier_semantics_arm64::Arm64CorpusRegistry;
 use angryier_semantics_intel64::Intel64CorpusRegistry;
 use angryier_solver::{CanonicalConstraint, SolverBackend, SolverOutcomeKind, SolverQuery};
 use angryier_state::{
@@ -225,9 +231,6 @@ const PE_DRIVER_GS_COOKIE_OFF: u64 = 0x30;
 
 /// Maximum x86-64 instruction length in bytes.
 const MAX_INSN_LEN: usize = 15;
-
-/// Maximum number of executed block addresses retained for branch solving.
-const MAX_TRACE: usize = 4096;
 
 /// Deterministic identity for an exact dynamic PC trace.
 ///
@@ -510,13 +513,8 @@ pub struct Process {
     pub pci_config_address: u32,
     /// Static symbol table of the loaded image (empty when absent).
     pub symbols: Vec<Symbol>,
-    /// Addresses of executed blocks, in execution order (bounded by
-    /// [`MAX_TRACE`]); used to build symbolic traces for branch solving.
+    /// Complete executed-PC history, in execution order, for branch solving.
     pub trace: Vec<Address>,
-    /// True once bounded trace recording has evicted at least one earlier PC.
-    /// A full trace at exactly MAX_TRACE entries is still exact until the
-    /// next append actually drops history.
-    trace_truncated: bool,
     /// Observable effects of modeled syscalls (captured output, exit code).
     pub syscalls: SyscallModel,
     /// Current program break for `brk` (initialized at the image end).
@@ -649,7 +647,6 @@ impl Process {
     pub fn reset_to_entry(&mut self) {
         self.state = self.entry_state.clone();
         self.trace.clear();
-        self.trace_truncated = false;
         self.syscalls.reset();
         self.program_break = self.entry_program_break;
         self.mmap_next = MMAP_BASE;
@@ -689,17 +686,21 @@ impl Process {
         let Some((dll, export)) = self.pe_import_stubs.get(&pc) else {
             return;
         };
-        if import_audit::classify(dll, export, false) != import_audit::ImportBehavior::ApproximateScalar
-            || self
-                .state
-                .fidelity
-                .entries
-                .iter()
-                .any(|entry| entry.kind == AnalysisDebtKind::Concretized && entry.source == pc)
+        use import_audit::ImportBehavior;
+        let kind = match import_audit::classify(dll, export, false) {
+            ImportBehavior::ApproximateScalar => AnalysisDebtKind::Concretized,
+            ImportBehavior::SyntheticReturn => AnalysisDebtKind::Assumed,
+            ImportBehavior::ExplicitHook | ImportBehavior::UnsupportedUserland => return,
+        };
+        if !self
+            .state
+            .fidelity
+            .entries
+            .iter()
+            .any(|entry| entry.kind == kind && entry.source == pc)
         {
-            return;
+            self.state.fidelity = self.state.fidelity.record(kind, pc);
         }
-        self.state.fidelity = self.state.fidelity.record(AnalysisDebtKind::Concretized, pc);
     }
 
     /// Whether the target is executable in the current mapped address
@@ -739,13 +740,8 @@ impl Process {
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))
     }
 
-    /// Appends one executed PC to the bounded trace and records whether
-    /// any older history was actually evicted.
+    /// Appends a PC without losing the entry-to-branch replay identity.
     fn record_trace_pc(&mut self, pc: Address) {
-        if self.trace.len() >= MAX_TRACE {
-            self.trace.remove(0);
-            self.trace_truncated = true;
-        }
         self.trace.push(pc);
     }
 
@@ -789,7 +785,7 @@ fn read_register_u64(registers: &PersistentRegisters, register: u32) -> Result<u
 /// The end-to-end execution pipeline, generic over the decoder backend.
 pub struct Runtime<D: Decoder> {
     pub decoder: D,
-    pub registry: Intel64CorpusRegistry,
+    pub registry: CorpusRegistry,
     pub lowerer: BasicSemanticLowerer,
     pub interpreter: ConcreteInterpreter<PersistentRegisters, PersistentMemory>,
     pub simprocs: SimProcedureRegistry,
@@ -826,6 +822,55 @@ fn place_image_below(segments: &[angryier_loader::Segment], cursor: u64) -> Opti
     let bias = cursor.checked_sub(high)? & !(PAGE_SIZE - 1);
     let next_base = bias.checked_add(low)?.checked_sub(PAGE_SIZE)?;
     Some((bias, next_base))
+}
+
+/// Intel 64 canonical parent register set as (register id, width in bits).
+fn intel64_architectural_register_widths() -> Vec<(u32, u16)> {
+    Intel64RegisterFile::canonical()
+        .architectural_registers
+        .iter()
+        .map(|(register, bits)| (register.0, *bits))
+        .collect()
+}
+
+/// Canonical parent register set for the runtime's active architecture as
+/// (register id, width in bits).
+fn initial_register_widths(registry: &CorpusRegistry) -> Vec<(u32, u16)> {
+    match registry {
+        CorpusRegistry::Intel64(_) => intel64_architectural_register_widths(),
+        CorpusRegistry::Arm64(_) => Arm64RegisterFile::architectural_registers()
+            .into_iter()
+            .map(|(register, bits)| (register.0, bits))
+            .collect(),
+    }
+}
+
+impl Runtime<Arm64Decoder> {
+    /// Creates a runtime backed by the safe-Rust AArch64 decoder, with the
+    /// AArch64 semantic corpus and canonical ARM64 register widths.
+    pub fn new_arm64(
+        decoder: Arm64Decoder,
+        semantic_version: SemanticVersion,
+        target_profile: TargetProfileId,
+    ) -> Self {
+        Self {
+            decoder,
+            registry: CorpusRegistry::Arm64(Arm64CorpusRegistry::new()),
+            lowerer: BasicSemanticLowerer,
+            interpreter: ConcreteInterpreter::new(),
+            simprocs: SimProcedureRegistry::with_stubs(),
+            semantic_version,
+            target_profile,
+            context: SemanticContext {
+                semantic_version,
+                target_profile,
+                fidelity: FidelityProfile::Prove,
+                vector_representation: VectorRepresentation::HybridLazy,
+                tile_representation: TileRepresentation::LazyChunked,
+                floating_point_policy: FloatingPointPolicy::SmtFpPreferred,
+            },
+        }
+    }
 }
 
 impl<D: Decoder> Runtime<D> {
@@ -987,7 +1032,7 @@ impl<D: Decoder> Runtime<D> {
     pub fn new(decoder: D, semantic_version: SemanticVersion, target_profile: TargetProfileId) -> Self {
         Self {
             decoder,
-            registry: Intel64CorpusRegistry::new(semantic_version),
+            registry: CorpusRegistry::Intel64(Intel64CorpusRegistry::new(semantic_version)),
             lowerer: BasicSemanticLowerer,
             interpreter: ConcreteInterpreter::new(),
             simprocs: SimProcedureRegistry::with_stubs(),
@@ -1485,7 +1530,15 @@ impl<D: Decoder> Runtime<D> {
     /// Loads an ELF64 image from raw bytes and creates a Process.
     pub fn load_elf(&self, bytes: &[u8]) -> Result<Process, RuntimeError> {
         let loader = Elf64Loader::new();
-        let image = loader.load(bytes).map_err(RuntimeError::Loader)?;
+        let mut image = loader.load(bytes).map_err(RuntimeError::Loader)?;
+        // The ELF loader stamps INTEL64_TARGET_PROFILE unconditionally (the
+        // ELF64 container is machine-checked but the profile is an x86
+        // assumption). The AArch64 backend loads the same container format,
+        // so re-stamp the image with the runtime's active profile before the
+        // `load_image` profile check.
+        if matches!(self.registry, CorpusRegistry::Arm64(_)) {
+            image.target_profile = self.target_profile;
+        }
         self.load_image(image)
     }
 
@@ -1662,18 +1715,42 @@ impl<D: Decoder> Runtime<D> {
         };
         memory = memory.with_region(sentinel_stack).ok()?;
         memory = memory.load_concrete(SENTINEL - 8, &SENTINEL.to_le_bytes()).ok()?;
-        let reg_file = Intel64RegisterFile::canonical();
-        let widths: Vec<(u32, usize)> = reg_file
-            .architectural_registers
-            .iter()
-            .map(|(reg, bits)| (reg.0, usize::from(*bits).div_ceil(8)))
+        let widths: Vec<(u32, usize)> = initial_register_widths(&self.registry)
+            .into_iter()
+            .map(|(reg, bits)| (reg, usize::from(bits).div_ceil(8)))
             .collect();
         let mut registers = PersistentRegisters::from_widths(widths).ok()?;
-        registers = registers.write(register_id::RIP.0, &resolver.to_le_bytes()).ok()?;
+        let pc = match self.registry {
+            CorpusRegistry::Arm64(_) => angryier_arch_arm64::regs::register_id::PC,
+            _ => register_id::RIP,
+        };
+        let sp = match self.registry {
+            CorpusRegistry::Arm64(_) => angryier_arch_arm64::regs::register_id::SP,
+            _ => angryier_arch::RegisterId(register_id::GPR_BASE + 4),
+        };
+        let flags = match self.registry {
+            CorpusRegistry::Arm64(_) => angryier_arch_arm64::regs::register_id::NZCV,
+            _ => register_id::RFLAGS,
+        };
+        let flags_value: u64 = match self.registry {
+            CorpusRegistry::Arm64(_) => 0,
+            _ => 0x202,
+        };
+        // NZCV is a 32-bit architectural register; RFLAGS is 64-bit. The
+        // inline match below encodes the initial value at the register's own
+        // width so the write matches the width map from
+        // `initial_register_widths`.
+        registers = registers.write(pc.0, &resolver.to_le_bytes()).ok()?;
+        registers = registers.write(sp.0, &(SENTINEL - 8).to_le_bytes()).ok()?;
         registers = registers
-            .write(register_id::GPR_BASE + 4, &(SENTINEL - 8).to_le_bytes())
+            .write(
+                flags.0,
+                &match self.registry {
+                    CorpusRegistry::Arm64(_) => (flags_value as u32).to_le_bytes().to_vec(),
+                    _ => flags_value.to_le_bytes().to_vec(),
+                },
+            )
             .ok()?;
-        registers = registers.write(register_id::RFLAGS.0, &0x202u64.to_le_bytes()).ok()?;
         let state = ExecutionState {
             id: StateId(0),
             parent: None,
@@ -1701,7 +1778,7 @@ impl<D: Decoder> Runtime<D> {
             pci_config_address: 0,
             symbols: Vec::new(),
             trace: Vec::new(),
-            trace_truncated: false,
+
             syscalls: SyscallModel::new(),
             program_break: 0,
             entry_program_break: 0,
@@ -1820,22 +1897,42 @@ impl<D: Decoder> Runtime<D> {
         biased.entry += bias;
         let image = biased;
         let (stack_pointer, argv0_addr) = self.initial_stack_pointer(&image, &mut memory)?;
-        let reg_file = Intel64RegisterFile::canonical();
-        let widths: Vec<(u32, usize)> = reg_file
-            .architectural_registers
-            .iter()
-            .map(|(reg, bits)| (reg.0, usize::from(*bits).div_ceil(8)))
+        let widths: Vec<(u32, usize)> = initial_register_widths(&self.registry)
+            .into_iter()
+            .map(|(reg, bits)| (reg, usize::from(bits).div_ceil(8)))
             .collect();
         let mut registers =
             PersistentRegisters::from_widths(widths).map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+        let pc = match self.registry {
+            CorpusRegistry::Arm64(_) => angryier_arch_arm64::regs::register_id::PC,
+            _ => register_id::RIP,
+        };
+        let sp = match self.registry {
+            CorpusRegistry::Arm64(_) => angryier_arch_arm64::regs::register_id::SP,
+            _ => angryier_arch::RegisterId(register_id::GPR_BASE + 4),
+        };
+        let flags = match self.registry {
+            CorpusRegistry::Arm64(_) => angryier_arch_arm64::regs::register_id::NZCV,
+            _ => register_id::RFLAGS,
+        };
+        let flags_value: u64 = match self.registry {
+            CorpusRegistry::Arm64(_) => 0,
+            _ => 0x202,
+        };
         registers = registers
-            .write(register_id::RIP.0, &entry.to_le_bytes())
+            .write(pc.0, &entry.to_le_bytes())
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
         registers = registers
-            .write(register_id::GPR_BASE + 4, &stack_pointer.to_le_bytes())
+            .write(sp.0, &stack_pointer.to_le_bytes())
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
         registers = registers
-            .write(register_id::RFLAGS.0, &0x202u64.to_le_bytes())
+            .write(
+                flags.0,
+                &match self.registry {
+                    CorpusRegistry::Arm64(_) => (flags_value as u32).to_le_bytes().to_vec(),
+                    _ => flags_value.to_le_bytes().to_vec(),
+                },
+            )
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
         let state = ExecutionState {
             id: StateId(0),
@@ -1864,7 +1961,6 @@ impl<D: Decoder> Runtime<D> {
             pci_config_address: 0,
             symbols: image.symbols.clone(),
             trace: Vec::new(),
-            trace_truncated: false,
             syscalls: SyscallModel::new(),
             program_break: HEAP_BASE,
             entry_program_break: HEAP_BASE,
@@ -2609,7 +2705,11 @@ impl<D: Decoder> Runtime<D> {
         // and ESP leaves the reserve.
         write_u32(&mut process, PE32_FS_SCRATCH_BASE, 0xFFFF_FFFF)?; // SEH chain head terminator
         write_u32(&mut process, PE32_TEB_BASE + 0x04, PE32_STACK_BASE as u32)?;
-        write_u32(&mut process, PE32_TEB_BASE + 0x08, (PE32_STACK_BASE - PE32_STACK_SIZE) as u32)?;
+        write_u32(
+            &mut process,
+            PE32_TEB_BASE + 0x08,
+            (PE32_STACK_BASE - PE32_STACK_SIZE) as u32,
+        )?;
 
         // 32-bit user entry stack image: [argc=1][argv0][NULL] — 32-bit MSVC
         // startup reads argc at [esp] and argv at [esp+4].
@@ -2722,33 +2822,51 @@ impl<D: Decoder> Runtime<D> {
         // than the top of the mapped region.
         let (stack_pointer, argv0_addr) = self.initial_stack_pointer(&image, &mut memory)?;
 
-        // Initialize registers with Intel64 canonical widths.
-        let reg_file = Intel64RegisterFile::canonical();
-        let widths: Vec<(u32, usize)> = reg_file
-            .architectural_registers
-            .iter()
-            .map(|(reg, bits)| {
-                let bytes = usize::from(*bits).div_ceil(8);
-                (reg.0, bytes)
-            })
+        // Initialize registers with the active architecture's canonical widths.
+        let widths: Vec<(u32, usize)> = initial_register_widths(&self.registry)
+            .into_iter()
+            .map(|(reg, bits)| (reg, usize::from(bits).div_ceil(8)))
             .collect();
         let mut registers =
             PersistentRegisters::from_widths(widths).map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
 
-        // Set RIP to entry point.
+        // Set the program counter to the entry point. Intel 64 keeps the PC
+        // in RIP; AArch64 keeps it in the dedicated PC register.
+        let pc = match self.registry {
+            CorpusRegistry::Arm64(_) => angryier_arch_arm64::regs::register_id::PC,
+            _ => register_id::RIP,
+        };
         registers = registers
-            .write(register_id::RIP.0, &image.entry.to_le_bytes())
+            .write(pc.0, &image.entry.to_le_bytes())
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
 
-        // Set RSP to the initial process stack image.
+        // Initial stack pointer. Intel 64 uses RSP (GPR 4); AArch64 uses SP.
+        let sp = match self.registry {
+            CorpusRegistry::Arm64(_) => angryier_arch_arm64::regs::register_id::SP,
+            _ => angryier_arch::RegisterId(register_id::GPR_BASE + 4),
+        };
         registers = registers
-            .write(register_id::GPR_BASE + 4, &stack_pointer.to_le_bytes()) // RSP = GPR 4
+            .write(sp.0, &stack_pointer.to_le_bytes())
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
 
-        // Initial RFLAGS: reserved bit 1 and IF set, matching a real
-        // userspace entry state (0x202).
+        // Initial flag state. Intel 64: reserved bit 1 and IF set (0x202),
+        // matching a real userspace entry state. AArch64: NZCV cleared.
+        let flags = match self.registry {
+            CorpusRegistry::Arm64(_) => angryier_arch_arm64::regs::register_id::NZCV,
+            _ => register_id::RFLAGS,
+        };
+        let flags_value: u64 = match self.registry {
+            CorpusRegistry::Arm64(_) => 0,
+            _ => 0x202,
+        };
         registers = registers
-            .write(register_id::RFLAGS.0, &0x202u64.to_le_bytes())
+            .write(
+                flags.0,
+                &match self.registry {
+                    CorpusRegistry::Arm64(_) => (flags_value as u32).to_le_bytes().to_vec(),
+                    _ => flags_value.to_le_bytes().to_vec(),
+                },
+            )
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
 
         let state = ExecutionState {
@@ -2779,7 +2897,6 @@ impl<D: Decoder> Runtime<D> {
             pci_config_address: 0,
             symbols: image.symbols,
             trace: Vec::new(),
-            trace_truncated: false,
             syscalls: SyscallModel::new(),
             program_break: brk_base,
             entry_program_break: brk_base,
@@ -3711,6 +3828,15 @@ impl<D: Decoder> Runtime<D> {
         let index = match &mem.index {
             Some(MemoryIndex::Register(view)) => {
                 let value = process.read_register(view.parent.0).ok()?;
+                value.wrapping_mul(u64::from(mem.scale))
+            }
+            Some(MemoryIndex::ExtendedRegister { register, extension }) => {
+                let value = process.read_register(register.parent.0).ok()?;
+                let value = match extension {
+                    angryier_arch::MemoryIndexExtension::Uxtw => u64::from(value as u32),
+                    angryier_arch::MemoryIndexExtension::Sxtw => (value as u32 as i32 as i64) as u64,
+                    angryier_arch::MemoryIndexExtension::Uxtx | angryier_arch::MemoryIndexExtension::Sxtx => value,
+                };
                 value.wrapping_mul(u64::from(mem.scale))
             }
             Some(MemoryIndex::Vsib { .. }) => return None,
@@ -5537,12 +5663,10 @@ mod tests {
     /// A minimal process with canonical register widths and empty memory,
     /// sufficient for register-only handler tests.
     fn minimal_process() -> Result<Process, RuntimeError> {
-        let reg_file = Intel64RegisterFile::canonical();
         let registers = PersistentRegisters::from_widths(
-            reg_file
-                .architectural_registers
-                .iter()
-                .map(|(id, bits)| (id.0, usize::from(*bits).div_ceil(8))),
+            intel64_architectural_register_widths()
+                .into_iter()
+                .map(|(id, bits)| (id, usize::from(bits).div_ceil(8))),
         )
         .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
         let memory = PersistentMemory::new(Vec::new()).map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
@@ -5581,7 +5705,7 @@ mod tests {
             pci_config_address: 0,
             symbols: Vec::new(),
             trace: Vec::new(),
-            trace_truncated: false,
+
             syscalls: SyscallModel::new(),
             program_break: 0,
             entry_program_break: 0,
@@ -5846,8 +5970,13 @@ mod tests {
         process.step_count = 91;
         process.simproc_dispatches = 4;
         process.terminated = true;
-        process.trace = vec![entry_pc; MAX_TRACE];
-        process.trace_truncated = true;
+        for offset in 0..4097 {
+            process.record_trace_pc(entry_pc + offset);
+        }
+        assert_eq!(
+            process.trace,
+            (0..4097).map(|offset| entry_pc + offset).collect::<Vec<_>>()
+        );
         process.syscalls.record_write(b"noise");
         process.write_pc(entry_pc.wrapping_add(1))?;
 
@@ -5855,7 +5984,7 @@ mod tests {
 
         assert_eq!(process.pc()?, entry_pc);
         assert!(process.trace.is_empty());
-        assert!(!process.trace_truncated);
+        assert_eq!(process.trace.len(), 0);
         assert_eq!(process.program_break, entry_brk);
         assert_eq!(process.mmap_next, MMAP_BASE);
         assert!(process.open_fds.is_empty());
@@ -6019,22 +6148,35 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_success_stub_records_bounded_approximation_debt() -> Result<(), RuntimeError> {
+    fn import_stubs_record_bounded_debt_by_kind_and_pc() -> Result<(), RuntimeError> {
         let mut process = minimal_process()?;
-        let stub = 0x7000_0000_4140;
+        assert!(process.state.fidelity.is_exact());
+        for (pc, dll, export, kind) in [
+            (
+                0x4140,
+                "kernel32.dll",
+                "IsProcessorFeaturePresent",
+                AnalysisDebtKind::Concretized,
+            ),
+            (0x4150, "ntoskrnl.exe", "DbgPrint", AnalysisDebtKind::Assumed),
+            (0x4160, "ntoskrnl.exe", "DbgPrintEx", AnalysisDebtKind::Assumed),
+        ] {
+            process.pe_import_stubs.insert(pc, (dll.into(), export.into()));
+            let prior = process.state.fidelity.entries.len();
+            process.record_approximate_import(pc);
+            process.record_approximate_import(pc);
+            assert!(!process.state.fidelity.is_exact());
+            assert_eq!(process.state.fidelity.entries.len(), prior + 1);
+            let entry = &process.state.fidelity.entries[prior];
+            assert_eq!((entry.source, entry.kind), (pc, kind));
+        }
+        let hooked = 0x4170;
         process
             .pe_import_stubs
-            .insert(stub, ("kernel32.dll".into(), "IsProcessorFeaturePresent".into()));
-        assert!(process.state.fidelity.is_exact());
-        process.record_approximate_import(stub);
-        assert!(!process.state.fidelity.is_exact());
-        assert_eq!(process.state.fidelity.entries.len(), 1);
-        assert_eq!(process.state.fidelity.entries[0].source, stub);
-        process.record_approximate_import(stub);
-        assert_eq!(process.state.fidelity.entries.len(), 1);
-        process.stub_function(stub, 0);
-        process.record_approximate_import(stub);
-        assert_eq!(process.state.fidelity.entries.len(), 1);
+            .insert(hooked, ("ntoskrnl.exe".into(), "DbgPrint".into()));
+        process.stub_function(hooked, 0);
+        process.record_approximate_import(hooked);
+        assert_eq!(process.state.fidelity.entries.len(), 3);
         Ok(())
     }
 
@@ -6280,6 +6422,10 @@ mod solver_constraint_safety_tests {
         assert_eq!(a, same);
         assert_ne!(a, reordered);
         assert_ne!(a, shorter);
+        let long: Vec<_> = (0..4097).collect();
+        let mut changed = long.clone();
+        changed[4096] = 0xdead;
+        assert_ne!(trace_fingerprint(long), trace_fingerprint(changed));
     }
 
     #[test]
@@ -6372,12 +6518,11 @@ pub struct SymbolicBranchDecision {
     pub trace_fingerprint: u64,
 }
 
-/// Maximum symbolic branch decisions retained per state. The ledger is
-/// intentionally small and clone-friendly: forked states inherit the common
-/// prefix history, while merges clear it because merged constraint vectors no
-/// longer preserve the original per-branch prefix indices.
-pub const SYMBOLIC_BRANCH_HISTORY_CAP: usize = 64;
-
+/// Branch provenance retains the full decision prefix, without a silent cap.
+/// Forks inherit the prefix; merges clear it because merged constraint vectors
+/// no longer preserve the original per-branch prefix indices.
+/// Sustained exploration disables merges until full replay can be established.
+///
 /// Solver result for flipping a state's most recent symbolic branch while
 /// preserving only the constraints shared before that branch.
 #[derive(Clone, Debug)]
@@ -6517,7 +6662,7 @@ pub struct SymbolicState {
     /// Concrete value each load-derived expression stands for (pointer
     /// provenance for address concretization).
     pub expr_concrete: BTreeMap<ExprId, u64>,
-    /// Bounded branch-decision provenance in execution order.
+    /// Complete branch-decision provenance in execution order; bounded runs enforce their own trace budget.
     pub branch_history: Vec<SymbolicBranchDecision>,
     /// Most recent conditional-branch decision on this state. This is
     /// execution evidence, not reconstructed from numeric PC proximity.
@@ -6526,9 +6671,6 @@ pub struct SymbolicState {
 
 impl SymbolicState {
     fn record_branch_decision(&mut self, decision: SymbolicBranchDecision) {
-        if self.branch_history.len() >= SYMBOLIC_BRANCH_HISTORY_CAP {
-            self.branch_history.remove(0);
-        }
         self.branch_history.push(decision);
         self.last_branch = Some(decision);
     }
@@ -6742,17 +6884,16 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
     /// via [`SymbolicSession::mark_symbolic`]).
     pub fn new(runtime: &'a Runtime<D>, arena: &'a SymbolicArena, process: Process) -> Self {
         let memory = angryier_execution::SymbolicSessionMemory::new(process.state.memory.clone());
+        // Seed the concrete fallback map from the active architecture's
+        // canonical register set (Intel 64: GPRs + RIP + RFLAGS + vector
+        // state; AArch64: X0..X30, ZR, PC, NZCV, FPCR/FPSR, V0..V31, SP).
+        // Reads that fail for any register are skipped; the symbolic overlay
+        // still shadows them when marked.
         let mut concrete_registers = BTreeMap::new();
-        for i in 0..16u32 {
-            if let Ok(value) = process.read_register(register_id::GPR_BASE + i) {
-                concrete_registers.insert(register_id::GPR_BASE + i, value);
+        for (register, _bits) in initial_register_widths(&runtime.registry) {
+            if let Ok(value) = process.read_register(register) {
+                concrete_registers.insert(register, value);
             }
-        }
-        if let Ok(value) = process.read_register(register_id::RIP.0) {
-            concrete_registers.insert(register_id::RIP.0, value);
-        }
-        if let Ok(value) = process.read_register(register_id::RFLAGS.0) {
-            concrete_registers.insert(register_id::RFLAGS.0, value);
         }
         let state = SymbolicState {
             process,
@@ -8373,7 +8514,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             let state = &mut self.states[index];
             let prefix_constraints = state.constraints.len();
             let visit_index = state.process.trace.iter().filter(|&&address| address == pc).count() as u64;
-            let visit_index_exact = !state.process.trace_truncated;
+            let visit_index_exact = true;
             let branch_trace_fingerprint = trace_fingerprint(state.process.trace.iter().copied());
             if taken_feasible && other_feasible {
                 // Clone the common pre-branch state before recording either

@@ -1,0 +1,11 @@
+--- a/xed/xed_mbuild.py
++++ b/xed/xed_mbuild.py
+@@ -1202 +1202 @@
+-    for i,x in enumerate(private_syms):
++    for i,x in enumerate(sorted(private_syms)):
+@@ -1601 +1601 @@
+-    return mbuild.glob(env['src_dir'],'src',subdir,'*.c')
++    return sorted(mbuild.glob(env['src_dir'],'src',subdir,'*.c'))
+@@ -1860 +1860 @@
+-    generated_library_sources = mbuild.glob(env['build_dir'],'*.c')
++    generated_library_sources = sorted(mbuild.glob(env['build_dir'],'*.c'))

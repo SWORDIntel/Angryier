@@ -7,6 +7,7 @@ description = "Pipeline glue wiring loader, decoder, semantics, IR, interpreter,
 
 [dependencies]
 angryier-arch = { path = "../angryier-arch" }
+angryier-arch-arm64 = { path = "../angryier-arch-arm64" }
 angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
 angryier-cfg = { path = "../angryier-cfg" }
 angryier-execution = { path = "../angryier-execution" }
@@ -16,15 +17,19 @@ angryier-loader = { path = "../angryier-loader" }
 angryier-memory = { path = "../angryier-memory" }
 angryier-models = { path = "../angryier-models" }
 angryier-provenance = { path = "../angryier-provenance" }
+angryier-distribution = { path = "../angryier-distribution" }
+angryier-ledger = { path = "../angryier-ledger" }
 angryier-replay = { path = "../angryier-replay" }
 angryier-semantics = { path = "../angryier-semantics" }
 angryier-scheduler = { path = "../angryier-scheduler" }
+angryier-semantics-arm64 = { path = "../angryier-semantics-arm64" }
 angryier-semantics-intel64 = { path = "../angryier-semantics-intel64" }
 angryier-semantics-gen = { path = "../angryier-semantics-gen" }
 angryier-solver = { path = "../angryier-solver" }
 angryier-state = { path = "../angryier-state" }
 angryier-taint = { path = "../angryier-taint" }
 angryier-types = { path = "../angryier-types" }
+sha2 = "0.10"
 mlua = { version = "0.12", features = ["lua54", "vendored"], optional = true }
 angryier-arch-xed-ffi = { path = "../angryier-arch-xed-ffi", optional = true }
 angryier-solver-z3 = { path = "../angryier-solver-z3", optional = true }

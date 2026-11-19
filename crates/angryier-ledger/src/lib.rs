@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+pub mod evidence;
+pub mod sustained;
+pub mod wal;
+
 use angryier_types::{
     CodeVersionGuard, ContentId, LedgerEpoch, ProvenanceSeq, ReplayCapsuleId, SemanticVersion, StateId,
 };

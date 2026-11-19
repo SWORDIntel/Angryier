@@ -76,6 +76,8 @@ pub enum IrPrimitive {
     FMul,
     FDiv,
     FSqrt,
+    FNeg,
+    FAbs,
     FSin,
     FCos,
     FTan,
@@ -84,6 +86,12 @@ pub enum IrPrimitive {
     FLog2,
     FScale,
     FConvert,
+    /// Float -> signed Bits(32/64), truncating toward zero and saturating
+    /// to the destination range; NaN produces zero. No FP exception state.
+    FToIntSigned,
+    /// Float -> unsigned Bits(32/64), truncating toward zero and saturating
+    /// to the destination range; NaN produces zero. No FP exception state.
+    FToIntUnsigned,
     VecLaneAdd,
     VecLaneSub,
     VecLaneMul,
@@ -164,6 +172,9 @@ pub enum IrPrimitive {
     TileDotU8U8,
     TileDotBf16,
     TileDotFp16,
+    /// Signed Bits(32/64) -> Float32/Float64, round to nearest, ties to even.
+    /// No floating-point control/status register effects.
+    FFromIntSigned,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

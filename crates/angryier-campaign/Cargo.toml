@@ -1,0 +1,26 @@
+[package]
+name = "angryier-campaign"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host-native loopback sustained campaign coordinator and worker"
+
+[dependencies]
+angryier-distribution = { path = "../angryier-distribution" }
+angryier-types = { path = "../angryier-types" }
+angryier-expr = { path = "../angryier-expr" }
+angryier-ledger = { path = "../angryier-ledger" }
+angryier-runtime = { path = "../angryier-runtime" }
+sha2 = "0.10"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+angryier-runtime = { path = "../angryier-runtime", features = ["xed", "z3"] }
+angryier-arch-intel64 = { path = "../angryier-arch-intel64" }
+angryier-ir = { path = "../angryier-ir" }
+angryier-solver-z3 = { path = "../angryier-solver-z3", features = ["ffi"] }
+
+[features]
+default = []
+
+[lints]
+workspace = true

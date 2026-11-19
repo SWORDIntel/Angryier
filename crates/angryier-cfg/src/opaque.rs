@@ -70,10 +70,7 @@ pub enum PruningAction {
         instruction_count: usize,
     },
     /// Merges predecessor and successor when dead branch is removed.
-    StraightenBlocks {
-        predecessor: Address,
-        successor: Address,
-    },
+    StraightenBlocks { predecessor: Address, successor: Address },
     /// Replaces the overlapping prefix with NOPs or direct fallthrough.
     NeutralizeJunkOverlap {
         address: Address,
@@ -223,10 +220,8 @@ impl OpaquePredicateDetector {
                 let pc_over_junk_1 = insn.address.wrapping_add(u64::from(insn.length)).wrapping_add(1);
                 let pc_over_junk_2 = insn.address.wrapping_add(u64::from(insn.length)).wrapping_add(2);
 
-                let is_overlap = target == pc_plus_1
-                    || target == pc_plus_2
-                    || target == pc_over_junk_1
-                    || target == pc_over_junk_2;
+                let is_overlap =
+                    target == pc_plus_1 || target == pc_plus_2 || target == pc_over_junk_1 || target == pc_over_junk_2;
 
                 if is_overlap {
                     return Some(DetectedOpaquePredicate {
@@ -235,7 +230,9 @@ impl OpaquePredicateDetector {
                         kind: OpaquePredicateKind::OverlappingJunkInstruction,
                         description: format!(
                             "Overlapping junk jump/call at {:#x} landing at {:#x} (offset {})",
-                            insn.address, target, target.wrapping_sub(insn.address)
+                            insn.address,
+                            target,
+                            target.wrapping_sub(insn.address)
                         ),
                     });
                 }
@@ -286,7 +283,10 @@ impl OpaquePredicateDetector {
                 let base_src = base_register(registers, src);
                 let val = match registers.get(&src) {
                     Some(v) => v.clone(),
-                    None => SymbolicValue::OffsetFrom { base: base_src, offset: 0 },
+                    None => SymbolicValue::OffsetFrom {
+                        base: base_src,
+                        offset: 0,
+                    },
                 };
                 registers.insert(dst, val);
                 let e = get_or_create_expr(arena, expr_map, src, next_symbol);
@@ -299,15 +299,16 @@ impl OpaquePredicateDetector {
         if is_mov_load(form_id) {
             if let (Some(dst), Some(mem)) = (reg_operand(insn, 0), mem_operand(insn, 1))
                 && let Some(MemoryBase::Register(base_view)) = mem.base
-                    && mem.index.is_none() {
-                        registers.insert(
-                            dst,
-                            SymbolicValue::ContextRegister {
-                                reg: base_view.parent,
-                                offset: Some(mem.displacement),
-                            },
-                        );
-                    }
+                && mem.index.is_none()
+            {
+                registers.insert(
+                    dst,
+                    SymbolicValue::ContextRegister {
+                        reg: base_view.parent,
+                        offset: Some(mem.displacement),
+                    },
+                );
+            }
             return;
         }
 
@@ -319,12 +320,19 @@ impl OpaquePredicateDetector {
                     Some(SymbolicValue::OffsetFrom { base, offset }) => (*base, offset.saturating_add(1)),
                     _ => (base_dst, 1),
                 };
-                registers.insert(dst, SymbolicValue::OffsetFrom { base: base.0, offset: base.1 });
+                registers.insert(
+                    dst,
+                    SymbolicValue::OffsetFrom {
+                        base: base.0,
+                        offset: base.1,
+                    },
+                );
                 let e = get_or_create_expr(arena, expr_map, dst, next_symbol);
                 if let Ok(one) = constant_node(arena, 1, 64)
-                    && let Ok(add) = binary_node(arena, ExprOp::Add, e, one, 64) {
-                        expr_map.insert(dst, add);
-                    }
+                    && let Ok(add) = binary_node(arena, ExprOp::Add, e, one, 64)
+                {
+                    expr_map.insert(dst, add);
+                }
             }
             return;
         }
@@ -334,17 +342,22 @@ impl OpaquePredicateDetector {
                 let imm_i64 = imm as i64;
                 let base_dst = base_register(registers, dst);
                 let base = match registers.get(&dst) {
-                    Some(SymbolicValue::OffsetFrom { base, offset }) => {
-                        (*base, offset.saturating_add(imm_i64))
-                    }
+                    Some(SymbolicValue::OffsetFrom { base, offset }) => (*base, offset.saturating_add(imm_i64)),
                     _ => (base_dst, imm_i64),
                 };
-                registers.insert(dst, SymbolicValue::OffsetFrom { base: base.0, offset: base.1 });
+                registers.insert(
+                    dst,
+                    SymbolicValue::OffsetFrom {
+                        base: base.0,
+                        offset: base.1,
+                    },
+                );
                 let e = get_or_create_expr(arena, expr_map, dst, next_symbol);
                 if let Ok(k) = constant_node(arena, u128::from(imm), 64)
-                    && let Ok(add) = binary_node(arena, ExprOp::Add, e, k, 64) {
-                        expr_map.insert(dst, add);
-                    }
+                    && let Ok(add) = binary_node(arena, ExprOp::Add, e, k, 64)
+                {
+                    expr_map.insert(dst, add);
+                }
             } else if let (Some(dst), Some(src)) = (reg_operand(insn, 0), reg_operand(insn, 1)) {
                 let e_dst = get_or_create_expr(arena, expr_map, dst, next_symbol);
                 let e_src = get_or_create_expr(arena, expr_map, src, next_symbol);
@@ -363,12 +376,19 @@ impl OpaquePredicateDetector {
                     Some(SymbolicValue::OffsetFrom { base, offset }) => (*base, offset.saturating_sub(1)),
                     _ => (base_dst, -1),
                 };
-                registers.insert(dst, SymbolicValue::OffsetFrom { base: base.0, offset: base.1 });
+                registers.insert(
+                    dst,
+                    SymbolicValue::OffsetFrom {
+                        base: base.0,
+                        offset: base.1,
+                    },
+                );
                 let e = get_or_create_expr(arena, expr_map, dst, next_symbol);
                 if let Ok(one) = constant_node(arena, 1, 64)
-                    && let Ok(sub) = binary_node(arena, ExprOp::Sub, e, one, 64) {
-                        expr_map.insert(dst, sub);
-                    }
+                    && let Ok(sub) = binary_node(arena, ExprOp::Sub, e, one, 64)
+                {
+                    expr_map.insert(dst, sub);
+                }
             }
             return;
         }
@@ -434,7 +454,13 @@ impl OpaquePredicateDetector {
             if let (Some(dst), Some(src)) = (reg_operand(insn, 0), reg_operand(insn, 1)) {
                 let base_dst = base_register(registers, dst);
                 let base_src = base_register(registers, src);
-                registers.insert(dst, SymbolicValue::BitwiseOr { op1: base_dst, op2: base_src });
+                registers.insert(
+                    dst,
+                    SymbolicValue::BitwiseOr {
+                        op1: base_dst,
+                        op2: base_src,
+                    },
+                );
                 let e_dst = get_or_create_expr(arena, expr_map, dst, next_symbol);
                 let e_src = get_or_create_expr(arena, expr_map, src, next_symbol);
                 if let Ok(or_node) = binary_node(arena, ExprOp::Or, e_dst, e_src, 64) {
@@ -449,7 +475,13 @@ impl OpaquePredicateDetector {
             if let (Some(dst), Some(src)) = (reg_operand(insn, 0), reg_operand(insn, 1)) {
                 let base_dst = base_register(registers, dst);
                 let base_src = base_register(registers, src);
-                registers.insert(dst, SymbolicValue::BitwiseAnd { op1: base_dst, op2: base_src });
+                registers.insert(
+                    dst,
+                    SymbolicValue::BitwiseAnd {
+                        op1: base_dst,
+                        op2: base_src,
+                    },
+                );
                 let e_dst = get_or_create_expr(arena, expr_map, dst, next_symbol);
                 let e_src = get_or_create_expr(arena, expr_map, src, next_symbol);
                 if let Ok(and_node) = binary_node(arena, ExprOp::And, e_dst, e_src, 64) {
@@ -457,14 +489,16 @@ impl OpaquePredicateDetector {
                 }
             } else if let (Some(dst), Some(imm)) = (reg_operand(insn, 0), imm_operand(insn, 1)) {
                 if imm == 1
-                    && let Some(SymbolicValue::ParityEven { .. }) = registers.get(&dst) {
-                        registers.insert(dst, SymbolicValue::Constant(0));
-                    }
+                    && let Some(SymbolicValue::ParityEven { .. }) = registers.get(&dst)
+                {
+                    registers.insert(dst, SymbolicValue::Constant(0));
+                }
                 let e_dst = get_or_create_expr(arena, expr_map, dst, next_symbol);
                 if let Ok(k) = constant_node(arena, u128::from(imm), 64)
-                    && let Ok(and_node) = binary_node(arena, ExprOp::And, e_dst, k, 64) {
-                        expr_map.insert(dst, and_node);
-                    }
+                    && let Ok(and_node) = binary_node(arena, ExprOp::And, e_dst, k, 64)
+                {
+                    expr_map.insert(dst, and_node);
+                }
             }
             return;
         }
@@ -534,33 +568,35 @@ impl OpaquePredicateDetector {
 
         // Invariant 1: Parity check (x * (x + 1)) % 2 == 0
         if let FlagsSetter::TestRegImm { op, imm: 1 } = flags_setter
-            && let Some(SymbolicValue::ParityEven { .. }) = registers.get(op) {
-                // (x * (x + 1)) & 1 == 0 algebraically
-                // ZF = 1, PF = 1
-                if is_je_or_jz(branch_form) || branch_form == forms::JPE_REL32 {
-                    return Some(DetectedOpaquePredicate {
-                        address: branch_insn.address,
-                        block_start,
-                        kind: OpaquePredicateKind::TautologyAlwaysTrue,
-                        description: "Algebraic parity tautology: (x * (x + 1)) % 2 == 0 proven, branch always taken"
-                            .to_string(),
-                    });
-                }
-                if is_jne_or_jnz(branch_form) || branch_form == forms::JPO_REL32 {
-                    return Some(DetectedOpaquePredicate {
-                        address: branch_insn.address,
-                        block_start,
-                        kind: OpaquePredicateKind::TautologyAlwaysFalse,
-                        description: "Algebraic parity tautology: (x * (x + 1)) % 2 == 0 proven, branch never taken"
-                            .to_string(),
-                    });
-                }
+            && let Some(SymbolicValue::ParityEven { .. }) = registers.get(op)
+        {
+            // (x * (x + 1)) & 1 == 0 algebraically
+            // ZF = 1, PF = 1
+            if is_je_or_jz(branch_form) || branch_form == forms::JPE_REL32 {
+                return Some(DetectedOpaquePredicate {
+                    address: branch_insn.address,
+                    block_start,
+                    kind: OpaquePredicateKind::TautologyAlwaysTrue,
+                    description: "Algebraic parity tautology: (x * (x + 1)) % 2 == 0 proven, branch always taken"
+                        .to_string(),
+                });
             }
+            if is_jne_or_jnz(branch_form) || branch_form == forms::JPO_REL32 {
+                return Some(DetectedOpaquePredicate {
+                    address: branch_insn.address,
+                    block_start,
+                    kind: OpaquePredicateKind::TautologyAlwaysFalse,
+                    description: "Algebraic parity tautology: (x * (x + 1)) % 2 == 0 proven, branch never taken"
+                        .to_string(),
+                });
+            }
+        }
 
         // Invariant 2: Domain / Square invariant: x^2 >= 0
         if let FlagsSetter::CmpRegImm { op, imm: 0 } = flags_setter {
             if let Some(SymbolicValue::Square { .. }) = registers.get(op) {
-                if branch_form == forms::JGE_REL32 || branch_form == forms::JAE_REL32 || branch_form == forms::JNC_REL32 {
+                if branch_form == forms::JGE_REL32 || branch_form == forms::JAE_REL32 || branch_form == forms::JNC_REL32
+                {
                     return Some(DetectedOpaquePredicate {
                         address: branch_insn.address,
                         block_start,
@@ -598,24 +634,25 @@ impl OpaquePredicateDetector {
 
         if let FlagsSetter::TestRegReg { op1, op2 } = flags_setter
             && op1 == op2
-                && let Some(SymbolicValue::Square { .. }) = registers.get(op1) {
-                    if branch_form == forms::JNS_REL32 || branch_form == forms::JGE_REL32 {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::TautologyAlwaysTrue,
-                            description: "Domain invariant: x^2 >= 0 proven via sign bit test".to_string(),
-                        });
-                    }
-                    if branch_form == forms::JS_REL32 || branch_form == forms::JL_REL32 {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::TautologyAlwaysFalse,
-                            description: "Domain invariant: x^2 < 0 impossible via sign bit test".to_string(),
-                        });
-                    }
-                }
+            && let Some(SymbolicValue::Square { .. }) = registers.get(op1)
+        {
+            if branch_form == forms::JNS_REL32 || branch_form == forms::JGE_REL32 {
+                return Some(DetectedOpaquePredicate {
+                    address: branch_insn.address,
+                    block_start,
+                    kind: OpaquePredicateKind::TautologyAlwaysTrue,
+                    description: "Domain invariant: x^2 >= 0 proven via sign bit test".to_string(),
+                });
+            }
+            if branch_form == forms::JS_REL32 || branch_form == forms::JL_REL32 {
+                return Some(DetectedOpaquePredicate {
+                    address: branch_insn.address,
+                    block_start,
+                    kind: OpaquePredicateKind::TautologyAlwaysFalse,
+                    description: "Domain invariant: x^2 < 0 impossible via sign bit test".to_string(),
+                });
+            }
+        }
 
         // Invariant 3: Bitwise invariant: (x | y) >= (x & y)
         if let FlagsSetter::CmpRegReg { op1, op2 } = flags_setter {
@@ -626,90 +663,89 @@ impl OpaquePredicateDetector {
                 Some(SymbolicValue::BitwiseOr { op1: a1, op2: b1 }),
                 Some(SymbolicValue::BitwiseAnd { op1: a2, op2: b2 }),
             ) = (val1, val2)
-                && ((*a1 == *a2 && *b1 == *b2) || (*a1 == *b2 && *b1 == *a2)) {
-                    // (x | y) >= (x & y) holds for all bitvectors: CF == 0
-                    if branch_form == forms::JAE_REL32 || branch_form == forms::JNC_REL32 {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::TautologyAlwaysTrue,
-                            description: "Bitwise invariant (x | y) >= (x & y) proven, branch always taken"
-                                .to_string(),
-                        });
-                    }
-                    if branch_form == forms::JB_REL32 || branch_form == forms::JC_REL32 {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::TautologyAlwaysFalse,
-                            description: "Bitwise invariant (x | y) < (x & y) impossible, branch never taken"
-                                .to_string(),
-                        });
-                    }
+                && ((*a1 == *a2 && *b1 == *b2) || (*a1 == *b2 && *b1 == *a2))
+            {
+                // (x | y) >= (x & y) holds for all bitvectors: CF == 0
+                if branch_form == forms::JAE_REL32 || branch_form == forms::JNC_REL32 {
+                    return Some(DetectedOpaquePredicate {
+                        address: branch_insn.address,
+                        block_start,
+                        kind: OpaquePredicateKind::TautologyAlwaysTrue,
+                        description: "Bitwise invariant (x | y) >= (x & y) proven, branch always taken".to_string(),
+                    });
                 }
+                if branch_form == forms::JB_REL32 || branch_form == forms::JC_REL32 {
+                    return Some(DetectedOpaquePredicate {
+                        address: branch_insn.address,
+                        block_start,
+                        kind: OpaquePredicateKind::TautologyAlwaysFalse,
+                        description: "Bitwise invariant (x | y) < (x & y) impossible, branch never taken".to_string(),
+                    });
+                }
+            }
 
             // Reverse comparison: (x & y) compared with (x | y)
             if let (
                 Some(SymbolicValue::BitwiseAnd { op1: a1, op2: b1 }),
                 Some(SymbolicValue::BitwiseOr { op1: a2, op2: b2 }),
             ) = (val1, val2)
-                && ((*a1 == *a2 && *b1 == *b2) || (*a1 == *b2 && *b1 == *a2)) {
-                    if branch_form == forms::JB_REL32 || branch_form == forms::JC_REL32 {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::TautologyAlwaysTrue,
-                            description: "Bitwise invariant (x & y) <= (x | y) proven, branch always taken"
-                                .to_string(),
-                        });
-                    }
-                    if branch_form == forms::JA_REL32 {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::TautologyAlwaysFalse,
-                            description: "Bitwise invariant (x & y) > (x | y) impossible, branch never taken"
-                                .to_string(),
-                        });
-                    }
+                && ((*a1 == *a2 && *b1 == *b2) || (*a1 == *b2 && *b1 == *a2))
+            {
+                if branch_form == forms::JB_REL32 || branch_form == forms::JC_REL32 {
+                    return Some(DetectedOpaquePredicate {
+                        address: branch_insn.address,
+                        block_start,
+                        kind: OpaquePredicateKind::TautologyAlwaysTrue,
+                        description: "Bitwise invariant (x & y) <= (x | y) proven, branch always taken".to_string(),
+                    });
                 }
+                if branch_form == forms::JA_REL32 {
+                    return Some(DetectedOpaquePredicate {
+                        address: branch_insn.address,
+                        block_start,
+                        kind: OpaquePredicateKind::TautologyAlwaysFalse,
+                        description: "Bitwise invariant (x & y) > (x | y) impossible, branch never taken".to_string(),
+                    });
+                }
+            }
 
             // Invariant 4: Context Invariant / Identical context registers
             if let (
                 Some(SymbolicValue::ContextRegister { reg: r1, offset: o1 }),
                 Some(SymbolicValue::ContextRegister { reg: r2, offset: o2 }),
             ) = (val1, val2)
-                && r1 == r2 && o1 == o2 {
-                    if is_je_or_jz(branch_form)
-                        || branch_form == forms::JAE_REL32
-                        || branch_form == forms::JGE_REL32
-                        || branch_form == forms::JBE_REL32
-                        || branch_form == forms::JLE_REL32
-                    {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::ContextInvariant,
-                            description: "Context invariant: identical context register offsets compared (always true)"
-                                .to_string(),
-                        });
-                    }
-                    if is_jne_or_jnz(branch_form)
-                        || branch_form == forms::JB_REL32
-                        || branch_form == forms::JL_REL32
-                        || branch_form == forms::JA_REL32
-                        || branch_form == forms::JG_REL32
-                    {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::ContextInvariant,
-                            description:
-                                "Context invariant: identical context register offsets compared (always false)"
-                                    .to_string(),
-                        });
-                    }
+                && r1 == r2
+                && o1 == o2
+            {
+                if is_je_or_jz(branch_form)
+                    || branch_form == forms::JAE_REL32
+                    || branch_form == forms::JGE_REL32
+                    || branch_form == forms::JBE_REL32
+                    || branch_form == forms::JLE_REL32
+                {
+                    return Some(DetectedOpaquePredicate {
+                        address: branch_insn.address,
+                        block_start,
+                        kind: OpaquePredicateKind::ContextInvariant,
+                        description: "Context invariant: identical context register offsets compared (always true)"
+                            .to_string(),
+                    });
                 }
+                if is_jne_or_jnz(branch_form)
+                    || branch_form == forms::JB_REL32
+                    || branch_form == forms::JL_REL32
+                    || branch_form == forms::JA_REL32
+                    || branch_form == forms::JG_REL32
+                {
+                    return Some(DetectedOpaquePredicate {
+                        address: branch_insn.address,
+                        block_start,
+                        kind: OpaquePredicateKind::ContextInvariant,
+                        description: "Context invariant: identical context register offsets compared (always false)"
+                            .to_string(),
+                    });
+                }
+            }
 
             // Invariant 5: Identity: cmp reg, reg
             if op1 == op2 {
@@ -745,59 +781,59 @@ impl OpaquePredicateDetector {
             let e1 = get_or_create_expr(arena, expr_map, *op1, next_symbol);
             let e2 = get_or_create_expr(arena, expr_map, *op2, next_symbol);
             if let Ok(diff) = binary_node(arena, ExprOp::Sub, e1, e2, 64) {
-                    let simplified = deobfuscate(arena, diff);
-                    if let Some(c) = read_constant(arena, simplified) {
-                        if c == 0 {
-                            if is_je_or_jz(branch_form)
-                                || branch_form == forms::JAE_REL32
-                                || branch_form == forms::JGE_REL32
-                                || branch_form == forms::JBE_REL32
-                                || branch_form == forms::JLE_REL32
-                            {
-                                return Some(DetectedOpaquePredicate {
-                                    address: branch_insn.address,
-                                    block_start,
-                                    kind: OpaquePredicateKind::TautologyAlwaysTrue,
-                                    description: "MBA fixpoint simplification proven equivalent to 0 (always true)"
-                                        .to_string(),
-                                });
-                            }
-                            if is_jne_or_jnz(branch_form)
-                                || branch_form == forms::JB_REL32
-                                || branch_form == forms::JL_REL32
-                                || branch_form == forms::JA_REL32
-                                || branch_form == forms::JG_REL32
-                            {
-                                return Some(DetectedOpaquePredicate {
-                                    address: branch_insn.address,
-                                    block_start,
-                                    kind: OpaquePredicateKind::TautologyAlwaysFalse,
-                                    description: "MBA fixpoint simplification proven equivalent to 0 (never true)"
-                                        .to_string(),
-                                });
-                            }
-                        } else {
-                            if is_je_or_jz(branch_form) {
-                                return Some(DetectedOpaquePredicate {
-                                    address: branch_insn.address,
-                                    block_start,
-                                    kind: OpaquePredicateKind::TautologyAlwaysFalse,
-                                    description: "MBA simplification non-zero constant difference (never equal)"
-                                        .to_string(),
-                                });
-                            }
-                            if is_jne_or_jnz(branch_form) {
-                                return Some(DetectedOpaquePredicate {
-                                    address: branch_insn.address,
-                                    block_start,
-                                    kind: OpaquePredicateKind::TautologyAlwaysTrue,
-                                    description: "MBA simplification non-zero constant difference (always not-equal)"
-                                        .to_string(),
-                                });
-                            }
+                let simplified = deobfuscate(arena, diff);
+                if let Some(c) = read_constant(arena, simplified) {
+                    if c == 0 {
+                        if is_je_or_jz(branch_form)
+                            || branch_form == forms::JAE_REL32
+                            || branch_form == forms::JGE_REL32
+                            || branch_form == forms::JBE_REL32
+                            || branch_form == forms::JLE_REL32
+                        {
+                            return Some(DetectedOpaquePredicate {
+                                address: branch_insn.address,
+                                block_start,
+                                kind: OpaquePredicateKind::TautologyAlwaysTrue,
+                                description: "MBA fixpoint simplification proven equivalent to 0 (always true)"
+                                    .to_string(),
+                            });
+                        }
+                        if is_jne_or_jnz(branch_form)
+                            || branch_form == forms::JB_REL32
+                            || branch_form == forms::JL_REL32
+                            || branch_form == forms::JA_REL32
+                            || branch_form == forms::JG_REL32
+                        {
+                            return Some(DetectedOpaquePredicate {
+                                address: branch_insn.address,
+                                block_start,
+                                kind: OpaquePredicateKind::TautologyAlwaysFalse,
+                                description: "MBA fixpoint simplification proven equivalent to 0 (never true)"
+                                    .to_string(),
+                            });
+                        }
+                    } else {
+                        if is_je_or_jz(branch_form) {
+                            return Some(DetectedOpaquePredicate {
+                                address: branch_insn.address,
+                                block_start,
+                                kind: OpaquePredicateKind::TautologyAlwaysFalse,
+                                description: "MBA simplification non-zero constant difference (never equal)"
+                                    .to_string(),
+                            });
+                        }
+                        if is_jne_or_jnz(branch_form) {
+                            return Some(DetectedOpaquePredicate {
+                                address: branch_insn.address,
+                                block_start,
+                                kind: OpaquePredicateKind::TautologyAlwaysTrue,
+                                description: "MBA simplification non-zero constant difference (always not-equal)"
+                                    .to_string(),
+                            });
                         }
                     }
                 }
+            }
         }
 
         // SubRegReg checking: sub op1, op2 where (x | y) - (x & y)
@@ -808,24 +844,25 @@ impl OpaquePredicateDetector {
                 Some(SymbolicValue::BitwiseOr { op1: a1, op2: b1 }),
                 Some(SymbolicValue::BitwiseAnd { op1: a2, op2: b2 }),
             ) = (val1, val2)
-                && ((*a1 == *a2 && *b1 == *b2) || (*a1 == *b2 && *b1 == *a2)) {
-                    if branch_form == forms::JNC_REL32 || branch_form == forms::JAE_REL32 {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::TautologyAlwaysTrue,
-                            description: "Bitwise invariant (x | y) - (x & y) >= 0 proven, CF is 0".to_string(),
-                        });
-                    }
-                    if branch_form == forms::JC_REL32 || branch_form == forms::JB_REL32 {
-                        return Some(DetectedOpaquePredicate {
-                            address: branch_insn.address,
-                            block_start,
-                            kind: OpaquePredicateKind::TautologyAlwaysFalse,
-                            description: "Bitwise invariant (x | y) - (x & y) >= 0 proven, CF is never 1".to_string(),
-                        });
-                    }
+                && ((*a1 == *a2 && *b1 == *b2) || (*a1 == *b2 && *b1 == *a2))
+            {
+                if branch_form == forms::JNC_REL32 || branch_form == forms::JAE_REL32 {
+                    return Some(DetectedOpaquePredicate {
+                        address: branch_insn.address,
+                        block_start,
+                        kind: OpaquePredicateKind::TautologyAlwaysTrue,
+                        description: "Bitwise invariant (x | y) - (x & y) >= 0 proven, CF is 0".to_string(),
+                    });
                 }
+                if branch_form == forms::JC_REL32 || branch_form == forms::JB_REL32 {
+                    return Some(DetectedOpaquePredicate {
+                        address: branch_insn.address,
+                        block_start,
+                        kind: OpaquePredicateKind::TautologyAlwaysFalse,
+                        description: "Bitwise invariant (x | y) - (x & y) >= 0 proven, CF is never 1".to_string(),
+                    });
+                }
+            }
         }
 
         None
@@ -859,12 +896,13 @@ pub fn prune_opaque_predicates(cfg: &mut ControlFlowGraph, limits: PruningLimits
             total_instructions_scanned += block.instructions.len();
 
             if let Some(junk) = detector.detect_overlapping_junk(block)
-                && let Some(action) = neutralize_junk(cfg, b_addr, &junk) {
-                    report.detected.push(junk);
-                    report.actions.push(action);
-                    report.neutralized_junk += 1;
-                    pass_changed = true;
-                }
+                && let Some(action) = neutralize_junk(cfg, b_addr, &junk)
+            {
+                report.detected.push(junk);
+                report.actions.push(action);
+                report.neutralized_junk += 1;
+                pass_changed = true;
+            }
         }
 
         // 2. Scan and eliminate Dead Branches from Opaque Predicates
@@ -879,12 +917,13 @@ pub fn prune_opaque_predicates(cfg: &mut ControlFlowGraph, limits: PruningLimits
             total_instructions_scanned += block.instructions.len();
 
             if let Some(pred) = detector.detect_block(block)
-                && let Some(action) = eliminate_dead_branch(cfg, b_addr, &pred) {
-                    report.detected.push(pred);
-                    report.actions.push(action);
-                    report.eliminated_branches += 1;
-                    pass_changed = true;
-                }
+                && let Some(action) = eliminate_dead_branch(cfg, b_addr, &pred)
+            {
+                report.detected.push(pred);
+                report.actions.push(action);
+                report.eliminated_branches += 1;
+                pass_changed = true;
+            }
         }
 
         // 3. Purge unreachable dead blocks & their outgoing edges (collapsing fake diamonds and bogus loops)
@@ -970,10 +1009,8 @@ pub fn purge_unreachable_blocks(cfg: &mut ControlFlowGraph) -> (Vec<PruningActio
 
     let dead_set: BTreeSet<Address> = dead_addrs.into_iter().collect();
     let edges_before = cfg.edges.len();
-    cfg.edges.retain(|edge| {
-        !dead_insn_addrs.contains(&edge.from)
-            && !edge.to.is_some_and(|to| dead_set.contains(&to))
-    });
+    cfg.edges
+        .retain(|edge| !dead_insn_addrs.contains(&edge.from) && !edge.to.is_some_and(|to| dead_set.contains(&to)));
     let purged_edges = edges_before.saturating_sub(cfg.edges.len());
 
     (actions, purged_edges)
@@ -1032,7 +1069,8 @@ pub fn eliminate_dead_branch(
 
     if is_taken {
         // Retain taken edge as unconditional; remove fallthrough
-        cfg.edges.retain(|e| !(e.from == branch_addr && e.kind == EdgeKind::FallThrough));
+        cfg.edges
+            .retain(|e| !(e.from == branch_addr && e.kind == EdgeKind::FallThrough));
         for e in &mut cfg.edges {
             if e.from == branch_addr && e.kind == EdgeKind::ConditionalTaken {
                 e.kind = EdgeKind::Unconditional;
@@ -1046,7 +1084,8 @@ pub fn eliminate_dead_branch(
         }
     } else {
         // Retain fallthrough; remove conditional taken edge
-        cfg.edges.retain(|e| !(e.from == branch_addr && e.kind == EdgeKind::ConditionalTaken));
+        cfg.edges
+            .retain(|e| !(e.from == branch_addr && e.kind == EdgeKind::ConditionalTaken));
 
         let block = cfg.blocks.get_mut(&block_addr)?;
         block.terminator = EdgeKind::FallThrough;
@@ -1076,11 +1115,12 @@ pub fn neutralize_junk(
 
     for (idx, insn) in block.instructions.iter().enumerate() {
         if insn.address == pred.address
-            && let Some(target) = static_target(insn) {
-                let len = target.wrapping_sub(insn.address) as usize;
-                junk_info = Some((idx, target, len.max(1)));
-                break;
-            }
+            && let Some(target) = static_target(insn)
+        {
+            let len = target.wrapping_sub(insn.address) as usize;
+            junk_info = Some((idx, target, len.max(1)));
+            break;
+        }
     }
 
     let (junk_idx, target, length) = junk_info?;
@@ -1198,10 +1238,7 @@ pub fn straighten_all_blocks(cfg: &mut ControlFlowGraph, max_merges: usize) -> V
 
         // Remap outgoing edges that left S so they point from P's new terminator
         for e in &mut cfg.edges {
-            if e.from == s_addr
-                || s_insn_addrs.contains(&e.from)
-                || (s_block.start..s_block.end).contains(&e.from)
-            {
+            if e.from == s_addr || s_insn_addrs.contains(&e.from) || (s_block.start..s_block.end).contains(&e.from) {
                 e.from = p_last_addr;
             }
         }
@@ -1293,10 +1330,7 @@ fn is_sub(form_id: u32) -> bool {
 }
 
 fn is_imul(form_id: u32) -> bool {
-    matches!(
-        form_id,
-        forms::IMUL_R64_R64 | forms::IMUL_R32_R32 | forms::IMUL_1OP_R64
-    )
+    matches!(form_id, forms::IMUL_R64_R64 | forms::IMUL_R32_R32 | forms::IMUL_1OP_R64)
 }
 
 fn is_or(form_id: u32) -> bool {
@@ -1377,11 +1411,7 @@ fn static_target(insn: &DecodedInstruction) -> Option<Address> {
     })
 }
 
-fn constant_node(
-    arena: &ShardedExprArena,
-    value: u128,
-    bits: u16,
-) -> Result<ExprId, angryier_expr::ExprArenaError> {
+fn constant_node(arena: &ShardedExprArena, value: u128, bits: u16) -> Result<ExprId, angryier_expr::ExprArenaError> {
     let len = usize::from(bits).div_ceil(8);
     let bytes = value.to_le_bytes()[..len].to_vec();
     arena.intern(ExprNode {
@@ -1392,11 +1422,7 @@ fn constant_node(
     })
 }
 
-fn symbol_node(
-    arena: &ShardedExprArena,
-    sym_id: u64,
-    bits: u16,
-) -> Result<ExprId, angryier_expr::ExprArenaError> {
+fn symbol_node(arena: &ShardedExprArena, sym_id: u64, bits: u16) -> Result<ExprId, angryier_expr::ExprArenaError> {
     arena.intern(ExprNode {
         sort: ExprSort::BitVec(bits),
         op: ExprOp::Symbol,
@@ -1471,4 +1497,3 @@ fn base_register(registers: &BTreeMap<RegisterId, SymbolicValue>, reg: RegisterI
         _ => reg,
     }
 }
-

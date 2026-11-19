@@ -1,0 +1,16 @@
+[package]
+name = "angryier-arch-arm64"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+description = "AArch64 (A64) architecture profile, register model, and decoder for Angryier (ANG-023)"
+
+[dependencies]
+angryier-types = { path = "../angryier-types" }
+angryier-arch = { path = "../angryier-arch" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

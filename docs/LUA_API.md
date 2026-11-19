@@ -382,3 +382,37 @@ local report = angry.run(TARGET, {
     steps = 5000,
 })
 ```
+
+## 9. Durable sustained exploration (opt-in, XED + script)
+
+`angry.sustained.start(binary_path, opts)` creates a local frontier ledger; `angry.sustained.resume(binary_path, opts)` opens an **existing** ledger using the same pinned specification. Both return a handle with `:report()`, `:advance([timeout_ms])`, and `:retry_deferred()`. Retry explicitly requeues deferred, unknown, or failed owned work; resume never silently marks it complete. These APIs do not change `angry.run`, `angry.open`, `angry.prepare`, or `img:run_batch`.
+
+```lua
+local opts = {
+    ledger = "./campaign.ledger", fidelity = "prove", symbolic = { rbx = 64 },
+    targets = { find = { "0x401000" }, avoid = { "0x401080" } }, -- observations, not pruning
+    artifacts = {
+        script = "angry.sustained/v1", policy = "fork-all/v1",
+        solver_policy = "z3-default",
+    },
+    limits = {
+        max_steps = 64, max_path_steps = 64, max_active_states = 1,
+        max_path_depth = 64, max_loop_visits = 64,
+        max_solver_millis = 10000, max_wall_millis = 30000,
+        max_ram_bytes = 67108864, max_disk_bytes = 1048576,
+        max_trace_bytes = 1048576,
+    },
+}
+local c = angry.sustained.start("./branch.elf", opts)
+local partial = c:advance() -- fork cap retains children as deferred work
+-- In a fresh process: c = angry.sustained.resume("./branch.elf", opts)
+-- c:retry_deferred(); local next_report = c:advance(10000)
+```
+
+**Local scheduling policies.** With `angry.sustained/v1` + `fork-all/v1`, reservation is FIFO; find and avoid targets are observations only. With `angry.sustained/v2` + `rank-targets/v1`, the scheduler ranks queued work by its last dynamic branch successor: exact find matches first, neutral successors next, avoid matches last. Ties use target PC, predicate digest and path identity. This does not predict reachability.
+
+For v2, the only policy option is `opts.policy = { exclude_avoid = true }` (default false). Exclusion requires an exact validated dynamic branch target, not the entry PC or an arbitrary visited block. A matching satisfiable child is recorded as `ExcludedByPolicy`, not solver-infeasible. Resume requires the same pinned targets and policy. These are local Lua calls, not worker controls for the separate [distributed Rust campaign binary](guides/distributed-campaigns.md).
+
+All ten positive limits and `fidelity = "prove"` are mandatory (other fidelity modes are rejected because this runtime executes under Prove); there are no implicit zero/default ceilings. Only a static ELF64 x86-64 executable at its image entry is supported. `symbolic` (64-bit GPRs) and `regs` are the only execution options; unsupported options (entry override, mutable files/streams, hooks, UC/fallthrough, dynamic loading, patches) fail rather than silently escaping the replay pin. The root state is checked on start/resume and again by each advance. The actual image bytes are hashed and checked before every advance; changing image, root inputs, artifacts, limits, fidelity, or ledger identity prevents resume. The semantic profile is the native-XED v1 marker and the backend is native Z3 (`z3`) with the sole accepted `solver_policy = "z3-default"`; this marker is a version label, **not** a cryptographic hash of the installed engine binary. `artifacts.script = "angry.sustained/v1"` identifies the built-in sustained runner; arbitrary analyst Lua script bytes are rejected, not executed. `artifacts.policy = "fork-all/v1"` identifies the actual fork-all exploration policy; custom policies are rejected. Optional `targets = { find = { address, ... }, avoid = { address, ... } }` accepts dense arrays of at most 4096 exact integer or hex-string PCs each. Under v1, targets are **observational only**: neither list excludes, prunes, prioritizes, or establishes feasibility; `avoid` does not stop execution. Duplicate addresses, sparse arrays, floating-point addresses and unknown fields are rejected. Addresses are sorted canonically before pinning, so changing the list changes campaign identity but reordering it does not. The manifest policy artifact hashes the marker, canonical `symbolic`/`regs` seed bytes, effective initial-state digest, and (when nonempty) the typed ordered target lists; empty/absent target lists retain the prior fork-all identity. The only supported solver marker is `solver_policy = "z3-default"`. Named `inputs`/`stubs` must be absent or empty: nonempty artifacts are rejected because they are not injected into execution or replay-validated. The manifest cannot attest to an enclosing analyst Lua script or a dynamically installed engine binary.
+
+`:report()` returns `campaign_digest` (hex SHA-256), `entry`/`entry_hex`, `queued`, `active`, `deferred`, `completed`, `infeasible`, `unknown`, `excluded`, `failed`, `retired_splits`, `complete_within_declared_bounds`, plus `steps` and `reason` from the last advance on **this** handle (zero/nil after resume). `:report()` also returns `evidence` and `targets` reconstructed from the latest accepted path for each identity in the durable ledger, including after `resume`. `:advance()` additionally returns bounded **cumulative accepted** ledger `evidence` with `schema_version`, `campaign_digest`, `bounds_digest`, `contract_epoch`, `fidelity`, `closure_attested` (owner attestation, not independent verification), `completion` and the existing terminal/excluded/infeasible/pending/failed path, frontier, edge, block, witness, debt and storage counters. `evidence.paths` is an array of actual path records: `path_id` and `provenance_digest` (64-character hex digests), `fidelity`, `disposition`, optional `pending_reason`, `blocks = {{pc, pc_hex, visit_index}, ...}`, `edges = {{from_pc, from_pc_hex, to_pc, to_pc_hex, basis, trace_digest? / analysis_digest? / predicate_digest? / query_digest? / result_digest?}, ...}`, `branches = {{pc, pc_hex, visit_index, predicate_digest, query_digest, result_digest?, tested_target?, tested_target_hex?, solver_status}, ...}`, `semantic_debt = {{pc, pc_hex, kind}, ...}`, and `witness_present`, `replay_verified`, `witness? = {input_digest, replay_status, trace_digest?}`. Branch predicates are represented by canonical digests, **not** condition source text. An absent witness is `nil`, with both flags false; no solved input is implied. `evidence.frontier = {{path_id, reason}, ...}` holds pending work identities, not terminal paths. Address fields always have exact `_hex` siblings. `:advance()` also returns `targets = {find = {{pc, pc_hex, observed}, ...}, avoid = {{pc, pc_hex, observed}, ...}}`, sorted by PC; `observed` reflects a retained accepted executed path in the durable ledger (including earlier advances), never a solver-infeasible child, and false does not establish infeasibility. Ledger counters and accepted path evidence are durable; `:report()` reads accepted paths and edges without advancing execution. Both methods expose `cumulative_evidence` and `cumulative_targets` from the ledger; `:advance().evidence` additionally includes the live frontier and closure attestation from the native runner. The read-only cumulative evidence contains accepted paths, not reconstructed pending frontier identities: use the ledger's `queued`/`active`/`deferred`/`unknown`/`failed` counters for pending ownership, and do not infer closure from an empty cumulative frontier. A mismatch, corrupt ledger, or unreplayable root raises an error; neither an unresolved child nor a solver UNKNOWN is reported as a completed path.

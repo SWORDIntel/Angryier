@@ -313,9 +313,9 @@ fn reg_seed_from_pair(k: &Value, v: &Value) -> Result<Option<(u32, u64)>, mlua::
 pub const POOL_PREALLOC_CAP: usize = 64;
 
 #[cfg(feature = "xed")]
-pub mod session;
-#[cfg(feature = "xed")]
 pub mod prepared;
+#[cfg(feature = "xed")]
+pub mod session;
 #[cfg(feature = "xed")]
 pub mod state;
 pub mod utils;
@@ -346,6 +346,19 @@ pub fn register(lua: &Lua) -> mlua::Result<()> {
             prepared::PreparedImage::load(&path, opts.as_ref())
         })?,
     )?;
+    #[cfg(feature = "xed")]
+    {
+        let sustained = lua.create_table()?;
+        sustained.set(
+            "start",
+            lua.create_function(|_, (path, opts): (String, Table)| prepared::LuaSustained::open(path, opts, false))?,
+        )?;
+        sustained.set(
+            "resume",
+            lua.create_function(|_, (path, opts): (String, Table)| prepared::LuaSustained::open(path, opts, true))?,
+        )?;
+        lib.set("sustained", sustained)?;
+    }
     lib.set("version", lua.create_function(|_, ()| Ok(env!("CARGO_PKG_VERSION")))?)?;
     lua.globals().set("angry", lib)?;
     Ok(())
@@ -382,9 +395,7 @@ pub(crate) fn prep_process_for_session<D: crate::Decoder>(
     bytes: &[u8],
 ) -> mlua::Result<crate::Process> {
     let is_pe = bytes.len() > 1 && bytes[0] == b'M' && bytes[1] == b'Z';
-    let use_dynamic = opts
-        .and_then(|o| o.get::<bool>("dynamic").ok())
-        .unwrap_or(false);
+    let use_dynamic = opts.and_then(|o| o.get::<bool>("dynamic").ok()).unwrap_or(false);
     let process = if is_pe {
         runtime
             .load_pe_driver(bytes)
@@ -403,11 +414,7 @@ pub(crate) fn prep_process_for_session<D: crate::Decoder>(
         // compiler-runtime `.so` reachable only through a build prefix).
         let lib_dirs: Vec<String> = opts
             .and_then(|o| o.get::<Table>("lib_dirs").ok())
-            .map(|t| {
-                t.sequence_values::<String>()
-                    .filter_map(|v| v.ok())
-                    .collect()
-            })
+            .map(|t| t.sequence_values::<String>().filter_map(|v| v.ok()).collect())
             .unwrap_or_default();
         let lib_dir_refs: Vec<&str> = lib_dirs.iter().map(String::as_str).collect();
         runtime
@@ -430,10 +437,7 @@ pub(crate) fn prep_process_for_session<D: crate::Decoder>(
 /// `LuaSession:reset`, where the options re-apply to a fresh
 /// copy-on-write clone of the session's pristine template (milliseconds,
 /// no image re-parse).
-pub(crate) fn apply_process_opts(
-    mut process: crate::Process,
-    opts: &Table,
-) -> mlua::Result<crate::Process> {
+pub(crate) fn apply_process_opts(mut process: crate::Process, opts: &Table) -> mlua::Result<crate::Process> {
     {
         if opts.get::<bool>("zero_low_pages").unwrap_or(false) {
             let region = angryier_memory::MemoryRegion {
@@ -470,11 +474,7 @@ pub(crate) fn apply_process_opts(
             let mut target = requested;
             {
                 let regions = process.state.memory.regions();
-                let executable = |addr: u64| {
-                    regions
-                        .iter()
-                        .any(|region| region.executable && region.contains(addr))
-                };
+                let executable = |addr: u64| regions.iter().any(|region| region.executable && region.contains(addr));
                 if !executable(requested) {
                     let slid = requested.wrapping_add(crate::DYNAMIC_MAIN_BASE);
                     if executable(slid) {
@@ -492,15 +492,9 @@ pub(crate) fn apply_process_opts(
             // (IA-32) `ret` pops 4 bytes, PE32+ pops 8.
             let is_pe32 = process.target_profile == angryier_types::TargetProfileId(2);
             let (sentinel_addr, sentinel_bytes) = if is_pe32 {
-                (
-                    rsp.wrapping_sub(4),
-                    crate::PE32_EXIT_HOOK.to_le_bytes().to_vec(),
-                )
+                (rsp.wrapping_sub(4), crate::PE32_EXIT_HOOK.to_le_bytes().to_vec())
             } else {
-                (
-                    rsp.wrapping_sub(8),
-                    crate::EXIT_HOOK.to_le_bytes().to_vec(),
-                )
+                (rsp.wrapping_sub(8), crate::EXIT_HOOK.to_le_bytes().to_vec())
             };
             let hook = if is_pe32 {
                 crate::PE32_EXIT_HOOK
@@ -513,10 +507,7 @@ pub(crate) fn apply_process_opts(
                 .load_concrete(sentinel_addr, &sentinel_bytes)
                 .map_err(|e| mlua::Error::external(format!("entry frame: {e:?}")))?;
             process
-                .write_register(
-                    crate::register_id::GPR_BASE + 4,
-                    sentinel_addr,
-                )
+                .write_register(crate::register_id::GPR_BASE + 4, sentinel_addr)
                 .map_err(|e| mlua::Error::external(format!("entry rsp set: {e:?}")))?;
             process.hook_simproc(hook, "exit");
         }
@@ -675,7 +666,7 @@ pub(crate) fn campaign_execute(campaign: &mut Campaign<'_>, plan: &CampaignPlan)
     } else {
         Some(
             angryier_solver_z3::Z3Backend::native_ffi(
-                campaign.arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>,
+                campaign.arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>
             )
             .map_err(|e| format!("z3: {e:?}")),
         )
@@ -749,7 +740,7 @@ pub(crate) fn campaign_report(
         None
     } else {
         angryier_solver_z3::Z3Backend::native_ffi(
-            campaign.arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>,
+            campaign.arena.clone() as std::sync::Arc<dyn angryier_expr::ExprReader>
         )
         .ok()
     };

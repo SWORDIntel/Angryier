@@ -2,6 +2,10 @@
 
 Cross-project delivery order for ISANITY, VEXEL, METHRA, radare3, Angryier, QIHSE, and KEYSTONE on the rebuilt KP14-SUITE / VM 9211: [unified roadmap](https://github.com/SWORDIntel/METHRA/blob/main/docs/VM9211_CORE_ROADMAP.md). Shared instruction identities and semantics: [ISANITY](https://github.com/SWORDIntel/ISANITY). This file remains the source of truth for Angryier-specific implementation status.
 
+**Sustained exploration.** The [local Lua API (§9)](LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script) resumes work from a pinned ledger. The [distributed campaign guide](guides/distributed-campaigns.md) covers the separate loopback coordinator and its WAL. Reports describe the configured frontier and budgets, not all paths in the binary. Raw Advisor GUI PE application paths remain unverified.
+
+**ARM64.** Synthetic concrete and symbolic runtime tests cover a subset of A64 instructions. The static Titan decode census does not test runtime semantics or validate CLI image loading. See the [ARM64 phase tracker](../ROADMAP.md#sustained-exploration-and-arm64-status) for the scope and evidence.
+
 **Cross-project pin status (2026-10-11):** Conditional-write/read source-access metadata is published as revision `0ef740bd86043c33b64365ea803f677b30475217` on `codex/conditional-xed-access`, not on `main`. METHRA's direct Angryier dependency pins target that revision and pass its local verification, but the METHRA pin edits are still uncommitted. This is a shared metadata/ABI prerequisite, not evidence that Angryier has consumed ISANITY's full catalogue, completed instruction semantics, or passed POPKORN parity.
 
 **Status refresh: 2026-10-13.** POPKORN parity features delivered (`driver_ioctl` x64/x86 kernel layout seeding and verdict taxonomy), dual-mode symbolic/concolic execution validated, trace deduplication and simproc interception fixed in `angryier-runtime`. Full Angryier test suite (`api_stability`, `lua_api`, `real_binary`, `pe_driver`, `loop_summaries`) passes 100%.

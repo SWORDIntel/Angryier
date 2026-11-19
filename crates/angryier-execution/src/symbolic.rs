@@ -179,7 +179,20 @@ fn is_vector_debt_primitive(op: IrPrimitive) -> bool {
 /// are never emitted.
 fn is_float_debt_primitive(op: IrPrimitive) -> bool {
     use IrPrimitive as P;
-    matches!(op, P::FAdd | P::FSub | P::FMul | P::FDiv | P::FCompareFlags)
+    matches!(
+        op,
+        P::FAdd
+            | P::FSub
+            | P::FMul
+            | P::FDiv
+            | P::FSqrt
+            | P::FNeg
+            | P::FAbs
+            | P::FCompareFlags
+            | P::FToIntSigned
+            | P::FToIntUnsigned
+            | P::FFromIntSigned
+    )
 }
 
 /// Width of a scalar float IR type, for float-primitive result symbols.
@@ -223,6 +236,18 @@ fn exact_float_concolic(op: IrPrimitive, ty: IrType, inputs: &[(ExprId, Option<u
         .collect();
     let operands = raws?;
     match op {
+        IrPrimitive::FFromIntSigned => {
+            let [(_, _, source_ty)] = inputs else { return None };
+            crate::interpreter::signed_int_to_float_bits(*source_ty, ty, *operands.first()?)
+        }
+        IrPrimitive::FToIntSigned | IrPrimitive::FToIntUnsigned => {
+            let [(_, _, source_ty)] = inputs else { return None };
+            if !matches!(source_ty, IrType::Float32 | IrType::Float64) {
+                return None;
+            }
+            let input = decode_float(*source_ty, *operands.first()?)?;
+            crate::interpreter::float_to_int_bits(op, ty, input)
+        }
         IrPrimitive::FAdd | IrPrimitive::FSub | IrPrimitive::FMul | IrPrimitive::FDiv => {
             let left_raw = *operands.first()?;
             let right_raw = *operands.get(1)?;
@@ -236,6 +261,21 @@ fn exact_float_concolic(op: IrPrimitive, ty: IrType, inputs: &[(ExprId, Option<u
                 _ => unreachable!(),
             };
             encode_float(ty, value)
+        }
+        IrPrimitive::FSqrt => {
+            let raw = *operands.first()?;
+            let value = decode_float(ty, raw)?;
+            encode_float(ty, value.sqrt())
+        }
+        IrPrimitive::FNeg => {
+            let raw = *operands.first()?;
+            let value = decode_float(ty, raw)?;
+            encode_float(ty, -value)
+        }
+        IrPrimitive::FAbs => {
+            let raw = *operands.first()?;
+            let value = decode_float(ty, raw)?;
+            encode_float(ty, value.abs())
         }
         IrPrimitive::FCompareFlags => {
             let left_raw = *operands.first()?;
@@ -926,7 +966,25 @@ impl<'a> SymbolicEvaluator<'a> {
         ty: IrType,
         inputs: &[(ExprId, IrType)],
     ) -> Result<(ExprId, IrType), SymbolicEvalError> {
-        if let Some(exact) = self.exact_float_result(op, ty, inputs)? {
+        if matches!(op, IrPrimitive::FToIntSigned | IrPrimitive::FToIntUnsigned)
+            && (!matches!(ty, IrType::Bits(32 | 64)) || !matches!(inputs, [(_, IrType::Float32 | IrType::Float64)]))
+        {
+            return Err(SymbolicEvalError::UnsupportedOperation(format!(
+                "{op:?} requires one Float32/Float64 input and a Bits(32/64) result"
+            )));
+        }
+        if op == IrPrimitive::FFromIntSigned
+            && (!matches!(ty, IrType::Float32 | IrType::Float64) || !matches!(inputs, [(_, IrType::Bits(32 | 64))]))
+        {
+            return Err(SymbolicEvalError::UnsupportedOperation(
+                "FFromIntSigned requires one Bits(32/64) input and a Float32/Float64 result".into(),
+            ));
+        }
+        let conversion_is_symbolic = matches!(
+            op,
+            IrPrimitive::FToIntSigned | IrPrimitive::FToIntUnsigned | IrPrimitive::FFromIntSigned
+        ) && constant_value(self.arena, inputs[0].0).is_err();
+        if !conversion_is_symbolic && let Some(exact) = self.exact_float_result(op, ty, inputs)? {
             return Ok((exact, ty));
         }
         let width = float_width(ty)
@@ -960,6 +1018,23 @@ impl<'a> SymbolicEvaluator<'a> {
             return Ok(None);
         };
         let result: Option<u64> = match op {
+            IrPrimitive::FFromIntSigned => {
+                let Some((_, source_ty)) = inputs.first() else {
+                    return Ok(None);
+                };
+                operands
+                    .first()
+                    .and_then(|raw| crate::interpreter::signed_int_to_float_bits(*source_ty, ty, *raw))
+            }
+            IrPrimitive::FToIntSigned | IrPrimitive::FToIntUnsigned => {
+                let Some((_, source_ty)) = inputs.first() else {
+                    return Ok(None);
+                };
+                let Some(input) = operands.first().and_then(|raw| decode_float(*source_ty, *raw)) else {
+                    return Ok(None);
+                };
+                crate::interpreter::float_to_int_bits(op, ty, input)
+            }
             IrPrimitive::FAdd | IrPrimitive::FSub | IrPrimitive::FMul | IrPrimitive::FDiv => {
                 let (Some(left_raw), Some(right_raw)) = (operands.first().copied(), operands.get(1).copied()) else {
                     return Ok(None);
@@ -2719,13 +2794,41 @@ impl<'a> ConcolicEvaluator<'a> {
         // the concrete interpreter performs — otherwise a fresh
         // under-constrained symbol with no concrete tag.
         if is_float_debt_primitive(op) {
-            if let Some(value) = exact_float_concolic(op, ty, inputs) {
+            if matches!(op, IrPrimitive::FToIntSigned | IrPrimitive::FToIntUnsigned)
+                && (!matches!(ty, IrType::Bits(32 | 64))
+                    || !matches!(inputs, [(_, _, IrType::Float32 | IrType::Float64)]))
+            {
+                return Err(SymbolicEvalError::UnsupportedOperation(format!(
+                    "{op:?} requires one Float32/Float64 input and a Bits(32/64) result"
+                )));
+            }
+            if op == IrPrimitive::FFromIntSigned
+                && (!matches!(ty, IrType::Float32 | IrType::Float64)
+                    || !matches!(inputs, [(_, _, IrType::Bits(32 | 64))]))
+            {
+                return Err(SymbolicEvalError::UnsupportedOperation(
+                    "FFromIntSigned requires one Bits(32/64) input and a Float32/Float64 result".into(),
+                ));
+            }
+            // A concrete seed on a symbolic input is not a proof that the
+            // conversion is constant. Keep such conversions visible as debt.
+            let conversion_is_symbolic = matches!(
+                op,
+                IrPrimitive::FToIntSigned | IrPrimitive::FToIntUnsigned | IrPrimitive::FFromIntSigned
+            ) && constant_value(self.arena, inputs[0].0).is_err();
+            if !conversion_is_symbolic && let Some(value) = exact_float_concolic(op, ty, inputs) {
                 let byte_width = usize::from(output_width).div_ceil(8);
                 let expression = self.constant(ty, &value.to_le_bytes()[..byte_width])?;
                 return Ok((expression, Some(u128::from(value))));
             }
             let width = float_width(ty).unwrap_or(output_width);
             let expression = self.fresh_symbol(width)?;
+            if matches!(
+                op,
+                IrPrimitive::FToIntSigned | IrPrimitive::FToIntUnsigned | IrPrimitive::FFromIntSigned
+            ) {
+                self.record_debt(op, ty);
+            }
             return Ok((expression, None));
         }
 
@@ -5473,6 +5576,212 @@ mod tests {
             assert_eq!(folded, *expected, "compare {left} vs {right}");
             // No debt: the compare was exact.
             assert_eq!(evaluator.debt_total(), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn signed_integer_to_float_folds_constants_but_not_seeded_symbols() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        for bits in [32, 64] {
+            let cases = if bits == 32 {
+                vec![
+                    (0u64, 0u64, 0u64),
+                    (0xFFFF_FFFF, 0xBF80_0000, 0xBFF0_0000_0000_0000),
+                    (16_777_217, 0x4B80_0000, 0x4170_0000_1000_0000),
+                ]
+            } else {
+                vec![
+                    (0, 0, 0),
+                    (u64::MAX, 0xBF80_0000, 0xBFF0_0000_0000_0000),
+                    (0x8000_0000_0000_0000, 0xDF00_0000, 0xC3E0_0000_0000_0000),
+                    (0x4000_0040_0000_0001, 0x5E80_0001, 0x43D0_0000_1000_0000),
+                ]
+            };
+            for (raw, single, double) in cases {
+                for (ty, expected) in [(IrType::Float32, single), (IrType::Float64, double)] {
+                    let mut symbolic = SymbolicEvaluator::new(&arena);
+                    let input = symbolic.constant(IrType::Bits(bits), &raw.to_le_bytes()[..usize::from(bits / 8)])?;
+                    let (result, actual_ty) =
+                        symbolic.primitive(IrPrimitive::FFromIntSigned, ty, &[(input, IrType::Bits(bits))])?;
+                    assert_eq!(actual_ty, ty);
+                    assert_eq!(constant_value(&arena, result)?, expected);
+                    assert_eq!(symbolic.debt_total(), 0);
+                    let mut concolic = ConcolicEvaluator::new(&arena);
+                    let (result, concrete) = concolic.primitive_concolic(
+                        IrPrimitive::FFromIntSigned,
+                        ty,
+                        &[(input, Some(u128::from(raw)), IrType::Bits(bits))],
+                    )?;
+                    assert_eq!(constant_value(&arena, result)?, expected);
+                    assert_eq!(concrete, Some(u128::from(expected)));
+                    assert_eq!(concolic.debt_total(), 0);
+                }
+            }
+            for ty in [IrType::Float32, IrType::Float64] {
+                let mut symbolic = SymbolicEvaluator::new(&arena);
+                let input = symbolic.fresh_symbol(bits)?;
+                symbolic.expr_concrete.insert(input, 1);
+                let (result, _) =
+                    symbolic.primitive(IrPrimitive::FFromIntSigned, ty, &[(input, IrType::Bits(bits))])?;
+                assert!(constant_value(&arena, result).is_err());
+                assert_eq!(symbolic.debt_total(), 1);
+                assert_eq!(symbolic.debt_sites()[0].op, IrPrimitive::FFromIntSigned);
+                for seed in [None, Some(1)] {
+                    let mut concolic = ConcolicEvaluator::new(&arena);
+                    let (result, concrete) = concolic.primitive_concolic(
+                        IrPrimitive::FFromIntSigned,
+                        ty,
+                        &[(input, seed, IrType::Bits(bits))],
+                    )?;
+                    assert!(constant_value(&arena, result).is_err());
+                    assert_eq!(concrete, None);
+                    assert_eq!(concolic.debt_total(), 1);
+                    assert_eq!(concolic.debt_sites()[0].op, IrPrimitive::FFromIntSigned);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn signed_integer_to_float_symbolic_paths_reject_invalid_signatures() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        for (ty, source_ty, arity) in [
+            (IrType::Float32, IrType::Bits(16), 1),
+            (IrType::Bits(32), IrType::Bits(64), 1),
+            (IrType::Float32, IrType::Float32, 1),
+            (IrType::Float64, IrType::Bits(64), 0),
+            (IrType::Float32, IrType::Bits(32), 2),
+        ] {
+            let mut symbolic = SymbolicEvaluator::new(&arena);
+            let input = symbolic.fresh_symbol(bit_width(source_ty)?)?;
+            assert!(
+                symbolic
+                    .primitive(IrPrimitive::FFromIntSigned, ty, &vec![(input, source_ty); arity])
+                    .is_err()
+            );
+            let mut concolic = ConcolicEvaluator::new(&arena);
+            assert!(
+                concolic
+                    .primitive_concolic(
+                        IrPrimitive::FFromIntSigned,
+                        ty,
+                        &vec![(input, Some(1), source_ty); arity]
+                    )
+                    .is_err()
+            );
+            assert_eq!(symbolic.debt_total(), 0);
+            assert_eq!(concolic.debt_total(), 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn float_to_integer_constant_folding_matches_concrete_widths() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        for source_ty in [IrType::Float32, IrType::Float64] {
+            for bits in [32, 64] {
+                let signed_min = 1u64 << (bits - 1);
+                let signed_max = signed_min - 1;
+                let unsigned_max = if bits == 32 { u32::MAX as u64 } else { u64::MAX };
+                for (input, signed, unsigned) in [
+                    (3.75f64, 3, 3),
+                    (-3.75, mask64(bits) - 2, 0),
+                    (f64::NAN, 0, 0),
+                    (f64::INFINITY, signed_max, unsigned_max),
+                    (f64::NEG_INFINITY, signed_min, 0),
+                    (18446744073709551616.0, signed_max, unsigned_max),
+                    (
+                        4294967296.0,
+                        if bits == 32 { signed_max } else { 4294967296 },
+                        if bits == 32 { unsigned_max } else { 4294967296 },
+                    ),
+                ] {
+                    let raw = if source_ty == IrType::Float32 {
+                        u64::from((input as f32).to_bits())
+                    } else {
+                        input.to_bits()
+                    };
+                    let byte_width = if source_ty == IrType::Float32 { 4 } else { 8 };
+                    for (op, expected) in [
+                        (IrPrimitive::FToIntSigned, signed),
+                        (IrPrimitive::FToIntUnsigned, unsigned),
+                    ] {
+                        let mut symbolic = SymbolicEvaluator::new(&arena);
+                        let input = symbolic.constant(source_ty, &raw.to_le_bytes()[..byte_width])?;
+                        let (result, result_ty) = symbolic.primitive(op, IrType::Bits(bits), &[(input, source_ty)])?;
+                        assert_eq!(result_ty, IrType::Bits(bits));
+                        assert_eq!(constant_value(&arena, result)?, expected);
+                        assert_eq!(symbolic.debt_total(), 0);
+                        let mut concolic = ConcolicEvaluator::new(&arena);
+                        let (result, concrete) = concolic.primitive_concolic(
+                            op,
+                            IrType::Bits(bits),
+                            &[(input, Some(u128::from(raw)), source_ty)],
+                        )?;
+                        assert_eq!(constant_value(&arena, result)?, expected);
+                        assert_eq!(concrete, Some(u128::from(expected)));
+                        assert_eq!(concolic.debt_total(), 0);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn float_to_integer_symbolic_operands_record_debt_in_both_evaluators() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        for op in [IrPrimitive::FToIntSigned, IrPrimitive::FToIntUnsigned] {
+            for source_ty in [IrType::Float32, IrType::Float64] {
+                for bits in [32, 64] {
+                    let mut symbolic = SymbolicEvaluator::new(&arena);
+                    let input = symbolic.fresh_symbol(bit_width(source_ty)?)?;
+                    // A known seed must not erase the symbolic dependency.
+                    symbolic.expr_concrete.insert(input, 0);
+                    let (result, _) = symbolic.primitive(op, IrType::Bits(bits), &[(input, source_ty)])?;
+                    assert!(constant_value(&arena, result).is_err());
+                    assert_eq!(symbolic.debt_total(), 1);
+                    assert_eq!(symbolic.debt_sites()[0].op, op);
+                    for seed in [None, Some(0)] {
+                        let mut concolic = ConcolicEvaluator::new(&arena);
+                        let (result, concrete) =
+                            concolic.primitive_concolic(op, IrType::Bits(bits), &[(input, seed, source_ty)])?;
+                        assert!(constant_value(&arena, result).is_err());
+                        assert_eq!(concrete, None);
+                        assert_eq!(concolic.debt_total(), 1);
+                        assert_eq!(concolic.debt_sites()[0].op, op);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn float_to_integer_symbolic_paths_reject_invalid_signatures() -> Result<(), SymbolicEvalError> {
+        let arena = arena();
+        for op in [IrPrimitive::FToIntSigned, IrPrimitive::FToIntUnsigned] {
+            for (ty, source_ty, arity) in [
+                (IrType::Bits(16), IrType::Float64, 1),
+                (IrType::Float32, IrType::Float64, 1),
+                (IrType::Bits(32), IrType::Bits(64), 1),
+                (IrType::Bits(32), IrType::Float64, 0),
+                (IrType::Bits(32), IrType::Float64, 2),
+            ] {
+                let mut symbolic = SymbolicEvaluator::new(&arena);
+                let input = symbolic.fresh_symbol(bit_width(source_ty)?)?;
+                assert!(symbolic.primitive(op, ty, &vec![(input, source_ty); arity]).is_err());
+                let mut concolic = ConcolicEvaluator::new(&arena);
+                assert!(
+                    concolic
+                        .primitive_concolic(op, ty, &vec![(input, Some(0), source_ty); arity])
+                        .is_err()
+                );
+                assert_eq!(symbolic.debt_total(), 0);
+                assert_eq!(concolic.debt_total(), 0);
+            }
         }
         Ok(())
     }

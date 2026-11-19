@@ -1943,17 +1943,29 @@ angryier_ai_summary(r.steps or 0, table.concat(ai_report, "\n"))"#,
         })
     }
 
+    fn lua_arch_error(config: &RunConfig) -> Option<&'static str> {
+        (config.arch.as_deref() == Some("arm64")).then_some(
+            "the legacy Lua execution path supports x86-64 only; ANG-090 has no A64 image loader for `angryier run`",
+        )
+    }
+
     pub fn execute(config: &RunConfig) -> i32 {
         println!("{}", run_plan_output(config));
 
-        // Static handoff mode: direct Rust execution driven by METHRA static targets.
+        // Static handoff mode owns its architecture-specific diagnostics.
         if let Some(handoff_path) = &config.handoff {
             return execute_handoff_mode(config, handoff_path);
         }
 
-        // Driver mode: direct Rust execution with kernel models, no Lua.
+        // Driver mode owns its A64 backend/image-loader diagnostics.
         if config.driver {
             return execute_driver_mode(config);
+        }
+
+        if let Some(error) = lua_arch_error(config) {
+            eprintln!("[angryier][arch][error] --arch arm64 is unsupported for the legacy Lua path: {error}");
+            eprintln!("[angryier][arch][hint] omit --arch for the default x86-64 image path");
+            return 1;
         }
 
         println!("[angryier][init] initializing embedded Lua 5.4 scripting runtime");
@@ -2082,7 +2094,13 @@ angryier_ai_summary(r.steps or 0, table.concat(ai_report, "\n"))"#,
         let layout = match KernelLayout::for_arch(arch_str) {
             Some(l) => l,
             None => {
-                eprintln!("[angryier][handoff][error] unsupported architecture '{arch_str}'");
+                if arch_str.eq_ignore_ascii_case("arm64") {
+                    eprintln!(
+                        "[angryier][handoff][error] --arch arm64 selects the ARM64 execution backend, which has no Windows kernel-layout metadata; static-handoff driver verification requires a kernel-layout architecture (x64/x86)"
+                    );
+                } else {
+                    eprintln!("[angryier][handoff][error] unsupported architecture '{arch_str}'");
+                }
                 return 1;
             }
         };
@@ -2203,6 +2221,14 @@ angryier_ai_summary(r.steps or 0, table.concat(ai_report, "\n"))"#,
     fn execute_driver_mode(config: &RunConfig) -> i32 {
         use angryier_runtime::Runtime;
         use angryier_types::{SemanticVersion, TargetProfileId};
+
+        // `--arch arm64` selects the ARM64 execution backend (safe-Rust A64
+        // decoder + AArch64 semantic corpus) instead of the native-XED Intel64
+        // path. ANG-090 phase 1 wires the entry point here; concrete A64
+        // execution is exercised by the runtime integration test.
+        if config.arch.as_deref() == Some("arm64") {
+            return execute_arm64_backend(config);
+        }
 
         println!("[angryier][load] reading PE driver image: {}", config.path);
         let bytes = match std::fs::read(&config.path) {
@@ -2432,6 +2458,37 @@ angryier_ai_summary(r.steps or 0, table.concat(ai_report, "\n"))"#,
         0
     }
 
+    /// ANG-090 phase 1: the `--arch arm64` execution-backend entry point.
+    ///
+    /// Constructs the safe-Rust A64 decoder and the ARM64 runtime (AArch64
+    /// semantic corpus + canonical register widths) instead of the native-XED
+    /// Intel 64 path. Concrete A64 execution is exercised by the runtime
+    /// integration test (`crates/angryier-runtime/tests/arm64_concrete.rs`);
+    /// driver mode has no A64 image loader in this phase, so the CLI fails
+    /// closed rather than feeding an ARM64 runtime a PE image.
+    fn execute_arm64_backend(config: &RunConfig) -> i32 {
+        use angryier_arch_arm64::Arm64Decoder;
+        use angryier_runtime::Runtime;
+        use angryier_types::{SemanticVersion, TargetProfileId};
+
+        let target_profile = TargetProfileId(1);
+        let decoder = Arm64Decoder::with_profile_id(target_profile);
+        let runtime = Runtime::new_arm64(decoder, SemanticVersion(1), target_profile);
+
+        println!(
+            "[angryier][init] --arch arm64 selected the ARM64 execution backend (safe-Rust A64 decoder, semantic_version=1, target_profile={})",
+            runtime.target_profile.0
+        );
+        eprintln!(
+            "[angryier][arch][error] ANG-090 phase 1 has no A64 image loader for CLI driver mode; cannot load '{}' as an ARM64 image",
+            config.path
+        );
+        eprintln!(
+            "[angryier][arch][hint] concrete A64 execution is covered by `crates/angryier-runtime/tests/arm64_concrete.rs`; a CLI A64 loader lands in a later ANG-090 increment"
+        );
+        1
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -2539,6 +2596,18 @@ angryier_ai_summary(r.steps or 0, table.concat(ai_report, "\n"))"#,
                 ]))
                 .is_err()
             );
+        }
+
+        #[test]
+        fn rejects_arm64_for_non_driver_lua_execution() {
+            let parsed = parse(&args(&["image", "--arch", "arm64"]))
+                .expect("CLI syntax remains valid before mode-specific validation");
+            assert!(!parsed.driver);
+            assert!(parsed.handoff.is_none());
+            assert_eq!(execute(&parsed), 1);
+
+            let default = parse(&args(&["image"])).expect("default x86-64 invocation parses");
+            assert!(lua_arch_error(&default).is_none());
         }
 
         #[test]

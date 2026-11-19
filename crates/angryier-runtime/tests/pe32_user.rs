@@ -174,7 +174,12 @@ fn pe32_fs_scratch_accepts_writes() -> Result<(), Box<dyn std::error::Error>> {
         angryier_runtime::XedMachineMode::Legacy32,
     );
     let mut process = runtime.load_pe32_user(&pe32_image())?;
-    let bytes = [ByteValue::Concrete(0x11), ByteValue::Concrete(0x22), ByteValue::Concrete(0x33), ByteValue::Concrete(0x44)];
+    let bytes = [
+        ByteValue::Concrete(0x11),
+        ByteValue::Concrete(0x22),
+        ByteValue::Concrete(0x33),
+        ByteValue::Concrete(0x44),
+    ];
     process.state.memory = process
         .state
         .memory

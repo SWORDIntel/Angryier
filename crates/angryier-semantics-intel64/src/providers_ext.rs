@@ -12,10 +12,9 @@
 //! end-to-end through the full pipeline.
 
 use crate::providers::{
-    ShiftKind, add_flag_values, compose_rflags, const_stack, emit_memory_rotate_carry, stack_layout,
-    sub_flag_values, widen_to_u64, write_add_flags, write_add_flags_preserve_cf, write_logical_flags,
-    write_mul_flags, write_rotate_flags_width_count, write_shift_flags, write_sub_flags,
-    write_sub_flags_preserve_cf,
+    ShiftKind, add_flag_values, compose_rflags, const_stack, emit_memory_rotate_carry, stack_layout, sub_flag_values,
+    widen_to_u64, write_add_flags, write_add_flags_preserve_cf, write_logical_flags, write_mul_flags,
+    write_rotate_flags_width_count, write_shift_flags, write_sub_flags, write_sub_flags_preserve_cf,
 };
 use crate::{forms, rflags, rule_id};
 use angryier_arch::OperandKind;

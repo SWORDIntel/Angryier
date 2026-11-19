@@ -15,8 +15,8 @@ pub use block::{
 
 use angryier_arch::{AccessKind, DecodedInstruction};
 pub use angryier_arch::{
-    FarPointerOperand, FeatureId, ImmediateOperand, MemoryBase, MemoryIndex, MemoryOperand, OperandKind, RegisterId,
-    RegisterView, RegisterWriteBehavior, RelativeBranchOperand,
+    FarPointerOperand, FeatureId, ImmediateOperand, MemoryBase, MemoryIndex, MemoryIndexExtension, MemoryOperand,
+    OperandKind, RegisterId, RegisterView, RegisterWriteBehavior, RelativeBranchOperand,
 };
 use angryier_types::{
     Address, BlockId, CodeVersionGuard, FidelityProfile, ImageId, SemanticRuleId, SemanticVersion, TargetProfileId,
@@ -147,7 +147,13 @@ pub enum FloatingOp {
     Mul,
     Div,
     Sqrt,
+    Neg,
+    Abs,
     Compare,
+    /// Float -> signed integer (truncation toward zero).
+    ToIntSigned,
+    /// Float -> unsigned integer (truncation toward zero).
+    ToIntUnsigned,
     Convert,
     Round,
     Sin,
@@ -157,6 +163,9 @@ pub enum FloatingOp {
     Exp2,
     Log2,
     Scale,
+    /// Signed Bits(32/64) -> Float32/Float64, round to nearest, ties to even.
+    /// No floating-point control/status register effects.
+    FromIntSigned,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

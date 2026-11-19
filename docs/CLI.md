@@ -53,20 +53,34 @@ Commands:
 | `run ...` | See below; requires the `run` feature | 0/1 |
 | anything else | `error: unknown command '<cmd>'` on stderr | 1 |
 
-Note: `help` always lists `run`. In builds without the feature its line reads `Not in this build (rebuild with --features run)`; in feature builds it reads `Execute a binary symbolically`.
+The default `inspect` feature also lists `doctor`, `pe-address`, `pe-imports`, `dump-read`, and `capture-coverage`. `help` always lists `run`. In builds without the feature its line reads `Not in this build (rebuild with --features run)`; in feature builds it reads `Execute a binary symbolically`.
 
 ---
 
 ## `angryier run` — execute a binary symbolically
 
 ```
-usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver] [--no-ai-analysis] [--ai-min-steps N] [--ai-timeout-secs SECS] [--ai-model MODEL]...
+usage: angryier run <binary> [--script f.lua] [--symbolic REG] [--reg REG=VALUE] [--find ADDR] [--avoid ADDR] [--argv N] [--steps N] [--states N] [--timeout SECS] [--branch-timeout-ms N] [--solve] [--fork] [--dfs] [--dynamic] [--driver] [--no-ai-analysis] [--ai-min-steps N] [--ai-timeout-secs SECS] [--ai-model MODEL]... [--arch ARCH]
 note: --reg is repeatable; VALUE accepts decimal or 0x-prefixed hexadecimal
 note: --find/--avoid ADDR are repeatable hexadecimal addresses, 0x prefix optional
 note: --fork enables fork-aggressive symbolic exploration; --dfs prioritizes the newest/deepest state
 ```
 
 Loads an ELF64 or PE32+ image into the engine and runs it concretely/symbolically. The loader is chosen by magic bytes: ELF loads statically by default (`load_elf`), with `--dynamic` the dynamic-linking environment model is used (`load_elf_dynamic`), and an `MZ` image loads in **driver mode** (`load_pe_driver`: sections mapped, IAT resolved to import stubs, DriverEntry entry state — `dynamic` is ignored for PE).
+
+### ARM64 backend: runtime support, no CLI image loader
+
+The CLI has no ARM64 image loader. In legacy (non-`--driver`) mode, `--arch arm64` is rejected before the embedded Lua runtime starts; that path supports x86-64 images only. In PE driver mode, `angryier run <image> --driver --arch arm64` selects the safe-Rust A64 decoder and constructs `Runtime::new_arm64`, then exits 1 because driver mode cannot load an A64 image. Static handoff mode retains its own architecture-specific error because ARM64 has no Windows kernel-layout metadata. `--arch arm64` is not a general ELF loader switch, and the distributed campaign binary does not supply an ARM64 execution path.
+
+The Rust backend executes a subset of A64, not the whole ISA. Its integer semantics cover arithmetic and logical operations, NZCV flags, branches, addressing and loads/stores. The runtime tests use hand-assembled fixtures: `arm64_concrete` checks a counted loop and stack round-trip; `arm64_shifts` checks W/X variable shifts and rotates; `arm64_fp` and `arm64_simd` cover selected scalar FP arithmetic, conversions, conditional selection, vector arithmetic and lane duplication. `arm64_symbolic` checks that flag-dependent branches fork with distinct constraints; with `z3` it also checks solved path models. These tests do not establish application or OS compatibility.
+
+From the checkout, run the fixtures with:
+
+```sh
+cargo test -p angryier-runtime --features z3 --test arm64_concrete --test arm64_shifts --test arm64_fp --test arm64_simd --test arm64_symbolic
+```
+
+For persistent x86-64 campaigns, use the [local Lua API](LUA_API.md) or the separate [distributed coordinator and worker](guides/distributed-campaigns.md), not an `angryier run` subcommand.
 
 ### Flags
 

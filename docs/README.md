@@ -20,6 +20,12 @@
 |---|---|
 | [ROADMAP](ROADMAP.md) | Single source of truth: verified current state, architecture-as-built (42-crate map, dual-mode engine), phase plan, Go/No-Go gates, Production 1.0 checklist |
 
+### Sustained exploration and ARM64
+
+- [Local Lua API (§9)](LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script): start, resume, inspect, and advance a durable frontier.
+- [Distributed campaign operator guide](guides/distributed-campaigns.md): worker counts, progress reporting, and WAL recovery for bounded runs.
+- [ARM64 runtime status](../ROADMAP.md#sustained-exploration-and-arm64-status): tested execution subset versus static decode coverage.
+
 ### Architecture (design contracts; status superseded by ROADMAP)
 
 | Document | Description |

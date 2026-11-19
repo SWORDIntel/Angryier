@@ -5,8 +5,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use angryier_memory::{ByteValue, LayeredMemory};
 use crate::{PE_DRIVER_STUB_BASE, PE_DRIVER_STUB_SIZE};
+use angryier_memory::{ByteValue, LayeredMemory};
 use mlua::{Lua, RegistryKey, Table, UserData, UserDataMethods, Value};
 
 use super::prepared::XedRuntime;
@@ -493,10 +493,7 @@ impl UserData for LuaSession {
 /// freshly built session. Shared by `open_session` and
 /// [`rebuild_from_template`].
 #[cfg(feature = "xed")]
-fn apply_session_opts(
-    session: &mut super::prepared::XedSession<'static>,
-    opts: &Table,
-) -> mlua::Result<()> {
+fn apply_session_opts(session: &mut super::prepared::XedSession<'static>, opts: &Table) -> mlua::Result<()> {
     if let Ok(sym) = opts.get::<Table>("symbolic") {
         for pair in sym.pairs::<Value, Value>() {
             let (k, v) = pair?;
@@ -619,7 +616,9 @@ fn apply_session_opts(
             {
                 let mut list = Vec::new();
                 for (stub_addr, (dll, export)) in &session.states[0].process.pe_import_stubs {
-                    if export.eq_ignore_ascii_case(name.as_ref()) || format!("{dll}!{export}").eq_ignore_ascii_case(name.as_ref()) {
+                    if export.eq_ignore_ascii_case(name.as_ref())
+                        || format!("{dll}!{export}").eq_ignore_ascii_case(name.as_ref())
+                    {
                         list.push(*stub_addr);
                     }
                 }
@@ -745,10 +744,7 @@ pub fn open_session(path: &str, opts: Option<&Table>) -> mlua::Result<LuaSession
             angryier_arch_xed_ffi::XedMachineMode::Legacy32,
         )
     } else {
-        crate::Runtime::with_native_xed(
-            angryier_types::SemanticVersion(1),
-            angryier_types::TargetProfileId(1),
-        )
+        crate::Runtime::with_native_xed(angryier_types::SemanticVersion(1), angryier_types::TargetProfileId(1))
     }));
     let arena: &'static angryier_expr::ShardedExprArena = Box::leak(Box::new(angryier_expr::ShardedExprArena::new(
         angryier_types::ExpressionNormalizationVersion(1),

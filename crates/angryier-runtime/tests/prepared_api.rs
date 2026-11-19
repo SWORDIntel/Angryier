@@ -115,9 +115,7 @@ fn prepared_run_matches_angry_run_report() {
     );
     let out: mlua::Table = lua.load(&script).eval().expect("prepared parity eval");
 
-    let get = |key: &str| -> String {
-        out.get::<String>(key).unwrap_or_else(|_| panic!("missing {key}"))
-    };
+    let get = |key: &str| -> String { out.get::<String>(key).unwrap_or_else(|_| panic!("missing {key}")) };
     let get_n = |key: &str| -> u64 { out.get::<u64>(key).unwrap_or_else(|_| panic!("missing {key}")) };
     let get_b = |key: &str| -> bool { out.get::<bool>(key).unwrap_or_else(|_| panic!("missing {key}")) };
 
@@ -156,7 +154,14 @@ fn prepared_jobs_are_isolated_per_entry_and_regs() {
         "#
     );
     let (r1_pc, r2_pc, f1_pc, f2_pc, r1_trace, f1_trace, r2_trace, f2_trace): (
-        String, String, String, String, String, String, String, String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
     ) = lua.load(&script).eval().expect("prepared isolation eval");
 
     // Job A on the prepared image must equal a fresh one-shot job A...

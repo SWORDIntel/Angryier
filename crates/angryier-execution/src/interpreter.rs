@@ -861,6 +861,18 @@ fn evaluate_primitive<R, M>(
             let input = read_float(resolved[0])?;
             return Ok(write_float(ty, input.sqrt()));
         }
+        IrPrimitive::FNeg => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = read_float(resolved[0])?;
+            return Ok(write_float(ty, -input));
+        }
+        IrPrimitive::FAbs => {
+            require_arity(operation, &resolved, 1)?;
+            require_types(&resolved, ty)?;
+            let input = read_float(resolved[0])?;
+            return Ok(write_float(ty, input.abs()));
+        }
         IrPrimitive::FSin => {
             require_arity(operation, &resolved, 1)?;
             require_types(&resolved, ty)?;
@@ -910,6 +922,18 @@ fn evaluate_primitive<R, M>(
             require_arity(operation, &resolved, 1)?;
             let input = read_float(resolved[0])?;
             return Ok(write_float(ty, input));
+        }
+        IrPrimitive::FFromIntSigned => {
+            require_arity(operation, &resolved, 1)?;
+            let value = signed_int_to_float_bits(resolved[0].ty, ty, as_u128(resolved[0]) as u64)
+                .ok_or(ConcreteExecutionError::TypeMismatch)?;
+            return Ok(ConcreteValue::from_u128(ty, u128::from(value), output_bits));
+        }
+        IrPrimitive::FToIntSigned | IrPrimitive::FToIntUnsigned => {
+            require_arity(operation, &resolved, 1)?;
+            let input = read_float(resolved[0])?;
+            let value = float_to_int_bits(operation, ty, input).ok_or(ConcreteExecutionError::UnsupportedType(ty))?;
+            return Ok(ConcreteValue::from_u128(ty, u128::from(value), output_bits));
         }
         IrPrimitive::VecLaneAdd
         | IrPrimitive::VecLaneSub
@@ -2951,6 +2975,31 @@ fn read_float<R, M>(value: &ConcreteValue) -> Result<f64, ConcreteExecutionError
     }
 }
 
+/// Shared by concrete execution and constant folding. Rust float-to-int casts
+/// truncate and saturate (NaN -> zero); cast at the destination width, not
+/// through a wider integer whose low bits would wrap on narrowing.
+pub(crate) fn float_to_int_bits(op: IrPrimitive, ty: IrType, input: f64) -> Option<u64> {
+    match (op, ty) {
+        (IrPrimitive::FToIntSigned, IrType::Bits(32)) => Some(u64::from(input as i32 as u32)),
+        (IrPrimitive::FToIntSigned, IrType::Bits(64)) => Some(input as i64 as u64),
+        (IrPrimitive::FToIntUnsigned, IrType::Bits(32)) => Some(u64::from(input as u32)),
+        (IrPrimitive::FToIntUnsigned, IrType::Bits(64)) => Some(input as u64),
+        _ => None,
+    }
+}
+
+/// Cast directly to the destination format: i64 -> f64 -> f32 can round twice.
+/// Shared with symbolic/concolic constant folding; only default RNE is modeled.
+pub(crate) fn signed_int_to_float_bits(source: IrType, destination: IrType, raw: u64) -> Option<u64> {
+    match (source, destination) {
+        (IrType::Bits(32), IrType::Float32) => Some(u64::from((raw as u32 as i32 as f32).to_bits())),
+        (IrType::Bits(32), IrType::Float64) => Some((raw as u32 as i32 as f64).to_bits()),
+        (IrType::Bits(64), IrType::Float32) => Some(u64::from((raw as i64 as f32).to_bits())),
+        (IrType::Bits(64), IrType::Float64) => Some((raw as i64 as f64).to_bits()),
+        _ => None,
+    }
+}
+
 /// Writes an f64 into a ConcreteValue of the given float type.
 fn write_float(ty: IrType, value: f64) -> ConcreteValue {
     match ty {
@@ -3172,6 +3221,311 @@ mod tests {
             },
             instructions,
         })
+    }
+
+    #[test]
+    fn signed_integer_to_float_matches_integer_only_nearest_even_oracle() -> Result<(), TestError> {
+        fn oracle(value: i64, precision: u32, exponent_bits: u32) -> u64 {
+            if value == 0 {
+                return 0;
+            }
+            let magnitude = value.unsigned_abs();
+            let mut exponent = 63 - magnitude.leading_zeros();
+            let shift = exponent.saturating_sub(precision - 1);
+            let mut significand = magnitude >> shift;
+            if shift > 0 {
+                let remainder = magnitude & ((1u64 << shift) - 1);
+                let halfway = 1u64 << (shift - 1);
+                if remainder > halfway || (remainder == halfway && significand & 1 != 0) {
+                    significand += 1;
+                }
+                if significand == 1u64 << precision {
+                    significand >>= 1;
+                    exponent += 1;
+                }
+            } else {
+                significand <<= precision - 1 - exponent;
+            }
+            let fraction = significand & ((1u64 << (precision - 1)) - 1);
+            let biased = u64::from(exponent + ((1 << (exponent_bits - 1)) - 1));
+            (u64::from(value < 0) << (precision - 1 + exponent_bits)) | (biased << (precision - 1)) | fraction
+        }
+        let mut cases = vec![
+            0i64,
+            1,
+            -1,
+            i64::MIN,
+            i64::MAX,
+            i32::MIN as i64,
+            i32::MAX as i64,
+            16_777_217,
+            16_777_219,
+            9_007_199_254_740_993,
+            9_007_199_254_740_995,
+            0x4000_0040_0000_0001,
+            -0x4000_0040_0000_0001,
+        ];
+        let mut state = 0xA5A5_F00D_0123_4567u64;
+        for _ in 0..4096 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            cases.push(state as i64);
+        }
+        for bits in [32, 64] {
+            for value in &cases {
+                let signed = if bits == 32 { *value as i32 as i64 } else { *value };
+                for (ty, precision, exponent_bits) in [(IrType::Float32, 24, 8), (IrType::Float64, 53, 11)] {
+                    let input = ConcreteValue::from_u128(IrType::Bits(bits), *value as u64 as u128, bits);
+                    let actual = evaluate_primitive::<RegisterError, MemoryError>(
+                        IrPrimitive::FFromIntSigned,
+                        ty,
+                        &[IrValueId(0)],
+                        &[input],
+                    )?;
+                    assert_eq!(
+                        as_u128(&actual),
+                        u128::from(oracle(signed, precision, exponent_bits)),
+                        "{bits} {signed} {ty:?}"
+                    );
+                }
+            }
+        }
+        let value = 0x4000_0040_0000_0001i64;
+        assert_eq!(
+            signed_int_to_float_bits(IrType::Bits(64), IrType::Float32, value as u64),
+            Some(0x5E80_0001)
+        );
+        assert_ne!(
+            ((value as f64) as f32).to_bits(),
+            0x5E80_0001,
+            "the double-rounding witness must remain discriminating"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn signed_integer_to_float_rejects_invalid_signatures() -> Result<(), TestError> {
+        for (source, result) in [
+            (IrType::Bits(16), IrType::Float32),
+            (IrType::Float32, IrType::Float32),
+            (IrType::Bits(128), IrType::Float64),
+            (IrType::Bits(64), IrType::Bits(64)),
+        ] {
+            let input = ConcreteValue::from_u128(source, 1, scalar_bits::<RegisterError, MemoryError>(source)?);
+            assert!(
+                evaluate_primitive::<RegisterError, MemoryError>(
+                    IrPrimitive::FFromIntSigned,
+                    result,
+                    &[IrValueId(0)],
+                    &[input]
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            evaluate_primitive::<RegisterError, MemoryError>(IrPrimitive::FFromIntSigned, IrType::Float32, &[], &[])
+                .is_err()
+        );
+        let values = vec![ConcreteValue::from_u128(IrType::Bits(64), 1, 64); 2];
+        assert!(
+            evaluate_primitive::<RegisterError, MemoryError>(
+                IrPrimitive::FFromIntSigned,
+                IrType::Float32,
+                &[IrValueId(0), IrValueId(1)],
+                &values
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn float_to_integer_truncates_and_saturates_at_destination_width() -> Result<(), TestError> {
+        for source_ty in [IrType::Float32, IrType::Float64] {
+            for bits in [32, 64] {
+                let signed_max = if bits == 32 { i32::MAX as u64 } else { i64::MAX as u64 };
+                let signed_min = 1u64 << (bits - 1);
+                let unsigned_max = if bits == 32 { u32::MAX as u64 } else { u64::MAX };
+                for (input, signed, unsigned) in [
+                    (3.75, 3, 3),
+                    (
+                        -3.75,
+                        if bits == 32 {
+                            (-3i32) as u32 as u64
+                        } else {
+                            (-3i64) as u64
+                        },
+                        0,
+                    ),
+                    (0.0, 0, 0),
+                    (-0.0, 0, 0),
+                    (f64::from(f32::from_bits(1)), 0, 0),
+                    (-f64::from(f32::from_bits(1)), 0, 0),
+                    (f64::from_bits(1), 0, 0),
+                    (-f64::from_bits(1), 0, 0),
+                    (f64::NAN, 0, 0),
+                    (f64::INFINITY, signed_max, unsigned_max),
+                    (f64::NEG_INFINITY, signed_min, 0),
+                    (f64::MAX, signed_max, unsigned_max),
+                    (-f64::MAX, signed_min, 0),
+                ] {
+                    for (op, expected) in [
+                        (IrPrimitive::FToIntSigned, signed),
+                        (IrPrimitive::FToIntUnsigned, unsigned),
+                    ] {
+                        let source = write_float(source_ty, input);
+                        let actual = evaluate_primitive::<RegisterError, MemoryError>(
+                            op,
+                            IrType::Bits(bits),
+                            &[IrValueId(0)],
+                            &[source],
+                        )?;
+                        assert_eq!(
+                            as_u128(&actual),
+                            u128::from(expected),
+                            "{source_ty:?} {op:?} {bits} {input:?}"
+                        );
+                        assert_eq!(actual.bytes_le().len(), usize::from(bits / 8));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn float_to_integer_preserves_representable_boundary_neighbors() -> Result<(), TestError> {
+        for (source_ty, signed, bits, input, expected) in [
+            (IrType::Float64, true, 32, 2147483647.0, 0x7fff_ffffu64),
+            (IrType::Float64, true, 32, 2147483648.0f64.next_down(), 0x7fff_ffff),
+            (IrType::Float64, true, 32, 2147483648.0, 0x7fff_ffff),
+            (IrType::Float64, true, 32, (-2147483648.0f64).next_up(), 0x8000_0001),
+            (IrType::Float64, true, 32, -2147483648.0, 0x8000_0000),
+            (IrType::Float64, true, 32, (-2147483648.0f64).next_down(), 0x8000_0000),
+            (IrType::Float64, false, 32, 4294967295.0, 0xffff_ffff),
+            (IrType::Float64, false, 32, 4294967296.0f64.next_down(), 0xffff_ffff),
+            (IrType::Float64, false, 32, 4294967296.0, 0xffff_ffff),
+            (
+                IrType::Float64,
+                true,
+                64,
+                9223372036854775808.0f64.next_down(),
+                0x7fff_ffff_ffff_fc00,
+            ),
+            (IrType::Float64, true, 64, 9223372036854775808.0, 0x7fff_ffff_ffff_ffff),
+            (
+                IrType::Float64,
+                true,
+                64,
+                (-9223372036854775808.0f64).next_up(),
+                0x8000_0000_0000_0400,
+            ),
+            (IrType::Float64, true, 64, -9223372036854775808.0, 0x8000_0000_0000_0000),
+            (
+                IrType::Float64,
+                true,
+                64,
+                (-9223372036854775808.0f64).next_down(),
+                0x8000_0000_0000_0000,
+            ),
+            (
+                IrType::Float64,
+                false,
+                64,
+                18446744073709551616.0f64.next_down(),
+                0xffff_ffff_ffff_f800,
+            ),
+            (
+                IrType::Float64,
+                false,
+                64,
+                18446744073709551616.0,
+                0xffff_ffff_ffff_ffff,
+            ),
+            (
+                IrType::Float32,
+                true,
+                32,
+                f64::from(2147483648.0f32.next_down()),
+                0x7fff_ff80,
+            ),
+            (IrType::Float32, true, 32, 2147483648.0, 0x7fff_ffff),
+            (
+                IrType::Float32,
+                false,
+                32,
+                f64::from(4294967296.0f32.next_down()),
+                0xffff_ff00,
+            ),
+            (IrType::Float32, false, 32, 4294967296.0, 0xffff_ffff),
+            (
+                IrType::Float32,
+                true,
+                64,
+                f64::from(9223372036854775808.0f32.next_down()),
+                0x7fff_ff80_0000_0000,
+            ),
+            (IrType::Float32, true, 64, 9223372036854775808.0, 0x7fff_ffff_ffff_ffff),
+            (
+                IrType::Float32,
+                false,
+                64,
+                f64::from(18446744073709551616.0f32.next_down()),
+                0xffff_ff00_0000_0000,
+            ),
+            (
+                IrType::Float32,
+                false,
+                64,
+                18446744073709551616.0,
+                0xffff_ffff_ffff_ffff,
+            ),
+        ] {
+            let op = if signed {
+                IrPrimitive::FToIntSigned
+            } else {
+                IrPrimitive::FToIntUnsigned
+            };
+            let actual = evaluate_primitive::<RegisterError, MemoryError>(
+                op,
+                IrType::Bits(bits),
+                &[IrValueId(0)],
+                &[write_float(source_ty, input)],
+            )?;
+            assert_eq!(
+                as_u128(&actual),
+                u128::from(expected),
+                "{source_ty:?} {op:?} {bits} {input:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn float_to_integer_rejects_invalid_types_and_arity() {
+        for op in [IrPrimitive::FToIntSigned, IrPrimitive::FToIntUnsigned] {
+            let source = write_float(IrType::Float64, 1.0);
+            for ty in [IrType::Bits(16), IrType::Bits(128), IrType::Float32, IrType::Float64] {
+                assert!(
+                    evaluate_primitive::<RegisterError, MemoryError>(
+                        op,
+                        ty,
+                        &[IrValueId(0)],
+                        std::slice::from_ref(&source),
+                    )
+                    .is_err()
+                );
+            }
+            assert!(evaluate_primitive::<RegisterError, MemoryError>(op, IrType::Bits(32), &[], &[],).is_err());
+            assert!(
+                evaluate_primitive::<RegisterError, MemoryError>(
+                    op,
+                    IrType::Bits(32),
+                    &[IrValueId(0)],
+                    &[ConcreteValue::from_u128(IrType::Bits(64), 1, 64)],
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

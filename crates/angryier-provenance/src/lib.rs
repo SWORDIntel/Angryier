@@ -13,6 +13,7 @@
 //! to capture high-fidelity diagnostic snapshots.
 
 pub mod repetition;
+pub mod sustained;
 pub mod triggers;
 
 pub use repetition::*;

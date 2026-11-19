@@ -7,6 +7,7 @@ description = "Future multi-host serialization boundary"
 
 [dependencies]
 angryier-types = { path = "../angryier-types" }
+sha2 = "0.10"
 
 [lints]
 workspace = true

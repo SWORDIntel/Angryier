@@ -27,8 +27,8 @@ pub mod xrefs;
 
 pub type ControlFlowGraph = Cfg;
 pub use opaque::{
-    DetectedOpaquePredicate, OpaquePredicateDetector, OpaquePredicateKind, PruningAction,
-    PruningLimits, PruningReport, prune_opaque_predicates, purge_unreachable_blocks,
+    DetectedOpaquePredicate, OpaquePredicateDetector, OpaquePredicateKind, PruningAction, PruningLimits, PruningReport,
+    prune_opaque_predicates, purge_unreachable_blocks,
 };
 
 /// How control leaves a basic block.

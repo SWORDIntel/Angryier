@@ -1061,8 +1061,16 @@ fn parse_pe_imports(
     file_ranges: &[(u32, u32, u32)],
     is_pe32plus: bool,
 ) -> Result<Vec<PeImport>, LoaderError> {
-    let data_dirs_off = if is_pe32plus { PE32PLUS_DATA_DIRS } else { PE32_DATA_DIRS };
-    let num_rva_off = if is_pe32plus { PE32PLUS_NUM_RVA_AND_SIZES } else { PE32_NUM_RVA_AND_SIZES };
+    let data_dirs_off = if is_pe32plus {
+        PE32PLUS_DATA_DIRS
+    } else {
+        PE32_DATA_DIRS
+    };
+    let num_rva_off = if is_pe32plus {
+        PE32PLUS_NUM_RVA_AND_SIZES
+    } else {
+        PE32_NUM_RVA_AND_SIZES
+    };
     if opt_size < data_dirs_off {
         // Optional header too small to carry data directories: no imports.
         return Ok(Vec::new());
@@ -1122,11 +1130,19 @@ fn parse_pe_imports(
         // follow the same width split, both in the thunk array and in the
         // IAT the runtime patches later.
         let thunk_stride: u32 = if is_pe32plus { 8 } else { 4 };
-        let ordinal_flag: u64 = if is_pe32plus { PE_IMPORT_ORDINAL_FLAG } else { 0x8000_0000 };
+        let ordinal_flag: u64 = if is_pe32plus {
+            PE_IMPORT_ORDINAL_FLAG
+        } else {
+            0x8000_0000
+        };
         let mut index: u32 = 0;
         loop {
             let slot = thunk_rva
-                .checked_add(index.checked_mul(thunk_stride).ok_or(LoaderError::TruncatedImportTable)?)
+                .checked_add(
+                    index
+                        .checked_mul(thunk_stride)
+                        .ok_or(LoaderError::TruncatedImportTable)?,
+                )
                 .ok_or(LoaderError::TruncatedImportTable)?;
             let thunk_off = rva_to_file(slot).ok_or(LoaderError::TruncatedImportTable)?;
             let thunk = if is_pe32plus {
@@ -1138,7 +1154,11 @@ fn parse_pe_imports(
                 break; // End of the thunk array.
             }
             let iat_rva = first_thunk
-                .checked_add(index.checked_mul(thunk_stride).ok_or(LoaderError::TruncatedImportTable)?)
+                .checked_add(
+                    index
+                        .checked_mul(thunk_stride)
+                        .ok_or(LoaderError::TruncatedImportTable)?,
+                )
                 .ok_or(LoaderError::TruncatedImportTable)?;
             let kind = if thunk & ordinal_flag != 0 {
                 PeImportKind::Ordinal((thunk & 0xFFFF) as u16)
@@ -1188,8 +1208,16 @@ fn parse_pe_exports(
     file_ranges: &[(u32, u32, u32)],
     is_pe32plus: bool,
 ) -> Result<Vec<PeExport>, LoaderError> {
-    let data_dirs_off = if is_pe32plus { PE32PLUS_DATA_DIRS } else { PE32_DATA_DIRS };
-    let num_rva_off = if is_pe32plus { PE32PLUS_NUM_RVA_AND_SIZES } else { PE32_NUM_RVA_AND_SIZES };
+    let data_dirs_off = if is_pe32plus {
+        PE32PLUS_DATA_DIRS
+    } else {
+        PE32_DATA_DIRS
+    };
+    let num_rva_off = if is_pe32plus {
+        PE32PLUS_NUM_RVA_AND_SIZES
+    } else {
+        PE32_NUM_RVA_AND_SIZES
+    };
     if opt_size < data_dirs_off {
         // Optional header too small to carry data directories: no exports.
         return Ok(Vec::new());
@@ -2046,10 +2074,7 @@ mod pe32_tests {
         let imports = image.pe_imports().expect("import directory").to_vec();
         assert_eq!(imports.len(), 2);
         assert_eq!(imports[0].dll, "KERNEL32.dll");
-        assert_eq!(
-            imports[0].kind,
-            PeImportKind::Name("ExitProcess".to_string())
-        );
+        assert_eq!(imports[0].kind, PeImportKind::Name("ExitProcess".to_string()));
         assert_eq!(imports[1].kind, PeImportKind::Ordinal(7));
         // The IAT slot RVA must advance by the 4-byte IA-32 thunk stride.
         assert_eq!(imports[1].iat_rva - imports[0].iat_rva, 4);
