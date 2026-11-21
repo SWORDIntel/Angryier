@@ -1,5 +1,26 @@
 # Angryier — Consolidated Roadmap and Architecture-as-Built
 
+## ET_REL (Linux kernel module) support — proposed 2026-11-21
+
+Angryier today refuses `.ko` inputs twice: `crates/angryier-loader/src/lib.rs:665-667` (`e_type` must be ET_EXEC/ET_DYN) and `:703` (`e_phnum == 0` → `NoProgramHeaders`). Kernel modules are `ET_REL`: section headers only, no program headers, no entry point, and relocations against kernel symbols the image never defines. The byovd-harness runs of 2026-11-21 (40 Linux modules) showed the gap is the ceiling: angr loads these modules but returns `TIMEOUT`/`MEDIUM`-severity findings, and Angryier cannot run on the corpus at all.
+
+Two delivery options; the loader path is the durable one.
+
+**Option A — native loader path (recommended, ~2–3 days for loadability, 1–2 weeks for a useful model surface):**
+1. Accept `ET_REL`; require section headers instead of program headers; branch into a section-layout path without touching the ET_EXEC/ET_DYN path.
+2. Deterministic `SHF_ALLOC` `SHT_PROGBITS`/`SHT_NOBITS` placement with per-section alignment, overlap/overflow/bounds rejection (needed so harness RVAs map to runtime addresses).
+3. `SHT_REL`/`SHT_RELA` processing keyed by `sh_info`; the existing relocation walk (`lib.rs:416-484`) only handles `PT_DYNAMIC`/`DT_RELA`/`JMPREL`. Minimum x86-64 set: `R_X86_64_64`, `PC32`, `PLT32`, `32`, `32S`, `PC64`; decide GOT emulation for `GOTPCREL(X)`. Bad relocations must fail load, never yield a wrong address.
+4. Symbol resolution: defined symbols → section base + `st_value` (the `.symtab` parser at `lib.rs:514-560` already exists); undefined symbols → kernel model stubs; handle `STT_SECTION` and `SHN_COMMON` (→ `.bss`).
+5. Explicit campaign root (`Config::entry` exists; add `--root sym:<name>` or `base+rva`) since ET_REL has no `e_entry`; expose the section-base map.
+6. Kernel API models — the actual substance: `kmalloc`/`kzalloc`, `kfree`, `copy_from_user`/`copy_to_user`, `mutex_lock`/`unlock`, `refcount_inc`/`dec`, matching the semantics already defined in the harness (`ghidra_pipeline/src/ghidra_pipeline/kernel_api_models.py`). Without them every escalation ends `MODEL_LIMITED` — honest, but no better than angr.
+7. Tests: extend the synthetic ELF builder (`lib.rs:1515`) with ET_REL fixtures (bad relocs, overlapping sections, missing symtab); golden relocation checks against `objdump -r`; small real modules (`rc-pixelview-002t`, 32 KB); a fuzz pass over section/reloc bounds.
+
+**Option B — prelink shortcut (days, prove value first):** link each `.ko` with stub objects into an `ET_EXEC` at fixed addresses (`ld -T script`); Angryier loads it unmodified. No loader change, but it inherits the same modeling gap and adds a per-module link step. Use it to answer the gating question — does Z3-backed modeled `kfree`/`refcount` exploration actually close a finding these drivers present (e.g. `hid-picolcd` `VULN.POOL.DOUBLEFREE` @0x3abd, which angr leaves `TIMEOUT`) — before committing to Option A.
+
+Non-goals: module loading is not driver *execution*; `init_module`/device-model fidelity and `MODULE_STATE` lifecycle stay out of scope. Success criterion for either option: one harness `VULN.*` finding moved from `MEDIUM`/`TIMEOUT` to a witnessed `VULNERABLE` or a closed `INFEASIBLE`, with the ledger as evidence.
+
+---
+
 Cross-project delivery order for ISANITY, VEXEL, METHRA, radare3, Angryier, QIHSE, and KEYSTONE on the rebuilt KP14-SUITE / VM 9211: [unified roadmap](https://github.com/SWORDIntel/METHRA/blob/main/docs/VM9211_CORE_ROADMAP.md). Shared instruction identities and semantics: [ISANITY](https://github.com/SWORDIntel/ISANITY). This file remains the source of truth for Angryier-specific implementation status.
 
 **Sustained exploration.** The [local Lua API (§9)](LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script) resumes work from a pinned ledger. The [distributed campaign guide](guides/distributed-campaigns.md) covers the separate loopback coordinator and its WAL. Reports describe the configured frontier and budgets, not all paths in the binary. Raw Advisor GUI PE application paths remain unverified.
