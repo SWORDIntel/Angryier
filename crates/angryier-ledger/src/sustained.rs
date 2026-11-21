@@ -46,10 +46,15 @@ pub enum Error {
     StaleReservation,
     LimitExceeded,
     Poisoned,
+    /// Another process holds the ledger's exclusive writer lock.
+    Locked,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::Locked => write!(f, "ledger is locked by another process; one coordinator owns a ledger"),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 impl std::error::Error for Error {}
@@ -1058,7 +1063,11 @@ fn acquire_lock(path: &Path) -> Result<File, Error> {
         .create(true)
         .truncate(false)
         .open(lock_path)?;
-    lock.try_lock().map_err(|err| Error::Io(std::io::Error::other(err)))?;
+    lock.try_lock().map_err(|error| match error {
+        // A concurrent writer is an expected operator mistake, not a generic I/O fault.
+        std::fs::TryLockError::WouldBlock => Error::Locked,
+        std::fs::TryLockError::Error(inner) => Error::Io(inner),
+    })?;
     Ok(lock)
 }
 fn sync_parent(path: &Path) -> std::io::Result<()> {

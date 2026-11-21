@@ -45,7 +45,10 @@ pub enum SustainedError {
 }
 impl std::fmt::Display for SustainedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::Ledger(error) => write!(f, "{error}"),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 impl std::error::Error for SustainedError {}

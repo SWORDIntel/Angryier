@@ -189,8 +189,9 @@ fn reject_unsupported_version_malformed_peer_and_unauthorized_peer() -> TestResu
     unsupported[8..10].copy_from_slice(&(WIRE_VERSION + 1).to_be_bytes());
     assert_eq!(server.feed(&unsupported), Err(TransportError::UnsupportedVersion));
     let mut old = frame.clone();
-    // A version-1 frame carries neither the version-2 handshake nor its digest
-    // binding, so it must be rejected outright rather than interoperate.
+    // A version-2 frame comes from a handshake that put the sealed campaign
+    // digest on the wire in clear before any proof, so it must be rejected
+    // outright rather than interoperate.
     old[8..10].copy_from_slice(&(WIRE_VERSION - 1).to_be_bytes());
     assert_eq!(server.feed(&old), Err(TransportError::UnsupportedVersion));
     let mut unknown = frame.clone();
@@ -467,7 +468,7 @@ fn captured_handshake_proof_cannot_be_replayed() -> TestResult<()> {
         let mut challenge = [0; 32];
         stream.read_exact(&mut challenge)?;
         stream.write_all(&[7; 32])?;
-        // The peer campaign digest slot, then the client's proof, then a
+        // The peer's masked campaign digest slot, then the client's proof, then a
         // placeholder that is not a valid proof over the fresh challenge.
         stream.write_all(&[0; 32])?;
         let mut proof = [0; 32];
@@ -494,8 +495,9 @@ fn captured_handshake_proof_cannot_be_replayed() -> TestResult<()> {
     raw.read_exact(&mut fresh)?;
     raw.write_all(&challenge)?;
     raw.write_all(&proof)?;
-    // The captured challenge and proof occupy the nonce and digest slots of the
-    // fresh session; the peer proof slot is not reproducible by the attacker.
+    // The captured challenge and proof occupy the nonce and masked-digest slots
+    // of the fresh session; the peer proof slot is not reproducible by the
+    // attacker.
     raw.write_all(&[0; 32])?;
     server.join().map_err(|_| "server thread panicked")??;
     Ok(())
@@ -602,7 +604,7 @@ enum Tamper {
 }
 
 /// Relay one handshake through a middlebox that flips a byte, proving the peer
-/// digest is authenticated and never trusted as received.
+/// masked digest is authenticated and never trusted as received.
 fn tampered_handshake(m: &CampaignManifest, tamper: Tamper) -> TestResult<(Option<TcpError>, Option<TcpError>)> {
     let listener = TcpServer::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
@@ -615,7 +617,7 @@ fn tampered_handshake(m: &CampaignManifest, tamper: Tamper) -> TestResult<(Optio
     let proxy = thread::spawn(move || -> TestResult<()> {
         let (mut worker, _) = proxy_listener.accept()?;
         let mut server = TcpStream::connect(addr)?;
-        // Both sides open with nonce || campaign digest before either proof.
+        // Both sides open with nonce || masked campaign digest before either proof.
         let mut worker_hello = [0u8; 64];
         worker.read_exact(&mut worker_hello)?;
         let mut server_hello = [0u8; 64];
@@ -677,7 +679,7 @@ fn version_one_handshake_peer_cannot_negotiate_a_session() -> TestResult<()> {
     });
     let mut raw = TcpStream::connect(addr)?;
     // A version-1 peer offers a nonce and a proof that binds no campaign digest,
-    // so the version-2 requester's proof cannot be reproduced: fail closed.
+    // so the version-3 requester's proof cannot be reproduced: fail closed.
     raw.write_all(&[0x11; 32])?;
     let mut hello = [0u8; 64];
     raw.read_exact(&mut hello)?;
@@ -687,6 +689,53 @@ fn version_one_handshake_peer_cannot_negotiate_a_session() -> TestResult<()> {
     assert!(
         matches!(error, Some(TcpError::Protocol(TransportError::InvalidMac))),
         "expected invalid MAC, got {error:?}"
+    );
+    Ok(())
+}
+
+/// Capture the 64-byte prelude a connection opens with, before any proof.
+fn captured_prelude(m: &CampaignManifest) -> TestResult<[u8; 64]> {
+    let fake = TcpListener::bind("127.0.0.1:0")?;
+    let addr = fake.local_addr()?;
+    let capture = thread::spawn(move || -> TestResult<[u8; 64]> {
+        let (mut stream, _) = fake.accept()?;
+        let mut prelude = [0u8; 64];
+        stream.read_exact(&mut prelude)?;
+        Ok(prelude)
+    });
+    // The peer reads the prelude and hangs up, so this side cannot finish its
+    // proof; only the bytes it already put on the wire are under test.
+    assert!(
+        TcpSession::connect(addr, transport(m.clone(), 7, "worker", "coordinator")?, "coordinator").is_err(),
+        "a peer that offers no proof must not negotiate a session"
+    );
+    capture.join().map_err(|_| "capture thread panicked")?
+}
+
+#[test]
+fn prelude_never_discloses_the_campaign_digest_in_clear() -> TestResult<()> {
+    let m = manifest()?;
+    let digest = m.campaign_digest.0;
+    let first = captured_prelude(&m)?;
+    let second = captured_prelude(&m)?;
+    // The prelude is nonce || masked digest; the digest itself must be
+    // recoverable only by a holder of the pairwise key.
+    for prelude in [first, second] {
+        assert_ne!(
+            &prelude[32..],
+            digest.as_slice(),
+            "prelude carried the campaign digest unmasked"
+        );
+        assert!(
+            !prelude.windows(digest.len()).any(|window| window == digest.as_slice()),
+            "campaign digest appears verbatim in the prelude"
+        );
+    }
+    assert_ne!(first[..32], second[..32], "each connection must offer a fresh nonce");
+    assert_ne!(
+        first[32..],
+        second[32..],
+        "the same digest must be re-masked under a fresh key stream per connection"
     );
     Ok(())
 }

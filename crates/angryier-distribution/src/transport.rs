@@ -18,7 +18,7 @@ use crate::contracts::{
     Successor, WorkUnit,
 };
 
-pub const WIRE_VERSION: u16 = 2;
+pub const WIRE_VERSION: u16 = 3;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAGIC: &[u8; 4] = b"AWN1";
 const TAG_BYTES: usize = 32;
@@ -547,9 +547,12 @@ impl TcpSession {
 /// version, both campaign digests (including semantic/build inputs), and epoch.
 /// Session keys are fresh even if a caller reconstructs Transport after a crash.
 ///
-/// The proof authenticates the peer digest, and the digests are compared only
-/// after that proof verifies, so a legitimate peer holding a different manifest
-/// reports `CampaignMismatch` instead of an indistinguishable `InvalidMac`.
+/// The prelude carries the campaign digest masked under the pairwise key and the
+/// sender's own nonce, so a peer that connects and sends nothing never learns
+/// the digest before it proves key possession. The proof binds the unmasked
+/// digests, and the digests are compared only after that proof verifies, so a
+/// legitimate peer holding a different manifest reports `CampaignMismatch`
+/// instead of an indistinguishable `InvalidMac`.
 fn handshake(
     stream: &mut TcpStream,
     transport: &Transport,
@@ -574,11 +577,12 @@ fn handshake(
             .and_then(|mut entropy| entropy.read_exact(&mut local_nonce))
             .map_err(TcpError::Io)?;
         write_all(stream, &local_nonce, Some(deadline))?;
-        write_all(stream, &local_digest, Some(deadline))?;
+        write_all(stream, &masked_digest(key, &local_nonce, &local_digest), Some(deadline))?;
         let mut remote_nonce = [0u8; 32];
         read_exact(stream, &mut remote_nonce, Some(deadline))?;
-        let mut remote_digest = [0u8; 32];
-        read_exact(stream, &mut remote_digest, Some(deadline))?;
+        let mut remote_masked_digest = [0u8; 32];
+        read_exact(stream, &mut remote_masked_digest, Some(deadline))?;
+        let remote_digest = masked_digest(key, &remote_nonce, &remote_masked_digest);
         let local_side = ProofSide {
             peer: &transport.local_peer,
             digest: &local_digest,
@@ -603,7 +607,7 @@ fn handshake(
             return Err(TcpError::Protocol(TransportError::CampaignMismatch));
         }
         let mut context = Vec::with_capacity(128);
-        context.extend_from_slice(b"AWN1 session key v2");
+        context.extend_from_slice(b"AWN1 session key v3");
         if transport.local_peer.as_str() < peer {
             context.extend_from_slice(&local_tag);
             context.extend_from_slice(&remote_tag);
@@ -623,6 +627,22 @@ fn handshake(
     result
 }
 
+/// Mask the prelude campaign digest under the pairwise key and the sender's own
+/// nonce. XOR is its own inverse, so the receiver applies the same function to
+/// the peer's masked digest with the peer nonce to recover it. An unmasked
+/// prelude digest would be readable by any peer that connects and sends nothing.
+fn masked_digest(key: &[u8; 32], nonce: &[u8; 32], digest: &[u8; 32]) -> [u8; 32] {
+    let mut context = Vec::with_capacity(61);
+    context.extend_from_slice(b"AWN1 handshake v3 digest mask");
+    context.extend_from_slice(nonce);
+    let mask = mac(key, &context);
+    let mut masked = [0u8; 32];
+    for ((out, byte), mask_byte) in masked.iter_mut().zip(digest).zip(mask) {
+        *out = byte ^ mask_byte;
+    }
+    masked
+}
+
 /// One role in the handshake proof: its peer ID, campaign digest, and nonce.
 struct ProofSide<'a> {
     peer: &'a str,
@@ -634,7 +654,7 @@ struct ProofSide<'a> {
 /// digest, then the peer IDs and nonces in the same sender/recipient roles.
 fn handshake_tag(key: &[u8; 32], epoch: u64, sender: &ProofSide<'_>, recipient: &ProofSide<'_>) -> [u8; 32] {
     let mut context = Vec::with_capacity(256);
-    context.extend_from_slice(b"AWN1 handshake v2");
+    context.extend_from_slice(b"AWN1 handshake v3");
     put_u16(&mut context, WIRE_VERSION);
     put_u64(&mut context, epoch);
     context.extend_from_slice(sender.digest);
