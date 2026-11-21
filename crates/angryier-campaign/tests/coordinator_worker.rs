@@ -454,8 +454,9 @@ fn authenticated_drip_outcome_expires_and_requeues_grant() -> Result<(), Box<dyn
         let relay = thread::spawn(move || {
             let _ = io::copy(&mut coordinator_to_worker, &mut to_worker);
         });
-        // Forward both handshake halves intact, then drip the authenticated outcome frame.
-        for _ in 0..2 {
+        // Forward the whole handshake prelude (nonce, campaign digest, proof) intact,
+        // then drip the authenticated outcome frame.
+        for _ in 0..3 {
             let mut half = [0; 32];
             from_worker.read_exact(&mut half).expect("read worker handshake half");
             coordinator.write_all(&half).expect("forward worker handshake half");
@@ -475,11 +476,18 @@ fn authenticated_drip_outcome_expires_and_requeues_grant() -> Result<(), Box<dyn
     });
     let result = angryier_campaign::coordinate(&config, proxy_addr, f.ledger());
     let finished = Instant::now();
-    assert!(result.is_err(), "partial outcome must not commit");
+    // A drip that outlives the declared wall bound is a normal partial stop, not a
+    // transport fault: the report must stay honest and the grant must be requeued.
+    let report = result.expect("wall-bound stop is a partial report, not an error");
+    assert_eq!(
+        (report.queued, report.completed, report.complete_within_declared_bounds),
+        (1, 0, false),
+        "dripped outcome must not be admitted: {report:?}"
+    );
     let grant_time = grant_rx.recv_timeout(Duration::from_secs(2))?;
     assert!(
         finished.duration_since(grant_time) < Duration::from_secs(2),
-        "coordinator joined past grant deadline: {:?}, result={result:?}",
+        "coordinator joined past grant deadline: {:?}",
         finished.duration_since(grant_time)
     );
     proxy.join().expect("join proxy thread");

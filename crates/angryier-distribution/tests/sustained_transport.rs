@@ -188,6 +188,11 @@ fn reject_unsupported_version_malformed_peer_and_unauthorized_peer() -> TestResu
     let mut unsupported = frame.clone();
     unsupported[8..10].copy_from_slice(&(WIRE_VERSION + 1).to_be_bytes());
     assert_eq!(server.feed(&unsupported), Err(TransportError::UnsupportedVersion));
+    let mut old = frame.clone();
+    // A version-1 frame carries neither the version-2 handshake nor its digest
+    // binding, so it must be rejected outright rather than interoperate.
+    old[8..10].copy_from_slice(&(WIRE_VERSION - 1).to_be_bytes());
+    assert_eq!(server.feed(&old), Err(TransportError::UnsupportedVersion));
     let mut unknown = frame.clone();
     // Header: length(4), magic(4), version(2), kind(1), nonce(8), epoch(8), digest(32), sender length(2).
     unknown[61..67].copy_from_slice(b"rogue_");
@@ -381,29 +386,19 @@ fn handshake_rejects_downgrade_truncation_epoch_semantics_and_role() -> TestResu
         raw.shutdown(Shutdown::Write)?;
         server.join().map_err(|_| "server thread panicked")??;
     }
-    let mut changed = m.spec.clone();
-    changed.semantic_version = "engine-v2".into();
-    let changed = CampaignManifest::seal(changed)?;
-    for (client_m, epoch, local) in [
-        (m.clone(), 8, "worker"),
-        (changed, 7, "worker"),
-        (m.clone(), 7, "rogue"),
-    ] {
-        let listener = TcpServer::bind("127.0.0.1:0")?;
-        let addr = listener.local_addr()?;
-        let server_m = m.clone();
-        let server = thread::spawn(move || -> TestResult<()> {
-            assert!(matches!(
-                listener.accept(transport(server_m, 7, "coordinator", "worker")?, "worker"),
-                Err(TcpError::Protocol(TransportError::InvalidMac))
-            ));
-            Ok(())
-        });
-        assert!(matches!(
-            TcpSession::connect(addr, transport(client_m, epoch, local, "coordinator")?, "coordinator"),
-            Err(TcpError::Protocol(TransportError::InvalidMac))
-        ));
-        server.join().map_err(|_| "server thread panicked")??;
+    // Epoch and role mismatches still fail closed at the proof, because both
+    // values are bound into the tag the peer must reproduce.
+    for (epoch, local) in [(8, "worker"), (7, "rogue")] {
+        let (client, server) = handshake_error(
+            transport(m.clone(), epoch, local, "coordinator")?,
+            transport(m.clone(), 7, "coordinator", "worker")?,
+        )?;
+        for error in [client, server] {
+            assert!(
+                matches!(error, Some(TcpError::Protocol(TransportError::InvalidMac))),
+                "expected invalid MAC, got {error:?}"
+            );
+        }
     }
     Ok(())
 }
@@ -472,6 +467,9 @@ fn captured_handshake_proof_cannot_be_replayed() -> TestResult<()> {
         let mut challenge = [0; 32];
         stream.read_exact(&mut challenge)?;
         stream.write_all(&[7; 32])?;
+        // The peer campaign digest slot, then the client's proof, then a
+        // placeholder that is not a valid proof over the fresh challenge.
+        stream.write_all(&[0; 32])?;
         let mut proof = [0; 32];
         stream.read_exact(&mut proof)?;
         stream.write_all(&[0; 32])?;
@@ -496,6 +494,9 @@ fn captured_handshake_proof_cannot_be_replayed() -> TestResult<()> {
     raw.read_exact(&mut fresh)?;
     raw.write_all(&challenge)?;
     raw.write_all(&proof)?;
+    // The captured challenge and proof occupy the nonce and digest slots of the
+    // fresh session; the peer proof slot is not reproducible by the attacker.
+    raw.write_all(&[0; 32])?;
     server.join().map_err(|_| "server thread panicked")??;
     Ok(())
 }
@@ -554,5 +555,138 @@ fn duplicate_pairwise_keys_cannot_impersonate_another_peer() -> TestResult<()> {
         ),
         Err(TransportError::Malformed)
     ));
+    Ok(())
+}
+
+/// Drive one loopback handshake to completion or failure and return each side's
+/// error; `None` means that side negotiated the session.
+fn handshake_error(client: Transport, server: Transport) -> TestResult<(Option<TcpError>, Option<TcpError>)> {
+    let listener = TcpServer::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let server = thread::spawn(move || -> TestResult<Option<TcpError>> { Ok(listener.accept(server, "worker").err()) });
+    let client = TcpSession::connect(addr, client, "coordinator").err();
+    Ok((client, server.join().map_err(|_| "server thread panicked")??))
+}
+
+#[test]
+fn matching_digest_connects_and_differing_digest_reports_campaign_mismatch() -> TestResult<()> {
+    let m = manifest()?;
+    let (client, server) = handshake_error(
+        transport(m.clone(), 7, "worker", "coordinator")?,
+        transport(m.clone(), 7, "coordinator", "worker")?,
+    )?;
+    assert!(client.is_none() && server.is_none(), "{client:?} {server:?}");
+    // A lost or altered budget changes the sealed digest, so the peer holds a
+    // different manifest while still proving possession of the shared key.
+    let mut spec = m.spec.clone();
+    spec.limits.max_wall_millis += 1;
+    let differing = CampaignManifest::seal(spec)?;
+    assert_ne!(differing.campaign_digest, m.campaign_digest);
+    let (client, server) = handshake_error(
+        transport(differing, 7, "worker", "coordinator")?,
+        transport(m, 7, "coordinator", "worker")?,
+    )?;
+    for error in [client, server] {
+        assert!(
+            matches!(error, Some(TcpError::Protocol(TransportError::CampaignMismatch))),
+            "expected campaign mismatch, got {error:?}"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Tamper {
+    PeerDigest,
+    PeerProof,
+}
+
+/// Relay one handshake through a middlebox that flips a byte, proving the peer
+/// digest is authenticated and never trusted as received.
+fn tampered_handshake(m: &CampaignManifest, tamper: Tamper) -> TestResult<(Option<TcpError>, Option<TcpError>)> {
+    let listener = TcpServer::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let server_transport = transport(m.clone(), 7, "coordinator", "worker")?;
+    let server = thread::spawn(move || -> TestResult<Option<TcpError>> {
+        Ok(listener.accept(server_transport, "worker").err())
+    });
+    let proxy_listener = TcpListener::bind("127.0.0.1:0")?;
+    let proxy_addr = proxy_listener.local_addr()?;
+    let proxy = thread::spawn(move || -> TestResult<()> {
+        let (mut worker, _) = proxy_listener.accept()?;
+        let mut server = TcpStream::connect(addr)?;
+        // Both sides open with nonce || campaign digest before either proof.
+        let mut worker_hello = [0u8; 64];
+        worker.read_exact(&mut worker_hello)?;
+        let mut server_hello = [0u8; 64];
+        server.read_exact(&mut server_hello)?;
+        if matches!(tamper, Tamper::PeerDigest) {
+            worker_hello[32] ^= 0x80;
+        }
+        server.write_all(&worker_hello)?;
+        worker.write_all(&server_hello)?;
+        let mut worker_tag = [0u8; 32];
+        worker.read_exact(&mut worker_tag)?;
+        if matches!(tamper, Tamper::PeerProof) {
+            worker_tag[0] ^= 0x80;
+        }
+        server.write_all(&worker_tag)?;
+        let mut server_tag = [0u8; 32];
+        server.read_exact(&mut server_tag)?;
+        worker.write_all(&server_tag)?;
+        Ok(())
+    });
+    let client = TcpSession::connect(
+        proxy_addr,
+        transport(m.clone(), 7, "worker", "coordinator")?,
+        "coordinator",
+    );
+    proxy.join().map_err(|_| "proxy thread panicked")??;
+    let server_error = server.join().map_err(|_| "server thread panicked")??;
+    Ok((client.err(), server_error))
+}
+
+#[test]
+fn tampered_handshake_digest_or_proof_is_rejected_as_invalid_mac() -> TestResult<()> {
+    let m = manifest()?;
+    let (client, server) = tampered_handshake(&m, Tamper::PeerDigest)?;
+    for error in [client, server] {
+        assert!(
+            matches!(error, Some(TcpError::Protocol(TransportError::InvalidMac))),
+            "expected invalid MAC, got {error:?}"
+        );
+    }
+    let (_, server) = tampered_handshake(&m, Tamper::PeerProof)?;
+    assert!(
+        matches!(server, Some(TcpError::Protocol(TransportError::InvalidMac))),
+        "expected invalid MAC, got {server:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn version_one_handshake_peer_cannot_negotiate_a_session() -> TestResult<()> {
+    let m = manifest()?;
+    let listener = TcpServer::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let server_m = m.clone();
+    let server = thread::spawn(move || -> TestResult<Option<TcpError>> {
+        Ok(listener
+            .accept(transport(server_m, 7, "coordinator", "worker")?, "worker")
+            .err())
+    });
+    let mut raw = TcpStream::connect(addr)?;
+    // A version-1 peer offers a nonce and a proof that binds no campaign digest,
+    // so the version-2 requester's proof cannot be reproduced: fail closed.
+    raw.write_all(&[0x11; 32])?;
+    let mut hello = [0u8; 64];
+    raw.read_exact(&mut hello)?;
+    raw.write_all(&[0x22; 32])?;
+    raw.write_all(&[0x33; 32])?;
+    let error = server.join().map_err(|_| "server thread panicked")??;
+    assert!(
+        matches!(error, Some(TcpError::Protocol(TransportError::InvalidMac))),
+        "expected invalid MAC, got {error:?}"
+    );
     Ok(())
 }

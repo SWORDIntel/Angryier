@@ -27,7 +27,11 @@ use std::{
 #[cfg(target_arch = "x86_64")]
 use angryier_arch_intel64::register_id;
 #[cfg(target_arch = "x86_64")]
+use angryier_distribution::transport::TcpError;
+#[cfg(target_arch = "x86_64")]
 use angryier_ir::IrType;
+#[cfg(target_arch = "x86_64")]
+use angryier_ledger::sustained::FencedReservation;
 #[cfg(target_arch = "x86_64")]
 use angryier_runtime::{
     Process, Runtime, SymbolicSession,
@@ -756,21 +760,33 @@ pub fn coordinate_with_evidence(config: &Config, addr: SocketAddr, ledger: PathB
                 };
                 let manifest = &manifest;
                 handles.push(scope.spawn(move || {
-                    let result =
-                        request(peer, *secret, manifest, &grant, round_deadline).map_err(|error| error.to_string());
+                    let result = request(peer, *secret, manifest, &grant, round_deadline);
                     (grant, result)
                 }));
             }
             handles.into_iter().map(|handle| handle.join()).collect::<Vec<_>>()
         });
         let mut processed = 0usize;
+        let mut wall_limit = false;
         let admission = (|| -> Result<()> {
             for result in results {
                 let (grant, outcome) = result.map_err(|_| "network worker thread panicked")?;
-                let outcome = outcome?;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(RoundAbort::Fault(error)) => return Err(error.into()),
+                    // The declared wall bound elapsed while this grant was in
+                    // flight: stop the round at the bound instead of failing.
+                    Err(RoundAbort::WallLimitElapsed) => {
+                        wall_limit = true;
+                        break;
+                    }
+                };
                 let verified = verify(config, &image, &campaign, &grant, &outcome)?;
                 if start.elapsed() >= deadline {
-                    return Err("campaign wall limit reached before verified commit".into());
+                    // No commit after the declared bound: the verified outcome is
+                    // dropped and its still-active grant is revoked below.
+                    wall_limit = true;
+                    break;
                 }
                 let steps = campaign.commit_remote(&grant.fence, verified, grant.step_budget)?;
                 // The ledger commit is authoritative and cannot be undone: count
@@ -794,20 +810,21 @@ pub fn coordinate_with_evidence(config: &Config, addr: SocketAddr, ledger: PathB
             // Revoke every grant that is still active, but keep the admission
             // error: a failed revocation must neither mask it nor stop the
             // remaining grants from being revoked.
-            let mut cleanup_failed = Vec::new();
-            for fence in &grants[processed..] {
-                if let Err(revoke) = campaign.revoke_remote(fence) {
-                    cleanup_failed.push(revoke.to_string());
-                }
-            }
-            if !cleanup_failed.is_empty() {
-                eprintln!(
-                    "campaign cleanup: {} grant revocation(s) failed: {}",
-                    cleanup_failed.len(),
-                    cleanup_failed.join("; ")
-                );
-            }
+            release_uncommitted(&mut campaign, &grants, processed);
             return Err(error);
+        }
+        if wall_limit {
+            // Stop at the declared wall bound: revoke only the grants that were
+            // never committed, keep every committed event, and fall through to
+            // the durable partial report. A revocation failure cannot mask the
+            // bound stop, so it is reported without changing the outcome.
+            release_uncommitted(&mut campaign, &grants, processed);
+            println!(
+                "campaign wall limit reached: stopped at the declared bound with {} grant(s) revoked",
+                grants.len() - processed
+            );
+            io::stdout().flush()?;
+            break;
         }
         if used_steps >= config.limits.max_steps {
             break;
@@ -841,34 +858,96 @@ pub fn coordinate(config: &Config, addr: SocketAddr, ledger: PathBuf) -> Result<
 }
 
 #[cfg(target_arch = "x86_64")]
+/// Revoke the grants a stopped round never committed. A failed revocation is
+/// reported but never replaces the round's own outcome, and a committed grant
+/// is never passed here, so no grant is revoked twice.
+fn release_uncommitted(campaign: &mut SustainedCampaign, grants: &[FencedReservation], processed: usize) {
+    let mut cleanup_failed = Vec::new();
+    for fence in &grants[processed..] {
+        if let Err(revoke) = campaign.revoke_remote(fence) {
+            cleanup_failed.push(revoke.to_string());
+        }
+    }
+    if !cleanup_failed.is_empty() {
+        eprintln!(
+            "campaign cleanup: {} grant revocation(s) failed: {}",
+            cleanup_failed.len(),
+            cleanup_failed.join("; ")
+        );
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+/// Why one grant round stopped without an admitted result.
+#[derive(Debug, PartialEq, Eq)]
+enum RoundAbort {
+    /// The declared wall bound elapsed while this grant was in flight. The
+    /// round stops cleanly and reports its durable partial ledger instead of
+    /// surfacing the expired socket timeout as a transport error.
+    WallLimitElapsed,
+    /// A transport or protocol fault observed before the wall bound; this
+    /// stays a hard error so a genuine worker fault is never masked.
+    Fault(String),
+}
+
+/// The wall bound is reached only once that instant has actually passed; a
+/// timeout that fires while budget remains is a worker fault, not a bound stop.
+#[cfg(target_arch = "x86_64")]
+fn wall_bound_elapsed(deadline: Instant, now: Instant) -> bool {
+    now >= deadline
+}
+
+/// Classify one transport error against the campaign wall bound.
+#[cfg(target_arch = "x86_64")]
+fn round_abort(error: TcpError, deadline: Instant) -> RoundAbort {
+    let timed_out = match &error {
+        TcpError::Io(source) => {
+            matches!(source.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+        }
+        TcpError::InsecureEndpoint | TcpError::Protocol(_) => false,
+    };
+    if timed_out && wall_bound_elapsed(deadline, Instant::now()) {
+        RoundAbort::WallLimitElapsed
+    } else {
+        RoundAbort::Fault(error.to_string())
+    }
+}
+
+/// One worker request. The deadline bounds connect, handshake, send and receive;
+/// only a timeout at that bound is reported as [`RoundAbort::WallLimitElapsed`].
+#[cfg(target_arch = "x86_64")]
 fn request(
     peer: &Peer,
     secret: [u8; 32],
     manifest: &CampaignManifest,
     grant: &WireGrant,
     deadline: Instant,
-) -> Result<AdvanceOutcome> {
+) -> std::result::Result<AdvanceOutcome, RoundAbort> {
     let mut session = TcpSession::connect_until(
         peer.addr,
-        transport(manifest.clone(), COORDINATOR, &peer.id, secret)?,
+        transport(manifest.clone(), COORDINATOR, &peer.id, secret)
+            .map_err(|error| RoundAbort::Fault(error.to_string()))?,
         &peer.id,
         deadline,
-    )?;
-    session.send(&Message::Grant {
-        work: grant.fence.reservation.unit.clone(),
-        payload: grant.encode()?,
-    })?;
-    let received = session.receive()?;
-    if Instant::now() >= deadline {
-        return Err("campaign wall limit reached before outcome admission".into());
+    )
+    .map_err(|error| round_abort(error, deadline))?;
+    session
+        .send(&Message::Grant {
+            work: grant.fence.reservation.unit.clone(),
+            payload: grant.encode().map_err(|error| RoundAbort::Fault(error.to_string()))?,
+        })
+        .map_err(|error| round_abort(error, deadline))?;
+    let received = session.receive().map_err(|error| round_abort(error, deadline))?;
+    if wall_bound_elapsed(deadline, Instant::now()) {
+        return Err(RoundAbort::WallLimitElapsed);
     }
     let Message::Outcome { work, payload } = received.message else {
-        return Err("worker did not return typed outcome".into());
+        return Err(RoundAbort::Fault("worker did not return typed outcome".into()));
     };
     if work != grant.fence.reservation.unit {
-        return Err("result work identity mismatch".into());
+        return Err(RoundAbort::Fault("result work identity mismatch".into()));
     }
-    Ok(AdvanceOutcome::decode_wire(work, &payload, manifest)?)
+    AdvanceOutcome::decode_wire(work, &payload, manifest).map_err(|error| RoundAbort::Fault(error.to_string()))
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -1052,5 +1131,124 @@ mod tests {
         };
         assert!(!outcome.report.complete_within_declared_bounds);
         assert!(outcome.accepted_evidence.is_empty());
+    }
+
+    /// The declared wall bound is reached only once it has actually elapsed, so
+    /// budget remaining at the check keeps every verified commit admissible.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn wall_bound_gate_requires_an_elapsed_deadline() {
+        let start = Instant::now();
+        let bound = start + Duration::from_millis(400);
+        assert!(!wall_bound_elapsed(bound, start));
+        assert!(!wall_bound_elapsed(bound, bound - Duration::from_millis(1)));
+        assert!(wall_bound_elapsed(bound, bound));
+        assert!(wall_bound_elapsed(bound, bound + Duration::from_millis(1)));
+    }
+
+    /// A socket timeout at the wall bound stops the round cleanly, while the
+    /// same timeout before the bound (and any non-timeout fault) stays a hard
+    /// error so genuine worker faults are never masked as a bound stop.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn round_abort_is_a_wall_stop_only_after_the_bound() {
+        let elapsed = Instant::now() - Duration::from_millis(1);
+        let pending = Instant::now() + Duration::from_secs(60);
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::TimedOut] {
+            assert_eq!(
+                round_abort(TcpError::Io(io::Error::from(kind)), elapsed),
+                RoundAbort::WallLimitElapsed,
+                "{kind:?} at the wall bound must stop the round"
+            );
+            assert!(
+                matches!(
+                    round_abort(TcpError::Io(io::Error::from(kind)), pending),
+                    RoundAbort::Fault(_)
+                ),
+                "{kind:?} before the wall bound must stay a hard error"
+            );
+        }
+        for fault in [
+            TcpError::InsecureEndpoint,
+            TcpError::Io(io::Error::from(io::ErrorKind::ConnectionReset)),
+        ] {
+            assert!(
+                matches!(round_abort(fault, elapsed), RoundAbort::Fault(_)),
+                "a non-timeout fault is never a wall-limit stop"
+            );
+        }
+    }
+
+    /// A bound stop revokes only the grants the round never committed: the
+    /// committed prefix keeps its active ledger record, the uncommitted grant
+    /// returns to the queue, no evidence is accepted, and the report stays a
+    /// partial one instead of an error.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn wall_stop_releases_only_uncommitted_grants() -> Result<()> {
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Temp(std::env::temp_dir().join(format!("angryier-wall-stop-{}", std::process::id())));
+        fs::create_dir_all(&dir.0)?;
+        let config = Config::defaults(PathBuf::new(), PathBuf::new(), "test-v1".into());
+        let (image, profile) = (&b"image"[..], &b"profile"[..]);
+        let policy = config.policy(0x1000);
+        let sealed = manifest(&config, image, 0x1000, profile)?;
+        let artifacts = CampaignArtifacts {
+            binary: image,
+            semantic_profile: profile,
+            script: b"no-script",
+            policy: &policy,
+            solver_policy: b"z3-native-v1",
+            inputs: Vec::new(),
+            stubs: Vec::new(),
+        };
+        let mut campaign = SustainedCampaign::open(
+            dir.0.join("campaign.ledger"),
+            sealed,
+            &artifacts,
+            Digest::of(b"initial"),
+        )?;
+        let grants = vec![
+            campaign
+                .reserve_remote(Digest::of(b"worker"))?
+                .ok_or("root grant must be available")?,
+        ];
+        // A committed prefix is never revoked, so a round that committed every
+        // grant leaves all of them active.
+        release_uncommitted(&mut campaign, &grants, grants.len());
+        let report = campaign.report();
+        assert_eq!(
+            (report.active, report.queued),
+            (1, 0),
+            "a committed grant must stay active"
+        );
+        // The bound stop releases only the uncommitted suffix.
+        release_uncommitted(&mut campaign, &grants, 0);
+        let report = campaign.report();
+        assert_eq!(
+            (report.queued, report.active),
+            (1, 0),
+            "uncommitted grant was not requeued"
+        );
+        assert_eq!(
+            campaign.cumulative_evidence().count(),
+            0,
+            "a bound stop accepted evidence"
+        );
+        assert!(
+            !report.complete_within_declared_bounds,
+            "stalled work must be reported as partial"
+        );
+        // A grant is released exactly once: the ledger refuses a second revoke.
+        assert!(
+            campaign.revoke_remote(&grants[0]).is_err(),
+            "double revoke must be refused"
+        );
+        Ok(())
     }
 }

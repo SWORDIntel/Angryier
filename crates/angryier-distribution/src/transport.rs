@@ -18,7 +18,7 @@ use crate::contracts::{
     Successor, WorkUnit,
 };
 
-pub const WIRE_VERSION: u16 = 1;
+pub const WIRE_VERSION: u16 = 2;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAGIC: &[u8; 4] = b"AWN1";
 const TAG_BYTES: usize = 32;
@@ -542,9 +542,14 @@ impl TcpSession {
     }
 }
 
-/// Both sides prove possession of the provisioned pairwise key and bind their
-/// roles, wire version, campaign (including semantic/build inputs), and epoch.
+/// Both sides prove possession of the provisioned pairwise key over a fresh
+/// nonce exchange, exchange their campaign digests, and bind their roles, wire
+/// version, both campaign digests (including semantic/build inputs), and epoch.
 /// Session keys are fresh even if a caller reconstructs Transport after a crash.
+///
+/// The proof authenticates the peer digest, and the digests are compared only
+/// after that proof verifies, so a legitimate peer holding a different manifest
+/// reports `CampaignMismatch` instead of an indistinguishable `InvalidMac`.
 fn handshake(
     stream: &mut TcpStream,
     transport: &Transport,
@@ -561,25 +566,44 @@ fn handshake(
         .set_write_timeout(Some(std::time::Duration::from_secs(10)))
         .map_err(TcpError::Io)?;
     let result = (|| {
-        let mut local = [0u8; 32];
+        let local_digest = transport.manifest.campaign_digest.0;
+        let mut local_nonce = [0u8; 32];
         // The appliance runs on Linux. If OS entropy is unavailable, do not
         // substitute a predictable nonce or permit an unauthenticated session.
         File::open("/dev/urandom")
-            .and_then(|mut entropy| entropy.read_exact(&mut local))
+            .and_then(|mut entropy| entropy.read_exact(&mut local_nonce))
             .map_err(TcpError::Io)?;
-        write_all(stream, &local, Some(deadline))?;
-        let mut remote = [0u8; 32];
-        read_exact(stream, &mut remote, Some(deadline))?;
-        let local_tag = handshake_tag(key, transport, &transport.local_peer, peer, &local, &remote);
+        write_all(stream, &local_nonce, Some(deadline))?;
+        write_all(stream, &local_digest, Some(deadline))?;
+        let mut remote_nonce = [0u8; 32];
+        read_exact(stream, &mut remote_nonce, Some(deadline))?;
+        let mut remote_digest = [0u8; 32];
+        read_exact(stream, &mut remote_digest, Some(deadline))?;
+        let local_side = ProofSide {
+            peer: &transport.local_peer,
+            digest: &local_digest,
+            nonce: &local_nonce,
+        };
+        let remote_side = ProofSide {
+            peer,
+            digest: &remote_digest,
+            nonce: &remote_nonce,
+        };
+        let local_tag = handshake_tag(key, transport.epoch, &local_side, &remote_side);
         write_all(stream, &local_tag, Some(deadline))?;
         let mut remote_tag = [0u8; 32];
         read_exact(stream, &mut remote_tag, Some(deadline))?;
-        let expected = handshake_tag(key, transport, peer, &transport.local_peer, &remote, &local);
+        let expected = handshake_tag(key, transport.epoch, &remote_side, &local_side);
+        // Verify the proof covers the peer digest before that digest is trusted;
+        // a mismatch reported from unauthenticated bytes would be a forgery oracle.
         if !constant_time_eq(&remote_tag, &expected) {
             return Err(TcpError::Protocol(TransportError::InvalidMac));
         }
+        if remote_digest != local_digest {
+            return Err(TcpError::Protocol(TransportError::CampaignMismatch));
+        }
         let mut context = Vec::with_capacity(128);
-        context.extend_from_slice(b"AWN1 session key v1");
+        context.extend_from_slice(b"AWN1 session key v2");
         if transport.local_peer.as_str() < peer {
             context.extend_from_slice(&local_tag);
             context.extend_from_slice(&remote_tag);
@@ -599,23 +623,26 @@ fn handshake(
     result
 }
 
-fn handshake_tag(
-    key: &[u8; 32],
-    transport: &Transport,
-    sender: &str,
-    recipient: &str,
-    sender_nonce: &[u8; 32],
-    recipient_nonce: &[u8; 32],
-) -> [u8; 32] {
+/// One role in the handshake proof: its peer ID, campaign digest, and nonce.
+struct ProofSide<'a> {
+    peer: &'a str,
+    digest: &'a [u8; 32],
+    nonce: &'a [u8; 32],
+}
+
+/// The proof is role-ordered: the sender's campaign digest, the recipient's
+/// digest, then the peer IDs and nonces in the same sender/recipient roles.
+fn handshake_tag(key: &[u8; 32], epoch: u64, sender: &ProofSide<'_>, recipient: &ProofSide<'_>) -> [u8; 32] {
     let mut context = Vec::with_capacity(256);
-    context.extend_from_slice(b"AWN1 handshake v1");
+    context.extend_from_slice(b"AWN1 handshake v2");
     put_u16(&mut context, WIRE_VERSION);
-    put_u64(&mut context, transport.epoch);
-    context.extend_from_slice(&transport.manifest.campaign_digest.0);
-    put_peer(&mut context, sender);
-    put_peer(&mut context, recipient);
-    context.extend_from_slice(sender_nonce);
-    context.extend_from_slice(recipient_nonce);
+    put_u64(&mut context, epoch);
+    context.extend_from_slice(sender.digest);
+    context.extend_from_slice(recipient.digest);
+    put_peer(&mut context, sender.peer);
+    put_peer(&mut context, recipient.peer);
+    context.extend_from_slice(sender.nonce);
+    context.extend_from_slice(recipient.nonce);
     mac(key, &context)
 }
 
