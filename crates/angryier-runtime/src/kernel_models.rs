@@ -28,9 +28,18 @@ use crate::Process;
 /// from the loader's stub/GOT region (`0x1000_0000`) so pointers returned by a
 /// model never alias a relocation slot.
 pub const KERNEL_MODEL_HEAP_BASE: u64 = 0x2000_0000;
+/// Size of the synthesized kernel heap (512 KiB). Compact so the entire
+/// image plus heap and stack stays within the ELF 64 MiB sustained snapshot
+/// pinning budget (`mapped * 4 < 64 MiB`).
+pub const KERNEL_MODEL_HEAP_SIZE: u64 = 512 * 1024;
 /// Every model this module installs is a pure function of its slot address,
 /// which is what makes it safe to bind into the sustained replay digest.
-pub const DETERMINISTIC_MODEL_NAMES: &[&str] = &["linux_kernel_alloc", "linux_kernel_free", "linux_kernel_success"];
+pub const DETERMINISTIC_MODEL_NAMES: &[&str] = &[
+    "linux_kernel_alloc",
+    "linux_kernel_free",
+    "linux_kernel_success",
+    "linux_kernel_return_thunk",
+];
 
 /// What a modeled import does at the call boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +50,9 @@ pub enum KernelModelKind {
     Release,
     /// Returns success (RAX = 0).
     Success,
+    /// Simulates a retpoline/SLS return thunk (`jmp __x86_return_thunk` -> `ret`
+    /// without clobbering RAX).
+    ReturnThunk,
 }
 
 /// One installed kernel-API model.
@@ -74,6 +86,7 @@ impl SimProcedure for KernelModel {
             KernelModelKind::Allocate => "linux_kernel_alloc",
             KernelModelKind::Release => "linux_kernel_free",
             KernelModelKind::Success => "linux_kernel_success",
+            KernelModelKind::ReturnThunk => "linux_kernel_return_thunk",
         }
     }
 
@@ -81,6 +94,7 @@ impl SimProcedure for KernelModel {
         match self.kind {
             KernelModelKind::Allocate => SimResult::Return(self.allocation_address()),
             KernelModelKind::Release | KernelModelKind::Success => SimResult::Return(0),
+            KernelModelKind::ReturnThunk => SimResult::Continue(SimState::new()),
         }
     }
 }
@@ -148,6 +162,9 @@ pub fn model_for(symbol: &str) -> Option<KernelModelKind> {
     if symbol.contains("alloc") {
         return Some(KernelModelKind::Allocate);
     }
+    if symbol == "__x86_return_thunk" {
+        return Some(KernelModelKind::ReturnThunk);
+    }
     if SUCCESS.iter().any(|prefix| symbol.contains(prefix)) {
         return Some(KernelModelKind::Success);
     }
@@ -191,12 +208,18 @@ mod tests {
         assert_eq!(model_for("mutex_lock"), Some(KernelModelKind::Success));
         assert_eq!(model_for("refcount_dec_and_test"), Some(KernelModelKind::Success));
         assert_eq!(model_for("__fentry__"), Some(KernelModelKind::Success));
-        // Reached by `jmp`, not `call`: modeling it would clobber RAX and
-        // resume one byte into the thunk, so it must stay unmodeled.
-        assert_eq!(model_for("__x86_return_thunk"), None);
+        assert_eq!(model_for("__x86_return_thunk"), Some(KernelModelKind::ReturnThunk));
         // Unknown symbols stay unmapped so their paths defer honestly.
         assert_eq!(model_for("i2c_transfer"), None);
         assert_eq!(model_for("regmap_read"), None);
+    }
+
+    #[test]
+    fn return_thunk_model_returns_continue() {
+        let state = SimState::new();
+        let thunk = KernelModel::new(KernelModelKind::ReturnThunk, 0x1000_0008);
+        assert_eq!(thunk.name(), "linux_kernel_return_thunk");
+        assert_eq!(thunk.apply(&state), SimResult::Continue(SimState::new()));
     }
 
     #[test]

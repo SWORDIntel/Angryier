@@ -2801,6 +2801,19 @@ impl<D: Decoder> Runtime<D> {
             executable: false,
         });
 
+        // For ET_REL modules, add a zeroed kernel model heap region backing
+        // pointers handed out by allocation models.
+        if image.et_rel.is_some() {
+            regions.push(MemoryRegion {
+                object: angryier_types::ObjectId(3),
+                base: kernel_models::KERNEL_MODEL_HEAP_BASE,
+                size: kernel_models::KERNEL_MODEL_HEAP_SIZE,
+                readable: true,
+                writable: true,
+                executable: false,
+            });
+        }
+
         for region in extra_regions {
             regions.push(region);
         }
