@@ -29,7 +29,7 @@ use std::{path::PathBuf, str::FromStr};
 use angryier_distribution::contracts::{CampaignManifest, Digest};
 use angryier_ledger::{evidence::AcceptedEvidence, sustained::Report};
 
-use crate::{Config, ImageMode, Result, SymbolicRegister};
+use crate::{Config, ImageMode, Result};
 
 /// Local sustained-campaign specification: a [`Config`] narrowed to the local
 /// contract, the durable ledger path, the typed exploration policy, and the
@@ -174,13 +174,7 @@ fn canonical_targets(mut config: LocalConfig) -> Result<LocalConfig> {
     }
     if config.regs.iter().any(|(register, _)| {
         config.symbolic.as_ref().map_or_else(
-            || {
-                register.name()
-                    == match config.campaign.symbolic_reg {
-                        SymbolicRegister::Rbx => "rbx",
-                        SymbolicRegister::Rcx => "rcx",
-                    }
-            },
+            || config.campaign.symbolic_reg.register_names().contains(&register.name()),
             |symbolic| symbolic.iter().any(|(marked, _)| register == marked),
         )
     }) {
@@ -227,10 +221,7 @@ fn options_digest(config: &LocalConfig) -> Digest {
     bytes.push(0);
     bytes.extend_from_slice(config.campaign.build_id.as_bytes());
     bytes.push(0);
-    bytes.extend_from_slice(match config.campaign.symbolic_reg {
-        SymbolicRegister::Rbx => b"rbx".as_slice(),
-        SymbolicRegister::Rcx => b"rcx",
-    });
+    bytes.extend_from_slice(config.campaign.symbolic_reg.as_str().as_bytes());
     bytes.push(u8::from(config.symbolic.is_some()));
     if let Some(symbolic) = &config.symbolic {
         bytes.extend_from_slice(&(symbolic.len() as u64).to_le_bytes());
@@ -419,7 +410,9 @@ mod native {
                     session.mark_symbolic(0, register.register_id(), IrType::Bits(*width))?;
                 }
             } else {
-                session.mark_symbolic(0, config.campaign.symbolic_reg.register_id(), IrType::Bits(64))?;
+                for reg_id in config.campaign.symbolic_reg.register_ids() {
+                    session.mark_symbolic(0, reg_id, IrType::Bits(64))?;
+                }
             }
             for (register, value) in &config.regs {
                 session.states[0]
@@ -506,7 +499,9 @@ mod native {
                     session.mark_symbolic(0, register.register_id(), IrType::Bits(*width))?;
                 }
             } else {
-                session.mark_symbolic(0, self.config.campaign.symbolic_reg.register_id(), IrType::Bits(64))?;
+                for reg_id in self.config.campaign.symbolic_reg.register_ids() {
+                    session.mark_symbolic(0, reg_id, IrType::Bits(64))?;
+                }
             }
             for (register, value) in &self.config.regs {
                 session.states[0]

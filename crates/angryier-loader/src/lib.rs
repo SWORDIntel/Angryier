@@ -290,6 +290,7 @@ const SHN_COMMON: u16 = 0xFFF2;
 const STT_FILE: u8 = 4;
 
 /// x86-64 relocation types applied by the ET_REL path.
+const R_X86_64_NONE: u32 = 0;
 const R_X86_64_64: u32 = 1;
 const R_X86_64_PC32: u32 = 2;
 const R_X86_64_GOT32: u32 = 3;
@@ -1101,6 +1102,9 @@ impl Elf64Loader {
                 // r_info: type in the low 32 bits, symbol in the high 32.
                 let symbol_index = read_u32_le(bytes, entry + 12)?;
                 let r_type = read_u32_le(bytes, entry + 8)?;
+                if r_type == R_X86_64_NONE {
+                    continue;
+                }
                 let symbol = sym_entries
                     .get(symbol_index as usize)
                     .ok_or(LoaderError::RelocationError)?;
@@ -1229,6 +1233,9 @@ impl Elf64Loader {
                 // r_info: type in the low 32 bits, symbol in the high 32.
                 let symbol_index = read_u32_le(bytes, entry + 12)?;
                 let r_type = read_u32_le(bytes, entry + 8)?;
+                if r_type == R_X86_64_NONE {
+                    continue;
+                }
                 let write_size = match r_type {
                     R_X86_64_64 | R_X86_64_PC64 => 8,
                     _ => 4,
@@ -1268,8 +1275,9 @@ impl Elf64Loader {
                 };
                 match r_type {
                     R_X86_64_64 => {
-                        let value = symbol_value
-                            .checked_add(u64::try_from(addend).map_err(|_| LoaderError::RelocationError)?)
+                        let value = i128::from(symbol_value)
+                            .checked_add(i128::from(addend))
+                            .and_then(|v| u64::try_from(v).ok())
                             .ok_or(LoaderError::RelocationError)?;
                         write_le(&mut segments, place, &value.to_le_bytes())?;
                     }
@@ -1285,13 +1293,11 @@ impl Elf64Loader {
                         write_le(&mut segments, place, &(value as i32).to_le_bytes())?;
                     }
                     R_X86_64_32 => {
-                        let value = symbol_value
-                            .checked_add(u64::try_from(addend).map_err(|_| LoaderError::RelocationError)?)
+                        let value = i128::from(symbol_value)
+                            .checked_add(i128::from(addend))
+                            .and_then(|v| u32::try_from(v).ok())
                             .ok_or(LoaderError::RelocationError)?;
-                        if value > u32::MAX as u64 {
-                            return Err(LoaderError::RelocationError);
-                        }
-                        write_le(&mut segments, place, &(value as u32).to_le_bytes())?;
+                        write_le(&mut segments, place, &value.to_le_bytes())?;
                     }
                     R_X86_64_32S => {
                         let value = as_i64(symbol_value)?
@@ -2544,6 +2550,36 @@ mod tests {
         let past_end = make_et_rel(&text, 0, &[(text.len() as u64 - 2, 2, 1, 0)]);
         assert_eq!(
             ImageLoader::load(&loader, &past_end).err(),
+            Some(LoaderError::RelocationError)
+        );
+    }
+
+    #[test]
+    fn et_rel_supports_none_relocation_and_negative_addends_safely() {
+        let loader = Elf64Loader::new();
+        let text = [0u8; 24];
+        let rela = [
+            // R_X86_64_NONE against symbol index 0 (null/unnamed) is a no-op.
+            (0u64, 0u32, R_X86_64_NONE, 0i64),
+            // R_X86_64_64 against `main` (0x0100_0000) with addend -4 -> 0x00ff_fffc.
+            (8u64, 2u32, R_X86_64_64, -4i64),
+            // R_X86_64_32 against `main` (0x0100_0000) with addend -8 -> 0x00ff_fff8.
+            (16u64, 2u32, R_X86_64_32, -8i64),
+        ];
+        let valid = make_et_rel(&text, 0, &rela);
+        let loaded = ImageLoader::load(&loader, &valid).expect("NONE and valid negative addends must load");
+        let seg = loaded
+            .segments
+            .iter()
+            .find(|s| s.address == ET_REL_IMAGE_BASE)
+            .expect(".text segment");
+        assert_eq!(&seg.bytes[8..16], &(ET_REL_IMAGE_BASE - 4).to_le_bytes());
+        assert_eq!(&seg.bytes[16..20], &((ET_REL_IMAGE_BASE - 8) as u32).to_le_bytes());
+
+        // Negative addend underflowing below 0 must still fail closed.
+        let underflow = make_et_rel(&text, 0, &[(8u64, 2u32, R_X86_64_64, -0x0200_0000i64)]);
+        assert_eq!(
+            ImageLoader::load(&loader, &underflow).err(),
             Some(LoaderError::RelocationError)
         );
     }

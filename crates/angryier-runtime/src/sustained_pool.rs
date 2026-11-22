@@ -29,6 +29,12 @@ pub struct VerifiedRemoteOutcome {
     outcome: AdvanceOutcome,
 }
 
+impl VerifiedRemoteOutcome {
+    pub fn reason(&self) -> &str {
+        &self.outcome.reason
+    }
+}
+
 /// A worker's claimed result; decoding a wire result does not verify execution.
 pub struct AdvanceOutcome {
     grant: FencedReservation,
@@ -285,6 +291,7 @@ impl<D: Decoder> SymbolicSession<'_, D> {
         let mut solver_spent = Duration::ZERO;
         let mut steps = 0u64;
         let mut matched = 0usize;
+        let mut history_len = 0usize;
         let mut branches = Vec::new();
         let root = self.states[0].clone();
         let mut owned_model = None;
@@ -383,9 +390,24 @@ impl<D: Decoder> SymbolicSession<'_, D> {
                 );
             }
             let state = &self.states[0];
-            let new_decision = state.branch_history.len() > matched;
+            let new_decision = state.branch_history.len() > history_len;
             if matched < unit.prefix.len() {
                 if !new_decision {
+                    if outcome == SymbolicStepOutcome::Terminated {
+                        break (
+                            Status::Deferred,
+                            PathDisposition::Pending(PendingReason::ReplayMismatch),
+                            "terminated before owned prefix",
+                            None,
+                        );
+                    }
+                    continue;
+                }
+                if !matches!(outcome, SymbolicStepOutcome::Branched { .. }) {
+                    // A deterministic concrete branch happened before the next owned
+                    // fork in `unit.prefix`: advance `history_len` without advancing
+                    // `matched`, unless the path terminated before reaching its prefix.
+                    history_len += 1;
                     if outcome == SymbolicStepOutcome::Terminated {
                         break (
                             Status::Deferred,
@@ -408,7 +430,7 @@ impl<D: Decoder> SymbolicSession<'_, D> {
                         None,
                     );
                 }
-                if !matches!(outcome, SymbolicStepOutcome::Branched { .. }) || self.states.len() != 2 {
+                if self.states.len() != 2 {
                     break (
                         Status::Deferred,
                         PathDisposition::Pending(PendingReason::ReplayMismatch),
@@ -451,9 +473,10 @@ impl<D: Decoder> SymbolicSession<'_, D> {
                 branches.push(proof);
                 owned_model = model;
                 matched += 1;
+                history_len += 1;
                 continue;
             }
-            if new_decision {
+            if new_decision && outcome != SymbolicStepOutcome::Terminated {
                 if state.branch_history.len() as u64 > limits.max_path_depth {
                     break (
                         Status::Deferred,
@@ -465,9 +488,9 @@ impl<D: Decoder> SymbolicSession<'_, D> {
                 if !matches!(outcome, SymbolicStepOutcome::Branched { .. }) {
                     // The condition resolved concretely (constant fold or a
                     // recorded concrete value), so exactly one successor exists
-                    // and no fork or complementary proof is needed. The
-                    // decision is already recorded with its chosen successor;
-                    // keep walking the single path.
+                    // and no fork or complementary proof is needed. Advance
+                    // `history_len` past this decision and keep walking the path.
+                    history_len += 1;
                     continue;
                 }
                 if self.states.len() != 2 {
@@ -553,7 +576,10 @@ impl<D: Decoder> SymbolicSession<'_, D> {
                 break (
                     Status::Completed,
                     PathDisposition::Terminal,
-                    "terminal path at owned prefix",
+                    state
+                        .process
+                        .kernel_violation
+                        .unwrap_or("terminal path at owned prefix"),
                     None,
                 );
             }

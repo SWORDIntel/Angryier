@@ -1,5 +1,7 @@
 //! Versioned on-disk handoff for a loopback worker. No key material is stored.
-use crate::{CampaignLimits, Config, ImageMode, RamCap, Result, SymbolicRegister, build_profile, peer_id, read_image};
+#[cfg(test)]
+use crate::SymbolicRegister;
+use crate::{CampaignLimits, Config, ImageMode, RamCap, Result, build_profile, peer_id, read_image};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, Payload},
@@ -175,11 +177,7 @@ impl WorkerConfig {
             }
             .into(),
             entry: config.entry,
-            symbolic_reg: match config.symbolic_reg {
-                SymbolicRegister::Rbx => "rbx",
-                SymbolicRegister::Rcx => "rcx",
-            }
-            .into(),
+            symbolic_reg: config.symbolic_reg.as_str().into(),
             limits: SealedLimits {
                 max_steps: effective.max_steps,
                 max_path_steps: effective.max_path_steps,

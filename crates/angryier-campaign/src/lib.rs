@@ -75,6 +75,14 @@ impl std::str::FromStr for ImageMode {
 pub enum SymbolicRegister {
     Rbx,
     Rcx,
+    Rdx,
+    Rsi,
+    Rdi,
+    R8,
+    R9,
+    /// Linux x86-64 SysV user-controlled argument pair (`rsi` + `rdx`),
+    /// leaving `rdi` on the deterministic `ET_REL` scratch struct.
+    Sysv,
 }
 
 impl std::str::FromStr for SymbolicRegister {
@@ -84,19 +92,56 @@ impl std::str::FromStr for SymbolicRegister {
         match value {
             "rbx" => Ok(Self::Rbx),
             "rcx" => Ok(Self::Rcx),
-            _ => Err("--symbolic-reg must be rbx or rcx"),
+            "rdx" => Ok(Self::Rdx),
+            "rsi" => Ok(Self::Rsi),
+            "rdi" => Ok(Self::Rdi),
+            "r8" => Ok(Self::R8),
+            "r9" => Ok(Self::R9),
+            "sysv" => Ok(Self::Sysv),
+            _ => Err("--symbolic-reg must be rbx, rcx, rdx, rsi, rdi, r8, r9, or sysv"),
         }
     }
 }
 
 impl SymbolicRegister {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rbx => "rbx",
+            Self::Rcx => "rcx",
+            Self::Rdx => "rdx",
+            Self::Rsi => "rsi",
+            Self::Rdi => "rdi",
+            Self::R8 => "r8",
+            Self::R9 => "r9",
+            Self::Sysv => "sysv",
+        }
+    }
+
+    pub const fn register_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Rbx => &["rbx"],
+            Self::Rcx => &["rcx"],
+            Self::Rdx => &["rdx"],
+            Self::Rsi => &["rsi"],
+            Self::Rdi => &["rdi"],
+            Self::R8 => &["r8"],
+            Self::R9 => &["r9"],
+            Self::Sysv => &["rsi", "rdx"],
+        }
+    }
+
     #[cfg(target_arch = "x86_64")]
-    fn register_id(self) -> u32 {
-        register_id::GPR_BASE
-            + match self {
-                Self::Rbx => 3,
-                Self::Rcx => 1,
-            }
+    pub fn register_ids(self) -> Vec<u32> {
+        match self {
+            Self::Rbx => vec![register_id::GPR_BASE + 3],
+            Self::Rcx => vec![register_id::GPR_BASE + 1],
+            Self::Rdx => vec![register_id::GPR_BASE + 2],
+            Self::Rsi => vec![register_id::GPR_BASE + 6],
+            Self::Rdi => vec![register_id::GPR_BASE + 7],
+            Self::R8 => vec![register_id::GPR_BASE + 8],
+            Self::R9 => vec![register_id::GPR_BASE + 9],
+            Self::Sysv => vec![register_id::GPR_BASE + 6, register_id::GPR_BASE + 2],
+        }
     }
 }
 
@@ -201,10 +246,7 @@ impl Config {
             ImageMode::Elf => "elf",
             ImageMode::PeDriver => "pe-driver-model-not-windows",
         };
-        let register = match self.symbolic_reg {
-            SymbolicRegister::Rbx => "rbx",
-            SymbolicRegister::Rcx => "rcx",
-        };
+        let register = self.symbolic_reg.as_str();
         format!("campaign-root-v2/{mode}/entry:{entry:016x}/symbolic:{register}").into_bytes()
     }
 
@@ -509,7 +551,9 @@ fn initial(config: &Config, image: &[u8]) -> Result<(u64, Digest)> {
     let entry = root.pc()?;
     let arena = ShardedExprArena::new(ExpressionNormalizationVersion(1));
     let mut session = SymbolicSession::new(&runtime, &arena, root);
-    session.mark_symbolic(0, config.symbolic_reg.register_id(), IrType::Bits(64))?;
+    for reg_id in config.symbolic_reg.register_ids() {
+        session.mark_symbolic(0, reg_id, IrType::Bits(64))?;
+    }
     let digest = session.sustained_initial_digest().map_err(|error| {
         format!("root cannot be pinned for sustained replay ({:?}; pe-driver is a loader model, not Windows fidelity): {error}", config.image_mode)
     })?;
@@ -528,7 +572,9 @@ fn execute(config: &Config, image: &[u8], manifest: &CampaignManifest, grant: &W
         },
     )?;
     let mut session = SymbolicSession::new(&runtime, arena.as_ref(), root);
-    session.mark_symbolic(0, config.symbolic_reg.register_id(), IrType::Bits(64))?;
+    for reg_id in config.symbolic_reg.register_ids() {
+        session.mark_symbolic(0, reg_id, IrType::Bits(64))?;
+    }
     let mut solver = Z3Backend::native_ffi(arena.clone() as Arc<dyn ExprReader>)?;
     Ok(session.advance_sustained(&grant.fence, manifest, &mut solver, grant.timeout, grant.step_budget)?)
 }
@@ -551,7 +597,9 @@ fn verify(
         },
     )?;
     let mut session = SymbolicSession::new(&runtime, arena.as_ref(), root);
-    session.mark_symbolic(0, config.symbolic_reg.register_id(), IrType::Bits(64))?;
+    for reg_id in config.symbolic_reg.register_ids() {
+        session.mark_symbolic(0, reg_id, IrType::Bits(64))?;
+    }
     let mut solver = Z3Backend::native_ffi(arena.clone() as Arc<dyn ExprReader>)?;
     Ok(campaign.verify_remote(
         &grant.fence,
@@ -804,6 +852,10 @@ pub fn coordinate_with_evidence(config: &Config, addr: SocketAddr, ledger: PathB
                     }
                 };
                 let verified = verify(config, &image, &campaign, &grant, &outcome)?;
+                let violation_reason = verified
+                    .reason()
+                    .starts_with("kernel ")
+                    .then(|| verified.reason().to_owned());
                 if start.elapsed() >= deadline {
                     // No commit after the declared bound: the verified outcome is
                     // dropped and its still-active grant is revoked below.
@@ -822,6 +874,17 @@ pub fn coordinate_with_evidence(config: &Config, addr: SocketAddr, ledger: PathB
                         "accepted {}",
                         progress::event_json(manifest.campaign_digest, index, event)
                     );
+                    if let Some(reason) = &violation_reason {
+                        let verified_witness = event.delta.path.witness.as_ref().is_some_and(|w| {
+                            matches!(w.replay, angryier_ledger::evidence::ReplayVerification::Verified { .. })
+                        });
+                        let campaign_hex: String =
+                            manifest.campaign_digest.0.iter().map(|b| format!("{b:02x}")).collect();
+                        let path_hex: String = event.delta.path.path_id.iter().map(|b| format!("{b:02x}")).collect();
+                        println!(
+                            "violation {{\"event_id\":\"{campaign_hex}:{index}\",\"path_id\":\"{path_hex}\",\"reason\":\"{reason}\",\"witness_replay_verified\":{verified_witness}}}"
+                        );
+                    }
                     io::stdout().flush()?;
                 }
                 used_steps = used_steps.checked_add(steps).ok_or("step budget overflow")?;
@@ -988,13 +1051,24 @@ mod tests {
         assert!("pe-user".parse::<ImageMode>().is_err());
         assert_eq!("rbx".parse::<SymbolicRegister>(), Ok(SymbolicRegister::Rbx));
         assert_eq!("rcx".parse::<SymbolicRegister>(), Ok(SymbolicRegister::Rcx));
-        for name in ["rax", "rdx", "RCX", "", "1"] {
+        assert_eq!("rdx".parse::<SymbolicRegister>(), Ok(SymbolicRegister::Rdx));
+        assert_eq!("rsi".parse::<SymbolicRegister>(), Ok(SymbolicRegister::Rsi));
+        assert_eq!("rdi".parse::<SymbolicRegister>(), Ok(SymbolicRegister::Rdi));
+        assert_eq!("sysv".parse::<SymbolicRegister>(), Ok(SymbolicRegister::Sysv));
+        for name in ["rax", "rsp", "RCX", "", "1"] {
             assert!(name.parse::<SymbolicRegister>().is_err(), "accepted {name}");
         }
         #[cfg(target_arch = "x86_64")]
         {
-            assert_eq!(SymbolicRegister::Rbx.register_id(), register_id::GPR_BASE + 3);
-            assert_eq!(SymbolicRegister::Rcx.register_id(), register_id::GPR_BASE + 1);
+            assert_eq!(SymbolicRegister::Rbx.register_ids(), vec![register_id::GPR_BASE + 3]);
+            assert_eq!(SymbolicRegister::Rcx.register_ids(), vec![register_id::GPR_BASE + 1]);
+            assert_eq!(SymbolicRegister::Rdx.register_ids(), vec![register_id::GPR_BASE + 2]);
+            assert_eq!(SymbolicRegister::Rsi.register_ids(), vec![register_id::GPR_BASE + 6]);
+            assert_eq!(SymbolicRegister::Rdi.register_ids(), vec![register_id::GPR_BASE + 7]);
+            assert_eq!(
+                SymbolicRegister::Sysv.register_ids(),
+                vec![register_id::GPR_BASE + 6, register_id::GPR_BASE + 2]
+            );
         }
     }
 

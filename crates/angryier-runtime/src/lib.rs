@@ -555,6 +555,9 @@ pub struct Process {
     pub step_count: u64,
     pub simproc_dispatches: u64,
     pub terminated: bool,
+    /// Path-local kernel violation recorded by stateful `ET_REL` models
+    /// (for example double free or refcount underflow).
+    pub kernel_violation: Option<&'static str>,
 }
 
 impl Process {
@@ -1798,6 +1801,7 @@ impl<D: Decoder> Runtime<D> {
             step_count: 0,
             simproc_dispatches: 0,
             terminated: false,
+            kernel_violation: None,
         };
         for _ in 0..512 {
             if process.pc().ok()? == SENTINEL {
@@ -1980,6 +1984,7 @@ impl<D: Decoder> Runtime<D> {
             step_count: 0,
             simproc_dispatches: 0,
             terminated: false,
+            kernel_violation: None,
         })
     }
 
@@ -2802,12 +2807,21 @@ impl<D: Decoder> Runtime<D> {
         });
 
         // For ET_REL modules, add a zeroed kernel model heap region backing
-        // pointers handed out by allocation models.
+        // pointers handed out by allocation models, plus a 64 KiB SysV ABI
+        // scratch region for seeded handler struct/buffer pointers.
         if image.et_rel.is_some() {
             regions.push(MemoryRegion {
                 object: angryier_types::ObjectId(3),
                 base: kernel_models::KERNEL_MODEL_HEAP_BASE,
                 size: kernel_models::KERNEL_MODEL_HEAP_SIZE,
+                readable: true,
+                writable: true,
+                executable: false,
+            });
+            regions.push(MemoryRegion {
+                object: angryier_types::ObjectId(4),
+                base: kernel_models::KERNEL_ABI_SCRATCH_BASE,
+                size: kernel_models::KERNEL_ABI_SCRATCH_SIZE,
                 readable: true,
                 writable: true,
                 executable: false,
@@ -2828,6 +2842,9 @@ impl<D: Decoder> Runtime<D> {
             memory = memory
                 .load_concrete(seg.address, &seg.bytes)
                 .map_err(|e| RuntimeError::Memory(format!("{e:?}")))?;
+        }
+        if image.et_rel.is_some() {
+            kernel_models::seed_abi_scratch(&mut memory)?;
         }
 
         // Lay out the initial process stack the way the Linux kernel does for
@@ -2882,6 +2899,22 @@ impl<D: Decoder> Runtime<D> {
                 },
             )
             .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+
+        // Seed Linux SysV ABI scratch pointers for ET_REL kernel handlers so
+        // `file->private_data` (`[rdi+0x18]`), `buf` (`rsi`), and `ppos` (`rdx`)
+        // point to mapped zeroed scratch unless overridden symbolically.
+        if image.et_rel.is_some() && !matches!(self.registry, CorpusRegistry::Arm64(_)) {
+            for (gpr_index, value) in [
+                (7u32, kernel_models::KERNEL_ABI_ARG0),
+                (6u32, kernel_models::KERNEL_ABI_ARG1),
+                (2u32, kernel_models::KERNEL_ABI_ARG2),
+                (1u32, kernel_models::KERNEL_ABI_ARG3),
+            ] {
+                registers = registers
+                    .write(register_id::GPR_BASE + gpr_index, &value.to_le_bytes())
+                    .map_err(|e| RuntimeError::Register(format!("{e:?}")))?;
+            }
+        }
 
         let state = ExecutionState {
             id: StateId(0),
@@ -2938,6 +2971,7 @@ impl<D: Decoder> Runtime<D> {
             step_count: 0,
             simproc_dispatches: 0,
             terminated: false,
+            kernel_violation: None,
         };
         kernel_models::install(&mut process, &kernel_externals);
         Ok(process)
@@ -4162,6 +4196,13 @@ impl<D: Decoder> Runtime<D> {
             } else {
                 tracker.record_free(pointer, caller);
             }
+        }
+
+        if let Some(ret) = kernel_models::apply_stateful(process, &name)? {
+            process.simproc_dispatches += 1;
+            pop_call_return(process)?;
+            process.write_register(register_id::GPR_BASE, ret)?;
+            return Ok(StepOutcome::SimProcedure { address, name });
         }
 
         let result = model.apply(&sim_state);
@@ -5749,6 +5790,7 @@ mod tests {
             step_count: 0,
             simproc_dispatches: 0,
             terminated: false,
+            kernel_violation: None,
         })
     }
 
@@ -7789,22 +7831,30 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
             || state.process.redirects.contains_key(&pc)
         {
             let state = &mut self.states[index];
-            // Pop the PC recorded at the start of step_state_inner so that runtime.step
-            // / dispatch_simproc_instance does not record the same PC twice.
-            state.process.trace.pop();
+            // Pop the PC recorded at the start of step_state_inner only before
+            // `runtime.step`, which records `pc` itself; `dispatch_simproc_instance`
+            // does not push to `process.trace`.
+            let mut before_gprs = [0u64; 16];
+            for (i, slot) in before_gprs.iter_mut().enumerate() {
+                *slot = state
+                    .process
+                    .read_register(register_id::GPR_BASE + i as u32)
+                    .unwrap_or(0);
+            }
             let outcome = if state.process.redirects.contains_key(&pc) {
+                state.process.trace.pop();
                 self.runtime.step(&mut state.process)?
             } else if let Some(model) = state.process.simproc_instances.get(&pc).cloned() {
                 self.runtime.dispatch_simproc_instance(&mut state.process, pc, &model)?
             } else {
+                state.process.trace.pop();
                 self.runtime.step(&mut state.process)?
             };
             state.memory = angryier_execution::SymbolicSessionMemory::new(state.process.state.memory.clone());
             for i in 0..16u32 {
                 let reg_id = register_id::GPR_BASE + i;
                 if let Ok(value) = state.process.read_register(reg_id) {
-                    let prev_val = state.concrete_registers.insert(reg_id, value);
-                    let changed = prev_val != Some(value);
+                    let changed = value != before_gprs[i as usize];
                     let is_symbolic = state
                         .registers
                         .get(&reg_id)
@@ -7812,6 +7862,7 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         .map(|node| node.op != angryier_expr::ExprOp::Constant)
                         .unwrap_or(false);
                     if changed || !is_symbolic {
+                        state.concrete_registers.insert(reg_id, value);
                         let bytes = value.to_le_bytes().to_vec();
                         if let Ok(expr) = self.arena.intern(angryier_expr::ExprNode {
                             sort: angryier_expr::ExprSort::BitVec(64),
@@ -7821,6 +7872,8 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
                         }) {
                             state.registers.insert(reg_id, (expr, angryier_ir::IrType::Bits(64)));
                         }
+                    } else {
+                        state.concrete_registers.remove(&reg_id);
                     }
                 }
             }

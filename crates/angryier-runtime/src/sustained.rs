@@ -710,7 +710,37 @@ impl<D: Decoder> SymbolicSession<'_, D> {
                 data.push(u8::from(disposition == SolverDisposition::Sat));
                 Digest::of(&data).0
             });
-            let model = (disposition == SolverDisposition::Sat).then_some(result.model);
+            let model = (disposition == SolverDisposition::Sat).then(|| {
+                let mut assignments = result.model;
+                // Multi-register root seeds (for example `--symbolic-reg sysv`)
+                // may leave an unused input symbol absent from all path
+                // constraints; Z3 omits unconstrained symbols from its model.
+                // Default only symbols absent from `state.constraints` so a
+                // tampered/missing constrained symbol still fails verification.
+                let mut constrained = std::collections::BTreeSet::new();
+                let mut stack: Vec<angryier_types::ExprId> = state.constraints.clone();
+                while let Some(id) = stack.pop() {
+                    if !constrained.insert(id) {
+                        continue;
+                    }
+                    if let Some(node) = self.arena.get(id) {
+                        stack.extend(node.operands.iter().copied());
+                    }
+                }
+                let present: std::collections::BTreeSet<u64> = assignments.iter().map(|(id, _)| *id).collect();
+                for binding in &state.symbols {
+                    let expr_id = u64::from(binding.expression.0);
+                    if !present.contains(&expr_id)
+                        && !constrained.contains(&binding.expression)
+                        && binding.width == 64
+                        && (crate::register_id::GPR_BASE..crate::register_id::GPR_BASE + 16).contains(&binding.register)
+                    {
+                        let fallback = state.process.read_register(binding.register).unwrap_or(0);
+                        assignments.push((expr_id, fallback.to_le_bytes().to_vec()));
+                    }
+                }
+                assignments
+            });
             (query_digest, disposition, result_digest, model)
         } else {
             (
