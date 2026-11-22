@@ -160,7 +160,7 @@ impl std::str::FromStr for RamCap {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CampaignLimits {
     pub max_steps: u64,
     pub max_path_steps: u64,
@@ -503,6 +503,32 @@ pub fn resolve_entry_symbol(config: &Config, name: &str) -> Result<u64> {
     if config.entry.is_some() {
         return Err("--entry and --root-symbol are mutually exclusive".into());
     }
+    lookup_symbol(config, name)
+}
+
+/// Resolves `NAME` or `NAME+OFFSET` (decimal or `0x` hex) to a runtime virtual
+/// address in the configured ELF image. Intended for `--find-symbol` /
+/// `--avoid-symbol` targets on `ET_REL` or static ELF binaries.
+pub fn resolve_symbol(config: &Config, spec: &str) -> Result<u64> {
+    if let Some((name, off_str)) = spec.split_once('+') {
+        if name.is_empty() || off_str.is_empty() {
+            return Err("symbol target requires NAME or NAME+OFFSET".into());
+        }
+        let offset = if let Some(hex) = off_str.strip_prefix("0x") {
+            u64::from_str_radix(hex, 16)
+        } else {
+            off_str.parse::<u64>()
+        }
+        .map_err(|_| "symbol offset must be a u64 (decimal or 0x hexadecimal)")?;
+        let base = lookup_symbol(config, name)?;
+        base.checked_add(offset)
+            .ok_or_else(|| "symbol target offset overflow".into())
+    } else {
+        lookup_symbol(config, spec)
+    }
+}
+
+fn lookup_symbol(config: &Config, name: &str) -> Result<u64> {
     let image = read_image(config)?;
     let loader = angryier_loader::Elf64Loader::new();
     let loaded = angryier_loader::ImageLoader::load(&loader, &image)
@@ -554,6 +580,9 @@ fn initial(config: &Config, image: &[u8]) -> Result<(u64, Digest)> {
     for reg_id in config.symbolic_reg.register_ids() {
         session.mark_symbolic(0, reg_id, IrType::Bits(64))?;
     }
+    if config.symbolic_reg == SymbolicRegister::Sysv && config.image_mode == ImageMode::Elf {
+        session.mark_et_rel_abi_scratch_symbolic()?;
+    }
     let digest = session.sustained_initial_digest().map_err(|error| {
         format!("root cannot be pinned for sustained replay ({:?}; pe-driver is a loader model, not Windows fidelity): {error}", config.image_mode)
     })?;
@@ -574,6 +603,9 @@ fn execute(config: &Config, image: &[u8], manifest: &CampaignManifest, grant: &W
     let mut session = SymbolicSession::new(&runtime, arena.as_ref(), root);
     for reg_id in config.symbolic_reg.register_ids() {
         session.mark_symbolic(0, reg_id, IrType::Bits(64))?;
+    }
+    if config.symbolic_reg == SymbolicRegister::Sysv && config.image_mode == ImageMode::Elf {
+        session.mark_et_rel_abi_scratch_symbolic()?;
     }
     let mut solver = Z3Backend::native_ffi(arena.clone() as Arc<dyn ExprReader>)?;
     Ok(session.advance_sustained(&grant.fence, manifest, &mut solver, grant.timeout, grant.step_budget)?)
@@ -599,6 +631,9 @@ fn verify(
     let mut session = SymbolicSession::new(&runtime, arena.as_ref(), root);
     for reg_id in config.symbolic_reg.register_ids() {
         session.mark_symbolic(0, reg_id, IrType::Bits(64))?;
+    }
+    if config.symbolic_reg == SymbolicRegister::Sysv && config.image_mode == ImageMode::Elf {
+        session.mark_et_rel_abi_scratch_symbolic()?;
     }
     let mut solver = Z3Backend::native_ffi(arena.clone() as Arc<dyn ExprReader>)?;
     Ok(campaign.verify_remote(

@@ -6,6 +6,7 @@ use std::{
 
 use angryier_arch::Decoder;
 use angryier_distribution::contracts::{CampaignManifest, Digest, WorkUnit};
+use angryier_memory::{ByteValue, LayeredMemory};
 use angryier_provenance::sustained::{DynamicBlock, ReplayVerification, WitnessEvidence};
 
 use super::{SymbolicSession, SymbolicState, trace_digest};
@@ -31,31 +32,34 @@ pub(crate) fn verify<D: Decoder>(
         || !manifest.spec.stubs.is_empty()
         || unit.prefix.is_empty()
         || root.symbols.is_empty()
-        || !root.replay_memory_symbols.is_empty()
         || !root.replay_stream_symbols.is_empty()
         || !root.memory.memory.symbolic_writes().is_empty()
         || model.is_empty()
-        || model.len() > 256
+        || model.len() > 4096
         || expected_trace.is_empty()
         || expected_trace.len().saturating_mul(16) > manifest.spec.limits.max_trace_bytes as usize
     {
         return None;
     }
-    let mut seeds = BTreeMap::new();
+    let mut reg_seeds = BTreeMap::new();
+    let mut mem_seeds = BTreeMap::new();
     for binding in &root.symbols {
-        if binding.width != 64
+        let expr_id = u64::from(binding.expression.0);
+        if let Some(&addr) = root.replay_memory_symbols.get(&binding.expression) {
+            if binding.width != 8 || mem_seeds.insert(expr_id, addr).is_some() {
+                return None;
+            }
+        } else if binding.width != 64
             || !(crate::register_id::GPR_BASE..crate::register_id::GPR_BASE + 16).contains(&binding.register)
-            || seeds
-                .insert(u64::from(binding.expression.0), binding.register)
-                .is_some()
+            || reg_seeds.insert(expr_id, binding.register).is_some()
         {
             return None;
         }
     }
     let mut registers = BTreeMap::new();
+    let mut mem_bytes = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for (expr, value) in model {
-        let &register = seeds.get(expr)?;
         if !seen.insert(*expr)
             || value.is_empty()
             || value.len() > 16
@@ -63,19 +67,38 @@ pub(crate) fn verify<D: Decoder>(
         {
             return None;
         }
-        let mut bytes = [0; 8];
-        bytes[..value.len().min(8)].copy_from_slice(&value[..value.len().min(8)]);
-        if registers.insert(register, u64::from_le_bytes(bytes)).is_some() {
+        if let Some(&register) = reg_seeds.get(expr) {
+            let mut bytes = [0; 8];
+            bytes[..value.len().min(8)].copy_from_slice(&value[..value.len().min(8)]);
+            if registers.insert(register, u64::from_le_bytes(bytes)).is_some() {
+                return None;
+            }
+        } else if let Some(&addr) = mem_seeds.get(expr) {
+            if value.get(1..).is_some_and(|upper| upper.iter().any(|byte| *byte != 0)) {
+                return None;
+            }
+            if mem_bytes.insert(addr, value[0]).is_some() {
+                return None;
+            }
+        } else {
             return None;
         }
     }
-    if seen.len() != seeds.len() {
+    if seen.len() != reg_seeds.len() + mem_seeds.len() {
         return None;
     }
     let mut input = b"angryier-sustained-register-input/v1".to_vec();
     for (register, value) in &registers {
         input.extend_from_slice(&register.to_le_bytes());
         input.extend_from_slice(&value.to_le_bytes());
+    }
+    if !mem_bytes.is_empty() {
+        input.extend_from_slice(b"memory");
+        input.extend_from_slice(&(mem_bytes.len() as u64).to_le_bytes());
+        for (addr, byte) in &mem_bytes {
+            input.extend_from_slice(&addr.to_le_bytes());
+            input.push(*byte);
+        }
     }
     let input_digest = Digest::of(&input);
     let mut provenance = b"angryier-sustained-concrete-replay/v1".to_vec();
@@ -92,6 +115,25 @@ pub(crate) fn verify<D: Decoder>(
     for (register, value) in registers {
         if process.write_register(register, value).is_err() {
             return None;
+        }
+    }
+    if !mem_bytes.is_empty() {
+        let mut iter = mem_bytes.into_iter().peekable();
+        while let Some((start, first)) = iter.next() {
+            let mut run = vec![ByteValue::Concrete(first)];
+            let mut next_addr = start.saturating_add(1);
+            while let Some(&(addr, byte)) = iter.peek() {
+                if addr != next_addr {
+                    break;
+                }
+                iter.next();
+                run.push(ByteValue::Concrete(byte));
+                next_addr = next_addr.saturating_add(1);
+            }
+            let Ok(updated) = process.state.memory.write(start, &run) else {
+                return None;
+            };
+            process.state.memory = updated;
         }
     }
     let mut visits = BTreeMap::<u64, u64>::new();

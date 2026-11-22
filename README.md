@@ -243,7 +243,28 @@ angryier run ./tests/fixtures/symbolic_branch --script script.lua
 
 For local sustained campaigns on a single host, the typed Rust campaign API and `angryier-campaign` CLI support repeatable `--symbolic REG` (64-bit GPR marks) and `--reg NAME=VALUE` (concrete u64 GPR seeds); see the [local campaign operator guide](docs/guides/local-campaigns.md) for a `local-run --batch-ms 5000 --run-ms N` pinned-spec command, bounded post-batch progress, and the [typed Rust script](crates/angryier-campaign/examples/local_campaign.rs) (`cargo run -p angryier-campaign --example local_campaign -- ...`). The example pins its own executable SHA-256; neither the CLI nor a recompiled example can resume its ledger. For bounded 1/2/4-worker campaigns, live `--progress-jsonl` monitoring, WAL capacity/restore requirements, and a finite illustrative 48-hour ELF budget, see the [distributed campaign operator guide](docs/guides/distributed-campaigns.md). The embedded Lua `angry.sustained` v1/v2 interface remains exported as a deprecated compatibility surface; existing Lua ledgers cannot be reopened by the Rust API/CLI without migration, so resume them through Lua (see [Lua API §9](docs/LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script)). Raw Advisor GUI PE remains deferred at `fork lacks complementary solver proof`, not fixed by raising caps alone.
 
-For distributed campaigns, the **same compiled** `angryier-campaign` executable can generate a pinned worker handoff on the coordinator with `angryier-campaign worker-config --binary /srv/angryier/image.elf --worker-binary /remote/absolute/image.elf --build-id release-v1 --worker-id worker-a --sign-key /LOCAL/coordinator/worker-a.key --key-file /remote/key/worker-a.key --listen 127.0.0.1:30031 --connections 0 --output /staging/worker-a.toml`. Pass the same image mode, entry, symbolic register and ten sealed limits as the coordinator. Stage the image and identical executable bytes on the worker; provision a distinct matching 32-byte pairwise key for this worker separately on both endpoints. The required `--sign-key` opens and validates the existing coordinator-local key, while `--key-file` records only the worker-side key pathname. The v2 TOML envelope exposes only the worker-side bootstrap `--key-file` pathname, version, random 24-byte nonce and ciphertext; it does not serialize key bytes or the coordinator-local `--sign-key` path. XChaCha20-Poly1305 encrypts and authenticates all pinned campaign settings, with the version and bootstrap key path authenticated as associated data (AAD). Transfer the TOML over an authenticated confidential channel, install it in a private directory at `~/.config/angryier/worker.toml` with mode `0600`, and run `angryier-campaign worker --config ~/.config/angryier/worker.toml`. The worker reads the separately provisioned key from that visible path and authenticates/decrypts the envelope before accepting campaign settings or reporting `READY`; this does not protect against a party with the key or control of the worker account, nor eliminate executable-hash time-of-check/time-of-use risk. The coordinator still uses a `--peer` over an authenticated confidential loopback tunnel; transport HMAC does not encrypt application frames. This handoff procedure has not been verified across hosts. See the [distributed operator guide](docs/guides/distributed-campaigns.md#pinned-worker-config-handoff) and [campaign CLI reference](docs/CLI.md#distributed-workercoordinator-roles); the original worker flags remain supported.
+For distributed campaigns, the **same compiled** `angryier-campaign` executable can generate a pinned v2 AEAD-encrypted worker TOML (`XChaCha20-Poly1305` using the coordinator-local `--sign-key`, leaving only `version`, remote `--key-file` path, random 24-byte nonce, and ciphertext visible; `--worker-binary` allows a different remote image path of identical SHA-256). Cross-host execution over SSH loopback tunnels (`T420 -> T320` and three-host `.ko` censuses) is verified:
+
+```sh
+# 1) Generate pinned worker config on coordinator (or run worker directly with the same flags)
+angryier-campaign worker-config --profile ko-handler \
+  --binary /srv/driver.ko --worker-binary /remote/driver.ko --root-symbol my_ioctl \
+  --build-id run1 --worker-id worker-a --sign-key /local/worker-a.key \
+  --key-file /remote/worker-a.key --listen 127.0.0.1:30031 --output /staging/worker-a.toml
+
+# 2) On worker (after provisioning matching binary, image, and mode-0600 key + TOML):
+angryier-campaign worker --config ~/.config/angryier/worker.toml
+
+# 3) On coordinator (behind SSH -L / mTLS loopback tunnel; targets are report-only):
+angryier-campaign coordinator --profile ko-handler \
+  --binary /srv/driver.ko --root-symbol my_ioctl --build-id run1 \
+  --peer worker-a@127.0.0.1:30031@/local/worker-a.key --ledger /tmp/run1.ledger \
+  --find-symbol my_ioctl+0x35
+```
+
+- **Presets & shortcuts (`angryier-campaign --help`):** `--profile elf | ko-handler (ko) | ko-deep | pe-driver`, `--budget STEPS[:PATH_STEPS[:WALL_MS]]`, `--root-symbol NAME`, and `--find-symbol` / `--avoid-symbol NAME[+OFFSET]` condense chained flags while keeping exact sealed manifest digests.
+- **Linux kernel modules (`ET_REL` `.ko`):** `angryier-loader` lays `SHF_ALLOC` sections deterministically from `0x0100_0000`, applies x86-64 `REL`/`RELA` relocations (including `NONE`, negative addends, and synthesized GOT/external stub slots), and `angryier-runtime::kernel_models` attaches path-local stateful models inside `Process.state.memory` (`0x2000_0000` heap slots + double-free detection, initialized refcount tracking, `copy_*_user`, `__fentry__`, `__x86_return_thunk`, registration family) plus a 64 KiB SysV ABI scratch struct (`0x3000_0000`) whose 1 KiB `file->private_data` tail is marked symbolic under `--profile ko-handler` / `--symbolic-reg sysv`.
+- **Security boundary:** transport HMAC authenticates loopback frames (`WIRE_VERSION = 3`, masked prelude digest) but **does not encrypt TCP**; always wrap cross-host connections in an authenticated confidential tunnel (SSH `-L` or mTLS), and protect per-worker key and TOML files (`0700` dir, `0600` file). See the [distributed operator guide](docs/guides/distributed-campaigns.md) and [campaign CLI reference](docs/CLI.md#distributed-workercoordinator-roles).
 
 ### Rust Engine API
 
@@ -290,7 +311,7 @@ crates/
   angryier-arch-intel64/      Intel 64 registers, features, CPU profiles
   angryier-decode-xed/        XED normalization boundary
   angryier-arch-xed-ffi/      Native Intel XED decoder FFI
-  angryier-loader/            Pure-Rust ELF64 (static/dynamic) & PE32+ loader
+  angryier-loader/            Pure-Rust ELF64 (static, dynamic, ET_REL .ko) & PE32+ loader
   angryier-runtime/           Dual-mode engine, Lua scripting, speculative modules
   angryier-semantics/         Semantic IR, provider/builder contracts
   angryier-semantic-contracts Sealed identity, verification & evidence
@@ -347,6 +368,7 @@ Angryier adheres to uncompromising architectural guarantees:
 Comprehensive guides are available in the [`docs/`](docs/) directory:
 
 - [**Consolidated Roadmap (Single Source of Truth)**](docs/ROADMAP.md)
+- [**KP15-SUITE Control Panel & Workbench (parent repo, `../..`)**](../../README.md) · [`kp15ctl`](../../bin/kp15ctl) · [**Appliance Operations**](../../docs/APPLIANCE_OPERATIONS.md)
 - [**Architecture Overview**](docs/architecture/overview.md)
 - [**Crate Hierarchy & Boundaries**](docs/architecture/crates.md)
 - [**CLI & Scripting Reference**](docs/CLI.md)

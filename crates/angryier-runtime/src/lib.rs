@@ -7691,6 +7691,25 @@ impl<'a, D: Decoder> SymbolicSession<'a, D> {
         Ok(())
     }
 
+    /// Marks the 1 KiB non-pointer field tail (`+0x28..+0x428`) of the `ET_REL`
+    /// ABI scratch secondary struct (`file->private_data` at `0x3000_1000`)
+    /// symbolic so kernel handler checks against driver flags/counters explore
+    /// both paths instead of folding to zeroed scratch.
+    pub fn mark_et_rel_abi_scratch_symbolic(&mut self) -> Result<(), RuntimeError> {
+        let has_abi_scratch = self.states.first().is_some_and(|s| {
+            s.process
+                .state
+                .memory
+                .regions()
+                .iter()
+                .any(|r| r.base == kernel_models::KERNEL_ABI_SCRATCH_BASE)
+        });
+        if has_abi_scratch {
+            self.mark_memory_symbolic(0, kernel_models::KERNEL_ABI_SCRATCH_BASE + 0x1028, 1024)?;
+        }
+        Ok(())
+    }
+
     /// Overwrites `argv[0]`'s stack string with `len` symbolic bytes (the
     /// trailing NUL stays concrete) — symbolic argv input for `main(argc,
     /// argv)` programs. `len` includes the NUL: `symbolize_argv0(0, 8)`

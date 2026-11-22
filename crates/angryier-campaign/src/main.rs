@@ -75,16 +75,23 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
     let mut connections = 0;
     let mut worker_id = None;
     let mut peers = Vec::new();
-    let mut image_mode = ImageMode::Elf;
+    let mut profile: Option<String> = None;
+    let mut image_mode = None;
     let mut entry = None;
-    let mut symbolic_reg = SymbolicRegister::Rbx;
+    let mut symbolic_reg = None;
     let mut legacy_symbolic = false;
     let mut symbolic: Option<Vec<(LocalRegister, u16)>> = None;
     let mut regs = Vec::new();
+    let mut budget: Option<(u64, Option<u64>, Option<u64>)> = None;
+    let mut explicit_steps = None;
+    let mut explicit_path_steps = None;
+    let mut explicit_wall_ms = None;
     let mut limits = Config::defaults(PathBuf::new(), PathBuf::new(), String::new()).limits;
     let mut policy = LocalPolicy::ForkAll;
     let mut find = Vec::new();
     let mut avoid = Vec::new();
+    let mut find_symbols = Vec::new();
+    let mut avoid_symbols = Vec::new();
     let mut exclude_avoid = false;
     let mut batch_ms = None;
     let mut run_ms = None;
@@ -100,12 +107,13 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
         let value = args.next().ok_or("each option requires a value")?;
         match flag.as_str() {
             "--binary" => binary = Some(PathBuf::from(value)),
-            "--image-mode" if !local => image_mode = value.parse()?,
+            "--profile" => profile = Some(value),
+            "--image-mode" if !local => image_mode = Some(value.parse()?),
             "--symbolic-reg" => {
                 if local && symbolic.is_some() {
                     return Err("--symbolic-reg cannot be mixed with --symbolic".into());
                 }
-                symbolic_reg = value.parse()?;
+                symbolic_reg = Some(value.parse()?);
                 legacy_symbolic = true;
             }
             "--symbolic" if local => {
@@ -167,21 +175,98 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
             }
             "--find" if local || role == "coordinator" => find.push(pc(&value)?),
             "--avoid" if local || role == "coordinator" => avoid.push(pc(&value)?),
+            "--find-symbol" if local || role == "coordinator" => {
+                if value.is_empty() || value.starts_with('-') {
+                    return Err("--find-symbol requires NAME or NAME+OFFSET".into());
+                }
+                find_symbols.push(value);
+            }
+            "--avoid-symbol" if local || role == "coordinator" => {
+                if value.is_empty() || value.starts_with('-') {
+                    return Err("--avoid-symbol requires NAME or NAME+OFFSET".into());
+                }
+                avoid_symbols.push(value);
+            }
             "--batch-ms" if role == "local-run" => batch_ms = Some(value.parse()?),
             "--run-ms" if role == "local-run" => run_ms = Some(value.parse()?),
-            "--max-steps" => limits.max_steps = value.parse()?,
-            "--max-path-steps" => limits.max_path_steps = value.parse()?,
+            "--budget" => {
+                let mut parts = value.split(':');
+                let s = parts
+                    .next()
+                    .ok_or("--budget requires STEPS[:PATH_STEPS[:WALL_MS]]")?
+                    .parse::<u64>()?;
+                let p = parts.next().map(str::parse::<u64>).transpose()?;
+                let w = parts.next().map(str::parse::<u64>).transpose()?;
+                if parts.next().is_some() {
+                    return Err("--budget accepts at most STEPS:PATH_STEPS:WALL_MS".into());
+                }
+                budget = Some((s, p, w));
+            }
+            "--max-steps" => explicit_steps = Some(value.parse()?),
+            "--max-path-steps" => explicit_path_steps = Some(value.parse()?),
             "--max-active-states" => limits.max_active_states = value.parse()?,
             "--max-path-depth" => limits.max_path_depth = value.parse()?,
             "--max-loop-visits" => limits.max_loop_visits = value.parse()?,
             "--max-solver-ms" => limits.max_solver_millis = value.parse()?,
-            "--max-wall-ms" => limits.max_wall_millis = value.parse()?,
+            "--max-wall-ms" => explicit_wall_ms = Some(value.parse()?),
             "--max-ram-bytes" => limits.max_ram_bytes = value.parse()?,
             "--max-disk-bytes" => limits.max_disk_bytes = value.parse()?,
             "--max-trace-bytes" => limits.max_trace_bytes = value.parse()?,
             _ => return Err(format!("unsupported option {flag}").into()),
         }
     }
+    let mut resolved_image_mode = ImageMode::Elf;
+    let mut resolved_symbolic_reg = SymbolicRegister::Rbx;
+    if let Some(name) = profile.as_deref() {
+        match name {
+            "elf" => {}
+            "ko-handler" | "ko" => {
+                resolved_symbolic_reg = SymbolicRegister::Sysv;
+                limits.max_steps = 256;
+                limits.max_path_steps = 256;
+                limits.max_wall_millis = 45_000;
+            }
+            "ko-deep" => {
+                resolved_symbolic_reg = SymbolicRegister::Sysv;
+                limits.max_steps = 1024;
+                limits.max_path_steps = 512;
+                limits.max_wall_millis = 120_000;
+            }
+            "pe-driver" if !local => {
+                resolved_image_mode = ImageMode::PeDriver;
+                resolved_symbolic_reg = SymbolicRegister::Rcx;
+            }
+            "pe-driver" => {
+                return Err("--profile pe-driver is only supported on distributed roles".into());
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported --profile '{name}' (expected elf, ko-handler, ko-deep, or pe-driver)"
+                )
+                .into());
+            }
+        }
+    }
+    if let Some((s, p, w)) = budget {
+        limits.max_steps = s;
+        if let Some(p) = p {
+            limits.max_path_steps = p;
+        }
+        if let Some(w) = w {
+            limits.max_wall_millis = w;
+        }
+    }
+    if let Some(s) = explicit_steps {
+        limits.max_steps = s;
+    }
+    if let Some(p) = explicit_path_steps {
+        limits.max_path_steps = p;
+    }
+    if let Some(w) = explicit_wall_ms {
+        limits.max_wall_millis = w;
+    }
+    let image_mode = image_mode.unwrap_or(resolved_image_mode);
+    let symbolic_reg = symbolic_reg.unwrap_or(resolved_symbolic_reg);
     if role == "local-run" {
         let wall = limits.max_wall_millis;
         let batch = batch_ms.unwrap_or(5_000).min(wall);
@@ -197,17 +282,6 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
             LocalPolicy::RankTargets { .. } => LocalPolicy::RankTargets { exclude_avoid: true },
             LocalPolicy::ForkAll => return Err("--exclude-avoid requires --policy rank-targets".into()),
         };
-    }
-    if role == "coordinator" {
-        for (name, list) in [("find", &mut find), ("avoid", &mut avoid)] {
-            if list.len() > 4096 {
-                return Err(format!("coordinator: --{name} accepts at most 4096 addresses").into());
-            }
-            list.sort_unstable();
-            if list.windows(2).any(|pair| pair[0] == pair[1]) {
-                return Err(format!("coordinator: duplicate --{name} address").into());
-            }
-        }
     }
     if role == "worker-config" && (worker_id.is_none() || key_file.is_none() || sign_key.is_none()) {
         return Err("worker-config requires --worker-id, --key-file, and --sign-key".into());
@@ -228,14 +302,31 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
         config.worker_id = id;
     }
     config.image_mode = image_mode;
-    config.entry = entry;
-    if let Some(name) = &root_symbol {
-        config.entry = Some(angryier_campaign::resolve_entry_symbol(&config, name)?);
-    }
     config.symbolic_reg = symbolic_reg;
     config.peers = peers;
     config.limits = limits;
     config.progress_jsonl = progress_jsonl;
+    config.entry = entry;
+    if let Some(name) = &root_symbol {
+        config.entry = Some(angryier_campaign::resolve_entry_symbol(&config, name)?);
+    }
+    for spec in &find_symbols {
+        find.push(angryier_campaign::resolve_symbol(&config, spec)?);
+    }
+    for spec in &avoid_symbols {
+        avoid.push(angryier_campaign::resolve_symbol(&config, spec)?);
+    }
+    if role == "coordinator" {
+        for (name, list) in [("find", &mut find), ("avoid", &mut avoid)] {
+            if list.len() > 4096 {
+                return Err(format!("coordinator: --{name} accepts at most 4096 addresses").into());
+            }
+            list.sort_unstable();
+            if list.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(format!("coordinator: duplicate --{name} address").into());
+            }
+        }
+    }
     if local && ledger.is_none() {
         return Err("--ledger is required".into());
     }
@@ -491,8 +582,39 @@ fn run_local_campaign(mut campaign: LocalCampaign, batch_ms: u64, run_ms: u64) -
     }
 }
 
+fn print_help() {
+    println!(
+        "\
+angryier-campaign — bounded, replay-verified distributed & local sustained campaigns
+
+Roles:
+  worker --config FILE                       Serve from verified AEAD worker TOML
+  worker --binary BIN --build-id ID --key-file KEY --listen LOOPBACK:PORT [opts]
+  worker-config --binary BIN --worker-binary PATH --build-id ID --worker-id ID \\
+                --key-file REMOTE_KEY --sign-key LOCAL_KEY --listen LOOPBACK:PORT --output FILE [opts]
+  coordinator --binary BIN --build-id ID --peer ID@LOOPBACK:PORT@KEY --ledger PATH [opts]
+  local-run | local-start | local-advance | local-resume | local-retry | local-status
+
+Presets & shortcuts:
+  --profile NAME             elf | ko-handler (ko) | ko-deep | pe-driver
+                             ko-handler => --symbolic-reg sysv --budget 256:256:45000
+                             ko-deep    => --symbolic-reg sysv --budget 1024:512:120000
+                             pe-driver  => --image-mode pe-driver --symbolic-reg rcx
+  --budget S[:P[:W]]         Shorthand for --max-steps S, --max-path-steps P, --max-wall-ms W
+  --root-symbol NAME         Resolve ET_REL/ELF entry function VA (exclusive with --entry)
+  --symbolic-reg REG         rbx (default), rcx, rdx, rsi, rdi, r8, r9, or sysv (rsi+rdx + scratch)
+  --find PC / --avoid PC     Report-only target PCs on coordinator (or ranked targets on local-*)
+  --find-symbol SPEC         Resolve NAME or NAME+OFFSET (decimal or 0x hex) into --find
+  --avoid-symbol SPEC        Resolve NAME or NAME+OFFSET into --avoid"
+    );
+}
+
 fn run() -> Result<RunExit> {
     let args: Vec<_> = env::args().skip(1).collect();
+    if args.len() == 1 && matches!(args[0].as_str(), "-h" | "--help" | "help") {
+        print_help();
+        return Ok(RunExit::Complete);
+    }
     if let Some(path) = worker_config_path(&args)? {
         let (config, addr, connections, expected_image_sha256) = WorkerConfig::load(&path)?;
         #[cfg(target_arch = "x86_64")]
@@ -1054,6 +1176,114 @@ mod tests {
                 "{flag} must not be accepted by worker-config"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn profile_budget_and_find_symbol_shortcuts() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("angryier-preset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir)?;
+        let ko = write_minimal_ko(&dir, "p.ko")?;
+        let ko_str = ko.to_str().ok_or("utf8 path")?;
+
+        // --profile ko-handler + explicit override is order-independent.
+        let a = parse_test(&[
+            "worker",
+            "--profile",
+            "ko-handler",
+            "--binary",
+            ko_str,
+            "--root-symbol",
+            "main",
+            "--build-id",
+            "b1",
+            "--listen",
+            "127.0.0.1:9102",
+            "--max-steps",
+            "512",
+        ])?;
+        let b = parse_test(&[
+            "worker",
+            "--max-steps",
+            "512",
+            "--binary",
+            ko_str,
+            "--root-symbol",
+            "main",
+            "--build-id",
+            "b1",
+            "--listen",
+            "127.0.0.1:9102",
+            "--profile",
+            "ko",
+        ])?;
+        assert_eq!(a.config.symbolic_reg, SymbolicRegister::Sysv);
+        assert_eq!(a.config.limits.max_steps, 512);
+        assert_eq!(a.config.limits.max_path_steps, 256);
+        assert_eq!(a.config.limits.max_wall_millis, 45_000);
+        assert_eq!(a.config.limits, b.config.limits);
+        assert_eq!(a.config.symbolic_reg, b.config.symbolic_reg);
+
+        // --budget + --find-symbol / --avoid-symbol with +offset.
+        let c = parse_test(&[
+            "coordinator",
+            "--profile",
+            "ko-handler",
+            "--budget",
+            "300:150:60000",
+            "--binary",
+            ko_str,
+            "--root-symbol",
+            "main",
+            "--build-id",
+            "b1",
+            "--ledger",
+            "c.ledger",
+            "--connect",
+            "127.0.0.1:9102",
+            "--find-symbol",
+            "main+0x10",
+            "--avoid-symbol",
+            "main+0x20",
+        ])?;
+        assert_eq!(c.config.limits.max_steps, 300);
+        assert_eq!(c.config.limits.max_path_steps, 150);
+        assert_eq!(c.config.limits.max_wall_millis, 60_000);
+        let entry = c.config.entry.ok_or("missing resolved entry")?;
+        assert_eq!(c.find, vec![entry + 0x10]);
+        assert_eq!(c.avoid, vec![entry + 0x20]);
+
+        // --profile pe-driver fails on local-* and --find-symbol fails on worker.
+        assert!(
+            parse_test(&[
+                "local-run",
+                "--profile",
+                "pe-driver",
+                "--binary",
+                ko_str,
+                "--build-id",
+                "b1",
+                "--ledger",
+                "l"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_test(&[
+                "worker",
+                "--binary",
+                ko_str,
+                "--build-id",
+                "b1",
+                "--listen",
+                "127.0.0.1:9102",
+                "--find-symbol",
+                "main"
+            ])
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

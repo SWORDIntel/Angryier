@@ -730,9 +730,25 @@ impl<D: Decoder> SymbolicSession<'_, D> {
                 let present: std::collections::BTreeSet<u64> = assignments.iter().map(|(id, _)| *id).collect();
                 for binding in &state.symbols {
                     let expr_id = u64::from(binding.expression.0);
-                    if !present.contains(&expr_id)
-                        && !constrained.contains(&binding.expression)
-                        && binding.width == 64
+                    if present.contains(&expr_id) || constrained.contains(&binding.expression) {
+                        continue;
+                    }
+                    if let Some(&addr) = state.replay_memory_symbols.get(&binding.expression) {
+                        if binding.width == 8 {
+                            let fallback = state
+                                .process
+                                .state
+                                .memory
+                                .read(addr, 1)
+                                .ok()
+                                .and_then(|bytes| match bytes.first() {
+                                    Some(ByteValue::Concrete(b)) => Some(*b),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
+                            assignments.push((expr_id, vec![fallback]));
+                        }
+                    } else if binding.width == 64
                         && (crate::register_id::GPR_BASE..crate::register_id::GPR_BASE + 16).contains(&binding.register)
                     {
                         let fallback = state.process.read_register(binding.register).unwrap_or(0);

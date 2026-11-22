@@ -1265,3 +1265,112 @@ double_free_site:
     let _ = fs::remove_dir_all(&dir);
     Ok(())
 }
+
+#[test]
+fn et_rel_sysv_symbolic_private_data_reaches_guarded_target() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_loader::{Elf64Loader, ImageLoader};
+
+    let dir = std::env::temp_dir().join(format!("angryier-etrel-mem-{}", std::process::id(),));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir(&dir)?;
+    let source = dir.join("mem_handler.s");
+    let ko = dir.join("mem_handler.ko");
+    fs::write(
+        &source,
+        r#"
+.text
+.global write_handler, guarded_copy
+.extern _copy_from_user
+write_handler:
+    mov 0x18(%rdi), %r12
+    testb $1, 0x398(%r12)
+    je .Lnot_ready
+guarded_copy:
+    call _copy_from_user
+    mov $60, %rax
+    syscall
+.Lnot_ready:
+    mov $60, %rax
+    syscall
+"#,
+    )?;
+    assert!(
+        Command::new("as")
+            .args(["--64", "-o"])
+            .arg(&ko)
+            .arg(&source)
+            .status()?
+            .success()
+    );
+
+    let key = dir.join("pairwise.key");
+    fs::write(&key, [0x5au8; 32])?;
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600))?;
+
+    let loaded = Elf64Loader::new().load(&fs::read(&ko)?)?;
+    let guarded_pc = loaded
+        .symbols
+        .iter()
+        .find(|s| s.name == "guarded_copy")
+        .ok_or("missing guarded_copy")?
+        .address;
+
+    let mut worker_cmd = Command::new(env!("CARGO_BIN_EXE_angryier-campaign"));
+    worker_cmd
+        .arg("worker")
+        .args(["--binary"])
+        .arg(&ko)
+        .args(["--key-file"])
+        .arg(&key)
+        .args([
+            "--build-id",
+            "ko-mem-v1",
+            "--root-symbol",
+            "write_handler",
+            "--symbolic-reg",
+            "sysv",
+            "--listen",
+            "127.0.0.1:0",
+            "--connections",
+            "8",
+        ]);
+    let mut child = worker_cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut ready = String::new();
+    BufReader::new(child.stdout.take().expect("worker stdout")).read_line(&mut ready)?;
+    assert!(ready.starts_with("READY 127.0.0.1:"), "worker startup: {ready:?}");
+    let addr = ready.trim_start_matches("READY ").trim().to_owned();
+    let _worker = Worker(child);
+
+    let ledger = dir.join("mem.ledger");
+    let mut coord = Command::new(env!("CARGO_BIN_EXE_angryier-campaign"));
+    coord
+        .arg("coordinator")
+        .args(["--binary"])
+        .arg(&ko)
+        .args(["--key-file"])
+        .arg(&key)
+        .args([
+            "--build-id",
+            "ko-mem-v1",
+            "--root-symbol",
+            "write_handler",
+            "--symbolic-reg",
+            "sysv",
+            "--connect",
+            &addr,
+            "--ledger",
+        ])
+        .arg(&ledger)
+        .args(["--find", &format!("{guarded_pc:#x}")]);
+    let output = coord.output()?;
+    report_ok(&output);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.lines().any(|line| {
+            line == "campaign targets: find_witnessed=1/1 find_reached=1/1 avoid_witnessed=0/0 avoid_reached=0/0"
+        }),
+        "expected symbolic memory-gated target witness: {text}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    Ok(())
+}
