@@ -168,6 +168,14 @@ pub fn model_for(symbol: &str) -> Option<KernelModelKind> {
     if SUCCESS.iter().any(|prefix| symbol.contains(prefix)) {
         return Some(KernelModelKind::Success);
     }
+    // Driver/core registration helpers (`__pci_register_driver`,
+    // `i2c_register_driver`, `bus_register`, `misc_register`, ...) record the
+    // caller's ops and report success. They are the single largest class of
+    // blocking import across the corpus, so modelling the family keeps
+    // `init_module` from faulting at its first registration call.
+    if symbol.contains("register") && !symbol.contains("unregister") {
+        return Some(KernelModelKind::Success);
+    }
     None
 }
 
@@ -202,6 +210,20 @@ mod tests {
         assert_eq!(model_for("kzalloc"), Some(KernelModelKind::Allocate));
         assert_eq!(model_for("kmem_cache_alloc_trace"), Some(KernelModelKind::Allocate));
         assert_eq!(model_for("devm_iio_device_alloc"), Some(KernelModelKind::Allocate));
+        // Registration family: the census's dominant blocker class.
+        for symbol in [
+            "__pci_register_driver",
+            "i2c_register_driver",
+            "__spi_register_driver",
+            "usb_register_driver",
+            "__platform_driver_register",
+            "__hid_register_driver",
+            "bus_register",
+            "misc_register",
+        ] {
+            assert_eq!(model_for(symbol), Some(KernelModelKind::Success), "{symbol}");
+        }
+        assert_eq!(model_for("pci_unregister_driver"), None);
         assert_eq!(model_for("kfree"), Some(KernelModelKind::Release));
         assert_eq!(model_for("kfree_sensitive"), Some(KernelModelKind::Release));
         assert_eq!(model_for("copy_from_user"), Some(KernelModelKind::Success));
