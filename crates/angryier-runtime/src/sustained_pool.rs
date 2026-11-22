@@ -462,11 +462,19 @@ impl<D: Decoder> SymbolicSession<'_, D> {
                         None,
                     );
                 }
-                if !matches!(outcome, SymbolicStepOutcome::Branched { .. }) || self.states.len() != 2 {
+                if !matches!(outcome, SymbolicStepOutcome::Branched { .. }) {
+                    // The condition resolved concretely (constant fold or a
+                    // recorded concrete value), so exactly one successor exists
+                    // and no fork or complementary proof is needed. The
+                    // decision is already recorded with its chosen successor;
+                    // keep walking the single path.
+                    continue;
+                }
+                if self.states.len() != 2 {
                     break (
                         Status::Deferred,
                         PathDisposition::Pending(PendingReason::Unknown),
-                        "fork lacks complementary solver proof",
+                        "fork did not produce exactly two children",
                         None,
                     );
                 }
