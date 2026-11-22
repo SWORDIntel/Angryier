@@ -22,6 +22,7 @@ pub mod call_audit;
 pub mod capture;
 mod corpus_registry;
 pub mod import_audit;
+pub mod kernel_models;
 pub mod sustained;
 pub mod sustained_pool;
 pub mod vm_materialize;
@@ -2880,7 +2881,16 @@ impl<D: Decoder> Runtime<D> {
             fidelity: FidelityLedger::new(FidelityProfile::Prove),
         };
 
-        Ok(Process {
+        // ET_REL modules import kernel symbols they never define; attach the
+        // models we understand so those calls advance instead of faulting on a
+        // zero-filled stub slot. Unmodeled imports keep no hook.
+        let kernel_externals = image
+            .et_rel
+            .as_ref()
+            .map(|et_rel| et_rel.externals.clone())
+            .unwrap_or_default();
+
+        let mut process = Process {
             image_id: image.id,
             target_profile: image.target_profile,
             entry: image.entry,
@@ -2915,7 +2925,9 @@ impl<D: Decoder> Runtime<D> {
             step_count: 0,
             simproc_dispatches: 0,
             terminated: false,
-        })
+        };
+        kernel_models::install(&mut process, &kernel_externals);
+        Ok(process)
     }
 
     /// Executes a single instruction at the current PC.

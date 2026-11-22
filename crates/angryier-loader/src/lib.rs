@@ -2409,11 +2409,14 @@ mod tests {
 
     #[test]
     fn et_rel_loads_a_real_kernel_module() {
-        let path = std::path::Path::new(
-            "/home/john/Documents/byovd-harness.local/drivers_linux/drivers_media/rc-pixelview-002t.ko",
-        );
-        let Ok(bytes) = std::fs::read(path) else {
-            eprintln!("corpus module not present; skipping");
+        // Opt-in: point this at any real `.ko` to exercise the corpus path.
+        // The default keeps the suite hermetic.
+        let Ok(path) = std::env::var("ANGRYIER_KO_FIXTURE") else {
+            eprintln!("ANGRYIER_KO_FIXTURE not set; skipping real-module check");
+            return;
+        };
+        let Ok(bytes) = std::fs::read(std::path::Path::new(&path)) else {
+            eprintln!("ANGRYIER_KO_FIXTURE unreadable; skipping");
             return;
         };
         let loader = Elf64Loader::new();
@@ -2428,6 +2431,11 @@ mod tests {
                 .all(|section| section.address >= ET_REL_IMAGE_BASE),
             "every laid-out section sits at or above the fixed base"
         );
+        if std::env::var("ANGRYIER_KO_PRINT").is_ok() {
+            for external in &et_rel.externals {
+                eprintln!("EXT {:#x} {}", external.address, external.name);
+            }
+        }
         // The module imports kernel APIs; each became a synthesized stub slot.
         assert!(
             !et_rel.externals.is_empty(),

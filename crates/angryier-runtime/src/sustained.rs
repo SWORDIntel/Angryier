@@ -488,7 +488,7 @@ impl<D: Decoder> SymbolicSession<'_, D> {
             || !process.symbolic_fd_paths.is_empty()
             || process.kernel_pool.is_some()
             || process.jni_env.is_some()
-            || !process.simproc_instances.is_empty()
+            || !models_are_deterministic(process)
             || !process.redirects.is_empty()
             || self.uc_pin_fallback
             || !self.loop_summaries.is_empty()
@@ -500,11 +500,31 @@ impl<D: Decoder> SymbolicSession<'_, D> {
         }
         let pe = pinned_pe_loader_state(state)?;
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(if pe {
-            b"ANGRYIER-SUSTAINED-ROOT-v2-PE"
-        } else {
-            b"ANGRYIER-SUSTAINED-ROOT-v1"
+        // A process carrying kernel models needs its own root domain: the
+        // model set is part of the pinned environment, and old v1 ledgers must
+        // not silently compare equal to a modeled root.
+        let modeled = !process.simproc_instances.is_empty();
+        bytes.extend_from_slice(match (pe, modeled) {
+            (true, _) => b"ANGRYIER-SUSTAINED-ROOT-v2-PE".as_slice(),
+            (false, false) => b"ANGRYIER-SUSTAINED-ROOT-v1".as_slice(),
+            (false, true) => b"ANGRYIER-SUSTAINED-ROOT-v3-MODELED-ELF".as_slice(),
         });
+        // Bind the deterministic model set: address and model identity, sorted
+        // so install order cannot change the digest.
+        if modeled {
+            let mut bindings: Vec<(u64, String)> = process
+                .simproc_instances
+                .iter()
+                .map(|(address, model)| (*address, model.name().to_owned()))
+                .collect();
+            bindings.sort();
+            bytes.extend_from_slice(&(bindings.len() as u64).to_le_bytes());
+            for (address, name) in &bindings {
+                bytes.extend_from_slice(&address.to_le_bytes());
+                bytes.extend_from_slice(&(name.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(name.as_bytes());
+            }
+        }
         for n in [
             process.entry,
             process.image_id.0,
@@ -1512,6 +1532,16 @@ mod pe_root_tests {
         assert!(session.sustained_initial_digest().is_err());
         Ok(())
     }
+}
+
+/// True when every installed SimProcedure is one of the deterministic kernel
+/// models, whose behaviour is a pure function of its slot address. Any other
+/// hook makes the root unreplayable.
+fn models_are_deterministic(process: &crate::Process) -> bool {
+    process
+        .simproc_instances
+        .values()
+        .all(|model| crate::kernel_models::DETERMINISTIC_MODEL_NAMES.contains(&model.name()))
 }
 
 #[cfg(test)]
