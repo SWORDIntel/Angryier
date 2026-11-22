@@ -295,6 +295,7 @@ mod tests {
             program_headers: None,
             dynamic: None,
             pe: None,
+            et_rel: None,
         };
         Runtime::new(NoDecode, SemanticVersion(1), TargetProfileId(1))
             .load_image(image)

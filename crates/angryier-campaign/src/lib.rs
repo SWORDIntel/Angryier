@@ -452,6 +452,28 @@ fn read_image(config: &Config) -> Result<Vec<u8>> {
     Ok(image)
 }
 
+/// Resolves `--root-symbol NAME` to a runtime virtual address in the
+/// configured image. Prefers a `STT_FUNC` match; any named symbol is accepted
+/// otherwise. Kernel modules (ET_REL) have no entry point, so campaigns target
+/// one through this path or an explicit `--entry`; the two are mutually
+/// exclusive.
+pub fn resolve_entry_symbol(config: &Config, name: &str) -> Result<u64> {
+    if config.entry.is_some() {
+        return Err("--entry and --root-symbol are mutually exclusive".into());
+    }
+    let image = read_image(config)?;
+    let loader = angryier_loader::Elf64Loader::new();
+    let loaded = angryier_loader::ImageLoader::load(&loader, &image)
+        .map_err(|error| format!("root symbol resolution failed: {error}"))?;
+    let symbol = loaded
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == name && symbol.is_function())
+        .or_else(|| loaded.symbols.iter().find(|symbol| symbol.name == name))
+        .ok_or_else(|| format!("root symbol '{name}' not found in image"))?;
+    Ok(symbol.address)
+}
+
 #[cfg(target_arch = "x86_64")]
 fn configure_root(config: &Config, mut root: Process) -> Result<Process> {
     // pe-driver retains the runtime's deterministic import stubs, scratch

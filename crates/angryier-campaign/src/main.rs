@@ -26,6 +26,9 @@ struct Cli {
     regs: Vec<(LocalRegister, u64)>,
     batch_ms: Option<u64>,
     run_ms: Option<u64>,
+    /// Consumed inside `parse`: `config.entry` carries the resolved address.
+    #[allow(dead_code)]
+    root_symbol: Option<String>,
 }
 
 fn pc(value: &str) -> Result<u64> {
@@ -85,6 +88,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
     let mut exclude_avoid = false;
     let mut batch_ms = None;
     let mut run_ms = None;
+    let mut root_symbol = None;
     while let Some(flag) = args.next() {
         if flag == "--exclude-avoid" {
             if !local {
@@ -117,7 +121,21 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
                     pc(seed).map_err(|_| "--reg requires a u64 value (decimal or 0x hexadecimal)")?,
                 ));
             }
-            "--entry" if !local => entry = Some(pc(&value)?),
+            "--entry" if !local => {
+                if root_symbol.is_some() {
+                    return Err("--entry and --root-symbol are mutually exclusive".into());
+                }
+                entry = Some(pc(&value)?);
+            }
+            "--root-symbol" => {
+                if entry.is_some() {
+                    return Err("--entry and --root-symbol are mutually exclusive".into());
+                }
+                if value.is_empty() || value.starts_with('-') {
+                    return Err("--root-symbol requires a symbol name".into());
+                }
+                root_symbol = Some(value);
+            }
             "--key-file" if !local => key_file = Some(PathBuf::from(value)),
             "--worker-id" if !local => worker_id = Some(value),
             "--peer" if !local && role != "worker-config" => {
@@ -200,6 +218,9 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
     }
     config.image_mode = image_mode;
     config.entry = entry;
+    if let Some(name) = &root_symbol {
+        config.entry = Some(angryier_campaign::resolve_entry_symbol(&config, name)?);
+    }
     config.symbolic_reg = symbolic_reg;
     config.peers = peers;
     config.limits = limits;
@@ -239,6 +260,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
         regs,
         batch_ms,
         run_ms,
+        root_symbol,
     })
 }
 
@@ -420,6 +442,8 @@ fn run() -> Result<RunExit> {
         regs,
         batch_ms,
         run_ms,
+        // Applied inside `parse`: `config.entry` is already resolved numeric.
+        root_symbol: _,
     } = parse(args)?;
     #[cfg(target_arch = "x86_64")]
     match role.as_str() {
@@ -552,6 +576,155 @@ mod tests {
 
     fn parse_test(args: &[&str]) -> Result<Cli> {
         parse(args.iter().map(|arg| (*arg).to_owned()))
+    }
+
+    /// Minimal ET_REL object with one executable `.text` byte and a defined
+    /// `main` symbol, for `--root-symbol` resolution without the corpus.
+    fn write_minimal_ko(dir: &std::path::Path, name: &str) -> std::io::Result<PathBuf> {
+        use std::io::Write as _;
+        let path = dir.join(name);
+        let text = [0x90u8]; // nop
+        let strtab = b"\0main\0";
+        let names = b"\0.text\0.symtab\0.strtab\0";
+        let mut symtab = Vec::new();
+        let push = |v: &mut Vec<u8>, name: u32, info: u8, shndx: u16, value: u64, size: u64| {
+            v.extend_from_slice(&name.to_le_bytes());
+            v.push(info);
+            v.push(0);
+            v.extend_from_slice(&shndx.to_le_bytes());
+            v.extend_from_slice(&value.to_le_bytes());
+            v.extend_from_slice(&size.to_le_bytes());
+        };
+        push(&mut symtab, 0, 0, 0, 0, 0);
+        push(&mut symtab, 1, 0x12, 1, 0, 0); // main GLOBAL FUNC in .text
+        let mut body: Vec<u8> = Vec::new();
+        let text_off = 64 + body.len();
+        body.extend_from_slice(&text);
+        let symtab_off = 64 + body.len();
+        body.extend_from_slice(&symtab);
+        let strtab_off = 64 + body.len();
+        body.extend_from_slice(strtab);
+        let names_off = 64 + body.len();
+        body.extend_from_slice(names);
+        let shoff = 64 + body.len();
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"\x7fELF");
+        out.extend_from_slice(&[2, 1, 1]);
+        out.extend_from_slice(&[0u8; 9]);
+        out.extend_from_slice(&1u16.to_le_bytes()); // ET_REL
+        out.extend_from_slice(&62u16.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes()); // e_entry
+        out.extend_from_slice(&0u64.to_le_bytes()); // e_phoff
+        out.extend_from_slice(&shoff.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&64u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&64u16.to_le_bytes());
+        out.extend_from_slice(&5u16.to_le_bytes());
+        out.extend_from_slice(&4u16.to_le_bytes()); // e_shstrndx = names
+        out.extend_from_slice(&body);
+        let sh = |name: u32, kind: u32, flags: u64, off: u64, size: u64, link: u32, align: u64, entsize: u64| {
+            let mut v = Vec::with_capacity(64);
+            v.extend_from_slice(&name.to_le_bytes());
+            v.extend_from_slice(&kind.to_le_bytes());
+            v.extend_from_slice(&flags.to_le_bytes());
+            v.extend_from_slice(&0u64.to_le_bytes());
+            v.extend_from_slice(&off.to_le_bytes());
+            v.extend_from_slice(&size.to_le_bytes());
+            v.extend_from_slice(&link.to_le_bytes());
+            v.extend_from_slice(&0u32.to_le_bytes());
+            v.extend_from_slice(&align.to_le_bytes());
+            v.extend_from_slice(&entsize.to_le_bytes());
+            v
+        };
+        out.extend_from_slice(&sh(0, 0, 0, 0, 0, 0, 0, 0));
+        out.extend_from_slice(&sh(1, 1, 0x6, text_off as u64, text.len() as u64, 0, 16, 0));
+        out.extend_from_slice(&sh(7, 2, 0, symtab_off as u64, symtab.len() as u64, 3, 8, 24));
+        out.extend_from_slice(&sh(15, 3, 0, strtab_off as u64, strtab.len() as u64, 0, 1, 0));
+        out.extend_from_slice(&sh(23, 3, 0, names_off as u64, names.len() as u64, 0, 1, 0));
+        let mut file = std::fs::File::create(&path)?;
+        file.write_all(&out)?;
+        Ok(path)
+    }
+
+    #[test]
+    fn root_symbol_resolves_and_conflicts_with_entry() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("angryier-root-symbol-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let ko = write_minimal_ko(&dir, "minimal.ko")?;
+        let ko = ko.to_str().ok_or("temp path is not UTF-8")?;
+
+        let cli = parse_test(&[
+            "worker",
+            "--binary",
+            ko,
+            "--worker-id",
+            "w1",
+            "--key-file",
+            "k.key",
+            "--build-id",
+            "v1",
+            "--listen",
+            "127.0.0.1:9101",
+            "--root-symbol",
+            "main",
+        ])?;
+        assert_eq!(cli.root_symbol.as_deref(), Some("main"));
+        assert_eq!(cli.config.entry, Some(0x0100_0000));
+
+        let cli = parse_test(&[
+            "local-run",
+            "--binary",
+            ko,
+            "--build-id",
+            "v1",
+            "--ledger",
+            "l.ledger",
+            "--root-symbol",
+            "main",
+        ])?;
+        assert_eq!(cli.config.entry, Some(0x0100_0000));
+
+        let conflict = parse_test(&[
+            "worker",
+            "--binary",
+            "a.ko",
+            "--worker-id",
+            "w1",
+            "--key-file",
+            "k.key",
+            "--build-id",
+            "v1",
+            "--listen",
+            "127.0.0.1:9101",
+            "--entry",
+            "0x1000",
+            "--root-symbol",
+            "init_module",
+        ]);
+        assert!(conflict.is_err(), "--entry with --root-symbol must fail");
+
+        let reverse = parse_test(&[
+            "worker",
+            "--binary",
+            "a.ko",
+            "--worker-id",
+            "w1",
+            "--key-file",
+            "k.key",
+            "--build-id",
+            "v1",
+            "--listen",
+            "127.0.0.1:9101",
+            "--root-symbol",
+            "init_module",
+            "--entry",
+            "0x1000",
+        ]);
+        assert!(reverse.is_err(), "--root-symbol with --entry must fail");
+        Ok(())
     }
 
     #[test]

@@ -10,6 +10,7 @@ angryier-distribution = { path = "../angryier-distribution" }
 angryier-types = { path = "../angryier-types" }
 angryier-expr = { path = "../angryier-expr" }
 angryier-ledger = { path = "../angryier-ledger" }
+angryier-loader = { path = "../angryier-loader" }
 angryier-runtime = { path = "../angryier-runtime" }
 sha2 = "0.10"
 chacha20poly1305 = "=0.10.1"

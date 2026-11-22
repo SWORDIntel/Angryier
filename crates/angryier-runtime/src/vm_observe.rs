@@ -225,6 +225,7 @@ mod tests {
             program_headers: None,
             dynamic: None,
             pe: None,
+            et_rel: None,
         };
         let mut process = runtime.load_image(image)?;
         let start = VmObservedLocation {
@@ -295,6 +296,7 @@ mod tests {
             program_headers: None,
             dynamic: None,
             pe: None,
+            et_rel: None,
         };
         let mut process = runtime.load_image(image)?;
         let here = VmObservedLocation {

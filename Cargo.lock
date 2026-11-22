@@ -81,6 +81,7 @@ dependencies = [
  "angryier-expr",
  "angryier-ir",
  "angryier-ledger",
+ "angryier-loader",
  "angryier-runtime",
  "angryier-solver-z3",
  "angryier-types",

@@ -112,6 +112,7 @@ fn fixture() -> Result<VmHandlerCapture, String> {
         program_headers: None,
         dynamic: None,
         pe: None,
+        et_rel: None,
     };
     let process = runtime.load_image(image).map_err(|e| e.to_string())?;
     let a = location(0x1000, 0x50, 1);
@@ -383,6 +384,7 @@ fn native_xed_two_instruction_execution_replays_materialized_effects() -> Result
         program_headers: None,
         dynamic: None,
         pe: None,
+        et_rel: None,
     };
     let mut process = runtime.load_image(image).map_err(|error| error.to_string())?;
     // A MOV EAX must clear the upper half of RAX, even if the original

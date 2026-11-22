@@ -74,6 +74,10 @@ pub struct LoadedImage {
     pub dynamic: Option<DynamicInfo>,
     /// Parsed PE32+ metadata — present on PE images only.
     pub pe: Option<PeInfo>,
+    /// ET_REL (relocatable object) metadata — present on `.ko`-style inputs
+    /// only. Sections are laid out at [`ET_REL_IMAGE_BASE`]; `entry` is 0 and
+    /// the caller must select an explicit root (symbol or address).
+    pub et_rel: Option<EtRelInfo>,
 }
 
 /// A parsed `PT_DYNAMIC` entry of interest — a `(tag, value)` pair where
@@ -192,6 +196,16 @@ pub enum LoaderError {
     InvalidMachine,
     /// No program headers or loadable segments were found.
     NoProgramHeaders,
+    /// An ET_REL image has no (or a truncated) section header table.
+    NoSectionHeaders,
+    /// A relocation could not be applied safely: bad symbol index, target
+    /// out of the laid-out section, value does not fit, or an unsupported
+    /// relocation type. The image is rejected rather than mis-linked.
+    RelocationError,
+    /// A relocation uses an x86-64 type this loader does not synthesize.
+    UnsupportedRelocation,
+    /// The ET_REL image exceeds the loader's laid-out size cap.
+    ImageTooLarge,
     /// A segment file offset or memory size extends beyond the input buffer.
     SegmentOutOfRange,
     /// The PE32+ import directory, a descriptor, thunk array, or import name
@@ -215,6 +229,12 @@ impl fmt::Display for LoaderError {
             Self::InvalidElfClass => f.write_str("invalid ELF class (expected 64-bit)"),
             Self::InvalidMachine => f.write_str("invalid machine architecture (expected x86-64)"),
             Self::NoProgramHeaders => f.write_str("no program headers found"),
+            Self::NoSectionHeaders => f.write_str("ET_REL image has no section header table"),
+            Self::RelocationError => {
+                f.write_str("relocation could not be applied safely (bad symbol, target or value)")
+            }
+            Self::UnsupportedRelocation => f.write_str("relocation uses an unsupported x86-64 type"),
+            Self::ImageTooLarge => f.write_str("ET_REL image exceeds the laid-out size cap"),
             Self::SegmentOutOfRange => f.write_str("segment offset or size is out of range"),
             Self::TruncatedImportTable => f.write_str("PE import table is truncated or out of range"),
             Self::ImportDllNameTooLong => f.write_str("PE import DLL name exceeds 64 characters"),
@@ -233,6 +253,7 @@ const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 const EV_CURRENT: u8 = 1;
 
+const ET_REL: u16 = 1;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
@@ -246,6 +267,76 @@ const PF_R: u32 = 4;
 const SHT_SYMTAB: u32 = 2;
 const ELF64_SECTION_HEADER_SIZE: u64 = 64;
 const ELF64_SYMBOL_SIZE: u64 = 24;
+
+// --- ET_REL (relocatable object, e.g. Linux kernel modules) ----------------
+const SHT_PROGBITS: u32 = 1;
+const SHT_STRTAB: u32 = 3;
+const SHT_RELA: u32 = 4;
+const SHT_NOTE: u32 = 7;
+const SHT_NOBITS: u32 = 8;
+const SHT_REL: u32 = 9;
+const SHT_INIT_ARRAY: u32 = 14;
+const SHT_FINI_ARRAY: u32 = 15;
+const SHT_PREINIT_ARRAY: u32 = 16;
+
+const SHF_WRITE: u64 = 0x1;
+const SHF_ALLOC: u64 = 0x2;
+const SHF_EXECINSTR: u64 = 0x4;
+
+const SHN_UNDEF: u16 = 0;
+const SHN_ABS: u16 = 0xFFF1;
+const SHN_COMMON: u16 = 0xFFF2;
+
+const STT_FILE: u8 = 4;
+
+/// x86-64 relocation types applied by the ET_REL path.
+const R_X86_64_64: u32 = 1;
+const R_X86_64_PC32: u32 = 2;
+const R_X86_64_GOT32: u32 = 3;
+const R_X86_64_PLT32: u32 = 4;
+const R_X86_64_GOTPCREL: u32 = 9;
+const R_X86_64_32: u32 = 10;
+const R_X86_64_32S: u32 = 11;
+const R_X86_64_PC64: u32 = 24;
+const R_X86_64_GOTPCRELX: u32 = 41;
+
+/// Deterministic base where ET_REL sections are laid out. Section headers
+/// carry no virtual addresses, so a fixed base keeps harness RVAs convertible:
+/// runtime VA = base + section base + section offset.
+pub const ET_REL_IMAGE_BASE: u64 = 0x0100_0000;
+/// Deterministic region for synthesized data: undefined-symbol stub slots,
+/// GOT slots, and `SHN_COMMON` allocations, in that order, all in one
+/// writable segment so relocation math stays u32-representable.
+const ET_REL_SYNTH_BASE: u64 = 0x1000_0000;
+/// Slot size for one synthesized undefined-symbol address or GOT entry.
+const ET_REL_SLOT_SIZE: u64 = 8;
+/// Upper bound on the laid-out ET_REL image (sections + synthesized region).
+const ET_REL_MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+/// Upper bound on total relocation entries processed per image.
+const ET_REL_MAX_RELOCATIONS: usize = 2_000_000;
+
+/// One `SHF_ALLOC` section laid out by the ET_REL loader. `address` is the
+/// runtime virtual address where the section's first byte lands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionInfo {
+    pub name: String,
+    pub index: u16,
+    pub address: u64,
+    pub size: u64,
+    pub writable: bool,
+    pub executable: bool,
+}
+
+/// ET_REL-specific metadata attached to [`LoadedImage::et_rel`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EtRelInfo {
+    /// Laid-out `SHF_ALLOC` sections in section-header order.
+    pub sections: Vec<SectionInfo>,
+    /// One entry per referenced undefined symbol, in first-reference order.
+    /// `address` is the synthesized stub slot the relocations point at; the
+    /// slot bytes themselves are zero until a kernel-API model is attached.
+    pub externals: Vec<Symbol>,
+}
 
 /// Reads a little-endian `u16` at `offset`.
 fn read_u16_le(src: &[u8], offset: usize) -> Result<u16, LoaderError> {
@@ -343,6 +434,7 @@ impl ImageLoader for InMemoryImageLoader {
             program_headers: None,
             dynamic: None,
             pe: None,
+            et_rel: None,
         })
     }
 }
@@ -662,8 +754,11 @@ impl ImageLoader for Elf64Loader {
             return Err(LoaderError::InvalidFormat);
         }
 
-        // e_type (offset 16..18): ET_EXEC (2) or ET_DYN (3)
+        // e_type (offset 16..18): ET_REL (1), ET_EXEC (2) or ET_DYN (3)
         let e_type = read_u16_le(bytes, 16)?;
+        if e_type == ET_REL {
+            return self.load_rel(bytes);
+        }
         if e_type != ET_EXEC && e_type != ET_DYN {
             return Err(LoaderError::InvalidFormat);
         }
@@ -791,8 +886,590 @@ impl ImageLoader for Elf64Loader {
             program_headers,
             dynamic,
             pe: None,
+            et_rel: None,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// ET_REL (relocatable object) loading: Linux kernel modules and other `.o`
+// ---------------------------------------------------------------------------
+//
+// A `.ko` has section headers but no program headers, no entry point, and
+// relocations against kernel symbols it never defines. This path lays all
+// `SHF_ALLOC` sections out deterministically at [`ET_REL_IMAGE_BASE`],
+// allocates synthesized stub/GOT/`SHN_COMMON` slots at [`ET_REL_SYNTH_BASE`],
+// applies the x86-64 relocations the image actually uses, and fails closed on
+// anything it cannot link exactly. `entry` is 0; the caller must pick an
+// explicit root (see [`LoadedImage::et_rel`] and `SectionInfo`).
+
+struct RawSection {
+    name: String,
+    kind: u32,
+    flags: u64,
+    file_offset: u64,
+    size: u64,
+    link: u32,
+    info: u32,
+    addralign: u64,
+    entsize: u64,
+}
+
+struct RawSymbol {
+    name: String,
+    value: u64,
+    size: u64,
+    shndx: u16,
+    kind: u8,
+    binding: u8,
+}
+
+impl Elf64Loader {
+    fn load_rel(&self, bytes: &[u8]) -> Result<LoadedImage, LoaderError> {
+        let e_machine = read_u16_le(bytes, 18)?;
+        if e_machine != EM_X86_64 {
+            return Err(LoaderError::InvalidMachine);
+        }
+
+        let shoff = read_u64_le_at(bytes, 40)?;
+        let shentsize = read_u16_le(bytes, 58)?;
+        let shnum = read_u16_le(bytes, 60)?;
+        let shstrndx = read_u16_le(bytes, 62)?;
+        if shoff == 0 || shnum == 0 {
+            return Err(LoaderError::NoSectionHeaders);
+        }
+        if u64::from(shentsize) < ELF64_SECTION_HEADER_SIZE {
+            return Err(LoaderError::TruncatedHeader);
+        }
+        let shoff_usize = usize::try_from(shoff).map_err(|_| LoaderError::TruncatedHeader)?;
+        let shentsize_usize = usize::from(shentsize);
+        let shnum_usize = usize::from(shnum);
+        let table_end = shoff_usize
+            .checked_add(
+                shnum_usize
+                    .checked_mul(shentsize_usize)
+                    .ok_or(LoaderError::TruncatedHeader)?,
+            )
+            .ok_or(LoaderError::TruncatedHeader)?;
+        if table_end > bytes.len() {
+            return Err(LoaderError::TruncatedHeader);
+        }
+
+        let mut raw_sections = Vec::with_capacity(shnum_usize);
+        for index in 0..shnum_usize {
+            let header = shoff_usize + index * shentsize_usize;
+            let sh_name = read_u32_le(bytes, header)?;
+            let sh_type = read_u32_le(bytes, header + 4)?;
+            let sh_flags = read_u64_le_at(bytes, header + 8)?;
+            let sh_offset = read_u64_le_at(bytes, header + 24)?;
+            let sh_size = read_u64_le_at(bytes, header + 32)?;
+            let sh_link = read_u32_le(bytes, header + 40)?;
+            let sh_info = read_u32_le(bytes, header + 44)?;
+            let sh_addralign = read_u64_le_at(bytes, header + 48)?;
+            let sh_entsize = read_u64_le_at(bytes, header + 56)?;
+            // `SHT_NOBITS` occupies no file bytes; everything else must sit
+            // inside the file.
+            if sh_type != SHT_NOBITS {
+                let offset = usize::try_from(sh_offset).map_err(|_| LoaderError::TruncatedHeader)?;
+                let end = offset
+                    .checked_add(usize::try_from(sh_size).map_err(|_| LoaderError::TruncatedHeader)?)
+                    .ok_or(LoaderError::TruncatedHeader)?;
+                if end > bytes.len() {
+                    return Err(LoaderError::TruncatedHeader);
+                }
+            }
+            raw_sections.push(RawSection {
+                name: section_name(bytes, shstrndx, sh_name, shoff_usize, shentsize_usize, shnum_usize)?,
+                kind: sh_type,
+                flags: sh_flags,
+                file_offset: sh_offset,
+                size: sh_size,
+                link: sh_link,
+                info: sh_info,
+                addralign: sh_addralign,
+                entsize: sh_entsize,
+            });
+        }
+
+        // --- layout -------------------------------------------------------
+        let mut laid: Vec<Option<SectionInfo>> = vec![None; raw_sections.len()];
+        let mut cursor = ET_REL_IMAGE_BASE;
+        for (index, section) in raw_sections.iter().enumerate() {
+            if section.flags & SHF_ALLOC == 0 {
+                continue;
+            }
+            if !matches!(
+                section.kind,
+                SHT_PROGBITS | SHT_NOTE | SHT_NOBITS | SHT_INIT_ARRAY | SHT_FINI_ARRAY | SHT_PREINIT_ARRAY
+            ) {
+                return Err(LoaderError::UnsupportedRelocation);
+            }
+            if section.addralign > 0x1000 {
+                return Err(LoaderError::InvalidFormat);
+            }
+            let align = section.addralign.max(1);
+            cursor = align_up(cursor, align).ok_or(LoaderError::ImageTooLarge)?;
+            let end = cursor.checked_add(section.size).ok_or(LoaderError::ImageTooLarge)?;
+            if end - ET_REL_IMAGE_BASE > ET_REL_MAX_IMAGE_BYTES {
+                return Err(LoaderError::ImageTooLarge);
+            }
+            laid[index] = Some(SectionInfo {
+                name: section.name.clone(),
+                index: index as u16,
+                address: cursor,
+                size: section.size,
+                writable: section.flags & SHF_WRITE != 0,
+                executable: section.flags & SHF_EXECINSTR != 0,
+            });
+            cursor = end;
+        }
+
+        // --- symbols ------------------------------------------------------
+        let symtab_index = raw_sections
+            .iter()
+            .position(|section| section.kind == SHT_SYMTAB)
+            .ok_or(LoaderError::NoSectionHeaders)?;
+        let sym_entries = {
+            let symtab = &raw_sections[symtab_index];
+            let strtab_index = symtab.link as usize;
+            let strtab_section = raw_sections.get(strtab_index).ok_or(LoaderError::TruncatedHeader)?;
+            let offset = usize::try_from(strtab_section.file_offset).map_err(|_| LoaderError::TruncatedHeader)?;
+            let size = usize::try_from(strtab_section.size).map_err(|_| LoaderError::TruncatedHeader)?;
+            let end = offset.checked_add(size).ok_or(LoaderError::TruncatedHeader)?;
+            if strtab_section.kind != SHT_STRTAB || end > bytes.len() {
+                return Err(LoaderError::TruncatedHeader);
+            }
+            let strtab = bytes.get(offset..end).ok_or(LoaderError::TruncatedHeader)?;
+            parse_rel_symbols(bytes, symtab, strtab)?
+        };
+
+        // --- relocation tables --------------------------------------------
+        let mut reloc_tables = Vec::new();
+        let mut total_relocs = 0usize;
+        for (index, section) in raw_sections.iter().enumerate() {
+            if section.kind != SHT_REL && section.kind != SHT_RELA {
+                continue;
+            }
+            let target = section.info as usize;
+            // Tables against non-alloc sections (`.debug_*`, comment) carry no
+            // execution-relevant links and are skipped.
+            let Some(target_info) = laid.get(target).cloned().flatten() else {
+                continue;
+            };
+            if section.link as usize != symtab_index {
+                return Err(LoaderError::RelocationError);
+            }
+            let entry_size = if section.kind == SHT_RELA { 24 } else { 16 };
+            let entsize = if section.entsize == 0 {
+                entry_size
+            } else {
+                usize::try_from(section.entsize).map_err(|_| LoaderError::TruncatedHeader)?
+            };
+            if entsize < entry_size {
+                return Err(LoaderError::TruncatedHeader);
+            }
+            let count = usize::try_from(section.size).map_err(|_| LoaderError::TruncatedHeader)? / entsize;
+            total_relocs += count;
+            if total_relocs > ET_REL_MAX_RELOCATIONS {
+                return Err(LoaderError::ImageTooLarge);
+            }
+            reloc_tables.push((index, target_info, section.kind == SHT_RELA, entsize, count));
+        }
+
+        // --- synthesized region: externals, GOT slots, SHN_COMMON ---------
+        let mut external_slot: Vec<Option<u64>> = vec![None; sym_entries.len()];
+        let mut common_slot: Vec<Option<u64>> = vec![None; sym_entries.len()];
+        let mut got_slot: Vec<Option<u64>> = vec![None; sym_entries.len()];
+        let mut externals: Vec<Symbol> = Vec::new();
+        let mut synth_cursor = ET_REL_SYNTH_BASE;
+
+        let alloc_slot = |synth_cursor: &mut u64, size: u64| -> Result<u64, LoaderError> {
+            let address = *synth_cursor;
+            let end = address.checked_add(size).ok_or(LoaderError::ImageTooLarge)?;
+            if end - ET_REL_SYNTH_BASE > ET_REL_MAX_IMAGE_BYTES {
+                return Err(LoaderError::ImageTooLarge);
+            }
+            *synth_cursor = end;
+            Ok(address)
+        };
+
+        for &(table_index, _, _, entsize, count) in &reloc_tables {
+            let section = &raw_sections[table_index];
+            let table_offset = usize::try_from(section.file_offset).map_err(|_| LoaderError::TruncatedHeader)?;
+            for i in 0..count {
+                let entry = table_offset + i * entsize;
+                // r_info: type in the low 32 bits, symbol in the high 32.
+                let symbol_index = read_u32_le(bytes, entry + 12)?;
+                let r_type = read_u32_le(bytes, entry + 8)?;
+                let symbol = sym_entries
+                    .get(symbol_index as usize)
+                    .ok_or(LoaderError::RelocationError)?;
+                let si = symbol_index as usize;
+                if symbol.shndx == SHN_UNDEF {
+                    if symbol.name.is_empty() {
+                        return Err(LoaderError::RelocationError);
+                    }
+                    if external_slot[si].is_none() {
+                        let address = alloc_slot(&mut synth_cursor, ET_REL_SLOT_SIZE)?;
+                        external_slot[si] = Some(address);
+                        externals.push(Symbol {
+                            name: symbol.name.clone(),
+                            address,
+                            size: symbol.size,
+                            section_index: SHN_UNDEF,
+                            kind: STT_FUNC,
+                            binding: symbol.binding,
+                        });
+                    }
+                } else if symbol.shndx == SHN_COMMON && common_slot[si].is_none() {
+                    let aligned = symbol.size.max(1).checked_add(15).ok_or(LoaderError::ImageTooLarge)? & !15;
+                    let address = alloc_slot(&mut synth_cursor, aligned)?;
+                    common_slot[si] = Some(address);
+                }
+                if matches!(r_type, R_X86_64_GOT32 | R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX) && got_slot[si].is_none() {
+                    let address = alloc_slot(&mut synth_cursor, ET_REL_SLOT_SIZE)?;
+                    got_slot[si] = Some(address);
+                }
+            }
+        }
+
+        // --- segment bytes ------------------------------------------------
+        let mut segments: Vec<Segment> = Vec::new();
+        for (index, section) in raw_sections.iter().enumerate() {
+            let Some(info) = &laid[index] else { continue };
+            // Empty alloc sections are common in `.ko` images; a zero-length
+            // memory region is invalid downstream, so only non-empty sections
+            // become segments.
+            if section.size == 0 {
+                continue;
+            }
+            let size = usize::try_from(section.size).map_err(|_| LoaderError::TruncatedHeader)?;
+            let mut section_bytes = if section.kind == SHT_NOBITS {
+                vec![0u8; size]
+            } else {
+                let offset = usize::try_from(section.file_offset).map_err(|_| LoaderError::TruncatedHeader)?;
+                bytes
+                    .get(offset..offset.checked_add(size).ok_or(LoaderError::TruncatedHeader)?)
+                    .ok_or(LoaderError::TruncatedHeader)?
+                    .to_vec()
+            };
+            let _ = &mut section_bytes;
+            segments.push(Segment {
+                address: info.address,
+                bytes: section_bytes,
+                readable: true,
+                writable: info.writable,
+                executable: info.executable,
+            });
+        }
+
+        // Synthesized region (stub slots, GOT, common block) is writable data.
+        // GOT slots are pre-filled with the resolved address of their symbol;
+        // external stub slots stay zero until a kernel-API model is attached.
+        let resolve_static = |index: usize| -> Result<u64, LoaderError> {
+            let symbol = sym_entries.get(index).ok_or(LoaderError::RelocationError)?;
+            match symbol.shndx {
+                SHN_UNDEF => external_slot[index].ok_or(LoaderError::RelocationError),
+                SHN_ABS => Ok(symbol.value),
+                SHN_COMMON => common_slot[index].ok_or(LoaderError::RelocationError),
+                n => laid
+                    .get(usize::from(n))
+                    .cloned()
+                    .flatten()
+                    .map(|section| section.address + symbol.value)
+                    .ok_or(LoaderError::RelocationError),
+            }
+        };
+        let synth_size = usize::try_from(synth_cursor - ET_REL_SYNTH_BASE).map_err(|_| LoaderError::ImageTooLarge)?;
+        let mut synth_bytes = vec![0u8; synth_size];
+        for (si, slot) in got_slot.iter().enumerate() {
+            let Some(slot_address) = slot else { continue };
+            let resolved = resolve_static(si)?;
+            let offset =
+                usize::try_from(*slot_address - ET_REL_SYNTH_BASE).map_err(|_| LoaderError::RelocationError)?;
+            let slot_bytes = synth_bytes
+                .get_mut(offset..offset.checked_add(8).ok_or(LoaderError::RelocationError)?)
+                .ok_or(LoaderError::RelocationError)?;
+            slot_bytes.copy_from_slice(&resolved.to_le_bytes());
+        }
+        if synth_size > 0 {
+            segments.push(Segment {
+                address: ET_REL_SYNTH_BASE,
+                bytes: synth_bytes,
+                readable: true,
+                writable: true,
+                executable: false,
+            });
+        }
+
+        // --- apply relocations --------------------------------------------
+        let resolve = |index: u32| -> Result<u64, LoaderError> {
+            let symbol = sym_entries.get(index as usize).ok_or(LoaderError::RelocationError)?;
+            match symbol.shndx {
+                SHN_UNDEF => external_slot[index as usize].ok_or(LoaderError::RelocationError),
+                SHN_ABS => Ok(symbol.value),
+                SHN_COMMON => common_slot[index as usize].ok_or(LoaderError::RelocationError),
+                n => laid
+                    .get(usize::from(n))
+                    .cloned()
+                    .flatten()
+                    .map(|section| section.address + symbol.value)
+                    .ok_or(LoaderError::RelocationError),
+            }
+        };
+        let as_i64 =
+            |value: u64| -> Result<i64, LoaderError> { i64::try_from(value).map_err(|_| LoaderError::RelocationError) };
+
+        for &(table_index, ref target_info, is_rela, entsize, count) in &reloc_tables {
+            let section = &raw_sections[table_index];
+            let table_offset = usize::try_from(section.file_offset).map_err(|_| LoaderError::TruncatedHeader)?;
+            for i in 0..count {
+                let entry = table_offset + i * entsize;
+                let r_offset = read_u64_le_at(bytes, entry)?;
+                // r_info: type in the low 32 bits, symbol in the high 32.
+                let symbol_index = read_u32_le(bytes, entry + 12)?;
+                let r_type = read_u32_le(bytes, entry + 8)?;
+                let write_size = match r_type {
+                    R_X86_64_64 | R_X86_64_PC64 => 8,
+                    _ => 4,
+                };
+                if r_offset.checked_add(write_size).ok_or(LoaderError::RelocationError)? > target_info.size {
+                    return Err(LoaderError::RelocationError);
+                }
+                let place = target_info
+                    .address
+                    .checked_add(r_offset)
+                    .ok_or(LoaderError::RelocationError)?;
+                let symbol_value = resolve(symbol_index)?;
+                let addend = if is_rela {
+                    i64::from_le_bytes(
+                        bytes
+                            .get(entry + 16..entry + 24)
+                            .ok_or(LoaderError::TruncatedHeader)?
+                            .try_into()
+                            .map_err(|_| LoaderError::TruncatedHeader)?,
+                    )
+                } else {
+                    // SHT_REL: the addend lives in the target bytes themselves.
+                    let segment = segments
+                        .iter()
+                        .find(|segment| {
+                            place >= segment.address && place < segment.address + segment.bytes.len() as u64
+                        })
+                        .ok_or(LoaderError::RelocationError)?;
+                    let start = usize::try_from(place - segment.address).map_err(|_| LoaderError::RelocationError)?;
+                    let field = segment
+                        .bytes
+                        .get(start..start.checked_add(4).ok_or(LoaderError::RelocationError)?)
+                        .ok_or(LoaderError::RelocationError)?;
+                    let mut raw = [0u8; 4];
+                    raw.copy_from_slice(field);
+                    i32::from_le_bytes(raw) as i64
+                };
+                match r_type {
+                    R_X86_64_64 => {
+                        let value = symbol_value
+                            .checked_add(u64::try_from(addend).map_err(|_| LoaderError::RelocationError)?)
+                            .ok_or(LoaderError::RelocationError)?;
+                        write_le(&mut segments, place, &value.to_le_bytes())?;
+                    }
+                    R_X86_64_PC32 | R_X86_64_PLT32 => {
+                        let subtrahend = as_i64(place)?;
+                        let value = as_i64(symbol_value)?
+                            .checked_add(addend)
+                            .and_then(|v| v.checked_sub(subtrahend))
+                            .ok_or(LoaderError::RelocationError)?;
+                        if !(i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+                            return Err(LoaderError::RelocationError);
+                        }
+                        write_le(&mut segments, place, &(value as i32).to_le_bytes())?;
+                    }
+                    R_X86_64_32 => {
+                        let value = symbol_value
+                            .checked_add(u64::try_from(addend).map_err(|_| LoaderError::RelocationError)?)
+                            .ok_or(LoaderError::RelocationError)?;
+                        if value > u32::MAX as u64 {
+                            return Err(LoaderError::RelocationError);
+                        }
+                        write_le(&mut segments, place, &(value as u32).to_le_bytes())?;
+                    }
+                    R_X86_64_32S => {
+                        let value = as_i64(symbol_value)?
+                            .checked_add(addend)
+                            .ok_or(LoaderError::RelocationError)?;
+                        if !(i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+                            return Err(LoaderError::RelocationError);
+                        }
+                        write_le(&mut segments, place, &(value as i32).to_le_bytes())?;
+                    }
+                    R_X86_64_PC64 => {
+                        let subtrahend = as_i64(place)?;
+                        let value = as_i64(symbol_value)?
+                            .checked_add(addend)
+                            .and_then(|v| v.checked_sub(subtrahend))
+                            .ok_or(LoaderError::RelocationError)?;
+                        write_le(&mut segments, place, &value.to_le_bytes())?;
+                    }
+                    R_X86_64_GOT32 => {
+                        let slot = got_slot[symbol_index as usize].ok_or(LoaderError::RelocationError)?;
+                        let value = as_i64(slot)?.checked_add(addend).ok_or(LoaderError::RelocationError)?;
+                        if !(0..=u32::MAX as i64).contains(&value) {
+                            return Err(LoaderError::RelocationError);
+                        }
+                        write_le(&mut segments, place, &(value as u32).to_le_bytes())?;
+                    }
+                    R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX => {
+                        let slot = got_slot[symbol_index as usize].ok_or(LoaderError::RelocationError)?;
+                        let subtrahend = as_i64(place)?;
+                        let value = as_i64(slot)?
+                            .checked_add(addend)
+                            .and_then(|v| v.checked_sub(subtrahend))
+                            .ok_or(LoaderError::RelocationError)?;
+                        if !(i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+                            return Err(LoaderError::RelocationError);
+                        }
+                        write_le(&mut segments, place, &(value as i32).to_le_bytes())?;
+                    }
+                    _ => return Err(LoaderError::UnsupportedRelocation),
+                }
+            }
+        }
+
+        // --- image symbols at runtime addresses ---------------------------
+        let mut symbols = Vec::new();
+        for (index, symbol) in sym_entries.iter().enumerate() {
+            if symbol.name.is_empty() || symbol.kind == STT_FILE {
+                continue;
+            }
+            let address = match symbol.shndx {
+                SHN_UNDEF => continue,
+                SHN_ABS => symbol.value,
+                _ => match resolve(index as u32) {
+                    Ok(address) => address,
+                    // Symbol against a non-alloc section: keep it out of the
+                    // public list rather than failing the image.
+                    Err(LoaderError::RelocationError) => continue,
+                    Err(error) => return Err(error),
+                },
+            };
+            symbols.push(Symbol {
+                name: symbol.name.clone(),
+                address,
+                size: symbol.size,
+                section_index: symbol.shndx,
+                kind: symbol.kind,
+                binding: symbol.binding,
+            });
+        }
+
+        let id = self.allocate_id()?;
+        let sections: Vec<SectionInfo> = laid.iter().flatten().cloned().collect();
+        Ok(LoadedImage {
+            id,
+            entry: 0,
+            target_profile: INTEL64_TARGET_PROFILE,
+            segments,
+            symbols,
+            program_headers: None,
+            dynamic: None,
+            pe: None,
+            et_rel: Some(EtRelInfo { sections, externals }),
+        })
+    }
+}
+
+/// `align_up(a, b)` for `b >= 1`, `None` on overflow.
+fn align_up(value: u64, align: u64) -> Option<u64> {
+    let rounded = value.checked_add(align - 1)?;
+    Some(rounded - (rounded % align))
+}
+
+/// Reads one section name out of the section-name string table.
+fn section_name(
+    bytes: &[u8],
+    shstrndx: u16,
+    name_offset: u32,
+    shoff: usize,
+    shentsize: usize,
+    shnum: usize,
+) -> Result<String, LoaderError> {
+    if shstrndx == 0 || usize::from(shstrndx) >= shnum {
+        return Ok(String::new());
+    }
+    let header = shoff + usize::from(shstrndx) * shentsize;
+    let offset = usize::try_from(read_u64_le_at(bytes, header + 24)?).map_err(|_| LoaderError::TruncatedHeader)?;
+    let size = usize::try_from(read_u64_le_at(bytes, header + 32)?).map_err(|_| LoaderError::TruncatedHeader)?;
+    let end = offset.checked_add(size).ok_or(LoaderError::TruncatedHeader)?;
+    if end > bytes.len() {
+        return Err(LoaderError::TruncatedHeader);
+    }
+    let table = bytes.get(offset..end).ok_or(LoaderError::TruncatedHeader)?;
+    let start = usize::try_from(name_offset).map_err(|_| LoaderError::TruncatedHeader)?;
+    let rest = table.get(start..).ok_or(LoaderError::TruncatedHeader)?;
+    let len = rest.iter().position(|byte| *byte == 0).unwrap_or(rest.len());
+    Ok(String::from_utf8_lossy(&rest[..len]).into_owned())
+}
+
+/// Parses every entry of one `SHT_SYMTAB` section, unnamed included — the
+/// relocation pass indexes by position. `strtab` is the linked string table.
+fn parse_rel_symbols(bytes: &[u8], section: &RawSection, strtab: &[u8]) -> Result<Vec<RawSymbol>, LoaderError> {
+    let entsize = if section.entsize == 0 {
+        ELF64_SYMBOL_SIZE
+    } else {
+        section.entsize
+    };
+    if entsize < ELF64_SYMBOL_SIZE {
+        return Err(LoaderError::TruncatedHeader);
+    }
+    let entsize_usize = usize::try_from(entsize).map_err(|_| LoaderError::TruncatedHeader)?;
+    let offset = usize::try_from(section.file_offset).map_err(|_| LoaderError::TruncatedHeader)?;
+    let size = usize::try_from(section.size).map_err(|_| LoaderError::TruncatedHeader)?;
+    let end = offset.checked_add(size).ok_or(LoaderError::TruncatedHeader)?;
+    if end > bytes.len() {
+        return Err(LoaderError::TruncatedHeader);
+    }
+
+    let mut symbols = Vec::with_capacity(size / entsize_usize);
+    for index in 0..size / entsize_usize {
+        let entry = offset + index * entsize_usize;
+        let st_name = read_u32_le(bytes, entry)?;
+        let st_info = bytes.get(entry + 4).copied().ok_or(LoaderError::TruncatedHeader)?;
+        let st_shndx = read_u16_le(bytes, entry + 6)?;
+        let st_value = read_u64_le_at(bytes, entry + 8)?;
+        let st_size = read_u64_le_at(bytes, entry + 16)?;
+
+        let name_offset = usize::try_from(st_name).map_err(|_| LoaderError::TruncatedHeader)?;
+        let rest = strtab.get(name_offset..).ok_or(LoaderError::TruncatedHeader)?;
+        let name_len = rest.iter().position(|byte| *byte == 0).unwrap_or(rest.len());
+        symbols.push(RawSymbol {
+            name: String::from_utf8_lossy(&rest[..name_len]).into_owned(),
+            value: st_value,
+            size: st_size,
+            shndx: st_shndx,
+            kind: st_info & 0x0f,
+            binding: st_info >> 4,
+        });
+    }
+    Ok(symbols)
+}
+
+/// Locates the segment containing `address` and writes `data` there.
+fn write_le(segments: &mut [Segment], address: u64, data: &[u8]) -> Result<(), LoaderError> {
+    let end = address
+        .checked_add(data.len() as u64)
+        .ok_or(LoaderError::RelocationError)?;
+    for segment in segments {
+        let segment_end = segment
+            .address
+            .checked_add(segment.bytes.len() as u64)
+            .ok_or(LoaderError::RelocationError)?;
+        if address >= segment.address && end <= segment_end {
+            let start = usize::try_from(address - segment.address).map_err(|_| LoaderError::RelocationError)?;
+            segment.bytes[start..start + data.len()].copy_from_slice(data);
+            return Ok(());
+        }
+    }
+    Err(LoaderError::RelocationError)
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,6 +1690,7 @@ impl ImageLoader for Pe32Loader {
             program_headers: None,
             dynamic: None,
             pe,
+            et_rel: None,
         })
     }
 }
@@ -1573,6 +2251,308 @@ mod tests {
         binary.extend_from_slice(&phdr_bytes);
         binary.extend_from_slice(&payload_bytes);
         binary
+    }
+
+    /// Builds a minimal ET_REL object: `.text` (exec, `data`), `.data`
+    /// (write, `data2`), `.bss` (nobits, bss_size), `.rela.text` (rela),
+    /// symbols `main` (defined in .text at `main_off`) and `kfree`
+    /// (undefined). Symtab layout: 0 null, 1 section(.text), 2 main,
+    /// 3 kfree. `extra_rela` appends raw (offset, sym, type, addend) entries.
+    fn make_et_rel(text: &[u8], main_off: u64, rela: &[(u64, u32, u32, i64)]) -> Vec<u8> {
+        let names: &[(&str, u32)] = &[
+            ("", 0),
+            (".text", 1),
+            (".data", 7),
+            (".bss", 13),
+            (".rela.text", 18),
+            (".symtab", 29),
+            (".strtab", 37),
+            (".shstrtab", 45),
+        ];
+        let name_bytes: Vec<u8> = "\0.text\0.data\0.bss\0.rela.text\0.symtab\0.strtab\0.shstrtab\0"
+            .bytes()
+            .collect();
+        let strtab_off = 0u32;
+        let strtab: Vec<u8> = "\0main\0kfree\0".bytes().collect();
+
+        let mut symtab_bytes = Vec::new();
+        let push_sym = |v: &mut Vec<u8>, name: u32, info: u8, shndx: u16, value: u64, size: u64| {
+            v.extend_from_slice(&name.to_le_bytes());
+            v.push(info);
+            v.push(0);
+            v.extend_from_slice(&shndx.to_le_bytes());
+            v.extend_from_slice(&value.to_le_bytes());
+            v.extend_from_slice(&size.to_le_bytes());
+        };
+        push_sym(&mut symtab_bytes, 0, 0, 0, 0, 0); // null
+        push_sym(&mut symtab_bytes, 0, 3, 1, 0, 0); // STT_SECTION .text
+        push_sym(&mut symtab_bytes, strtab_off + 1, (1 << 4) | 2, 1, main_off, 0); // main GLOBAL FUNC
+        push_sym(&mut symtab_bytes, strtab_off + 6, (1 << 4) | 2, 0, 0, 0); // kfree GLOBAL FUNC undef
+
+        let mut rela_bytes = Vec::new();
+        for &(offset, sym_index, r_type, addend) in rela {
+            rela_bytes.extend_from_slice(&offset.to_le_bytes());
+            rela_bytes.extend_from_slice(&(((sym_index as u64) << 32) | r_type as u64).to_le_bytes());
+            rela_bytes.extend_from_slice(&addend.to_le_bytes());
+        }
+
+        // File layout: ehdr | .text | .data | rela | symtab | strtab | names | shdrs
+        let ehdr_size = 64usize;
+        let shdr_size = 64usize;
+        let shnum = 8usize;
+        let mut offsets = [0u64; 8];
+        let mut body = Vec::new();
+        let place = |body: &mut Vec<u8>, data: &[u8], offsets: &mut [u64; 8], i: usize| {
+            while !body.len().is_multiple_of(8) {
+                body.push(0);
+            }
+            // Section offsets are file offsets: body starts after the 64-byte ELF header.
+            offsets[i] = (ehdr_size + body.len()) as u64;
+            body.extend_from_slice(data);
+        };
+        let data2 = [0xAAu8; 8];
+        place(&mut body, text, &mut offsets, 1);
+        place(&mut body, &data2, &mut offsets, 2);
+        place(&mut body, &rela_bytes, &mut offsets, 4);
+        place(&mut body, &symtab_bytes, &mut offsets, 5);
+        place(&mut body, &strtab, &mut offsets, 6);
+        place(&mut body, &name_bytes, &mut offsets, 7);
+        // e_shoff is a file offset: the table lands after ehdr + body.
+        let shoff = (ehdr_size + body.len()) as u64;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0x7f, b'E', b'L', b'F']);
+        out.push(2); // ELFCLASS64
+        out.push(1); // LSB
+        out.push(1); // EV_CURRENT
+        out.extend_from_slice(&[0u8; 9]);
+        out.extend_from_slice(&1u16.to_le_bytes()); // ET_REL
+        out.extend_from_slice(&62u16.to_le_bytes()); // EM_X86_64
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes()); // e_entry
+        out.extend_from_slice(&0u64.to_le_bytes()); // e_phoff
+        out.extend_from_slice(&shoff.to_le_bytes()); // e_shoff
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(ehdr_size as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // e_phentsize
+        out.extend_from_slice(&0u16.to_le_bytes()); // e_phnum
+        out.extend_from_slice(&(shdr_size as u16).to_le_bytes());
+        out.extend_from_slice(&(shnum as u16).to_le_bytes());
+        out.extend_from_slice(&7u16.to_le_bytes()); // e_shstrndx
+        debug_assert_eq!(out.len(), ehdr_size);
+        out.extend_from_slice(&body);
+
+        let section = |name: u32,
+                       kind: u32,
+                       flags: u64,
+                       offset: u64,
+                       size: u64,
+                       link: u32,
+                       info: u32,
+                       align: u64,
+                       entsize: u64|
+         -> Vec<u8> {
+            let mut sh = Vec::with_capacity(64);
+            sh.extend_from_slice(&name.to_le_bytes());
+            sh.extend_from_slice(&kind.to_le_bytes());
+            sh.extend_from_slice(&flags.to_le_bytes());
+            sh.extend_from_slice(&0u64.to_le_bytes()); // sh_addr
+            sh.extend_from_slice(&offset.to_le_bytes());
+            sh.extend_from_slice(&size.to_le_bytes());
+            sh.extend_from_slice(&link.to_le_bytes());
+            sh.extend_from_slice(&info.to_le_bytes());
+            sh.extend_from_slice(&align.to_le_bytes());
+            sh.extend_from_slice(&entsize.to_le_bytes());
+            debug_assert_eq!(sh.len(), shdr_size);
+            sh
+        };
+        out.extend_from_slice(&section(0, 0, 0, 0, 0, 0, 0, 0, 0));
+        out.extend_from_slice(&section(names[1].1, 1, 0x6, offsets[1], text.len() as u64, 0, 0, 16, 0));
+        out.extend_from_slice(&section(names[2].1, 1, 0x3, offsets[2], 8, 0, 0, 8, 0));
+        out.extend_from_slice(&section(names[3].1, 8, 0x3, 0, 32, 0, 0, 8, 0)); // .bss nobits
+        out.extend_from_slice(&section(
+            names[4].1,
+            4,
+            0,
+            offsets[4],
+            rela_bytes.len() as u64,
+            5,
+            1,
+            8,
+            24,
+        ));
+        out.extend_from_slice(&section(
+            names[5].1,
+            2,
+            0,
+            offsets[5],
+            symtab_bytes.len() as u64,
+            6,
+            1,
+            8,
+            24,
+        ));
+        out.extend_from_slice(&section(names[6].1, 3, 0, offsets[6], strtab.len() as u64, 0, 0, 1, 0));
+        out.extend_from_slice(&section(
+            names[7].1,
+            3,
+            0,
+            offsets[7],
+            name_bytes.len() as u64,
+            0,
+            0,
+            1,
+            0,
+        ));
+        out
+    }
+
+    #[test]
+    fn et_rel_loads_a_real_kernel_module() {
+        let path = std::path::Path::new(
+            "/home/john/Documents/byovd-harness.local/drivers_linux/drivers_media/rc-pixelview-002t.ko",
+        );
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("corpus module not present; skipping");
+            return;
+        };
+        let loader = Elf64Loader::new();
+        let loaded = ImageLoader::load(&loader, &bytes).expect("real .ko must load");
+        assert_eq!(loaded.entry, 0);
+        let et_rel = loaded.et_rel.as_ref().expect("et_rel metadata");
+        assert!(!et_rel.sections.is_empty());
+        assert!(
+            et_rel
+                .sections
+                .iter()
+                .all(|section| section.address >= ET_REL_IMAGE_BASE),
+            "every laid-out section sits at or above the fixed base"
+        );
+        // The module imports kernel APIs; each became a synthesized stub slot.
+        assert!(
+            !et_rel.externals.is_empty(),
+            "rc-pixelview-002t imports at least one kernel symbol"
+        );
+        // Named code symbols resolve to executable laid-out sections.
+        let init = loaded
+            .symbols
+            .iter()
+            .find(|symbol| symbol.is_function() && symbol.name == "init_module");
+        if let Some(init) = init {
+            let section = et_rel
+                .sections
+                .iter()
+                .find(|section| init.address >= section.address && init.address < section.address + section.size)
+                .expect("symbol address inside a laid-out section");
+            assert!(section.executable, "init_module must live in code");
+        }
+    }
+
+    #[test]
+    fn et_rel_loads_sections_symbols_and_relocations() {
+        let loader = Elf64Loader::new();
+        // call *%kfree thunk: mov eax,0; call rel32 placeholder; ret
+        let mut text = vec![0xB8, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3];
+        // R_X86_64_64 slot after the ret, absolute address of kfree stub.
+        text.extend_from_slice(&[0u8; 8]);
+        let rela = [
+            (11u64, 3u32, 1u32, 0i64), // R_X86_64_64 kfree
+            (5u64, 2u32, 2u32, -5i64), // R_X86_64_PC32 main (call rel32)
+        ];
+        let image_bytes = make_et_rel(&text, 0, &rela);
+        let loaded = ImageLoader::load(&loader, &image_bytes).expect("valid ET_REL must load");
+
+        assert_eq!(loaded.entry, 0);
+        let et_rel = loaded.et_rel.as_ref().expect("et_rel metadata");
+        let text_section = et_rel
+            .sections
+            .iter()
+            .find(|section| section.name == ".text")
+            .expect(".text must be laid out");
+        assert!(text_section.executable);
+        assert_eq!(text_section.address, ET_REL_IMAGE_BASE);
+        let data_section = et_rel
+            .sections
+            .iter()
+            .find(|section| section.name == ".data")
+            .expect(".data must be laid out");
+        assert!(data_section.writable && !data_section.executable);
+        assert!(et_rel.sections.iter().any(|section| section.name == ".bss"));
+
+        // main resolved to its section-relative offset under the fixed base.
+        let main = loaded
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "main")
+            .expect("main symbol");
+        assert_eq!(main.address, ET_REL_IMAGE_BASE);
+        assert!(main.is_function());
+
+        // kfree is an external with its own synthesized stub slot.
+        let kfree = et_rel
+            .externals
+            .iter()
+            .find(|symbol| symbol.name == "kfree")
+            .expect("kfree external");
+        assert!(kfree.address >= ET_REL_SYNTH_BASE);
+        // The absolute slot wrote the stub address into the image bytes.
+        let slot = text_section.address + 11;
+        let segment = loaded
+            .segments
+            .iter()
+            .find(|segment| slot >= segment.address && slot + 8 <= segment.address + segment.bytes.len() as u64)
+            .expect(".text segment");
+        let start = (slot - segment.address) as usize;
+        assert_eq!(&segment.bytes[start..start + 8], &kfree.address.to_le_bytes());
+
+        // PC32 at .text+5 points back at main: S + A - P = base + 0 - (base+5) - 5.
+        let pc32 = text_section.address + 5;
+        let segment = loaded
+            .segments
+            .iter()
+            .find(|segment| pc32 >= segment.address && pc32 + 4 <= segment.address + segment.bytes.len() as u64)
+            .expect(".text segment");
+        let start = (pc32 - segment.address) as usize;
+        let mut raw = [0u8; 4];
+        raw.copy_from_slice(&segment.bytes[start..start + 4]);
+        assert_eq!(i32::from_le_bytes(raw), -10);
+    }
+
+    #[test]
+    fn et_rel_rejects_unknown_relocation_type_and_bad_symbol_index() {
+        let loader = Elf64Loader::new();
+        let text = [0x90u8; 16];
+        let bad_type = make_et_rel(&text, 0, &[(0, 2, 7, 0)]); // type 7 unhandled
+        assert_eq!(
+            ImageLoader::load(&loader, &bad_type).err(),
+            Some(LoaderError::UnsupportedRelocation)
+        );
+        let bad_symbol = make_et_rel(&text, 0, &[(0, 9, 1, 0)]); // sym 9 out of range
+        assert_eq!(
+            ImageLoader::load(&loader, &bad_symbol).err(),
+            Some(LoaderError::RelocationError)
+        );
+        // Relocation target past the end of its section.
+        let past_end = make_et_rel(&text, 0, &[(text.len() as u64 - 2, 2, 1, 0)]);
+        assert_eq!(
+            ImageLoader::load(&loader, &past_end).err(),
+            Some(LoaderError::RelocationError)
+        );
+    }
+
+    #[test]
+    fn et_rel_without_symtab_fails_closed() {
+        let loader = Elf64Loader::new();
+        let mut image_bytes = make_et_rel(&[0x90; 8], 0, &[]);
+        // Blank out the symtab section header's type and size.
+        let shoff = u64::from_le_bytes(image_bytes[40..48].try_into().expect("e_shoff"));
+        let symtab_header = shoff as usize + 5 * 64;
+        image_bytes[symtab_header + 4..symtab_header + 8].copy_from_slice(&0u32.to_le_bytes());
+        image_bytes[symtab_header + 32..symtab_header + 40].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            ImageLoader::load(&loader, &image_bytes).err(),
+            Some(LoaderError::NoSectionHeaders)
+        );
     }
 
     #[test]
