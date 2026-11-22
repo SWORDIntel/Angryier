@@ -43,6 +43,11 @@ pub enum Error {
     AlreadyExists,
     NotFound,
     InvalidTransition,
+    /// Verified evidence exceeded the per-event typed-evidence bound.
+    EvidenceTooLarge {
+        blocks: usize,
+        edges: usize,
+    },
     StaleReservation,
     LimitExceeded,
     Poisoned,
@@ -53,6 +58,10 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Locked => write!(f, "ledger is locked by another process; one coordinator owns a ledger"),
+            Self::EvidenceTooLarge { blocks, edges } => write!(
+                f,
+                "verified evidence exceeds the per-event bound ({blocks} blocks, {edges} edges)"
+            ),
             _ => write!(f, "{self:?}"),
         }
     }

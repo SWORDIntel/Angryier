@@ -3,16 +3,19 @@
 use crate::sustained::{Cursor, Error, MAX_STORE, Status};
 use angryier_distribution::contracts::{CampaignManifest, Digest};
 pub use angryier_provenance::sustained::{
-    BranchEvidence, DebtKind, DynamicBlock, EdgeBasis, EvidenceBuilder, EvidenceLimits, EvidenceScope, FailureReason,
-    FlowEdge, PathDisposition, PathEvidence, PendingReason, ReplayVerification, SemanticDebt, SolverDisposition,
-    WitnessEvidence,
+    BranchEvidence, DebtKind, DynamicBlock, EdgeBasis, EvidenceBuilder, EvidenceError, EvidenceLimits, EvidenceScope,
+    FailureReason, FlowEdge, PathDisposition, PathEvidence, PendingReason, ReplayVerification, SemanticDebt,
+    SolverDisposition, WitnessEvidence,
 };
 
 pub const SCHEMA_VERSION: u32 = 3;
 /// Target capacity: 65536 accepted evidence events per durable ledger.
 pub const MAX_EVENTS: usize = 65536;
 pub const MAX_ITEMS: usize = 4096;
-pub const MAX_EVENT_BYTES: usize = 64 * 1024;
+/// Per-event evidence bound. Raised from 64 KiB because a 512-block PE
+/// DriverEntry path needs ~70 KiB of typed evidence; oversize paths now fail
+/// with a dedicated error rather than a generic transition error.
+pub const MAX_EVENT_BYTES: usize = 192 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvidenceDelta {
@@ -73,7 +76,13 @@ pub(crate) fn validate_path(path: &PathEvidence, manifest: &CampaignManifest, ep
         },
     )
     .map_err(|_| Error::InvalidTransition)?;
-    builder.add_path(path.clone()).map_err(|_| Error::InvalidTransition)
+    builder.add_path(path.clone()).map_err(|error| match error {
+        EvidenceError::Exhausted => Error::EvidenceTooLarge {
+            blocks: path.blocks.len(),
+            edges: path.edges.len(),
+        },
+        _ => Error::InvalidTransition,
+    })
 }
 
 fn put_u64(out: &mut Vec<u8>, n: u64) {
