@@ -326,6 +326,7 @@ usage: angryier-campaign coordinator --binary PATH --build-id TOKEN --ledger PAT
 | `--connections N` | worker | Finite cap on accepted worker sessions; `0` serves until stopped. There is no hidden reconnect/retry. |
 | `--ledger PATH` | coordinator | Required durable campaign ledger (single writer; checkpoint + WAL sidecar). |
 | `--progress-jsonl PATH` | coordinator | Live accepted-event projection; defaults to `<ledger>.progress.jsonl`. Not a second ledger. |
+| `--find PC` / `--avoid PC` | coordinator | Repeatable report-only target PCs (decimal or `0x` hex; at most 4096 per list, no duplicates). Kept outside campaign identity so workers need no target flags; after completion or reopen, prints one JSONL `target` row per PC distinguishing strict verified-terminal witnesses (`observed`) from coordinator-replayed path hits (`trace_observed`) plus a `campaign targets:` summary. |
 
 The worker can alternatively consume a generated v2 AEAD-encrypted TOML envelope. Generate it **on the coordinator using the same compiled `angryier-campaign` executable** that the worker will run:
 

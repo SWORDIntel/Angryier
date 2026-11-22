@@ -165,8 +165,8 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
                     _ => return Err("--policy requires fork-all or rank-targets".into()),
                 }
             }
-            "--find" if local => find.push(pc(&value)?),
-            "--avoid" if local => avoid.push(pc(&value)?),
+            "--find" if local || role == "coordinator" => find.push(pc(&value)?),
+            "--avoid" if local || role == "coordinator" => avoid.push(pc(&value)?),
             "--batch-ms" if role == "local-run" => batch_ms = Some(value.parse()?),
             "--run-ms" if role == "local-run" => run_ms = Some(value.parse()?),
             "--max-steps" => limits.max_steps = value.parse()?,
@@ -197,6 +197,17 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Cli> {
             LocalPolicy::RankTargets { .. } => LocalPolicy::RankTargets { exclude_avoid: true },
             LocalPolicy::ForkAll => return Err("--exclude-avoid requires --policy rank-targets".into()),
         };
+    }
+    if role == "coordinator" {
+        for (name, list) in [("find", &mut find), ("avoid", &mut avoid)] {
+            if list.len() > 4096 {
+                return Err(format!("coordinator: --{name} accepts at most 4096 addresses").into());
+            }
+            list.sort_unstable();
+            if list.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(format!("coordinator: duplicate --{name} address").into());
+            }
+        }
     }
     if role == "worker-config" && (worker_id.is_none() || key_file.is_none() || sign_key.is_none()) {
         return Err("worker-config requires --worker-id, --key-file, and --sign-key".into());
@@ -344,6 +355,73 @@ fn print_local_evidence(campaign: &LocalCampaign, find: &[u64], avoid: &[u64]) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+fn print_coordinator_targets(
+    accepted_evidence: &[angryier_ledger::evidence::AcceptedEvidence],
+    find: &[u64],
+    avoid: &[u64],
+) {
+    let mut find_witnessed = 0usize;
+    let mut find_reached = 0usize;
+    let mut avoid_witnessed = 0usize;
+    let mut avoid_reached = 0usize;
+    for (kind, targets) in [("find", find), ("avoid", avoid)] {
+        let mut targets = targets.to_vec();
+        targets.sort_unstable();
+        for target in targets {
+            let witness_observed = accepted_evidence.iter().find(|event| {
+                let path = &event.delta.path;
+                matches!(event.status, Status::Completed)
+                    && matches!(path.disposition, PathDisposition::Terminal)
+                    && path.witness.as_ref().is_some_and(|witness| {
+                        matches!(witness.replay, ReplayVerification::Verified { .. })
+                            && witness.replay_trace.iter().any(|block| block.pc == target)
+                    })
+            });
+            let trace_observed = witness_observed.or_else(|| {
+                accepted_evidence
+                    .iter()
+                    .find(|event| event.delta.path.blocks.iter().any(|block| block.pc == target))
+            });
+            if kind == "find" {
+                if witness_observed.is_some() {
+                    find_witnessed += 1;
+                }
+                if trace_observed.is_some() {
+                    find_reached += 1;
+                }
+            } else {
+                if witness_observed.is_some() {
+                    avoid_witnessed += 1;
+                }
+                if trace_observed.is_some() {
+                    avoid_reached += 1;
+                }
+            }
+            let path_id = witness_observed.map_or_else(
+                || "null".to_owned(),
+                |event| format!("\"{}\"", hex(&event.delta.path.path_id)),
+            );
+            let trace_path_id = trace_observed.map_or_else(
+                || "null".to_owned(),
+                |event| format!("\"{}\"", hex(&event.delta.path.path_id)),
+            );
+            println!(
+                "{{\"type\":\"target\",\"kind\":\"{kind}\",\"pc\":{target},\"observed\":{},\"trace_observed\":{},\"path_id\":{path_id},\"trace_path_id\":{trace_path_id}}}",
+                witness_observed.is_some(),
+                trace_observed.is_some(),
+            );
+        }
+    }
+    println!(
+        "campaign targets: find_witnessed={find_witnessed}/{} find_reached={find_reached}/{} avoid_witnessed={avoid_witnessed}/{} avoid_reached={avoid_reached}/{}",
+        find.len(),
+        find.len(),
+        avoid.len(),
+        avoid.len(),
+    );
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum RunExit {
     Complete,
@@ -463,13 +541,16 @@ fn run() -> Result<RunExit> {
             Ok(RunExit::Complete)
         }
         "coordinator" => {
-            let report = angryier_campaign::coordinate(
+            let outcome = angryier_campaign::coordinate_with_evidence(
                 &config,
                 addr.ok_or("distributed address required")?,
                 ledger.ok_or("--ledger is required")?,
             )?;
-            println!("{report:?}");
-            if !report.complete_within_declared_bounds {
+            println!("{:?}", outcome.report);
+            if !find.is_empty() || !avoid.is_empty() {
+                print_coordinator_targets(&outcome.accepted_evidence, &find, &avoid);
+            }
+            if !outcome.report.complete_within_declared_bounds {
                 return Err("campaign partial: unresolved owned work remains".into());
             }
             Ok(RunExit::Complete)
@@ -895,6 +976,84 @@ mod tests {
             .is_err()
         );
         assert!(parse_test(&["worker", "--binary", "a.elf", "--build-id", "v1"]).is_err());
+        let coord = parse_test(&[
+            "coordinator",
+            "--binary",
+            "a.elf",
+            "--build-id",
+            "v1",
+            "--ledger",
+            "a.ledger",
+            "--connect",
+            "127.0.0.1:1234",
+            "--find",
+            "0x4010",
+            "--find",
+            "42",
+            "--avoid",
+            "0x4020",
+        ])?;
+        assert_eq!(coord.find, vec![42, 0x4010]);
+        assert_eq!(coord.avoid, vec![0x4020]);
+        assert!(
+            parse_test(&[
+                "coordinator",
+                "--binary",
+                "a.elf",
+                "--build-id",
+                "v1",
+                "--ledger",
+                "a.ledger",
+                "--connect",
+                "127.0.0.1:1234",
+                "--find",
+                "0x4010",
+                "--find",
+                "16400",
+            ])
+            .is_err(),
+            "duplicate coordinator --find must fail"
+        );
+        for flag in ["--find", "--avoid"] {
+            assert!(
+                parse_test(&[
+                    "worker",
+                    "--binary",
+                    "a.elf",
+                    "--build-id",
+                    "v1",
+                    "--listen",
+                    "127.0.0.1:1234",
+                    flag,
+                    "0x4010",
+                ])
+                .is_err(),
+                "{flag} must not be accepted by worker"
+            );
+            assert!(
+                parse_test(&[
+                    "worker-config",
+                    "--binary",
+                    "a.elf",
+                    "--worker-id",
+                    "w1",
+                    "--key-file",
+                    "remote.key",
+                    "--sign-key",
+                    "local.key",
+                    "--build-id",
+                    "v1",
+                    "--listen",
+                    "127.0.0.1:9001",
+                    "--output",
+                    "worker.toml",
+                    flag,
+                    "0x4010",
+                ])
+                .is_err(),
+                "{flag} must not be accepted by worker-config"
+            );
+        }
         Ok(())
     }
 

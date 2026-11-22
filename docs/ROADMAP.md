@@ -4,16 +4,11 @@
 
 The 140-module census (2026-11-22) settled that execution breadth is not the metric: 120 modules run real module code and **zero** produce a ledger event, because a terminal without a replay-verified witness is deliberately not observed. The corpus therefore needs two explicitly ranked outcomes, not more blocks of coverage.
 
-**Tier 1 — achievement: a target address reached.** A named PC inside the driver is reached on a path the coordinator can replay and confirm. This is already expressible locally: `LocalConfig::find` / `avoid` are pinned observations and ranking hints (`crates/angryier-campaign/src/local.rs:36-49`), never pruning under `ForkAll`, and ranking-only under `RankTargets`. What is missing is the distributed half:
-
-1. accept `--find`/`--avoid` on `worker`, `coordinator` and the `worker-config` generator (today they are local-only, `main.rs:168-169`);
-2. seal the canonical lists into the campaign identity so a worker whose target set differs fails handshake rather than disagreeing silently;
-3. record a reached target as accepted evidence keyed by PC, and replay-verify it like any other witness;
-4. report reached/attempted targets in the coordinator report so a census can be scored on them.
+**Tier 1 — achievement: a target address reached (report-only scoring landed 2026-11-22).** `coordinator` now accepts `--find PC` and `--avoid PC` outside campaign identity (workers need no target flags; campaign digests stay unchanged) and scores `coordinate_with_evidence`'s accepted ledger snapshot in `crates/angryier-campaign/src/main.rs` (`print_coordinator_targets`), reporting both strict verified-terminal witnesses (`observed`, `Status::Completed` + `Terminal` + `ReplayVerification::Verified`) and coordinator-replayed accepted path hits (`trace_observed`, `event.delta.path.blocks` confirmed by `verify_remote`), plus a `campaign targets:` summary line. Distributed worker-side ranking/pruning under `--policy` remains open and separate from report-only scoring.
 
 **Tier 2 — ideal: a modelled violation.** A witnessed double free, unchecked copy, or refcount underflow. This needs the heap identity and refcount state that the shallow models deliberately omit (`kernel_models.rs`: models are pure functions of the slot address, required for replay soundness). No verdict of this class is reachable today on any `.ko`.
 
-**Scoring.** A census run should report, per module: `load` (yes/no), `code reached` (blocks), `targets reached` (tier 1), `violations` (tier 2). Today's corpus stands at load 134/140, code reached 120/140, targets 0, violations 0 — and only the first two numbers are meaningful.
+**Scoring.** A census run reports, per module: `load` (yes/no), `code reached` (blocks), `targets reached` (tier 1), `violations` (tier 2). Across the 140-module Linux estate (three-host split census, 2026-11-22): load `134/140`, code reached `134/140`, tier-1 targets reached on coordinator-replayed paths `64/140` (`1/23` `copy_user`, `41/93` `handler_call`, `22/24` `other_call`), strict verified-terminal witnesses `0/140`, tier-2 violations `0/140` (capability gap — models remain stateless; `ioctl`/`read`/`write` handlers also often start with `rdi=0` or `rdx=0`, skipping `copy_*_user` branches or faulting on `[rdi+off]`).
 
 ## ET_REL (Linux kernel module) support — loader landed, models shallow, verdicts still open
 

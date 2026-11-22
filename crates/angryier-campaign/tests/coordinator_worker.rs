@@ -1062,3 +1062,79 @@ fn committed_grant_survives_projection_failure_and_sibling_is_revoked() -> Resul
     );
     Ok(())
 }
+
+#[test]
+fn coordinator_scores_find_and_avoid_targets_without_changing_identity() -> Result<(), Box<dyn std::error::Error>> {
+    use angryier_loader::{Elf64Loader, ImageLoader};
+
+    let f = Fixture::new();
+    let elf_bytes = fs::read(&f.elf)?;
+    let loaded = Elf64Loader::new().load(&elf_bytes)?;
+    let entry = loaded.entry;
+    let unreached = 0xdead_beefu64;
+    let avoid = entry + 0x1000;
+
+    // Worker has NO --find/--avoid flags; targets stay outside campaign identity.
+    let (_worker, addr) = f.worker(8);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_angryier-campaign"));
+    cmd.arg("coordinator");
+    f.common(&mut cmd, "build-v1");
+    cmd.args(["--connect", &addr, "--ledger"])
+        .arg(f.ledger())
+        .args(["--find", &format!("{entry:#x}")])
+        .args(["--find", &format!("{unreached:#x}")])
+        .args(["--avoid", &format!("{avoid:#x}")]);
+    let output = cmd.output()?;
+    report_ok(&output);
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let hit = text
+        .lines()
+        .find(|line| line.contains("\"type\":\"target\"") && line.contains(&format!("\"pc\":{entry}")))
+        .ok_or("missing reached target row")?;
+    assert!(
+        hit.contains("\"observed\":true")
+            && hit.contains("\"trace_observed\":true")
+            && hit.contains("\"path_id\":\"")
+            && hit.contains("\"trace_path_id\":\""),
+        "{hit}"
+    );
+    let miss = text
+        .lines()
+        .find(|line| line.contains("\"type\":\"target\"") && line.contains(&format!("\"pc\":{unreached}")))
+        .ok_or("missing unreached target row")?;
+    assert!(
+        miss.contains("\"observed\":false")
+            && miss.contains("\"trace_observed\":false")
+            && miss.contains("\"path_id\":null")
+            && miss.contains("\"trace_path_id\":null"),
+        "{miss}"
+    );
+    assert!(
+        text.lines().any(|line| {
+            line == "campaign targets: find_witnessed=1/2 find_reached=1/2 avoid_witnessed=0/1 avoid_reached=0/1"
+        }),
+        "missing target summary: {text}"
+    );
+
+    // Reopening the completed ledger with no worker running reproduces the same target score.
+    let mut reopen_cmd = Command::new(env!("CARGO_BIN_EXE_angryier-campaign"));
+    reopen_cmd.arg("coordinator");
+    f.common(&mut reopen_cmd, "build-v1");
+    reopen_cmd
+        .args(["--connect", &addr, "--ledger"])
+        .arg(f.ledger())
+        .args(["--find", &format!("{entry:#x}")])
+        .args(["--find", &format!("{unreached:#x}")])
+        .args(["--avoid", &format!("{avoid:#x}")]);
+    let reopen = reopen_cmd.output()?;
+    report_ok(&reopen);
+    let reopen_text = String::from_utf8_lossy(&reopen.stdout);
+    assert!(
+        reopen_text.lines().any(|line| {
+            line == "campaign targets: find_witnessed=1/2 find_reached=1/2 avoid_witnessed=0/1 avoid_reached=0/1"
+        }),
+        "reopen target summary drifted: {reopen_text}"
+    );
+    Ok(())
+}
