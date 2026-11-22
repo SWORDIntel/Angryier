@@ -1,5 +1,20 @@
 # Angryier — Consolidated Roadmap and Architecture-as-Built
 
+## Witness ladder for the `.ko` corpus — defined 2026-11-22
+
+The 140-module census (2026-11-22) settled that execution breadth is not the metric: 120 modules run real module code and **zero** produce a ledger event, because a terminal without a replay-verified witness is deliberately not observed. The corpus therefore needs two explicitly ranked outcomes, not more blocks of coverage.
+
+**Tier 1 — achievement: a target address reached.** A named PC inside the driver is reached on a path the coordinator can replay and confirm. This is already expressible locally: `LocalConfig::find` / `avoid` are pinned observations and ranking hints (`crates/angryier-campaign/src/local.rs:36-49`), never pruning under `ForkAll`, and ranking-only under `RankTargets`. What is missing is the distributed half:
+
+1. accept `--find`/`--avoid` on `worker`, `coordinator` and the `worker-config` generator (today they are local-only, `main.rs:168-169`);
+2. seal the canonical lists into the campaign identity so a worker whose target set differs fails handshake rather than disagreeing silently;
+3. record a reached target as accepted evidence keyed by PC, and replay-verify it like any other witness;
+4. report reached/attempted targets in the coordinator report so a census can be scored on them.
+
+**Tier 2 — ideal: a modelled violation.** A witnessed double free, unchecked copy, or refcount underflow. This needs the heap identity and refcount state that the shallow models deliberately omit (`kernel_models.rs`: models are pure functions of the slot address, required for replay soundness). No verdict of this class is reachable today on any `.ko`.
+
+**Scoring.** A census run should report, per module: `load` (yes/no), `code reached` (blocks), `targets reached` (tier 1), `violations` (tier 2). Today's corpus stands at load 134/140, code reached 120/140, targets 0, violations 0 — and only the first two numbers are meaningful.
+
 ## ET_REL (Linux kernel module) support — loader landed, models shallow, verdicts still open
 
 **Loader (landed 2026-11-21):** `.ko` inputs load through a section-layout path — deterministic `SHF_ALLOC` placement from `0x0100_0000`, x86-64 `SHT_REL`/`SHT_RELA` processing (`R_X86_64_64`, `PC32`, `PLT32`, `32`, `32S`, `PC64`, `GOT32`, `GOTPCREL(X)` with synthesized GOT slots), symbol resolution, and a stub slot per referenced undefined kernel symbol from `0x1000_0000` recorded in `LoadedImage::et_rel.externals`. Unlinkable input fails closed. `--root-symbol NAME` (worker, coordinator, generator; exclusive with `--entry`) resolves and seals the root VA. Local controls keep image-entry-only semantics.
