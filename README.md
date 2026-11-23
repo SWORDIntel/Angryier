@@ -367,7 +367,7 @@ Angryier adheres to uncompromising architectural guarantees:
 
 Comprehensive guides are available in the [`docs/`](docs/) directory:
 
-- [**Cluster operations: running many campaigns across hosts**](docs/guides/cluster-operations.md) · [**Open blockers, with evidence**](docs/BLOCKERS.md)
+- [**Open blockers, with evidence**](docs/BLOCKERS.md)
 - [**Consolidated Roadmap (Single Source of Truth)**](docs/ROADMAP.md)
 - [**KP15-SUITE Control Panel & Workbench (parent repo, `../..`)**](../../README.md) · [`kp15ctl`](../../bin/kp15ctl) · [**Appliance Operations**](../../docs/APPLIANCE_OPERATIONS.md)
 - [**Architecture Overview**](docs/architecture/overview.md)
