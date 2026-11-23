@@ -88,6 +88,8 @@ Before running the generator, provision the distinct raw 32-byte pairwise secret
 
 Set up the [authenticated confidential loopback tunnel](#remote-hosts-tunnel-only-never-plaintext) before connecting the coordinator. Its `--peer worker-a@127.0.0.1:31031@LOCAL_KEY` still refers to the **coordinator-side** local key file (`LOCAL_KEY` is a placeholder), while `127.0.0.1:31031` forwards to worker `127.0.0.1:30031`; use the same build ID, image and limits. This is a deployment procedure, not a claim that the current checkout has undergone a new cross-host test. See also the [CLI option reference](../CLI.md#distributed-workercoordinator-roles).
 
+For multi-host fan-out (hundreds of one-worker campaigns, the dispatch pattern, `sshd` limits and measured failure clusters) see [cluster-operations.md](cluster-operations.md).
+
 ## Two and four workers
 
 For two workers, run one worker command per host (or process), with unique IDs, loopback listen ports, and their corresponding key files:
