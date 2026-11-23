@@ -70,6 +70,67 @@ The hard target is 65,536 work records and 65,536 accepted events, with a 1 GiB 
 
 Raw transport is HMAC-authenticated but **plaintext**, rekeys each TCP connection, and rejects non-loopback endpoints. Cross-host operation is permitted only through independently authenticated, encrypted and pinned loopback SSH or mTLS tunnels; never expose this endpoint via a plaintext proxy. A tunnel must preserve loopback endpoints on both sides. In the cross-host run, encrypted `ssh -L` localhost forwards connected the coordinator's loopback peer endpoints to worker loopback listeners on T320 and 730xd, with distinct mode-0600 pairwise key files per worker/coordinator pair; no plaintext cross-host listener or hop was used. Connections authenticate campaign digest, epoch and peer identity before a grant is processed. There is no built-in TLS, machine provisioning, job scheduler, shared filesystem protocol, or cross-host proof of library/OS equivalence.
 
+## Multi-host deployment model
+
+The loopback milestone above is the *substrate*. Deploying it across machines is a placement problem, and the design choices that matter are these:
+
+- **One coordinator, N worker hosts.** The coordinator is the only ledger writer and the only admission authority: it reserves disjoint fenced subtrees, sends concurrent grants to distinct worker processes, and re-executes each claimed subtree on a fresh local root before publishing anything. A worker never modifies the ledger, so a lost or restarted worker cannot corrupt a campaign.
+- **One campaign per worker process.** Each campaign has its own ledger, its own sealed limits, and its own worker configuration. Because the worker serves one pinned image at a time, identity stays simple: one campaign ↔ one image digest ↔ one worker process ↔ one ledger. Do not multiplex several images through one worker process or share a ledger between campaigns.
+- **Identity is cryptographic, not positional.** The coordinator seals the executable digest into the campaign manifest, so every worker must run byte-identical bytes of the same build; the image digest is pinned and re-checked against the bytes actually loaded before the listener starts; worker settings are sealed in the AEAD envelope and must match on both sides. A host that is merely "a fast box" is not interchangeable — its binary and image must match exactly.
+- **Keys are per worker, not global.** Each coordinator/worker pair gets its own random 32-byte pairwise key, provisioned independently on both endpoints. A compromised worker cannot authenticate as another worker, and a rejected peer fails closed rather than falling back.
+- **Network is a tunnel boundary, not a cluster fabric.** Listeners bind loopback only. Cross-host reachability is provided by an independently authenticated, confidential channel whose local end terminates on loopback (SSH local forward, or an mTLS adapter). The frame HMAC is additional application authentication and never a substitute for the encrypted channel.
+- **Campaigns are independent failure domains.** A dead worker stalls only its own campaign; the coordinator reports a partial outcome and keeps the durable accepted evidence. Recovery is re-running the same coordinator command with the same ledger, which validates and rebuilds the progress projection from accepted history.
+
+Capacity follows from those choices: a worker process is single-campaign, so concurrency across a fleet equals the number of campaigns you choose to run, bounded by each host's cores and memory. Keep the coordinator host lightly loaded — it runs a solver and a verifier for every admitted subtree — and place the bulk of campaigns on worker hosts.
+
+## Using it across hosts
+
+Build once, deploy identical bytes, provision keys, then run one campaign per worker. The commands below are the deployment runbook; `docs/guides/distributed-campaigns.md` covers the flag-level detail and `docs/CLI.md` the full reference.
+
+```sh
+# 1) One release build, deployed to every host; compare the digest on each
+cargo build -p angryier-campaign --release --locked --offline
+sha256sum target/release/angryier-campaign
+
+# 2) Stage the image on the worker at a stable absolute path (may differ from the
+#    coordinator's path), plus the same executable bytes
+install -m 0755 angryier-campaign /opt/angryier/angryier-campaign
+install -m 0644 image.elf        /opt/angryier/image.elf
+
+# 3) Provision this worker's own key, twice (once per endpoint), mode 0600
+(umask 077; head -c 32 /dev/urandom > /secure/worker-a.key)
+
+# 4) Generate the sealed worker envelope on the coordinator, using the local copy
+#    of the key; --worker-binary names the worker-side path, --key-file is the
+#    worker-side key pathname recorded inside the envelope
+angryier-campaign worker-config --profile ko-handler \
+  --binary ./image.elf --worker-binary /opt/angryier/image.elf \
+  --root-symbol my_handler --build-id run-1 --worker-id worker-a \
+  --sign-key /secure/worker-a.key --key-file /secure/worker-a.key \
+  --listen 127.0.0.1:30031 --output worker-a.toml
+
+# 5) On the worker: install the envelope privately and start it
+install -d -m 0700 ~/.config/angryier
+install -m 0600 worker-a.toml ~/.config/angryier/worker.toml
+angryier-campaign worker --config ~/.config/angryier/worker.toml
+#    ... wait for `READY 127.0.0.1:30031`
+
+# 6) On the coordinator: publish the tunnel, then run the campaign
+ssh -N -L 127.0.0.1:31031:127.0.0.1:30031 worker-a &
+angryier-campaign coordinator --profile ko-handler \
+  --binary ./image.elf --root-symbol my_handler --build-id run-1 \
+  --peer worker-a@127.0.0.1:31031@/secure/worker-a.key \
+  --ledger ./run-1.ledger
+```
+
+Operational rules that follow from the design model:
+
+- **One port per campaign** on each worker host, so a stale process cannot answer for a new campaign; stop workers by PID resolved from the listening socket rather than by pattern.
+- **One ledger per campaign**, never shared, and never written by a worker.
+- **The sealed limits are campaign identity**: changing `--max-steps`, `--max-wall-ms` or any other sealed limit on one side turns the run into a different campaign, and the handshake rejects the mismatch by name rather than proceeding.
+- **Repeat runs are resume runs**: re-issuing the same coordinator command against an existing ledger validates accepted history and continues from it.
+- **Fan-out is an operator concern.** For many images, drive one campaign per image with whatever scheduler you already trust, keeping one worker process and one port per campaign. The engine intentionally contains no scheduler.
+
 ## Validation
 
 `cargo test -p angryier-campaign --offline --test coordinator_worker` runs actual separate-process 1/2/4-worker finite ELF campaigns with equal accepted unique path evidence and independently verified witnesses at equal configured budgets; changed-version/ELF rejection, distinct-key/auth failure and recovery, disconnect/reconnect, stale-fence rejection and forged evidence fail-closed are covered. The three independently built host executables matched the SHA-256 above; a cross-host two-path campaign completed through encrypted SSH loopback forwards, and remote reconnect passed. On the eight-path fixture, five interleaved repetitions of 1-local versus four workers across three hosts measured mean 6.944 s versus 5.100 s (1.362× on this fixture). All 8 terminal paths and 15 unique accepted event paths/8 witnesses were verified, with typed equality and the same 22,504-byte ledger hash; remote host worker processes performed work. This does **not** establish general throughput, saturation scaling or a cluster scheduler. `cargo test -p angryier-distribution --offline --test sustained_transport` covers bounded authenticated payloads, replay/MAC rejection, and handshake rekey. `cargo test -p angryier-runtime --features xed,script --offline --test sustained_pool` checks native local baseline replay and unsatisfiable child fail-closed behavior. Final bounded eight-path campaign validation measured SSH tunnel lifetime byte counters (sent/received) of 6,828/8,020 for T320 and 6,864/8,908 for 730xd. These include SSH handshake and idle traffic over approximately 60–69 seconds, not precise application traffic. Four worker per-process user CPU tick deltas were positive: T420a 100, t420b 83, T320 119 and 730xd 87. This establishes use of each process, not simultaneous saturation. The five-run 1.362× result above remains scoped to the small fixture, and cross-host operation still requires encrypted loopback tunnels.

@@ -243,6 +243,8 @@ angryier run ./tests/fixtures/symbolic_branch --script script.lua
 
 For local sustained campaigns on a single host, the typed Rust campaign API and `angryier-campaign` CLI support repeatable `--symbolic REG` (64-bit GPR marks) and `--reg NAME=VALUE` (concrete u64 GPR seeds); see the [local campaign operator guide](docs/guides/local-campaigns.md) for a `local-run --batch-ms 5000 --run-ms N` pinned-spec command, bounded post-batch progress, and the [typed Rust script](crates/angryier-campaign/examples/local_campaign.rs) (`cargo run -p angryier-campaign --example local_campaign -- ...`). The example pins its own executable SHA-256; neither the CLI nor a recompiled example can resume its ledger. For bounded 1/2/4-worker campaigns, live `--progress-jsonl` monitoring, WAL capacity/restore requirements, and a finite illustrative 48-hour ELF budget, see the [distributed campaign operator guide](docs/guides/distributed-campaigns.md). The embedded Lua `angry.sustained` v1/v2 interface remains exported as a deprecated compatibility surface; existing Lua ledgers cannot be reopened by the Rust API/CLI without migration, so resume them through Lua (see [Lua API §9](docs/LUA_API.md#9-durable-sustained-exploration-opt-in-xed--script)). Raw Advisor GUI PE remains deferred at `fork lacks complementary solver proof`, not fixed by raising caps alone.
 
+**Deploying across machines?** Read [the multi-host deployment model and runbook](docs/design/sustained-hpc-deployment.md#multi-host-deployment-model) first: it states the placement rules (one coordinator as sole ledger writer, one campaign per worker process, one pairwise key per worker, loopback listeners reached only through an authenticated confidential tunnel) and then walks a five-step deployment — build once, stage identical bytes, provision the key, generate the sealed envelope, publish the tunnel, run the coordinator.
+
 For distributed campaigns, the **same compiled** `angryier-campaign` executable can generate a pinned v2 AEAD-encrypted worker TOML (`XChaCha20-Poly1305` using the coordinator-local `--sign-key`, leaving only `version`, remote `--key-file` path, random 24-byte nonce, and ciphertext visible; `--worker-binary` allows a different remote image path of identical SHA-256). Cross-host execution over SSH loopback tunnels (`T420 -> T320` and three-host `.ko` censuses) is verified:
 
 ```sh
@@ -367,6 +369,7 @@ Angryier adheres to uncompromising architectural guarantees:
 
 Comprehensive guides are available in the [`docs/`](docs/) directory:
 
+- [**Multi-host deployment: design model and runbook**](docs/design/sustained-hpc-deployment.md#multi-host-deployment-model) — one coordinator, N worker hosts, one campaign per worker, per-worker keys, tunnel-only reachability
 - [**Open blockers, with evidence**](docs/BLOCKERS.md)
 - [**Consolidated Roadmap (Single Source of Truth)**](docs/ROADMAP.md)
 - [**KP15-SUITE Control Panel & Workbench (parent repo, `../..`)**](../../README.md) · [`kp15ctl`](../../bin/kp15ctl) · [**Appliance Operations**](../../docs/APPLIANCE_OPERATIONS.md)
